@@ -1,9 +1,10 @@
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
@@ -52,21 +53,20 @@ struct ProcessSlot {
     last_detail: String,
 }
 
+/// Slots are created on demand and keyed by a free string: `"issue"` (the one
+/// rotating scheduler), `"uat:<repo id>"` per repo, `"task"` for one-offs.
 #[derive(Default)]
 pub struct ProcessManager {
-    issue: Mutex<ProcessSlot>,
-    uat: Mutex<ProcessSlot>,
-    task: Mutex<ProcessSlot>,
+    slots: Mutex<HashMap<String, Arc<Mutex<ProcessSlot>>>>,
 }
 
 impl ProcessManager {
-    fn slot(&self, name: &str) -> Result<&Mutex<ProcessSlot>, String> {
-        match name {
-            "issue" => Ok(&self.issue),
-            "uat" => Ok(&self.uat),
-            "task" => Ok(&self.task),
-            _ => Err(format!("Unknown process slot: {name}")),
-        }
+    fn slot(&self, name: &str) -> Result<Arc<Mutex<ProcessSlot>>, String> {
+        let mut registry = self
+            .slots
+            .lock()
+            .map_err(|_| "Process registry lock was poisoned".to_string())?;
+        Ok(registry.entry(name.to_string()).or_default().clone())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -163,8 +163,8 @@ impl ProcessManager {
         source: &str,
         log_path: &Path,
     ) -> Result<ProcessStatus, String> {
-        let mut slot = self
-            .slot(slot_name)?
+        let mutex = self.slot(slot_name)?;
+        let mut slot = mutex
             .lock()
             .map_err(|_| "Process state lock was poisoned".to_string())?;
         refresh_slot(&mut slot, source, app, log_path);
@@ -180,8 +180,8 @@ impl ProcessManager {
     }
 
     fn signal(&self, slot_name: &str, signal: i32, paused: bool) -> Result<ProcessStatus, String> {
-        let mut slot = self
-            .slot(slot_name)?
+        let mutex = self.slot(slot_name)?;
+        let mut slot = mutex
             .lock()
             .map_err(|_| "Process state lock was poisoned".to_string())?;
         let process = slot
@@ -194,8 +194,8 @@ impl ProcessManager {
     }
 
     pub fn stop(&self, slot_name: &str) -> Result<ProcessStatus, String> {
-        let mut slot = self
-            .slot(slot_name)?
+        let mutex = self.slot(slot_name)?;
+        let mut slot = mutex
             .lock()
             .map_err(|_| "Process state lock was poisoned".to_string())?;
         let Some(mut process) = slot.process.take() else {
@@ -222,8 +222,13 @@ impl ProcessManager {
     }
 
     pub fn stop_all(&self) {
-        for slot in ["issue", "uat", "task"] {
-            let _ = self.stop(slot);
+        let names: Vec<String> = self
+            .slots
+            .lock()
+            .map(|registry| registry.keys().cloned().collect())
+            .unwrap_or_default();
+        for name in names {
+            let _ = self.stop(&name);
         }
     }
 }

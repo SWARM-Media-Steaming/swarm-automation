@@ -1,7 +1,8 @@
 use super::{
-    detect_tools, get_config, inspect_repository, issue_worker_arguments, save_config, AppState,
+    detect_tools, get_config, inspect_repository, repo_worker_args, require_closed_issue,
+    save_config, scheduler_arguments, validate_worker_script_dir, AppState, ResolvedProvider,
 };
-use crate::config::AppConfig;
+use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
 use tauri::Manager;
@@ -46,12 +47,34 @@ fn real_git_checkout() -> tempfile::TempDir {
     dir
 }
 
-fn valid_config(repo_dir: &Path) -> AppConfig {
-    AppConfig {
-        repo_dir: repo_dir.to_string_lossy().into_owned(),
-        github_repository: "octocat/example".into(),
+fn repo(github_repository: &str) -> RepoConfig {
+    RepoConfig {
+        id: crate::config::repo_slug(github_repository),
+        github_repository: github_repository.into(),
         assignee: "octocat".into(),
-        ..AppConfig::default()
+        ..RepoConfig::default()
+    }
+}
+
+/// A valid single-repo config whose repo uses `repo_dir` as an override so no
+/// clone is needed.
+fn valid_config(repo_dir: &Path) -> AppConfig {
+    let mut config = AppConfig::default();
+    config.repositories.push(RepoConfig {
+        repo_dir: repo_dir.to_string_lossy().into_owned(),
+        ..repo("octocat/example")
+    });
+    config
+}
+
+#[allow(dead_code)]
+fn resolved_provider(id: &str, bin: &str) -> ResolvedProvider {
+    ResolvedProvider {
+        id: id.into(),
+        model: format!("{id}-model"),
+        effort: "high".into(),
+        bin: PathBuf::from(bin),
+        enabled: true,
     }
 }
 
@@ -59,45 +82,99 @@ fn valid_config(repo_dir: &Path) -> AppConfig {
 fn save_config_then_get_config_round_trips_through_a_real_file() {
     let test_app = test_app();
     let app = test_app.handle();
-    let repo = real_git_checkout();
-    let config = valid_config(repo.path());
+    let repo_dir = real_git_checkout();
+    let config = valid_config(repo_dir.path());
 
     let saved = save_config(app.clone(), app.state(), config.clone())
         .expect("save_config should succeed against a real, valid repo checkout");
-    assert_eq!(saved.repo_dir, config.repo_dir);
+    assert_eq!(saved.repositories[0].github_repository, "octocat/example");
+    assert_eq!(saved.repositories[0].id, "octocat__example");
 
     let loaded = get_config(app.state()).expect("get_config should succeed");
-    assert_eq!(loaded.repo_dir, config.repo_dir);
-    assert_eq!(loaded.github_repository, "octocat/example");
+    assert_eq!(loaded.repositories.len(), 1);
+    assert_eq!(loaded.repositories[0].integration_branch, "ai-main");
 
-    // The config file this wrote must be real, present on disk, and
-    // owner-only (0600) — matches config.rs's own save() contract, and is
-    // the whole reason a per-test isolated data dir exists: this assertion
-    // would be meaningless (or worse, flaky) against a shared real path.
-    let config_path = test_app
-        ._data_dir
-        .path()
-        .join(crate::config::CONFIG_FILE);
+    let config_path = test_app._data_dir.path().join(crate::config::CONFIG_FILE);
     assert!(config_path.is_file(), "config.json should exist on disk");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600, "config.json must be owner-only");
     }
 }
 
 #[test]
-fn save_config_rejects_a_repo_dir_that_does_not_exist() {
+fn save_config_round_trips_two_repositories() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let mut config = AppConfig::default();
+    config.repositories.push(repo("octocat/one"));
+    config.repositories.push(RepoConfig {
+        integration_branch: "integration".into(),
+        branch_prefix: "bots".into(),
+        ..repo("octocat/two")
+    });
+
+    save_config(app.clone(), app.state(), config).expect("two-repo config is valid");
+    let loaded = get_config(app.state()).expect("get_config");
+    assert_eq!(loaded.repositories.len(), 2);
+    assert_eq!(loaded.repositories[1].integration_branch, "integration");
+    assert_eq!(loaded.repositories[1].branch_prefix, "bots");
+}
+
+#[test]
+fn save_config_rejects_a_working_copy_override_that_does_not_exist() {
     let test_app = test_app();
     let app = test_app.handle();
     let config = valid_config(Path::new("/definitely/not/a/real/path"));
 
     let error = save_config(app.clone(), app.state(), config)
-        .expect_err("a nonexistent repo_dir must be rejected, not silently saved");
+        .expect_err("a nonexistent working-copy override must be rejected");
+    assert!(error.contains("working-copy override"), "got: {error}");
+}
+
+#[test]
+fn save_config_needs_no_local_checkout_when_the_app_will_clone() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let mut config = AppConfig::default();
+    config.repositories.push(repo("octocat/example"));
+    let saved =
+        save_config(app.clone(), app.state(), config).expect("clone-managed config is valid");
+    assert!(saved.repositories[0].repo_dir.is_empty());
+}
+
+#[test]
+fn save_config_rejects_no_repositories() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let error = save_config(app.clone(), app.state(), AppConfig::default())
+        .expect_err("a config with no repositories must be rejected");
     assert!(
-        error.contains("existing local repository folder"),
-        "expected the real validation message, got: {error}"
+        error.contains("at least one GitHub repository"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn save_config_rejects_base_equal_to_integration_branch() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let mut config = AppConfig::default();
+    config.repositories.push(RepoConfig {
+        integration_branch: "main".into(),
+        ..repo("octocat/example")
+    });
+    let error = save_config(app.clone(), app.state(), config)
+        .expect_err("integration branch must differ from base branch");
+    assert!(
+        error.contains("must differ from the base branch"),
+        "got: {error}"
     );
 }
 
@@ -105,15 +182,12 @@ fn save_config_rejects_a_repo_dir_that_does_not_exist() {
 fn inspect_repository_on_a_real_git_checkout_reports_valid_with_no_scripts() {
     let repo = real_git_checkout();
     let inspection = inspect_repository(repo.path().to_string_lossy().into_owned());
-    assert!(inspection.valid, "a real `git init`-ed folder must be valid");
     assert!(
-        !inspection.worker_available,
-        "a bare git init has no scripts/issue_worker"
+        inspection.valid,
+        "a real `git init`-ed folder must be valid"
     );
-    assert!(
-        !inspection.uat_available,
-        "a bare git init has no scripts/tests/full_uat_cron.sh"
-    );
+    assert!(!inspection.worker_available);
+    assert!(!inspection.uat_available);
     assert!(inspection.error.is_empty());
 }
 
@@ -124,162 +198,198 @@ fn inspect_repository_on_a_plain_folder_reports_invalid() {
     assert!(!inspection.valid);
     assert!(
         inspection.error.contains("not a Git checkout"),
-        "expected the real not-a-git-checkout message, got: {}",
+        "got: {}",
         inspection.error
     );
 }
 
-/// Proof that a target repository shipping its own issue-worker/UAT
-/// scripts (the SWARM convention this tool was originally built against)
-/// is detected correctly — the exact case worker_script_dir in main.rs
-/// prefers over its own bundled resources. A synthetic fixture, not the
-/// real SWARM checkout: this app no longer lives in that tree, so nothing
-/// here may assume it's available at test time.
 #[test]
 fn inspect_repository_detects_a_target_repos_own_script_bundles() {
     let repo = real_git_checkout();
-    std::fs::create_dir_all(repo.path().join("scripts/issue_worker"))
-        .expect("create scripts/issue_worker fixture dir");
+    std::fs::create_dir_all(repo.path().join("scripts/issue_worker")).unwrap();
     std::fs::write(
         repo.path()
             .join("scripts/issue_worker/install_swarm_issue_cron.py"),
         "#!/usr/bin/env python3\n",
     )
-    .expect("write fixture worker script");
-    std::fs::create_dir_all(repo.path().join("scripts/tests"))
-        .expect("create scripts/tests fixture dir");
+    .unwrap();
+    std::fs::create_dir_all(repo.path().join("scripts/tests")).unwrap();
     std::fs::write(
         repo.path().join("scripts/tests/full_uat_cron.sh"),
         "#!/usr/bin/env bash\n",
     )
-    .expect("write fixture UAT cron script");
+    .unwrap();
 
     let inspection = inspect_repository(repo.path().to_string_lossy().into_owned());
     assert!(inspection.valid);
-    assert!(
-        inspection.worker_available,
-        "a target repo with scripts/issue_worker/install_swarm_issue_cron.py must be detected"
-    );
-    assert!(
-        inspection.uat_available,
-        "a target repo with scripts/tests/full_uat_cron.sh must be detected"
-    );
+    assert!(inspection.worker_available);
+    assert!(inspection.uat_available);
+}
+
+#[test]
+fn bundled_worker_resources_are_validated_as_one_versioned_set() {
+    let resources = tempfile::tempdir().expect("create resource dir");
+    for name in super::REQUIRED_WORKER_RESOURCES {
+        std::fs::write(resources.path().join(name), "# bundled\n").unwrap();
+    }
+    let resolved = validate_worker_script_dir(resources.path()).expect("complete worker bundle");
+    assert_eq!(resolved, resources.path());
+
+    std::fs::remove_file(resources.path().join("swarm_issue_worker.py")).unwrap();
+    let error = validate_worker_script_dir(resources.path())
+        .expect_err("an incomplete app bundle must fail before launch");
+    assert!(error.contains("swarm_issue_worker.py"), "got: {error}");
+    assert!(error.contains("Reinstall or rebuild"), "got: {error}");
 }
 
 #[test]
 fn detect_tools_finds_real_git_on_this_machine_without_panicking() {
     let test_app = test_app();
-    let tools = detect_tools(test_app.handle().state())
-        .expect("detect_tools should never itself error, even if individual tools are missing");
+    let tools =
+        detect_tools(test_app.handle().state()).expect("detect_tools should never itself error");
     let git = tools
         .iter()
         .find(|tool| tool.id == "git")
         .expect("git should always be a reported tool");
-    assert!(
-        git.installed,
-        "this dev machine has git on PATH; detect_tools should find it"
-    );
+    assert!(git.installed, "this dev machine has git on PATH");
     assert!(!git.path.is_empty());
 }
 
-#[test]
-fn issue_worker_arguments_carries_schedule_and_delivery_config_through() {
-    let mut config = valid_config(Path::new("/tmp/example"));
-    config.schedule_mode = "weekdays".into();
-    config.schedule_time = "07:30".into();
-    config.delivery_mode = "pull-request".into();
-    config.auto_merge = true;
+// ----- scheduler / repo worker args --------------------------------------
 
-    let arguments = issue_worker_arguments(
+fn args_for(repo: &RepoConfig) -> Vec<String> {
+    let config = {
+        let mut config = AppConfig::default();
+        config.repositories.push(repo.clone());
+        config
+    };
+    repo_worker_args(
         &config,
-        &PathBuf::from("/bin/runner.py"),
-        &PathBuf::from("/usr/bin/python3"),
+        repo,
+        &PathBuf::from("/tmp/workspace"),
         &PathBuf::from("/usr/bin/git"),
         &PathBuf::from("/usr/bin/gh"),
-        &PathBuf::from("/usr/bin/claude"),
-        &PathBuf::from("/usr/bin/codex"),
-        false,
-    );
+    )
+}
 
-    let pair = |flag: &str| -> Option<String> {
-        arguments
-            .iter()
-            .position(|value| value == flag)
-            .and_then(|index| arguments.get(index + 1).cloned())
-    };
-    assert_eq!(pair("--schedule-mode").as_deref(), Some("weekdays"));
-    assert_eq!(pair("--schedule-time").as_deref(), Some("07:30"));
-    assert_eq!(pair("--github-repository").as_deref(), Some("octocat/example"));
-    assert_eq!(pair("--assignee").as_deref(), Some("octocat"));
-    assert!(arguments.contains(&"--auto-merge".to_string()));
-    assert!(
-        !arguments.contains(&"--once".to_string()),
-        "run_once=false must not add --once"
-    );
+fn pair<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|value| value == flag)
+        .and_then(|index| args.get(index + 1))
+        .map(String::as_str)
 }
 
 #[test]
-fn issue_worker_arguments_defaults_trusted_and_completion_authors_to_the_assignee() {
-    let config = valid_config(Path::new("/tmp/example"));
-    assert!(config.trusted_followup_authors.is_empty());
-    assert!(config.completion_authors.is_empty());
+fn repo_worker_args_carries_per_repo_branch_config() {
+    let repo = RepoConfig {
+        base_branch: "trunk".into(),
+        integration_branch: "ai-main".into(),
+        branch_prefix: "ai".into(),
+        ..repo("octocat/example")
+    };
+    let args = args_for(&repo);
+    assert_eq!(pair(&args, "--repo-dir"), Some("/tmp/workspace"));
+    assert_eq!(pair(&args, "--base-branch"), Some("trunk"));
+    assert_eq!(pair(&args, "--integration-branch"), Some("ai-main"));
+    assert_eq!(pair(&args, "--branch-prefix"), Some("ai"));
+    assert_eq!(pair(&args, "--github-repository"), Some("octocat/example"));
+    assert_eq!(pair(&args, "--assignee"), Some("octocat"));
+    assert!(args.contains(&"--no-auto-approve".to_string()));
+    assert!(args.contains(&"--no-auto-merge".to_string()));
+    // The old delivery/merge flags are gone.
+    assert!(!args.iter().any(|value| value == "--delivery-mode"));
+    assert!(!args.iter().any(|value| value == "--merge-method"));
+}
 
-    let arguments = issue_worker_arguments(
-        &config,
-        &PathBuf::from("/bin/runner.py"),
-        &PathBuf::from("/usr/bin/python3"),
-        &PathBuf::from("/usr/bin/git"),
-        &PathBuf::from("/usr/bin/gh"),
-        &PathBuf::from("/usr/bin/claude"),
-        &PathBuf::from("/usr/bin/codex"),
-        false,
-    );
-
-    let values_for = |flag: &str| -> Vec<String> {
-        arguments
-            .iter()
+#[test]
+fn repo_worker_args_defaults_authors_to_the_assignee() {
+    let repo = repo("octocat/example");
+    let args = args_for(&repo);
+    let all = |flag: &str| -> Vec<&str> {
+        args.iter()
             .enumerate()
             .filter(|(_, value)| *value == flag)
-            .map(|(index, _)| arguments[index + 1].clone())
+            .map(|(index, _)| args[index + 1].as_str())
             .collect()
     };
-    assert_eq!(
-        values_for("--trusted-followup-author"),
-        vec!["octocat".to_string()],
-        "a blank trusted-authors list must fall back to the configured assignee, \
-         not silently trust no one"
-    );
-    assert_eq!(
-        values_for("--completion-author"),
-        vec!["octocat".to_string()],
-        "a blank completion-authors list must fall back to the configured assignee"
-    );
+    assert_eq!(all("--trusted-followup-author"), vec!["octocat"]);
+    assert_eq!(all("--completion-author"), vec!["octocat"]);
 }
 
 #[test]
-fn issue_worker_arguments_manual_schedule_runs_as_continuous_with_once() {
-    let mut config = valid_config(Path::new("/tmp/example"));
-    config.schedule_mode = "manual".into();
+fn repo_worker_args_uses_the_global_preferred_provider_when_unset() {
+    let mut config = AppConfig::default();
+    config.preferred_provider = "codex".into();
+    let repo = repo("octocat/example");
+    config.repositories.push(repo.clone());
+    let args = repo_worker_args(
+        &config,
+        &repo,
+        &PathBuf::from("/tmp/ws"),
+        &PathBuf::from("/usr/bin/git"),
+        &PathBuf::from("/usr/bin/gh"),
+    );
+    assert_eq!(pair(&args, "--preferred-provider"), Some("codex"));
+}
 
-    let arguments = issue_worker_arguments(
+#[test]
+fn scheduler_arguments_degrade_manual_to_continuous_and_pass_the_repos_file() {
+    let mut config = AppConfig::default();
+    config.schedule_mode = "manual".into();
+    let args = scheduler_arguments(
         &config,
         &PathBuf::from("/bin/runner.py"),
         &PathBuf::from("/usr/bin/python3"),
         &PathBuf::from("/usr/bin/git"),
-        &PathBuf::from("/usr/bin/gh"),
-        &PathBuf::from("/usr/bin/claude"),
-        &PathBuf::from("/usr/bin/codex"),
+        &PathBuf::from("/state/repos.json"),
         true,
     );
+    assert_eq!(pair(&args, "--repos-file"), Some("/state/repos.json"));
+    assert_eq!(pair(&args, "--schedule-mode"), Some("continuous"));
+    assert!(args.contains(&"--once".to_string()));
+}
 
-    let schedule_mode_index = arguments
-        .iter()
-        .position(|value| value == "--schedule-mode")
-        .expect("--schedule-mode flag should be present");
-    assert_eq!(
-        arguments[schedule_mode_index + 1], "continuous",
-        "a manual-profile Run Now must not pass --schedule-mode manual to the worker, \
-         which has no such mode — it degrades to a one-shot continuous check"
-    );
-    assert!(arguments.contains(&"--once".to_string()));
+#[test]
+fn issue_branch_merge_requires_the_issue_to_be_closed() {
+    let error = require_closed_issue(42, "OPEN", "ai-main")
+        .expect_err("an open issue must block its branch merge");
+    assert!(error.contains("Issue #42 must be closed"), "got: {error}");
+    require_closed_issue(42, "CLOSED", "ai-main").expect("closed issue may merge");
+}
+
+// ----- provider round-trips (unchanged behaviour) ----------------------
+
+#[test]
+fn save_config_round_trips_a_provider_the_user_excluded_from_the_flow() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    for provider in &mut config.providers {
+        provider.enabled = provider.id != "codex";
+        if provider.id == "grok" {
+            provider.effort = "xhigh".into();
+        }
+    }
+
+    save_config(app.clone(), app.state(), config).expect("valid provider set saves");
+    let loaded = get_config(app.state()).expect("get_config");
+    assert!(!loaded.provider("codex").unwrap().enabled);
+    assert!(loaded.provider("claude").unwrap().enabled);
+    assert_eq!(loaded.provider("grok").unwrap().effort, "xhigh");
+}
+
+#[test]
+fn save_config_rejects_a_preferred_provider_that_is_not_enabled() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    config.preferred_provider = "grok".into();
+    for provider in &mut config.providers {
+        provider.enabled = provider.id == "claude";
+    }
+    let error = save_config(app.clone(), app.state(), config)
+        .expect_err("preferred provider must be one of the enabled ones");
+    assert!(error.contains("preferred provider"), "got: {error}");
 }

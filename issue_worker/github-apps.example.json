@@ -12,5 +12,12 @@
     "private_key_path": "/Users/your-name/.config/swarm/swarm-codex-bot.pem",
     "bot_login": "swarm-codex-bot[bot]",
     "bot_name": "Swarm Codex Bot"
+  },
+  "grok": {
+    "app_id": 567890,
+    "installation_id": 67890123,
+    "private_key_path": "/Users/your-name/.config/swarm/swarm-grok-bot.pem",
+    "bot_login": "swarm-grok-bot[bot]",
+    "bot_name": "Swarm Grok Bot"
   }
 }

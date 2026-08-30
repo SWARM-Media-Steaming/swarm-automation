@@ -15,11 +15,12 @@
         </div>
         <nav aria-label="Application sections">
           <button class="nav-item active" data-view-target="overview"><span class="nav-icon">⌂</span>Overview</button>
-          <button class="nav-item" data-view-target="worker"><span class="nav-icon">◫</span>Issue worker</button>
-          <button class="nav-item" data-view-target="providers"><span class="nav-icon">✦</span>AI &amp; GitHub</button>
-          <button class="nav-item" data-view-target="uat"><span class="nav-icon">✓</span>UAT scheduler</button>
-          <button class="nav-item" data-view-target="settings"><span class="nav-icon">⚙</span>Repository</button>
-          <button class="nav-item" data-view-target="logs"><span class="nav-icon">≡</span>Live logs <span id="log-count" class="nav-count">0</span></button>
+          <button class="nav-item" data-view-target="repository"><span class="nav-icon">⑂</span>Repository</button>
+          <button class="nav-item" data-view-target="ai"><span class="nav-icon">✦</span>AI Configuration</button>
+          <button class="nav-item" data-view-target="scheduler"><span class="nav-icon">✓</span>Test Scheduler</button>
+          <button class="nav-item" data-view-target="advanced"><span class="nav-icon">⚙</span>Advanced</button>
+          <button class="nav-item" data-view-target="debug"><span class="nav-icon">≡</span>Info &amp; Debug <span id="log-count" class="nav-count">0</span></button>
+          <button class="nav-item" data-view-target="help"><span class="nav-icon">?</span>Help</button>
         </nav>
         <div class="sidebar-foot">
           <div class="machine-state"><span class="pulse-dot"></span><span>Runs on this Mac</span></div>
@@ -34,6 +35,7 @@
             <h1 id="page-title">Automation overview</h1>
           </div>
           <div class="topbar-actions">
+            <label class="repo-switcher">Repository<select id="active-repo-select" aria-label="Active repository"></select></label>
             <span id="save-state" class="save-state">All changes saved</span>
             <button id="save-button" class="primary-button">Save configuration</button>
           </div>
@@ -44,169 +46,167 @@
         <section id="view-overview" class="view active">
           <div id="config-warning" class="banner warning hidden"></div>
           <div class="hero-panel">
-            <div>
-              <p class="eyebrow">LOCAL AUTOMATION CONTROL</p>
-              <h2>One place to run the work,<br />see the state, and stop it.</h2>
-              <p class="hero-copy">Your AI credentials stay on this machine. The worker operates only on the configured checkout and GitHub repository.</p>
-            </div>
-            <div class="hero-orbit" aria-hidden="true">
-              <div class="orbit-ring ring-one"></div><div class="orbit-ring ring-two"></div>
-              <div class="orbit-core">AI</div><span class="orbit-node node-a">GH</span><span class="orbit-node node-b">UAT</span><span class="orbit-node node-c">CLI</span>
+            <div><p class="eyebrow">LOCAL AUTOMATION CONTROL</p><h2>From request to working code. Automatically.</h2><p class="hero-copy">Pick up issues, builds and tests changes, responds to feedback, and keeps working until the job is done.</p></div>
+            <div class="feedback-loop" role="img" aria-label="Continuous feedback loop from issue to AI to test and back again">
+              <svg class="loop-arrows" viewBox="0 0 300 160" aria-hidden="true">
+                <defs><marker id="loop-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 8 4 0 8Z"></path></marker></defs>
+                <path class="loop-path" d="M78 58 H109" marker-end="url(#loop-arrow)"></path>
+                <path class="loop-path" d="M191 58 H222" marker-end="url(#loop-arrow)"></path>
+                <path class="loop-path return" d="M261 92 C261 145 39 145 39 92" marker-end="url(#loop-arrow)"></path>
+              </svg>
+              <div class="loop-step issue"><span>#</span><strong>Issue</strong></div>
+              <div class="loop-step ai"><span>✦</span><strong>AI</strong></div>
+              <div class="loop-step test"><span>✓</span><strong>Test</strong></div>
+              <span class="feedback-label">feedback</span>
             </div>
           </div>
 
-          <div class="section-heading"><div><p class="eyebrow">RUNTIME</p><h2>Automation services</h2></div><button class="text-button" data-view-jump="logs">View live logs →</button></div>
+          <div class="section-heading"><div><p class="eyebrow">RUNTIME</p><h2>Automation services</h2></div><button class="text-button" data-view-jump="debug">View logs →</button></div>
           <div class="service-grid">
             <article class="service-card" id="issue-service-card">
               <div class="card-top"><div class="service-icon violet">◫</div><span id="issue-status-pill" class="status-pill stopped">Stopped</span></div>
-              <h3>Issue worker</h3><p id="issue-status-copy">Ready when your repository and AI providers are configured.</p>
-              <div class="service-meta"><span>Schedule</span><strong id="worker-schedule-summary">Continuous</strong></div>
-              <div class="control-row">
-                <button class="primary-button compact" data-action="start-issue">Start</button>
-                <button class="secondary-button compact" data-action="run-issue">Run now</button>
-                <button class="icon-button" title="Pause" data-action="pause-issue">Ⅱ</button>
-                <button class="icon-button danger" title="Stop" data-action="stop-issue">■</button>
+              <h3>Issue worker</h3><p id="issue-status-copy">Ready when GitHub and at least one AI provider are configured.</p>
+              <div class="service-timing">
+                <label>Timing <select id="schedule-mode-select"><option value="continuous">Continuous</option><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="custom">Custom</option><option value="manual">Manual</option></select></label>
+                <label id="poll-field">Poll every <div class="input-with-suffix"><input type="number" min="10" data-config="poll_interval_seconds" /><span>seconds</span></div></label>
+                <label id="time-field" class="hidden">Start at <input type="time" data-config="schedule_time" /></label>
+                <fieldset id="days-field" class="day-picker hidden"><legend>Run on</legend><label><input type="checkbox" value="mon" />M</label><label><input type="checkbox" value="tue" />T</label><label><input type="checkbox" value="wed" />W</label><label><input type="checkbox" value="thu" />T</label><label><input type="checkbox" value="fri" />F</label><label><input type="checkbox" value="sat" />S</label><label><input type="checkbox" value="sun" />S</label></fieldset>
               </div>
+              <div class="service-meta"><span>Schedule</span><strong id="worker-schedule-summary">Continuous</strong></div>
+              <div class="control-row"><button class="primary-button compact" data-action="start-issue">Start</button><button class="secondary-button compact" data-action="run-issue">Run now</button><button class="icon-button" title="Pause" data-action="pause-issue">Ⅱ</button><button class="icon-button danger" title="Stop" data-action="stop-issue">■</button></div>
             </article>
             <article class="service-card" id="uat-service-card">
               <div class="card-top"><div class="service-icon cyan">✓</div><span id="uat-status-pill" class="status-pill stopped">Stopped</span></div>
-              <h3>Full UAT scheduler</h3><p id="uat-status-copy">Runs the repository’s frozen backend, Fire TV E2E, and TV UAT suites.</p>
+              <h3>Full UAT scheduler</h3><p id="uat-status-copy">Runs the repository’s frozen test suites when available.</p>
+              <div class="service-timing two"><label class="toggle"><input type="checkbox" data-repo-config="uat_enabled" /><span></span>Enabled</label><label>Run daily at <select data-repo-config="uat_hour" id="uat-hour"></select></label></div>
               <div class="service-meta"><span>Daily window</span><strong id="uat-schedule-summary">03:00 local</strong></div>
-              <div class="control-row">
-                <button class="primary-button compact" data-action="start-uat">Start</button>
-                <button class="secondary-button compact" data-action="run-uat">Check now</button>
-                <button class="icon-button" title="Pause" data-action="pause-uat">Ⅱ</button>
-                <button class="icon-button danger" title="Stop" data-action="stop-uat">■</button>
-              </div>
+              <div class="control-row"><button class="primary-button compact" data-action="start-uat">Start</button><button class="secondary-button compact" data-action="run-uat">Check now</button><button class="icon-button" title="Pause" data-action="pause-uat">Ⅱ</button><button class="icon-button danger" title="Stop" data-action="stop-uat">■</button></div>
             </article>
           </div>
 
           <div class="two-column">
-            <article class="panel">
-              <div class="panel-header"><div><p class="eyebrow">READINESS</p><h3>Before the first run</h3></div><span id="readiness-score" class="score">0 / 5</span></div>
-              <div id="readiness-list" class="checklist"></div>
-            </article>
-            <article class="panel log-preview-panel">
-              <div class="panel-header"><div><p class="eyebrow">ACTIVITY</p><h3>Latest output</h3></div><span class="live-label"><span></span>LIVE</span></div>
-              <pre id="overview-log" class="log-preview">No automation output yet.</pre>
+            <article class="panel"><div class="panel-header"><div><p class="eyebrow">READINESS</p><h3>Before the first run</h3></div><span id="readiness-score" class="score">0 / 4</span></div><div id="readiness-list" class="checklist"></div></article>
+            <article class="panel activity-panel">
+              <div class="panel-header"><div><p class="eyebrow">ACTIVITY</p><h3>Recent activity</h3></div><span id="activity-live-state" class="live-label"><span></span>LIVE</span></div>
+              <div class="activity-toolbar" aria-label="Activity filters">
+                <div class="activity-filters"><button class="active" data-activity-filter="all">All</button><button data-activity-filter="work">Work</button><button data-activity-filter="tests">Tests</button><button data-activity-filter="setup">Setup</button><button data-activity-filter="problems">Problems</button></div>
+                <button id="toggle-activity-live" class="activity-live-button">Pause updates</button>
+              </div>
+              <div id="overview-activity" class="activity-feed" aria-live="polite"><div class="activity-empty"><strong>No activity yet</strong><span>Start a service to see progress here.</span></div></div>
+              <button class="text-button activity-debug-link" data-view-jump="debug">Open technical logs →</button>
             </article>
           </div>
         </section>
 
-        <section id="view-worker" class="view">
-          <div class="section-intro"><div><p class="eyebrow">ISSUE WORKER</p><h2>Choose when and how work is picked up</h2><p>The worker selects assigned GitHub issues, gives them to an available AI, and delivers reviewed changes through your chosen workflow.</p></div><span id="worker-page-status" class="status-pill stopped">Stopped</span></div>
+        <section id="view-repository" class="view">
+          <div class="section-intro"><div><p class="eyebrow">REPOSITORY</p><h2>Configure and inspect monitored repositories</h2><p>The required repository and queue settings are together here. Branch state refreshes in the background.</p></div><div class="control-row"><button id="refresh-branches" class="secondary-button">Refresh</button><button id="add-repo" class="primary-button">Add repository</button></div></div>
           <div class="settings-grid">
             <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">TIMING</p><h3>Issue pickup schedule</h3></div></div>
-              <div class="segmented" id="schedule-segmented">
-                <button data-schedule="continuous" class="active">Continuous</button><button data-schedule="daily">Daily</button><button data-schedule="weekdays">Weekdays</button><button data-schedule="custom">Custom</button><button data-schedule="manual">Manual</button>
-              </div>
-              <div class="form-grid schedule-fields">
-                <label id="poll-field">Poll every <div class="input-with-suffix"><input type="number" min="10" data-config="poll_interval_seconds" /><span>seconds</span></div><small>Completed issues drain immediately; this interval is used only while idle.</small></label>
-                <label id="time-field" class="hidden">Start at <input type="time" data-config="schedule_time" /><small>Uses this Mac’s local time zone.</small></label>
-                <fieldset id="days-field" class="day-picker hidden"><legend>Run on</legend><label><input type="checkbox" value="mon" />M</label><label><input type="checkbox" value="tue" />T</label><label><input type="checkbox" value="wed" />W</label><label><input type="checkbox" value="thu" />T</label><label><input type="checkbox" value="fri" />F</label><label><input type="checkbox" value="sat" />S</label><label><input type="checkbox" value="sun" />S</label></fieldset>
-              </div>
-              <div class="inline-note" id="manual-note"><span>ⓘ</span><p>Pause freezes the entire worker process group, including an active Claude/Codex session and its tests. Resume continues that exact process; Stop requests a clean shutdown.</p></div>
-            </article>
-
-            <article class="panel">
-              <div class="panel-header"><div><p class="eyebrow">SELECTION</p><h3>GitHub queue</h3></div></div>
-              <div class="stacked-form">
-                <label>Assigned to <input data-config="assignee" placeholder="octocat" /></label>
-                <label>Trusted follow-up authors <input data-config="trusted_followup_authors" data-list placeholder="octocat, teammate" /><small>Only comments by these users may trigger another pass. Defaults to just the assignee above when left blank.</small></label>
-                <label>Completion authors <input data-config="completion_authors" data-list placeholder="octocat, bot[bot]" /><small>Defaults to just the assignee above when left blank.</small></label>
-                <label>Ready label <input data-config="ready_label" /></label>
-              </div>
-            </article>
-
-            <article class="panel">
-              <div class="panel-header"><div><p class="eyebrow">CAPACITY</p><h3>AI selection</h3></div></div>
-              <div class="stacked-form">
-                <label>Preferred first provider <select data-config="preferred_provider"><option value="claude">Claude</option><option value="codex">Codex</option></select></label>
-                <label>Minimum quota remaining <div class="input-with-suffix"><input type="number" min="0" max="100" data-config="minimum_remaining_percent" /><span>%</span></div><small>Every active provider quota window must remain above this threshold.</small></label>
-              </div>
-              <div class="provider-mini-grid"><div><span>Claude</span><strong data-tool-mini="claude">Checking…</strong></div><div><span>Codex</span><strong data-tool-mini="codex">Checking…</strong></div></div>
-            </article>
-
-            <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">DELIVERY</p><h3>Branch, review, and merge</h3></div></div>
-              <div class="form-grid three">
-                <label>Delivery mode <select data-config="delivery_mode"><option value="pull-request">Provider branch + pull request</option><option value="local-main">Commit to local base branch</option></select></label>
-                <label>Base branch <input data-config="base_branch" /></label><label>Git remote <input data-config="remote_name" /></label>
-                <label>Branch prefix <input data-config="branch_prefix" /></label><label>Merge method <select data-config="merge_method"><option value="merge">Merge commit</option><option value="squash">Squash</option><option value="rebase">Rebase</option></select></label>
-                <div class="toggle-stack"><label class="toggle"><input type="checkbox" data-config="auto_approve" /><span></span>Opposite bot approves</label><label class="toggle"><input type="checkbox" data-config="auto_merge" /><span></span>Merge automatically</label></div>
-              </div>
-            </article>
-          </div>
-        </section>
-
-        <section id="view-providers" class="view">
-          <div class="section-intro"><div><p class="eyebrow">AI &amp; GITHUB</p><h2>Local tools and bot identities</h2><p>The app looks in your login-shell PATH, standard macOS locations, and any paths you override. Install actions use the vendors’ official npm packages without sudo.</p></div><button id="refresh-tools" class="secondary-button">Refresh detection</button></div>
-          <div id="tool-grid" class="tool-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div></div>
-          <div class="settings-grid">
-            <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">MODELS</p><h3>Provider configuration</h3></div></div>
-              <div class="form-grid four">
-                <label>Claude model <input data-config="claude_model" /></label><label>Claude effort <select data-config="claude_effort"><option>low</option><option>medium</option><option>high</option><option>max</option></select></label>
-                <label>Codex model <input data-config="codex_model" /></label><label>Codex effort <select data-config="codex_effort"><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
-              </div>
-            </article>
-            <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">GITHUB APPS</p><h3>Claude Bot and Codex Bot</h3></div><span id="bot-config-pill" class="status-pill stopped">Not configured</span></div>
-              <p class="panel-copy">Private GitHub Apps keep provider commits, comments, approvals, and merges attributable to separate bots. Setup opens a loopback-only assistant in your browser.</p>
-              <div class="form-grid two"><label>GitHub Apps configuration <input data-config="github_apps_config" /></label><label class="toggle align-end"><input type="checkbox" data-config="require_bot_auth" /><span></span>Require bot authentication</label></div>
-              <div class="control-row"><button id="setup-bots" class="primary-button">Set up GitHub Apps</button><button id="verify-bots" class="secondary-button">Verify both bots</button></div>
-              <div id="bot-results" class="verification-results"></div>
-            </article>
-          </div>
-        </section>
-
-        <section id="view-uat" class="view">
-          <div class="section-intro"><div><p class="eyebrow">FULL UAT</p><h2>Daily closed-loop verification</h2><p>The desktop app supervises the existing foreground cron. It does not change test cases, pass/fail thresholds, evidence capture, or tracking-issue rules.</p></div><span id="uat-page-status" class="status-pill stopped">Stopped</span></div>
-          <div class="banner policy"><strong>Frozen-suite policy is active.</strong><span>Backend UAT → Fire TV E2E → Fire TV UI UAT. The cron tests the local checkout, never pulls it, never overlaps another run, and only files/comments on real failures.</span></div>
-          <div class="settings-grid">
-            <article class="panel">
-              <div class="panel-header"><div><p class="eyebrow">SCHEDULE</p><h3>Daily run</h3></div></div>
-              <div class="stacked-form"><label class="toggle"><input type="checkbox" data-config="uat_enabled" /><span></span>Enable UAT controls for this profile</label><label>Local hour <select data-config="uat_hour" id="uat-hour"></select><small>The frozen cron runs once per day and skips unchanged commits.</small></label><label>Run data directory <input data-config="run_dir" placeholder="Repository/.run" /></label></div>
-            </article>
-            <article class="panel">
-              <div class="panel-header"><div><p class="eyebrow">PREFLIGHT</p><h3>Environment gates</h3></div></div>
-              <div class="stacked-form"><label>SMB host <input data-config="uat_batocera_host" /></label><label>Tracking issue label <input data-config="uat_issue_label" /></label><label class="toggle"><input type="checkbox" data-config="uat_triage_enabled" /><span></span>Read-only AI triage on failure</label></div>
-            </article>
-            <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">CONTROL</p><h3>UAT scheduler process</h3></div><span id="uat-availability" class="availability">Checking repository…</span></div>
-              <div class="control-row large"><button class="primary-button" data-action="start-uat">Start daily scheduler</button><button class="secondary-button" data-action="run-uat">Check changed commit now</button><button class="secondary-button" data-action="pause-uat">Pause</button><button class="danger-button" data-action="stop-uat">Stop</button></div>
-              <p class="fine-print">Closing the window hides the app to the menu bar; it does not stop a scheduler. Quitting the app stops all child process groups.</p>
-            </article>
-          </div>
-        </section>
-
-        <section id="view-settings" class="view">
-          <div class="section-intro"><div><p class="eyebrow">REPOSITORY PROFILE</p><h2>Point automation at any GitHub checkout</h2><p>The issue worker is bundled with this app. SWARM-specific UAT controls activate only when the selected checkout contains the UAT runner.</p></div></div>
-          <div class="settings-grid">
-            <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">LOCAL + REMOTE</p><h3>Repository identity</h3></div><span id="repo-valid-pill" class="status-pill stopped">Not checked</span></div>
-              <div class="stacked-form"><label>Profile name <input data-config="profile_name" /></label><label>Local checkout <div class="input-action"><input data-config="repo_dir" /><button id="browse-repo" class="secondary-button">Choose…</button></div></label><label>GitHub repository <input data-config="github_repository" placeholder="owner/repository" /></label><label>GitHub host <input data-config="github_host" /></label></div>
+              <div class="panel-header"><div><p class="eyebrow">MONITORED REPOSITORY</p><h3>GitHub source <button class="help-dot" data-help="repo-profile" aria-label="About repository settings">?</button></h3></div><div class="control-row"><button id="remove-repo" class="danger-button compact">Remove</button><span id="repo-valid-pill" class="status-pill stopped">Not checked</span></div></div>
+              <div class="form-grid two"><label>GitHub repository <span class="req">*</span><input data-repo-config="github_repository" id="github-repository-input" required placeholder="owner/repository" /><small>Each repository is cloned and monitored independently.</small></label><label>Assignee <span class="req">*</span><input data-repo-config="assignee" required placeholder="octocat" /><small>Only assigned issues for this GitHub user enter the queue.</small></label><label class="toggle"><input type="checkbox" data-repo-config="enabled" /><span></span>Enabled</label></div>
+              <div class="workspace-row"><div><span class="workspace-label">Workspace</span><code id="workspace-path">—</code></div><div class="control-row"><button id="prepare-workspace" class="primary-button compact">Clone / update</button><button id="reveal-workspace" class="secondary-button compact">Reveal in Finder</button></div></div>
               <div id="repo-inspection" class="repo-inspection"></div>
             </article>
-            <article class="panel">
-              <div class="panel-header"><div><p class="eyebrow">NOTIFICATIONS</p><h3>Email completion notices</h3></div></div>
-              <div class="stacked-form"><label class="toggle"><input type="checkbox" data-config="email_enabled" /><span></span>Send email notifications</label><label>Recipient <input type="email" data-config="email_to" /></label><label>SMTP credentials file <input data-config="smtp_credentials_file" /></label><label>SMTP password <input id="smtp-password" type="password" autocomplete="new-password" placeholder="Stored only in macOS Keychain" /></label><button id="save-password" class="secondary-button">Save password to Keychain</button></div>
-            </article>
-            <article class="panel">
-              <div class="panel-header"><div><p class="eyebrow">ADVANCED PATHS</p><h3>Executable overrides</h3></div></div>
-              <div class="stacked-form"><label>Claude binary <input data-config="claude_bin" placeholder="Auto-detect" /></label><label>Codex binary <input data-config="codex_bin" placeholder="Auto-detect" /></label><label>GitHub CLI binary <input data-config="gh_bin" placeholder="Auto-detect" /></label><label>Python 3 binary <input data-config="python_bin" placeholder="Auto-detect" /></label><label>Worker state directory <input data-config="worker_state_dir" /></label></div>
-            </article>
+            <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">GITHUB QUEUE</p><h3>Issue selection <button class="help-dot" data-help="repo-queue" aria-label="About GitHub queue settings">?</button></h3></div></div><div class="form-grid three"><label>Trusted follow-up authors <input data-repo-config="trusted_followup_authors" data-list placeholder="Defaults to assignee" /><small>Only these users may request another pass.</small></label><label>Completion authors <input data-repo-config="completion_authors" data-list placeholder="Defaults to assignee" /></label><label>Ready label <input data-repo-config="ready_label" /></label></div></article>
+          </div>
+          <div class="section-heading"><div><p class="eyebrow">VISUAL TREE</p><h2>Branches and promotion <button class="help-dot" data-help="repo-branches" aria-label="About the branch tree">?</button></h2></div></div>
+          <div id="branch-warning" class="banner warning hidden"></div><div id="branch-tree" class="branch-tree"><article class="panel"><p class="panel-copy">Choose a configured repository to inspect its branches.</p></article></div>
+          <details class="raw-graph-panel"><summary>Raw Git graph</summary><pre id="raw-git-graph" class="full-log branch-graph">No branch data loaded.</pre></details>
+        </section>
+
+        <section id="view-ai" class="view">
+          <div class="section-intro"><div><p class="eyebrow">AI CONFIGURATION</p><h2>Providers, identities, and protected delivery</h2><p>Choose the AI tools in the rotation and how their work reaches the protected integration branch.</p></div></div>
+          <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">AI SELECTION</p><h3>Provider rotation <button class="help-dot" data-help="provider-rotation" aria-label="About provider rotation">?</button></h3></div></div><div class="form-grid two"><label>Preferred first provider <select data-config="preferred_provider" id="preferred-provider-select"></select></label><label>Minimum quota remaining <div class="input-with-suffix"><input type="number" min="0" max="100" data-config="minimum_remaining_percent" /><span>%</span></div></label></div></article>
+          <div class="section-heading"><div><p class="eyebrow">PROVIDERS</p><h2>Enabled AI tools <button class="help-dot" data-help="provider-include-exclude" aria-label="About providers">?</button></h2></div></div>
+          <div id="provider-cards" class="provider-card-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div>
+          <div class="settings-grid">
+            <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">BOT IDENTITIES</p><h3>Per-provider GitHub Apps <button class="help-dot" data-help="bot-identities" aria-label="About GitHub App bot identities">?</button></h3></div><span id="bot-config-pill" class="status-pill stopped">Not configured</span></div><p class="panel-copy">Bot authentication is required by default so commits, reviews, comments, and merges retain the provider identity.</p><div class="control-row"><button id="setup-bots" class="primary-button">Set up GitHub Apps</button><button id="verify-bots" class="secondary-button">Verify bots</button></div><div id="bot-results" class="verification-results"></div></article>
+            <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">PROTECTED FLOW</p><h3>AI branch delivery <button class="help-dot" data-help="delivery-mode" aria-label="About branch delivery">?</button></h3></div></div><div class="form-grid three"><label>Human-owned branch <span class="req">*</span><input data-repo-config="base_branch" required /></label><label>AI integration branch <span class="req">*</span><input data-repo-config="integration_branch" required /></label><label>Git remote <span class="req">*</span><input data-repo-config="remote_name" required /></label><label>Issue branch prefix <input data-repo-config="branch_prefix" /></label></div><div class="automation-flow-options"><div class="automation-flow-heading"><strong>Pull request automation</strong><span>Off by default</span></div><label class="toggle automation-flow-toggle"><input type="checkbox" data-repo-config="auto_approve" /><span></span><div><strong>Automatically approve issue PRs</strong><small>Uses another provider’s bot when one is available.</small></div></label><label class="toggle automation-flow-toggle"><input type="checkbox" data-repo-config="auto_merge" /><span></span><div><strong>Automatically merge closed issue PRs into <code>ai-main</code></strong><small>Squashes the PR and removes its issue branch. Open issues never merge.</small></div></label></div><div class="inline-note"><span>ⓘ</span><p>Defaults are <code>main</code>, <code>ai-main</code>, <code>origin</code>, and <code>ai</code>. These options never merge <code>ai-main</code> into <code>main</code>.</p></div></article>
           </div>
         </section>
 
-        <section id="view-logs" class="view logs-view">
-          <div class="section-intro"><div><p class="eyebrow">LIVE OUTPUT</p><h2>Worker, UAT, setup, and install logs</h2><p>Passwords and provider credentials are never written here. The rolling file is available from Finder for longer investigations.</p></div><div class="control-row"><button id="clear-log" class="secondary-button">Clear view</button><button id="open-log-folder" class="secondary-button">Open log folder</button></div></div>
-          <div class="log-toolbar"><div class="log-filters"><button class="active" data-log-filter="all">All</button><button data-log-filter="Issue worker">Worker</button><button data-log-filter="UAT scheduler">UAT</button><button data-log-filter="Setup">Setup</button></div><span id="log-live-state" class="live-label"><span></span>LISTENING</span></div>
-          <pre id="full-log" class="full-log">Waiting for output…</pre>
+        <section id="view-scheduler" class="view">
+          <div class="section-intro"><div><p class="eyebrow">TEST SCHEDULER</p><h2>Closed-loop repository verification</h2><p>Timing and start/stop controls live on Overview. This page contains test-specific policy and environment settings.</p></div><span id="uat-page-status" class="status-pill stopped">Stopped</span></div>
+          <div class="banner policy"><strong>Frozen-suite policy is active.</strong><span>Backend UAT → Fire TV E2E → Fire TV UI UAT. The runner skips unchanged commits and never overlaps another run.</span></div>
+          <div class="settings-grid"><article class="panel"><div class="panel-header"><div><p class="eyebrow">PREFLIGHT</p><h3>Environment gates</h3></div></div><div class="stacked-form"><label>SMB host <input data-repo-config="uat_batocera_host" /></label><label>Tracking issue label <input data-repo-config="uat_issue_label" /></label><label class="toggle"><input type="checkbox" data-repo-config="uat_triage_enabled" /><span></span>Read-only AI triage on failure</label></div></article><article class="panel"><div class="panel-header"><div><p class="eyebrow">STATUS</p><h3>Repository test runner</h3></div><span id="uat-availability" class="availability">Checking repository…</span></div><p class="panel-copy">When available and enabled, use the compact controls on Overview to run or supervise the scheduler.</p><button class="secondary-button" data-view-jump="overview">Open Overview</button></article></div>
+        </section>
+
+        <section id="view-advanced" class="view">
+          <div class="section-intro"><div><p class="eyebrow">ADVANCED</p><h2>Optional notifications and overrides</h2><p>The defaults work for normal GitHub.com repositories. Change these only when your local environment requires it.</p></div></div>
+          <div class="settings-grid">
+            <article class="panel"><div class="panel-header"><div><p class="eyebrow">NOTIFICATIONS</p><h3>Email completion notices <span class="opt">optional</span> <button class="help-dot" data-help="email-notifications" aria-label="About email notification settings">?</button></h3></div></div><div class="stacked-form"><label class="toggle"><input type="checkbox" data-config="email_enabled" /><span></span>Send email notifications</label><label>Recipient <input type="email" data-config="email_to" /></label><label>SMTP credentials file <input data-config="smtp_credentials_file" /></label><label>SMTP password <input id="smtp-password" type="password" autocomplete="new-password" placeholder="Stored only in macOS Keychain" /></label><button id="save-password" class="secondary-button">Save password to Keychain</button></div></article>
+            <article class="panel"><div class="panel-header"><div><p class="eyebrow">ADVANCED PATHS</p><h3>Local overrides <span class="opt">optional</span> <button class="help-dot" data-help="advanced-paths" aria-label="About local path overrides">?</button></h3></div></div><div class="stacked-form"><label>Workspace folder <input data-config="workspace_root" placeholder="App data folder" /></label><label>Working-copy override <div class="input-action"><input data-repo-config="repo_dir" placeholder="Managed clone by default" /><button id="browse-repo" class="secondary-button">Choose…</button></div></label><label>Worker state directory <input data-config="worker_state_dir" /></label><label>UAT run data directory <input data-repo-config="run_dir" placeholder="Repository/.run" /></label><label>GitHub Apps configuration <input data-repo-config="github_apps_config" placeholder="Automatic" /></label><label>GitHub CLI binary <input data-config="gh_bin" placeholder="Auto-detect" /></label><label>Python 3 binary <input data-config="python_bin" placeholder="Auto-detect" /></label></div></article>
+            <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">PROVIDER EXECUTABLES</p><h3>CLI path overrides <span class="opt">optional</span> <button class="help-dot" data-help="provider-bins" aria-label="About provider executable overrides">?</button></h3></div></div><div class="form-grid three"><label>Claude <input data-provider-bin="claude" placeholder="Auto-detect" /></label><label>Codex <input data-provider-bin="codex" placeholder="Auto-detect" /></label><label>Grok <input data-provider-bin="grok" placeholder="Auto-detect" /></label></div></article>
+          </div>
+        </section>
+
+        <section id="view-debug" class="view">
+          <div class="section-intro"><div><p class="eyebrow">INFO &amp; DEBUG</p><h2>Environment and live diagnostics</h2><p>Tool detection and logs refresh independently so slow checks do not block the rest of the interface.</p></div><button id="refresh-tools" class="secondary-button">Refresh tools</button></div>
+          <div id="tool-grid" class="tool-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div></div>
+          <div class="section-heading"><div><p class="eyebrow">LIVE OUTPUT</p><h2>Worker, UAT, setup, and install logs</h2></div><div class="control-row"><button id="clear-log" class="secondary-button">Clear view</button><button id="open-log-folder" class="secondary-button">Open log folder</button></div></div>
+          <div class="log-toolbar"><div class="log-filters"><button class="active" data-log-filter="all">All</button><button data-log-filter="Issue worker">Worker</button><button data-log-filter="UAT scheduler">UAT</button><button data-log-filter="Setup">Setup</button></div><span id="log-live-state" class="live-label"><span></span>LISTENING</span></div><pre id="full-log" class="full-log debug-log">Waiting for output…</pre>
+        </section>
+
+        <section id="view-help" class="view">
+          <div class="section-intro"><div><p class="eyebrow">HELP</p><h2>What this app does, and how to start</h2><p>Short explanations for setup and everyday use. Click any <span class="help-dot inline">?</span> around the app for help with that box.</p></div></div>
+
+          <article class="panel span-two tldr-panel">
+            <div class="panel-header"><div><p class="eyebrow">TL;DR</p><h3>Get started in six steps</h3></div></div>
+            <ol class="help-steps">
+              <li><button data-view-jump="repository">Repository</button> — enter the <strong>GitHub repository</strong> (<code>owner/name</code>) and the <strong>assignee</strong> whose issues the worker may pick up, then clone the managed workspace.</li>
+              <li><button data-view-jump="ai">AI Configuration</button> — enable and sign in to at least one provider (Claude, Codex, or Grok).</li>
+              <li><button data-view-jump="ai">Bot identities</button> — set up the enabled providers’ GitHub Apps so commits and reviews remain attributable.</li>
+              <li>Press <strong>Save configuration</strong> (top right).</li>
+              <li><button data-view-jump="overview">Overview</button> — choose a pickup schedule (Continuous, Daily, Weekdays, Custom, or Manual).</li>
+              <li>Press <strong>Start</strong> for the schedule, or <strong>Run now</strong> for one issue, then watch <button data-view-jump="debug">Info &amp; Debug</button>.</li>
+            </ol>
+          </article>
+
+          <div class="settings-grid">
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">IN PLAIN TERMS</p><h3>What is SWARM Automation?</h3></div></div>
+              <p class="panel-copy">It watches assigned GitHub issues, asks an enabled AI provider to make the change, and asks another provider to review it. The work stays on protected AI branches until you choose to move it to the human-owned branch. It runs on this Mac using your existing AI accounts.</p>
+            </article>
+
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">CONCEPTS</p><h3>Worth understanding</h3></div></div>
+              <div id="help-concepts" class="concept-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">WHEN SOMETHING IS OFF</p><h3>Troubleshooting</h3></div></div>
+              <div class="faq-list">
+                <details><summary>The worker won’t start</summary><p>Check the <button data-view-jump="overview">Overview</button> readiness list. The banner there names the first setting or sign-in that needs attention.</p></details>
+                <details><summary>A provider says “Sign-in required”</summary><p>Open <button data-view-jump="ai">AI Configuration</button> and select <strong>Sign in</strong> on that provider’s card. Finish the provider’s login, then refresh detection in <button data-view-jump="debug">Info &amp; Debug</button>.</p></details>
+                <details><summary>Nothing happens on the schedule</summary><p>A Manual profile only runs on <strong>Run now</strong>. For recurring pickup choose Continuous / Daily / Weekdays / Custom in the <button data-view-jump="overview">Issue worker</button> panel, then press <strong>Start</strong>.</p></details>
+                <details><summary>How do I stop everything?</summary><p>Closing the window only hides the app to the menu bar — workers keep running. Use <strong>Quit and stop workers</strong> in the menu-bar menu to terminate every supervised process group.</p></details>
+                <details><summary>Where are the logs and settings?</summary><p>Open <button data-view-jump="debug">Info &amp; Debug</button> and select <strong>Open log folder</strong>. Settings stay in a private local file, and the optional email password stays in macOS Keychain.</p></details>
+              </div>
+            </article>
+
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">FURTHER READING</p><h3>Official documentation</h3></div></div>
+              <div class="link-row">
+                <button class="secondary-button" data-external="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code docs</button>
+                <button class="secondary-button" data-external="https://developers.openai.com/codex/cli/">Codex CLI docs</button>
+                <button class="secondary-button" data-external="https://docs.x.ai/build/overview">Grok Build docs</button>
+                <button class="secondary-button" data-external="https://docs.github.com/apps">GitHub Apps</button>
+              </div>
+            </article>
+          </div>
         </section>
       </main>
     </div>
+
+    <div id="help-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
+      <div class="modal">
+        <button id="help-modal-close" class="modal-close" aria-label="Close">×</button>
+        <h2 id="help-modal-title"></h2>
+        <div id="help-modal-body"></div>
+        <div id="help-modal-links" class="link-row"></div>
+      </div>
+    </div>
+
     <script src="app.js"></script>
   </body>
 </html>

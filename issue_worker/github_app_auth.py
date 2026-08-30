@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GitHub App authentication for SWARM's Claude and Codex automations.
+"""GitHub App authentication for SWARM's Claude, Codex, and Grok automations.
 
 The module intentionally has no third-party dependencies. It signs the GitHub
 App JWT with the system OpenSSL binary, exchanges it for a short-lived
@@ -65,7 +65,7 @@ class AppDefinition:
 
     @classmethod
     def from_mapping(cls, provider: str, value: dict[str, Any], base_dir: Path) -> "AppDefinition":
-        required = ("app_id", "installation_id", "private_key_path", "bot_login")
+        required = ("app_id", "private_key_path", "bot_login")
         missing = [key for key in required if not value.get(key)]
         if missing:
             raise ValueError(f"{provider} GitHub App config is missing: {', '.join(missing)}")
@@ -75,7 +75,7 @@ class AppDefinition:
         login = str(value["bot_login"])
         return cls(
             app_id=int(value["app_id"]),
-            installation_id=int(value["installation_id"]),
+            installation_id=int(value.get("installation_id") or 0),
             private_key_path=key_path,
             bot_login=login,
             bot_name=str(value.get("bot_name") or login.removesuffix("[bot]").replace("-", " ").title()),
@@ -93,14 +93,21 @@ class GitHubAppAuth:
         self._tokens: dict[str, tuple[str, float]] = {}
         if self.config_path.exists():
             raw = json.loads(self.config_path.read_text(encoding="utf-8"))
-            for provider in ("claude", "codex"):
+            for provider in ("claude", "codex", "grok"):
                 if isinstance(raw.get(provider), dict):
-                    self._definitions[provider] = AppDefinition.from_mapping(
-                        provider, raw[provider], self.config_path.parent
-                    )
+                    try:
+                        self._definitions[provider] = AppDefinition.from_mapping(
+                            provider, raw[provider], self.config_path.parent
+                        )
+                    except ValueError:
+                        # The setup assistant persists the app ID/key before
+                        # installation completes. Treat that provider as not
+                        # configured until an installation ID is added.
+                        continue
 
     def configured(self, provider: str) -> bool:
-        return provider.lower() in self._definitions
+        definition = self._definitions.get(provider.lower())
+        return bool(definition and definition.installation_id > 0)
 
     def definition(self, provider: str) -> AppDefinition:
         key = provider.lower()
@@ -147,6 +154,8 @@ class GitHubAppAuth:
         if cached and cached[1] > time.time() + 120:
             return cached[0]
         definition = self.definition(key)
+        if definition.installation_id <= 0:
+            raise RuntimeError(f"GitHub App {provider} has not been installed on a repository yet")
         response = _request(
             "POST",
             f"https://api.github.com/app/installations/{definition.installation_id}/access_tokens",
@@ -158,6 +167,44 @@ class GitHubAppAuth:
         # 50 minutes so clock skew cannot leak an expired token into a long run.
         self._tokens[key] = (token, time.time() + 3000)
         return token
+
+    def app_profile(self, provider: str) -> dict[str, Any]:
+        """Return the app registration, proving the saved app ID/key still match."""
+        definition = self.definition(provider)
+        return dict(_request("GET", "https://api.github.com/app", self._jwt(definition)))
+
+    def find_installation_for_repository(self, provider: str, repository: str) -> int | None:
+        """Discover a replacement installation ID for an existing app.
+
+        This repairs configs after an app was uninstalled/reinstalled without
+        requiring the user to copy an installation ID out of a browser URL.
+        """
+        definition = self.definition(provider)
+        jwt = self._jwt(definition)
+        installations = _request(
+            "GET", "https://api.github.com/app/installations?per_page=100", jwt
+        )
+        target = repository.casefold()
+        for installation in installations:
+            installation_id = int(installation.get("id", 0))
+            if installation_id <= 0:
+                continue
+            response = _request(
+                "POST",
+                f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+                jwt,
+                {},
+            )
+            token = str(response["token"])
+            repositories = _request(
+                "GET", "https://api.github.com/installation/repositories?per_page=100", token
+            )
+            if any(
+                str(item.get("full_name", "")).casefold() == target
+                for item in repositories.get("repositories", [])
+            ):
+                return installation_id
+        return None
 
     def bot_environment(self, provider: str) -> dict[str, str]:
         definition = self.definition(provider)
@@ -190,9 +237,9 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("identity", "check"):
         sub = subparsers.add_parser(command)
-        sub.add_argument("--provider", required=True, choices=("claude", "codex"))
+        sub.add_argument("--provider", required=True, choices=("claude", "codex", "grok"))
     execute = subparsers.add_parser("exec", help="Run a command as the selected bot")
-    execute.add_argument("--provider", required=True, choices=("claude", "codex"))
+    execute.add_argument("--provider", required=True, choices=("claude", "codex", "grok"))
     execute.add_argument("command_args", nargs=argparse.REMAINDER)
     return parser
 

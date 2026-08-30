@@ -2,7 +2,7 @@ mod config;
 mod processes;
 mod tools;
 
-use config::{AppConfig, CONFIG_FILE};
+use config::{AppConfig, RepoConfig, CONFIG_FILE};
 use processes::{ProcessManager, ProcessStatus};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,14 @@ use tauri_plugin_opener::OpenerExt;
 const MAIN_WINDOW: &str = "main";
 const SMTP_KEYRING_SERVICE: &str = "app.swarm.automation";
 const SMTP_KEYRING_ACCOUNT: &str = "smtp-password";
+const REQUIRED_WORKER_RESOURCES: [&str; 6] = [
+    "install_swarm_issue_cron.py",
+    "swarm_issue_worker.py",
+    "github_app_auth.py",
+    "setup_github_bots.py",
+    "codex_rate_limits.py",
+    "send_issue_notification.py",
+];
 
 struct AppState {
     config: Mutex<AppConfig>,
@@ -55,16 +63,41 @@ struct RepositoryInspection {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AutomationStatus {
-    issue: ProcessStatus,
+struct RepoStatus {
+    id: String,
+    label: String,
+    github_repository: String,
+    enabled: bool,
+    /// Per-repo UAT scheduler process (slot `uat:<id>`).
     uat: ProcessStatus,
-    task: ProcessStatus,
+    /// Absolute path of the working copy for this repo (a managed clone or the
+    /// advanced override).
+    workspace_path: String,
+    /// True once that path is a real Git checkout on disk.
+    workspace_ready: bool,
+    /// True when the app manages the clone (no `repo_dir` override).
+    workspace_managed: bool,
     worker_available: bool,
     uat_available: bool,
     bot_config_exists: bool,
-    smtp_password_configured: bool,
-    config_error: String,
+    /// Per-repo validation error, if any.
+    repo_config_error: String,
     repository: RepositoryInspection,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationStatus {
+    /// The single rotating issue-worker scheduler (services every enabled repo).
+    issue: ProcessStatus,
+    /// Shared one-off task slot (installs, bot setup).
+    task: ProcessStatus,
+    scheduler_repo_count: usize,
+    repos: Vec<RepoStatus>,
+    bot_config_exists: bool,
+    smtp_password_configured: bool,
+    /// Global (non-repo) validation error, if any.
+    config_error: String,
     log_path: String,
 }
 
@@ -118,8 +151,10 @@ fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
 fn save_config<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
-    config: AppConfig,
+    mut config: AppConfig,
 ) -> Result<AppConfig, String> {
+    // Fold any legacy shape and guarantee a full provider set before persisting.
+    config.normalize();
     config::save(&app_config_path(&app)?, &config)?;
     *state
         .config
@@ -218,7 +253,20 @@ fn github_slug(remote: &str) -> Option<String> {
 
 #[tauri::command]
 fn detect_tools(state: State<'_, AppState>) -> Result<Vec<tools::ToolInfo>, String> {
-    Ok(tools::detect(&current_config(&state)?))
+    let config = current_config(&state)?;
+    let host = config
+        .repositories()
+        .first()
+        .map(repo_host)
+        .unwrap_or_else(|| "github.com".into());
+    Ok(tools::detect(&config, &host))
+}
+
+#[tauri::command]
+async fn detect_tools_background(app: tauri::AppHandle) -> Result<Vec<tools::ToolInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || detect_tools(app.state()))
+        .await
+        .map_err(|error| format!("Tool detection background task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -228,26 +276,85 @@ fn get_automation_status(
 ) -> Result<AutomationStatus, String> {
     let config = current_config(&state)?;
     let log_path = automation_log_path(&app)?;
-    let repository = inspect_repository_path(Path::new(&config.repo_dir));
-    let config_error = config.validate().err().unwrap_or_default();
+    let worker_available = worker_script_dir(&app).is_ok();
+    let mut repos = Vec::new();
+    for repo in config.repositories() {
+        let managed = repo.repo_dir.trim().is_empty();
+        let workspace = resolve_workspace(&app, &config, repo).unwrap_or_default();
+        let mut repository = inspect_repository_path(&workspace);
+        let workspace_ready = repository.valid;
+        if !workspace_ready && managed {
+            repository.error = "Not cloned yet — press Clone / update in Repository.".into();
+        }
+        repos.push(RepoStatus {
+            id: repo.id.clone(),
+            label: repo.label(),
+            github_repository: repo.github_repository.clone(),
+            enabled: repo.enabled,
+            uat: state.processes.status(
+                &app,
+                &format!("uat:{}", repo.id),
+                &format!("UAT scheduler · {}", repo.label()),
+                &log_path,
+            )?,
+            workspace_path: workspace.to_string_lossy().into_owned(),
+            workspace_ready,
+            workspace_managed: managed,
+            worker_available,
+            uat_available: repository.uat_available,
+            bot_config_exists: Path::new(&repo.effective_apps_config()).is_file(),
+            repo_config_error: repo_error(&config, repo),
+            repository,
+        });
+    }
     Ok(AutomationStatus {
         issue: state
             .processes
-            .status(&app, "issue", "Issue worker", &log_path)?,
-        uat: state
-            .processes
-            .status(&app, "uat", "UAT scheduler", &log_path)?,
+            .status(&app, "issue", "Issue worker scheduler", &log_path)?,
         task: state
             .processes
             .status(&app, "task", "Setup task", &log_path)?,
-        worker_available: worker_script_dir(&app, &config).is_ok(),
-        uat_available: repository.uat_available,
-        bot_config_exists: Path::new(&config.github_apps_config).is_file(),
+        scheduler_repo_count: config.enabled_repos().count(),
+        bot_config_exists: config
+            .repositories()
+            .iter()
+            .all(|repo| Path::new(&repo.effective_apps_config()).is_file()),
+        repos,
         smtp_password_configured: smtp_password().is_ok(),
-        config_error,
-        repository,
+        config_error: config.validate().err().unwrap_or_default(),
         log_path: log_path.to_string_lossy().into_owned(),
     })
+}
+
+#[tauri::command]
+async fn get_automation_status_background(
+    app: tauri::AppHandle,
+) -> Result<AutomationStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_automation_status(app.clone(), state)
+    })
+    .await
+    .map_err(|error| format!("Status refresh background task failed: {error}"))?
+}
+
+/// The validation message for a single repo (empty when it is fine), so the UI
+/// can flag exactly which repo card needs attention.
+fn repo_error(config: &AppConfig, repo: &RepoConfig) -> String {
+    match config.validate() {
+        Ok(()) => String::new(),
+        Err(message) => {
+            let needle = format!("Repository {}:", repo.label());
+            if message.starts_with(&needle) {
+                message[needle.len()..]
+                    .trim()
+                    .trim_end_matches('.')
+                    .to_string()
+            } else {
+                String::new()
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -259,64 +366,155 @@ fn start_issue_worker(
     let config = current_config(&state)?;
     config.validate()?;
     if config.schedule_mode == "manual" && !run_once {
-        return Err("This profile is set to Manual only. Use Run now or choose a schedule.".into());
+        return Err(
+            "The schedule is set to Manual only. Use Run now or choose a recurring schedule."
+                .into(),
+        );
     }
-    let script_dir = worker_script_dir(&app, &config)?;
-    let runner = script_dir.join("install_swarm_issue_cron.py");
+    let providers = resolve_providers(&config);
+    if providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .all(|provider| provider.bin.as_os_str().is_empty())
+    {
+        return Err(
+            "Install and sign in to at least one enabled AI provider (Claude, Codex, or Grok) \
+             before starting the worker."
+                .into(),
+        );
+    }
+
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
     let git = tools::configured_or_detected("", "git")?;
     let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
-    let claude = tools::find_executable("claude", &config.claude_bin).unwrap_or_default();
-    let codex = tools::find_executable("codex", &config.codex_bin).unwrap_or_default();
-    if claude.as_os_str().is_empty() && codex.as_os_str().is_empty() {
-        return Err(
-            "Install and sign in to Claude Code or Codex CLI before starting the worker.".into(),
-        );
+    let state_root = PathBuf::from(&config.worker_state_dir);
+
+    // Ensure every enabled repo's workspace, then build one spec entry each.
+    let mut spec = Vec::new();
+    // The desktop app and its Python worker form one versioned unit. Never
+    // borrow automation scripts from a monitored repository: that copy may
+    // implement a different command-line interface.
+    let script_dir = worker_script_dir(&app)?;
+    for repo in config.enabled_repos() {
+        let workspace = prepared_workspace(&app, &config, repo)?;
+        let repo_state = state_root.join(&repo.id);
+        std::fs::create_dir_all(&repo_state).map_err(|error| error.to_string())?;
+        spec.push(serde_json::json!({
+            "label": repo.label(),
+            "workspace_dir": workspace.to_string_lossy(),
+            "state_dir": repo_state.to_string_lossy(),
+            "base_branch": repo.base_branch,
+            "remote_name": repo.remote_name,
+            "integration_branch": repo.integration_branch,
+            "worker_args": repo_worker_args(&config, repo, &workspace, &git, &gh),
+        }));
     }
-    let mut arguments = issue_worker_arguments(
-        &config, &runner, &python, &git, &gh, &claude, &codex, run_once,
-    );
+    if spec.is_empty() {
+        return Err("Enable at least one repository before starting the worker.".into());
+    }
+    let runner = script_dir.join("install_swarm_issue_cron.py");
+
+    std::fs::create_dir_all(&state_root).map_err(|error| error.to_string())?;
+    let repos_file = state_root.join("repos.json");
+    std::fs::write(
+        &repos_file,
+        serde_json::to_vec_pretty(&spec).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let mut arguments = scheduler_arguments(&config, &runner, &python, &git, &repos_file, run_once);
+    for provider in &providers {
+        arguments.extend([format!("--{}-model", provider.id), provider.model.clone()]);
+        arguments.extend([format!("--{}-effort", provider.id), provider.effort.clone()]);
+        arguments.extend([
+            format!("--{}-bin", provider.id),
+            provider.bin.to_string_lossy().into_owned(),
+        ]);
+        if provider.enabled {
+            arguments.extend(["--enabled-provider".into(), provider.id.clone()]);
+        }
+    }
+    arguments.extend([
+        "--minimum-remaining-percent".into(),
+        config.minimum_remaining_percent.to_string(),
+        "--preferred-provider".into(),
+        config.preferred_provider.clone(),
+        "--gh-bin".into(),
+        gh.to_string_lossy().into_owned(),
+    ]);
     let mut environment = vec![
         ("PATH".into(), tools::enhanced_path()),
         (
             "SWARM_ISSUE_WORKER_SCRIPT_DIR".into(),
             script_dir.to_string_lossy().into_owned(),
         ),
-        ("SWARM_TRUSTED_FOLLOWUP_AUTHORS".into(), String::new()),
-        ("SWARM_COMPLETION_AUTHORS".into(), String::new()),
     ];
     if config.email_enabled {
         environment.push(("SWARM_SMTP_PASSWORD".into(), smtp_password()?));
-    } else if !arguments.iter().any(|argument| argument == "--no-email") {
+        arguments.extend([
+            "--smtp-credentials-file".into(),
+            config.smtp_credentials_file.clone(),
+            "--email-to".into(),
+            config.email_to.clone(),
+        ]);
+    } else {
         arguments.push("--no-email".into());
     }
+
     state.processes.spawn(
         &app,
         "issue",
-        "Issue worker",
+        "Issue worker scheduler",
         &python,
         &arguments,
         &environment,
-        Path::new(&config.repo_dir),
+        &state_root,
         automation_log_path(&app)?,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn issue_worker_arguments(
+/// A provider with its executable resolved to a concrete path (empty when the
+/// CLI is not installed / not on PATH). `enabled` mirrors the config switch —
+/// the worker is handed every known provider's details so it can still resume
+/// an issue paused on a provider the user has since excluded, but only selects
+/// from the enabled set for new work.
+struct ResolvedProvider {
+    id: String,
+    model: String,
+    effort: String,
+    bin: PathBuf,
+    enabled: bool,
+}
+
+fn resolve_providers(config: &AppConfig) -> Vec<ResolvedProvider> {
+    config
+        .providers
+        .iter()
+        .map(|provider| ResolvedProvider {
+            id: provider.id.clone(),
+            model: provider.model.clone(),
+            effort: provider.effort.clone(),
+            bin: tools::find_executable(&provider.id, &provider.bin).unwrap_or_default(),
+            enabled: provider.enabled,
+        })
+        .collect()
+}
+
+/// Global scheduler flags for `install_swarm_issue_cron.py`. Per-repo detail
+/// lives in the `--repos-file`; unknown provider/email flags added by the
+/// caller are forwarded to every repo's worker invocation.
+fn scheduler_arguments(
     config: &AppConfig,
     runner: &Path,
     python: &Path,
     git: &Path,
-    gh: &Path,
-    claude: &Path,
-    codex: &Path,
+    repos_file: &Path,
     run_once: bool,
 ) -> Vec<String> {
     let mut arguments = vec![
         runner.to_string_lossy().into_owned(),
-        "--repo-dir".into(),
-        config.repo_dir.clone(),
+        "--repos-file".into(),
+        repos_file.to_string_lossy().into_owned(),
         "--state-dir".into(),
         config.worker_state_dir.clone(),
         "--python-bin".into(),
@@ -335,102 +533,88 @@ fn issue_worker_arguments(
         config.schedule_time.clone(),
         "--schedule-days".into(),
         config.schedule_days.join(","),
-        "--base-branch".into(),
-        config.base_branch.clone(),
-        "--remote-name".into(),
-        config.remote_name.clone(),
-        "--github-repository".into(),
-        config.github_repository.clone(),
-        "--assignee".into(),
-        config.assignee.clone(),
-        "--ready-label".into(),
-        config.ready_label.clone(),
-        "--minimum-remaining-percent".into(),
-        config.minimum_remaining_percent.to_string(),
-        "--preferred-provider".into(),
-        config.preferred_provider.clone(),
-        "--claude-model".into(),
-        config.claude_model.clone(),
-        "--claude-effort".into(),
-        config.claude_effort.clone(),
-        "--codex-model".into(),
-        config.codex_model.clone(),
-        "--codex-effort".into(),
-        config.codex_effort.clone(),
-        "--claude-bin".into(),
-        claude.to_string_lossy().into_owned(),
-        "--codex-bin".into(),
-        codex.to_string_lossy().into_owned(),
+    ];
+    if run_once {
+        arguments.push("--once".into());
+    }
+    arguments
+}
+
+/// `swarm_issue_worker.py` flag list for one repo, embedded in `repos.json`.
+fn repo_worker_args(
+    config: &AppConfig,
+    repo: &RepoConfig,
+    workspace: &Path,
+    git: &Path,
+    gh: &Path,
+) -> Vec<String> {
+    let state_dir = PathBuf::from(&config.worker_state_dir).join(&repo.id);
+    let mut arguments = vec![
+        "--repo-dir".into(),
+        workspace.to_string_lossy().into_owned(),
+        "--state-dir".into(),
+        state_dir.to_string_lossy().into_owned(),
+        "--git-bin".into(),
+        git.to_string_lossy().into_owned(),
         "--gh-bin".into(),
         gh.to_string_lossy().into_owned(),
+        "--base-branch".into(),
+        repo.base_branch.clone(),
+        "--integration-branch".into(),
+        repo.integration_branch.clone(),
+        "--remote-name".into(),
+        repo.remote_name.clone(),
+        "--branch-prefix".into(),
+        repo.branch_prefix.clone(),
+        "--github-repository".into(),
+        repo.github_repository.clone(),
+        "--assignee".into(),
+        repo.assignee.clone(),
+        "--ready-label".into(),
+        repo.ready_label.clone(),
+        "--github-host".into(),
+        repo_host(repo),
         "--github-apps-config".into(),
-        config.github_apps_config.clone(),
-        if config.require_bot_auth {
+        repo.effective_apps_config(),
+        "--preferred-provider".into(),
+        repo.effective_preferred_provider(&config.preferred_provider)
+            .to_string(),
+        if repo.require_bot_auth {
             "--require-bot-auth"
         } else {
             "--no-require-bot-auth"
         }
         .into(),
-        "--delivery-mode".into(),
-        config.delivery_mode.clone(),
-        if config.auto_approve {
+        if repo.auto_approve {
             "--auto-approve"
         } else {
             "--no-auto-approve"
         }
         .into(),
-        if config.auto_merge {
+        if repo.auto_merge {
             "--auto-merge"
         } else {
             "--no-auto-merge"
         }
         .into(),
-        "--branch-prefix".into(),
-        config.branch_prefix.clone(),
-        "--merge-method".into(),
-        config.merge_method.clone(),
-        "--github-host".into(),
-        config.github_host.clone(),
     ];
-    // An empty list here isn't a harmless "no restriction" default — the
-    // worker's env-var fallback for these flags only applies when the var
-    // is truly unset, and the environment this process launches with
-    // always sets both explicitly (see `start_issue_worker`'s
-    // `environment` vec), so an empty config list reaches the worker as a
-    // genuinely empty list, trusting no one's follow-ups and crediting no
-    // one's commits — a silent dead end for a first-run profile that never
-    // touched these optional-looking fields. Falling back to the
-    // configured assignee (which validate() already requires to be
-    // non-empty) keeps that first run actually functional without forcing
-    // every new profile to fill in two more fields before its first use.
-    let trusted_followup_authors = if config.trusted_followup_authors.is_empty() {
-        std::slice::from_ref(&config.assignee)
+    // A blank list is a genuine "trust no one" — fall back to the assignee so
+    // a first run works without filling in two more fields.
+    let trusted = if repo.trusted_followup_authors.is_empty() {
+        std::slice::from_ref(&repo.assignee)
     } else {
-        config.trusted_followup_authors.as_slice()
+        repo.trusted_followup_authors.as_slice()
     };
-    for author in trusted_followup_authors {
+    for author in trusted {
         arguments.extend(["--trusted-followup-author".into(), author.clone()]);
     }
-    let completion_authors = if config.completion_authors.is_empty() {
-        std::slice::from_ref(&config.assignee)
+    let completion = if repo.completion_authors.is_empty() {
+        std::slice::from_ref(&repo.assignee)
     } else {
-        config.completion_authors.as_slice()
+        repo.completion_authors.as_slice()
     };
-    for author in completion_authors {
+    for author in completion {
         arguments.extend(["--completion-author".into(), author.clone()]);
-    }
-    if config.email_enabled {
-        arguments.extend([
-            "--smtp-credentials-file".into(),
-            config.smtp_credentials_file.clone(),
-            "--email-to".into(),
-            config.email_to.clone(),
-        ]);
-    } else {
-        arguments.push("--no-email".into());
-    }
-    if run_once {
-        arguments.push("--once".into());
     }
     arguments
 }
@@ -439,14 +623,17 @@ fn issue_worker_arguments(
 fn start_uat_scheduler(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    repo_id: String,
     run_once: bool,
 ) -> Result<ProcessStatus, String> {
     let config = current_config(&state)?;
     config.validate()?;
-    if !config.uat_enabled {
-        return Err("UAT scheduling is disabled in this profile.".into());
+    let repo = resolve_repo(&config, &repo_id)?;
+    if !repo.uat_enabled {
+        return Err(format!("UAT scheduling is disabled for {}.", repo.label()));
     }
-    let script = Path::new(&config.repo_dir).join("scripts/tests/full_uat_cron.sh");
+    let workspace = prepared_workspace(&app, &config, repo)?;
+    let script = workspace.join("scripts/tests/full_uat_cron.sh");
     if !script.is_file() {
         return Err("This repository does not contain scripts/tests/full_uat_cron.sh.".into());
     }
@@ -454,60 +641,60 @@ fn start_uat_scheduler(
     if run_once {
         arguments.push("--once".into());
     }
-    let environment = uat_environment(&config);
+    let environment = uat_environment(&config, repo, &workspace);
     state.processes.spawn(
         &app,
-        "uat",
-        "UAT scheduler",
+        &format!("uat:{}", repo.id),
+        &format!("UAT scheduler · {}", repo.label()),
         Path::new("/bin/bash"),
         &arguments,
         &environment,
-        Path::new(&config.repo_dir),
+        &workspace,
         automation_log_path(&app)?,
     )
 }
 
-fn uat_environment(config: &AppConfig) -> Vec<(String, String)> {
+fn uat_environment(
+    config: &AppConfig,
+    repo: &RepoConfig,
+    workspace: &Path,
+) -> Vec<(String, String)> {
     let mut environment = vec![
         ("PATH".into(), tools::enhanced_path()),
-        (
-            "SWARM_FULL_UAT_CRON_HOUR".into(),
-            config.uat_hour.to_string(),
-        ),
+        ("SWARM_FULL_UAT_CRON_HOUR".into(), repo.uat_hour.to_string()),
         (
             "SWARM_GITHUB_REPOSITORY".into(),
-            config.github_repository.clone(),
+            repo.github_repository.clone(),
         ),
-        (
-            "SWARM_E2E_ISSUE_LABEL".into(),
-            config.uat_issue_label.clone(),
-        ),
+        ("SWARM_E2E_ISSUE_LABEL".into(), repo.uat_issue_label.clone()),
         (
             "SWARM_RUN_DIR".into(),
-            config.effective_run_dir().to_string_lossy().into_owned(),
+            repo.effective_run_dir(workspace)
+                .to_string_lossy()
+                .into_owned(),
         ),
         (
             "SWARM_UAT_BATOCERA_HOST".into(),
-            config.uat_batocera_host.clone(),
+            repo.uat_batocera_host.clone(),
         ),
         (
             "SWARM_UAT_TRIAGE_ENABLED".into(),
-            if config.uat_triage_enabled { "1" } else { "0" }.into(),
+            if repo.uat_triage_enabled { "1" } else { "0" }.into(),
         ),
         (
             "SWARM_MIN_REMAINING_PERCENT".into(),
             config.minimum_remaining_percent.to_string(),
         ),
-        ("SWARM_CLAUDE_MODEL".into(), config.claude_model.clone()),
-        ("SWARM_CLAUDE_EFFORT".into(), config.claude_effort.clone()),
-        ("SWARM_CODEX_MODEL".into(), config.codex_model.clone()),
-        ("SWARM_CODEX_EFFORT".into(), config.codex_effort.clone()),
     ];
-    if let Some(path) = tools::find_executable("claude", &config.claude_bin) {
-        environment.push(("CLAUDE_BIN".into(), path.to_string_lossy().into_owned()));
-    }
-    if let Some(path) = tools::find_executable("codex", &config.codex_bin) {
-        environment.push(("CODEX_BIN".into(), path.to_string_lossy().into_owned()));
+    // Per-enabled-provider model / effort / executable for the frozen UAT
+    // runner (it reads SWARM_<ID>_MODEL / SWARM_<ID>_EFFORT / <ID>_BIN).
+    for provider in config.enabled_providers() {
+        let upper = provider.id.to_uppercase();
+        environment.push((format!("SWARM_{upper}_MODEL"), provider.model.clone()));
+        environment.push((format!("SWARM_{upper}_EFFORT"), provider.effort.clone()));
+        if let Some(path) = tools::find_executable(&provider.id, &provider.bin) {
+            environment.push((format!("{upper}_BIN"), path.to_string_lossy().into_owned()));
+        }
     }
     environment
 }
@@ -533,8 +720,22 @@ fn install_ai_cli(
     state: State<'_, AppState>,
     provider: String,
 ) -> Result<ProcessStatus, String> {
-    let (program, arguments) = tools::install_spec(&provider)?;
     let config = current_config(&state)?;
+    // Grok Build has no npm package — run its official installer in a visible
+    // Terminal window (same mechanism as provider sign-in) so the user sees
+    // exactly what executes.
+    if provider == "grok" {
+        open_terminal_command("curl -fsSL https://x.ai/cli/install.sh | bash")?;
+        return state
+            .processes
+            .status(&app, "task", "Install grok", &automation_log_path(&app)?);
+    }
+    let (program, arguments) = tools::install_spec(&provider)?;
+    let workspace = config
+        .repositories()
+        .first()
+        .and_then(|repo| resolve_workspace(&app, &config, repo).ok())
+        .unwrap_or_default();
     state.processes.spawn(
         &app,
         "task",
@@ -542,7 +743,7 @@ fn install_ai_cli(
         &program,
         &arguments,
         &[("PATH".into(), tools::enhanced_path())],
-        repo_or_home(&config),
+        repo_or_home(&workspace),
         automation_log_path(&app)?,
     )
 }
@@ -551,27 +752,46 @@ fn install_ai_cli(
 fn launch_bot_setup(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    repo_id: String,
 ) -> Result<ProcessStatus, String> {
     let config = current_config(&state)?;
-    config.validate()?;
-    let script = worker_script_dir(&app, &config)?.join("setup_github_bots.py");
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = resolve_workspace(&app, &config, repo).unwrap_or_default();
+    let script = worker_script_dir(&app)?.join("setup_github_bots.py");
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
-    let arguments = vec![
+    let log_path = automation_log_path(&app)?;
+    let running = state
+        .processes
+        .status(&app, "task", "Setup task", &log_path)?;
+    if running.state != "stopped" {
+        if running.detail.contains("setup_github_bots.py") {
+            // Treat another click as "reopen/restart setup". The old loopback
+            // page becomes invalid, and the newly spawned assistant opens a
+            // fresh page with the configuration already saved so far.
+            state.processes.stop("task")?;
+        } else {
+            return Err("Another setup or installation task is already running.".into());
+        }
+    }
+    let mut arguments = vec![
         script.to_string_lossy().into_owned(),
         "--repository".into(),
-        config.github_repository.clone(),
+        repo.github_repository.clone(),
         "--config".into(),
-        config.github_apps_config.clone(),
+        repo.effective_apps_config(),
     ];
+    for provider in config.enabled_providers() {
+        arguments.extend(["--provider".into(), provider.id.clone()]);
+    }
     state.processes.spawn(
         &app,
         "task",
-        "GitHub bot setup",
+        &format!("GitHub bot setup · {}", repo.label()),
         &python,
         &arguments,
         &[("PATH".into(), tools::enhanced_path())],
-        Path::new(&config.repo_dir),
-        automation_log_path(&app)?,
+        repo_or_home(&workspace),
+        log_path,
     )
 }
 
@@ -579,19 +799,28 @@ fn launch_bot_setup(
 fn verify_github_bots(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    repo_id: String,
 ) -> Result<Vec<BotVerification>, String> {
     let config = current_config(&state)?;
-    let script = worker_script_dir(&app, &config)?.join("github_app_auth.py");
+    let repo = resolve_repo(&config, &repo_id)?;
+    let script = worker_script_dir(&app)?.join("github_app_auth.py");
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
-    Ok(["claude", "codex"]
+    let apps_config = repo.effective_apps_config();
+    let providers: Vec<String> = config
+        .enabled_providers()
+        .map(|provider| provider.id.clone())
+        .collect();
+    Ok(providers
         .into_iter()
         .map(|provider| {
-            if !Path::new(&config.github_apps_config).is_file() {
+            if !Path::new(&apps_config).is_file() {
                 return BotVerification {
-                    provider: provider.into(),
+                    provider: provider.clone(),
                     configured: false,
                     valid: false,
-                    message: "GitHub Apps configuration has not been created.".into(),
+                    message: format!(
+                        "Local bot credentials were not found at {apps_config}. Existing GitHub Apps still need their app ID, installation ID, and private PEM key linked here."
+                    ),
                 };
             }
             let (valid, message) = run_capture_owned(
@@ -599,14 +828,14 @@ fn verify_github_bots(
                 &[
                     script.to_string_lossy().into_owned(),
                     "--config".into(),
-                    config.github_apps_config.clone(),
+                    apps_config.clone(),
                     "check".into(),
                     "--provider".into(),
-                    provider.into(),
+                    provider.clone(),
                 ],
             );
             BotVerification {
-                provider: provider.into(),
+                provider,
                 configured: true,
                 valid,
                 message: message.trim().to_string(),
@@ -615,16 +844,667 @@ fn verify_github_bots(
         .collect())
 }
 
+// ----- Branch tree + manual merge -----------------------------------------
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CommitTip {
+    sha: String,
+    subject: String,
+    author: String,
+    committed_at: String,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BranchAheadBehind {
+    ahead: u32,
+    behind: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueBranchInfo {
+    name: String,
+    ai_tool: String,
+    issue_number: u64,
+    issue_state: String,
+    ahead_of_integration: u32,
+    behind_integration: u32,
+    last_commit: CommitTip,
+    pr_number: Option<u64>,
+    pr_url: String,
+    pr_state: String,
+    mergeable: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoGitOverview {
+    repo_id: String,
+    github_repository: String,
+    base_branch: String,
+    integration_branch: String,
+    workspace_ready: bool,
+    /// `origin/<base>` tip.
+    base_tip: CommitTip,
+    /// Does `origin/<integration>` exist yet?
+    integration_exists: bool,
+    /// `origin/<integration>` relative to `origin/<base>`.
+    integration_vs_base: BranchAheadBehind,
+    integration_tip: CommitTip,
+    /// Open `ai-main -> main` PR, if any.
+    integration_pr_url: String,
+    integration_pr_number: Option<u64>,
+    issue_branches: Vec<IssueBranchInfo>,
+    /// `git log --graph` text for the tree view's raw toggle.
+    graph: String,
+    error: String,
+}
+
+fn git_c(git: &Path, workspace: &str, args: &[&str]) -> (bool, String) {
+    let mut full = vec!["-C", workspace];
+    full.extend_from_slice(args);
+    run_capture(git, &full)
+}
+
+fn commit_tip(git: &Path, workspace: &str, refname: &str) -> CommitTip {
+    let (ok, out) = git_c(
+        git,
+        workspace,
+        &["log", "-1", "--format=%H%x1f%s%x1f%an%x1f%cI", refname],
+    );
+    if !ok {
+        return CommitTip::default();
+    }
+    let mut parts = out.splitn(4, '\u{1f}');
+    CommitTip {
+        sha: parts.next().unwrap_or_default().to_string(),
+        subject: parts.next().unwrap_or_default().to_string(),
+        author: parts.next().unwrap_or_default().to_string(),
+        committed_at: parts.next().unwrap_or_default().to_string(),
+    }
+}
+
+fn ahead_behind(git: &Path, workspace: &str, left: &str, right: &str) -> BranchAheadBehind {
+    // `git rev-list --left-right --count L...R` -> "behind\tahead" for R vs L.
+    let (ok, out) = git_c(
+        git,
+        workspace,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{left}...{right}"),
+        ],
+    );
+    if !ok {
+        return BranchAheadBehind::default();
+    }
+    let mut nums = out.split_whitespace();
+    let behind = nums.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let ahead = nums.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    BranchAheadBehind { ahead, behind }
+}
+
+fn require_closed_issue(
+    issue_number: u64,
+    issue_state: &str,
+    integration_branch: &str,
+) -> Result<(), String> {
+    if issue_state.trim().eq_ignore_ascii_case("closed") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Issue #{issue_number} must be closed before its branch can be merged into {integration_branch}."
+        ))
+    }
+}
+
+#[tauri::command]
+fn git_overview(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<RepoGitOverview, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?.clone();
+    let git = tools::configured_or_detected("", "git")?;
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh").ok();
+    let workspace = resolve_workspace(&app, &config, &repo)?;
+    let ws = workspace.to_string_lossy().into_owned();
+
+    let mut overview = RepoGitOverview {
+        repo_id: repo.id.clone(),
+        github_repository: repo.github_repository.clone(),
+        base_branch: repo.base_branch.clone(),
+        integration_branch: repo.integration_branch.clone(),
+        workspace_ready: workspace.join(".git").is_dir(),
+        base_tip: CommitTip::default(),
+        integration_exists: false,
+        integration_vs_base: BranchAheadBehind::default(),
+        integration_tip: CommitTip::default(),
+        integration_pr_url: String::new(),
+        integration_pr_number: None,
+        issue_branches: Vec::new(),
+        graph: String::new(),
+        error: String::new(),
+    };
+    if !overview.workspace_ready {
+        overview.error = "Not cloned yet — clone the repository in Repository first.".into();
+        return Ok(overview);
+    }
+
+    let (fetch_ok, fetch_message) = git_c(&git, &ws, &["fetch", "--prune", &repo.remote_name]);
+    if !fetch_ok {
+        overview.error = format!(
+            "Could not refresh {}: {}. Showing cached branch data.",
+            repo.remote_name, fetch_message
+        );
+    }
+    let base_ref = format!("{}/{}", repo.remote_name, repo.base_branch);
+    let integ_ref = format!("{}/{}", repo.remote_name, repo.integration_branch);
+    overview.base_tip = commit_tip(&git, &ws, &base_ref);
+    overview.integration_exists =
+        git_c(&git, &ws, &["rev-parse", "--verify", "--quiet", &integ_ref]).0;
+    if overview.integration_exists {
+        overview.integration_tip = commit_tip(&git, &ws, &integ_ref);
+        overview.integration_vs_base = ahead_behind(&git, &ws, &base_ref, &integ_ref);
+    }
+
+    // Issue branches: refs/remotes/<remote>/<prefix>/<ai>/issue-<n>
+    let prefix = format!("{}/{}/", repo.remote_name, repo.branch_prefix);
+    let (_, refs) = git_c(
+        &git,
+        &ws,
+        &["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
+    );
+    let mut branches: Vec<(String, String, u64)> = Vec::new();
+    for line in refs.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((ai, tail)) = rest.split_once('/') else {
+            continue;
+        };
+        let Some(num) = tail.strip_prefix("issue-") else {
+            continue;
+        };
+        if let Ok(number) = num.parse::<u64>() {
+            branches.push((line.to_string(), ai.to_string(), number));
+        }
+    }
+    branches.sort_by_key(|(_, _, n)| *n);
+
+    // One `gh pr list` call, joined by head ref.
+    let mut pr_by_head: std::collections::HashMap<String, (u64, String, String, String)> =
+        std::collections::HashMap::new();
+    let mut issue_states: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+    if let Some(gh) = &gh {
+        let (ok, out) = run_capture_owned(
+            gh,
+            &[
+                "pr".into(),
+                "list".into(),
+                "--repo".into(),
+                repo.github_repository.clone(),
+                "--state".into(),
+                "open".into(),
+                "--limit".into(),
+                "100".into(),
+                "--json".into(),
+                "number,url,headRefName,state,mergeable,baseRefName".into(),
+            ],
+        );
+        if ok {
+            if let Ok(list) = serde_json::from_str::<serde_json::Value>(&out) {
+                for pr in list.as_array().cloned().unwrap_or_default() {
+                    let head = pr["headRefName"].as_str().unwrap_or_default().to_string();
+                    let base = pr["baseRefName"].as_str().unwrap_or_default();
+                    let entry = (
+                        pr["number"].as_u64().unwrap_or(0),
+                        pr["url"].as_str().unwrap_or_default().to_string(),
+                        pr["state"].as_str().unwrap_or_default().to_string(),
+                        pr["mergeable"].as_str().unwrap_or_default().to_string(),
+                    );
+                    if head == repo.integration_branch && base == repo.base_branch {
+                        overview.integration_pr_url = entry.1.clone();
+                        overview.integration_pr_number = Some(entry.0);
+                    }
+                    pr_by_head.insert(head, entry);
+                }
+            }
+        }
+        let (ok, out) = run_capture_owned(
+            gh,
+            &[
+                "issue".into(),
+                "list".into(),
+                "--repo".into(),
+                repo.github_repository.clone(),
+                "--state".into(),
+                "all".into(),
+                "--limit".into(),
+                "1000".into(),
+                "--json".into(),
+                "number,state".into(),
+            ],
+        );
+        if ok {
+            if let Ok(list) = serde_json::from_str::<serde_json::Value>(&out) {
+                for issue in list.as_array().cloned().unwrap_or_default() {
+                    if let Some(number) = issue["number"].as_u64() {
+                        issue_states.insert(
+                            number,
+                            issue["state"].as_str().unwrap_or_default().to_string(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    for (name, ai, number) in &branches {
+        let ab = if overview.integration_exists {
+            ahead_behind(&git, &ws, &integ_ref, name)
+        } else {
+            BranchAheadBehind::default()
+        };
+        let head_ref = name
+            .strip_prefix(&format!("{}/", repo.remote_name))
+            .unwrap_or(name)
+            .to_string();
+        let pr = pr_by_head.get(&head_ref);
+        overview.issue_branches.push(IssueBranchInfo {
+            name: head_ref,
+            ai_tool: ai.clone(),
+            issue_number: *number,
+            issue_state: issue_states.get(number).cloned().unwrap_or_default(),
+            ahead_of_integration: ab.ahead,
+            behind_integration: ab.behind,
+            last_commit: commit_tip(&git, &ws, name),
+            pr_number: pr.map(|p| p.0),
+            pr_url: pr.map(|p| p.1.clone()).unwrap_or_default(),
+            pr_state: pr.map(|p| p.2.clone()).unwrap_or_default(),
+            mergeable: pr.map(|p| p.3.clone()).unwrap_or_default(),
+        });
+    }
+
+    // Raw graph for the toggle.
+    let mut graph_args = vec![
+        "log".to_string(),
+        "--graph".into(),
+        "--oneline".into(),
+        "--decorate".into(),
+        "--color=never".into(),
+        "-40".into(),
+    ];
+    if overview.integration_exists {
+        graph_args.push(integ_ref.clone());
+    } else {
+        graph_args.push(base_ref.clone());
+    }
+    graph_args.extend(branches.iter().map(|(name, _, _)| name.clone()));
+    let (_, graph) = run_capture_owned(
+        &git,
+        &std::iter::once("-C".to_string())
+            .chain(std::iter::once(ws.clone()))
+            .chain(graph_args)
+            .collect::<Vec<_>>(),
+    );
+    overview.graph = graph;
+    Ok(overview)
+}
+
+#[tauri::command]
+async fn git_overview_background(
+    app: tauri::AppHandle,
+    repo_id: String,
+) -> Result<RepoGitOverview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        git_overview(app.clone(), state, repo_id)
+    })
+    .await
+    .map_err(|error| format!("Repository refresh background task failed: {error}"))?
+}
+
+#[tauri::command]
+fn refresh_repo(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<RepoGitOverview, String> {
+    git_overview(app, state, repo_id)
+}
+
+#[tauri::command]
+fn merge_issue_branch(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_id: String,
+    pr_number: u64,
+    issue_number: u64,
+) -> Result<RepoGitOverview, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?.clone();
+    let worker = state.processes.status(
+        &app,
+        "issue",
+        "Issue worker scheduler",
+        &automation_log_path(&app)?,
+    )?;
+    if worker.state != "stopped" {
+        return Err("Stop the issue worker before merging an issue branch.".into());
+    }
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    let git = tools::configured_or_detected("", "git")?;
+
+    let (issue_ok, issue_state) = run_capture_owned(
+        &gh,
+        &[
+            "issue".into(),
+            "view".into(),
+            issue_number.to_string(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--json".into(),
+            "state".into(),
+            "--jq".into(),
+            ".state".into(),
+        ],
+    );
+    if !issue_ok {
+        return Err(format!(
+            "Could not inspect issue #{issue_number}: {issue_state}"
+        ));
+    }
+    require_closed_issue(issue_number, &issue_state, &repo.integration_branch)?;
+
+    let (view_ok, view_out) = run_capture_owned(
+        &gh,
+        &[
+            "pr".into(),
+            "view".into(),
+            pr_number.to_string(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--json".into(),
+            "state,headRefName,baseRefName,headRefOid".into(),
+        ],
+    );
+    if !view_ok {
+        return Err(format!("Could not inspect PR #{pr_number}: {view_out}"));
+    }
+    let pr: serde_json::Value = serde_json::from_str(&view_out)
+        .map_err(|error| format!("GitHub returned invalid PR details: {error}"))?;
+    let head = pr["headRefName"].as_str().unwrap_or_default();
+    let base = pr["baseRefName"].as_str().unwrap_or_default();
+    let state_name = pr["state"].as_str().unwrap_or_default();
+    let parts: Vec<_> = head.split('/').collect();
+    let valid_tool = parts.get(1).is_some_and(|tool| {
+        config::KNOWN_PROVIDERS.contains(tool) || matches!(*tool, "xai" | "grok")
+    });
+    if state_name != "OPEN"
+        || base != repo.integration_branch
+        || parts.len() != 3
+        || parts[0] != repo.branch_prefix
+        || !valid_tool
+        || parts[2] != format!("issue-{issue_number}")
+    {
+        return Err(format!(
+            "PR #{pr_number} is not the open issue #{issue_number} branch targeting {}.",
+            repo.integration_branch
+        ));
+    }
+    let head_sha = pr["headRefOid"].as_str().unwrap_or_default();
+
+    let (ok, message) = run_capture_owned(
+        &gh,
+        &[
+            "pr".into(),
+            "merge".into(),
+            pr_number.to_string(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--squash".into(),
+            "--delete-branch".into(),
+            "--match-head-commit".into(),
+            head_sha.into(),
+        ],
+    );
+    if !ok {
+        return Err(format!("Could not merge PR #{pr_number}: {message}"));
+    }
+
+    // The issue is already closed; record where its branch landed.
+    let (merge_ok, merge_sha) = run_capture_owned(
+        &gh,
+        &[
+            "pr".into(),
+            "view".into(),
+            pr_number.to_string(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--json".into(),
+            "mergeCommit".into(),
+            "--jq".into(),
+            ".mergeCommit.oid".into(),
+        ],
+    );
+    let merge_sha = if merge_ok { merge_sha } else { String::new() };
+    let comment = format!(
+        "Squash-merged into `{}` via PR #{}{} after this issue was closed.",
+        repo.integration_branch,
+        pr_number,
+        if merge_sha.is_empty() {
+            String::new()
+        } else {
+            format!(" (commit `{merge_sha}`)")
+        }
+    );
+    let (comment_ok, comment_message) = run_capture_owned(
+        &gh,
+        &[
+            "issue".into(),
+            "comment".into(),
+            issue_number.to_string(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--body".into(),
+            comment,
+        ],
+    );
+    if !comment_ok {
+        return Err(format!(
+            "PR #{pr_number} was merged, but issue #{issue_number} could not be updated: {comment_message}"
+        ));
+    }
+
+    if let Ok(workspace) = resolve_workspace(&app, &config, &repo) {
+        let ws = workspace.to_string_lossy().into_owned();
+        let _ = git_c(&git, &ws, &["fetch", "--prune", &repo.remote_name]);
+        let current = git_c(&git, &ws, &["branch", "--show-current"]).1;
+        let clean = git_c(&git, &ws, &["status", "--porcelain"]).1.is_empty();
+        if current == head && clean {
+            let remote_integration = format!("{}/{}", repo.remote_name, repo.integration_branch);
+            if !git_c(&git, &ws, &["switch", &repo.integration_branch]).0 {
+                let _ = git_c(
+                    &git,
+                    &ws,
+                    &[
+                        "switch",
+                        "-c",
+                        &repo.integration_branch,
+                        &remote_integration,
+                    ],
+                );
+            }
+            let _ = git_c(&git, &ws, &["merge", "--ff-only", &remote_integration]);
+            let _ = git_c(&git, &ws, &["branch", "-D", head]);
+        } else if current != head {
+            let _ = git_c(&git, &ws, &["branch", "-D", head]);
+        }
+    }
+
+    git_overview(app, state, repo_id)
+}
+
+#[tauri::command]
+fn merge_integration_branch(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_id: String,
+    pr_number: u64,
+) -> Result<RepoGitOverview, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?.clone();
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    let git = tools::configured_or_detected("", "git")?;
+    let (view_ok, view_out) = run_capture_owned(
+        &gh,
+        &[
+            "pr".into(),
+            "view".into(),
+            pr_number.to_string(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--json".into(),
+            "state,headRefName,baseRefName,headRefOid".into(),
+        ],
+    );
+    if !view_ok {
+        return Err(format!("Could not inspect PR #{pr_number}: {view_out}"));
+    }
+    let pr: serde_json::Value = serde_json::from_str(&view_out)
+        .map_err(|error| format!("GitHub returned invalid PR details: {error}"))?;
+    if pr["state"].as_str() != Some("OPEN")
+        || pr["headRefName"].as_str() != Some(repo.integration_branch.as_str())
+        || pr["baseRefName"].as_str() != Some(repo.base_branch.as_str())
+    {
+        return Err(format!(
+            "PR #{pr_number} is not the open {} -> {} promotion pull request.",
+            repo.integration_branch, repo.base_branch
+        ));
+    }
+    let head_sha = pr["headRefOid"].as_str().unwrap_or_default();
+    let (ok, message) = run_capture_owned(
+        &gh,
+        &[
+            "pr".into(),
+            "merge".into(),
+            pr_number.to_string(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--merge".into(),
+            "--match-head-commit".into(),
+            head_sha.into(),
+        ],
+    );
+    if !ok {
+        return Err(format!(
+            "Could not merge the promotion PR #{pr_number}: {message}"
+        ));
+    }
+    if let Ok(workspace) = resolve_workspace(&app, &config, &repo) {
+        let ws = workspace.to_string_lossy().into_owned();
+        let _ = git_c(&git, &ws, &["fetch", "--prune", &repo.remote_name]);
+    }
+    git_overview(app, state, repo_id)
+}
+
+#[tauri::command]
+fn open_integration_pr(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<String, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?.clone();
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+
+    // Reuse an open PR if there is one.
+    let (list_ok, list_out) = run_capture_owned(
+        &gh,
+        &[
+            "pr".into(),
+            "list".into(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--base".into(),
+            repo.base_branch.clone(),
+            "--head".into(),
+            repo.integration_branch.clone(),
+            "--state".into(),
+            "open".into(),
+            "--json".into(),
+            "url".into(),
+            "--jq".into(),
+            ".[0].url // \"\"".into(),
+        ],
+    );
+    let url = if list_ok && list_out.starts_with("https://") {
+        list_out
+    } else {
+        let (create_ok, create_out) = run_capture_owned(
+            &gh,
+            &[
+                "pr".into(),
+                "create".into(),
+                "--repo".into(),
+                repo.github_repository.clone(),
+                "--base".into(),
+                repo.base_branch.clone(),
+                "--head".into(),
+                repo.integration_branch.clone(),
+                "--title".into(),
+                format!(
+                    "Merge {} into {}",
+                    repo.integration_branch, repo.base_branch
+                ),
+                "--body".into(),
+                format!(
+                    "Human review gate: promote AI-integration work from `{}` to `{}`. \
+                     Review the checks and merge on GitHub.",
+                    repo.integration_branch, repo.base_branch
+                ),
+            ],
+        );
+        if !create_ok {
+            return Err(format!("Could not open the integration PR: {create_out}"));
+        }
+        create_out
+            .lines()
+            .rev()
+            .find(|line| line.starts_with("https://"))
+            .unwrap_or(&create_out)
+            .to_string()
+    };
+    let _ = app.opener().open_url(url.clone(), None::<&str>);
+    Ok(url)
+}
+
 #[tauri::command]
 fn open_provider_login(state: State<'_, AppState>, provider: String) -> Result<(), String> {
     let config = current_config(&state)?;
+    let provider_bin = |id: &str| {
+        config
+            .provider(id)
+            .map(|provider| provider.bin.clone())
+            .unwrap_or_default()
+    };
     let (binary, arguments) = match provider.as_str() {
         "claude" => (
-            tools::configured_or_detected(&config.claude_bin, "claude")?,
+            tools::configured_or_detected(&provider_bin("claude"), "claude")?,
             Vec::<&str>::new(),
         ),
         "codex" => (
-            tools::configured_or_detected(&config.codex_bin, "codex")?,
+            tools::configured_or_detected(&provider_bin("codex"), "codex")?,
+            vec!["login"],
+        ),
+        "grok" => (
+            tools::configured_or_detected(&provider_bin("grok"), "grok")?,
             vec!["login"],
         ),
         "gh" => (
@@ -694,27 +1574,196 @@ fn get_recent_logs(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     Ok(lines.into_iter().map(str::to_string).collect())
 }
 
-fn worker_script_dir(app: &tauri::AppHandle, config: &AppConfig) -> Result<PathBuf, String> {
-    let checkout = Path::new(&config.repo_dir).join("scripts/issue_worker");
-    if checkout.join("install_swarm_issue_cron.py").is_file() {
-        return Ok(checkout);
+fn resolve_repo<'a>(config: &'a AppConfig, id: &str) -> Result<&'a RepoConfig, String> {
+    config
+        .repo(id)
+        .ok_or_else(|| format!("No configured repository with id '{id}'."))
+}
+
+fn repo_host(repo: &RepoConfig) -> String {
+    let _ = repo;
+    "github.com".to_string()
+}
+
+/// Parent directory for managed clones — `workspace_root` when set, else
+/// `<app-data-dir>/checkouts` (or the test data dir).
+fn workspace_root<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+) -> Result<PathBuf, String> {
+    let configured = config.workspace_root.trim();
+    if !configured.is_empty() {
+        return Ok(PathBuf::from(configured));
     }
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Some(dir) = &state.test_data_dir {
+            return Ok(dir.join("checkouts"));
+        }
+    }
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("checkouts"))
+        .map_err(|error| error.to_string())
+}
+
+/// The working copy for `repo`: the advanced `repo_dir` override when set,
+/// otherwise `<workspace root>/<repo id>`.
+fn resolve_workspace<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    repo: &RepoConfig,
+) -> Result<PathBuf, String> {
+    let override_path = repo.repo_dir.trim();
+    if !override_path.is_empty() {
+        return Ok(PathBuf::from(override_path));
+    }
+    if !repo.github_repository.trim().contains('/') {
+        return Err(format!(
+            "Repository {}: set the GitHub repository (owner/name) first.",
+            repo.label()
+        ));
+    }
+    Ok(workspace_root(app, config)?.join(&repo.id))
+}
+
+/// Clone `repo`'s GitHub repository into `target` if it is not already a
+/// checkout; otherwise fetch. Only for the managed-clone case.
+fn ensure_workspace(config: &AppConfig, repo: &RepoConfig, target: &Path) -> Result<(), String> {
+    let git = tools::configured_or_detected("", "git")?;
+    if target.join(".git").is_dir() {
+        let (ok, message) = run_capture(
+            &git,
+            &[
+                "-C",
+                &target.to_string_lossy(),
+                "fetch",
+                "--prune",
+                &repo.remote_name,
+            ],
+        );
+        if !ok {
+            return Err(format!(
+                "Could not fetch updates for the workspace: {message}"
+            ));
+        }
+        return Ok(());
+    }
+    if target.exists() {
+        return Err(format!(
+            "{} already exists but is not a Git checkout — move or remove it, or set a different workspace folder.",
+            target.display()
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let repository = repo.github_repository.trim();
+    let target_string = target.to_string_lossy().into_owned();
+    let host = repo_host(repo);
+    // Prefer `gh repo clone` (existing gh auth, right protocol), fall back to
+    // an HTTPS `git clone`.
+    if let Some(gh) = tools::find_executable("gh", &config.gh_bin) {
+        let (ok, message) = run_capture(&gh, &["repo", "clone", repository, &target_string]);
+        if ok {
+            return Ok(());
+        }
+        let url = format!("https://{host}/{repository}.git");
+        let (git_ok, git_message) = run_capture(&git, &["clone", "--", &url, &target_string]);
+        return if git_ok {
+            Ok(())
+        } else {
+            Err(format!("Clone failed. gh: {message}. git: {git_message}"))
+        };
+    }
+    let url = format!("https://{host}/{repository}.git");
+    let (ok, message) = run_capture(&git, &["clone", "--", &url, &target_string]);
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("Clone failed: {message}"))
+    }
+}
+
+/// Resolve `repo`'s workspace and, when the app manages the clone, make sure
+/// it exists on disk.
+fn prepared_workspace<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    repo: &RepoConfig,
+) -> Result<PathBuf, String> {
+    let workspace = resolve_workspace(app, config, repo)?;
+    if repo.repo_dir.trim().is_empty() {
+        ensure_workspace(config, repo, &workspace)?;
+    }
+    Ok(workspace)
+}
+
+#[tauri::command]
+fn prepare_workspace(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<RepositoryInspection, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = prepared_workspace(&app, &config, repo)?;
+    Ok(inspect_repository_path(&workspace))
+}
+
+#[tauri::command]
+fn open_workspace_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<(), String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = resolve_workspace(&app, &config, repo)?;
+    let target = if workspace.is_dir() {
+        workspace
+    } else {
+        workspace
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(workspace)
+    };
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::create_dir_all(&target);
+    app.opener()
+        .open_path(target.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+fn validate_worker_script_dir(bundled: &Path) -> Result<PathBuf, String> {
+    let missing: Vec<&str> = REQUIRED_WORKER_RESOURCES
+        .iter()
+        .copied()
+        .filter(|name| !bundled.join(name).is_file())
+        .collect();
+    if missing.is_empty() {
+        Ok(bundled.to_path_buf())
+    } else {
+        Err(format!(
+            "The bundled issue-worker resources are incomplete (missing {}). Reinstall or rebuild SWARM Automation.",
+            missing.join(", ")
+        ))
+    }
+}
+
+fn worker_script_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
     let bundled = app
         .path()
         .resource_dir()
         .map_err(|error| error.to_string())?
         .join("issue_worker");
-    if bundled.join("install_swarm_issue_cron.py").is_file() {
-        Ok(bundled)
-    } else {
-        Err("The bundled issue-worker resources could not be found.".into())
-    }
+    validate_worker_script_dir(&bundled)
 }
 
-fn repo_or_home(config: &AppConfig) -> &Path {
-    let repo = Path::new(&config.repo_dir);
-    if repo.is_dir() {
-        repo
+fn repo_or_home(workspace: &Path) -> &Path {
+    if workspace.is_dir() {
+        workspace
     } else {
         Path::new("/")
     }
@@ -860,8 +1909,12 @@ fn main() {
             save_config,
             choose_repository,
             inspect_repository,
+            prepare_workspace,
+            open_workspace_folder,
             detect_tools,
+            detect_tools_background,
             get_automation_status,
+            get_automation_status_background,
             start_issue_worker,
             start_uat_scheduler,
             pause_process,
@@ -870,6 +1923,12 @@ fn main() {
             install_ai_cli,
             launch_bot_setup,
             verify_github_bots,
+            git_overview,
+            git_overview_background,
+            refresh_repo,
+            merge_issue_branch,
+            merge_integration_branch,
+            open_integration_pr,
             open_provider_login,
             set_smtp_password,
             open_external_url,

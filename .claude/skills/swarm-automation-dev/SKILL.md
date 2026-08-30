@@ -25,7 +25,23 @@ since there's no `[workspace]` root above this directory to inherit from.
 
 `issue_worker/*.py` is a hand-copied snapshot of SWARM's
 `scripts/issue_worker/` at the time this repo was created. It is **not** a
-git submodule, symlink, or otherwise live-linked to the SWARM repo:
+git submodule, symlink, or otherwise live-linked to the SWARM repo.
+
+**This copy has intentionally diverged from upstream.** The vendored worker
+is now **N-provider** (Claude / Codex / Grok — an open set defined by
+`KNOWN_PROVIDERS` and `ProviderSpec` in `swarm_issue_worker.py`), while
+upstream `scripts/issue_worker/` is still a two-provider Claude↔Codex
+rotation. Re-syncing is no longer a straight copy — port changes field by
+field and keep the provider registry intact: `ProviderSpec`, the
+`--enabled-provider` / `--<key>-model|effort|bin` flags, `choose_provider`'s
+rotation, `review_provider`, `grok_capacity` / `_run_grok`, and the dynamic
+`PREVIOUS_AI_RE` + branch-prune regex. Adding a fourth provider = one entry
+in `KNOWN_PROVIDERS`, a `<key>_capacity` method, a `_run_<key>` branch in
+`run_ai`, an entry in `PROVIDERS` (`setup_github_bots.py`) and the loader
+tuple (`github_app_auth.py`), plus `config.rs::KNOWN_PROVIDERS` and
+`PROVIDER_META` / `HELP_TOPICS` in `ui/app.js` on the app side.
+
+Other ways the two copies relate:
 
 - Editing a file under `issue_worker/` here only affects this app's bundled
   copy. It does not change SWARM's own live issue-worker automation, which

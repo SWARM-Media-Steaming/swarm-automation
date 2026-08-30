@@ -2,32 +2,66 @@
 
 SWARM Automation is a macOS-first native desktop control center for running
 an AI issue worker and (when the target repository has one) a closed-loop
-UAT scheduler against **any local Git checkout on GitHub** — not just
-SWARM's own repositories. It bundles its own Python issue-worker
-implementation, so the repository you point it at doesn't need to carry any
-automation scripts of its own.
+UAT scheduler against **any GitHub repository** — not just SWARM's own. You
+give it `owner/name` and it clones the repo into a workspace it manages
+itself (never a checkout you work in); a power-user override can point it at
+an existing checkout instead. It bundles its own Python issue-worker
+implementation, so the repository doesn't need to carry any automation
+scripts of its own.
 
 The application can:
 
 - start, pause, resume, and stop the issue worker and its entire process tree;
 - run issue pickup continuously, daily, on weekdays, on selected days, or only
   when **Run now** is clicked;
-- point the bundled issue worker at any local GitHub checkout and configure its
-  assignee, provider, model, delivery, bot, quota, and notification settings;
-- detect Git, GitHub CLI, Python, Node/npm, Claude Code, and Codex using the
-  macOS login-shell path;
-- install Claude Code or Codex with the vendor's npm package, and open Terminal
-  for interactive provider sign-in;
-- launch and verify a Claude Bot/Codex Bot GitHub App setup for the configured
-  repository;
+- drive up to three AI coding agents — **Claude Code**, **Codex CLI**, and
+  **Grok Build** — rotating over whichever ones you include in the flow;
+  include/exclude each provider with a switch on its card, and pick which one
+  is tried first;
+- monitor multiple GitHub repositories in one scheduler, with an independent
+  managed clone, assignee, branch policy, bot identities, and UAT process for
+  each repository;
+- detect Git, GitHub CLI, Python, Node/npm, Claude Code, Codex, and Grok Build
+  using the macOS login-shell path;
+- install Claude Code or Codex with the vendor's npm package, run xAI's official
+  installer for Grok Build in a Terminal window, and open Terminal for
+  interactive provider sign-in;
+- launch and verify a Claude Bot / Codex Bot / Grok Bot GitHub App setup for the
+  configured repository;
+- show the base, AI-integration, and active issue branches as a Git tree; after
+  an issue is closed, squash its pull request into the AI-integration branch,
+  delete its branch, and expose the explicit human promotion gate;
 - supervise a target repository's own `scripts/tests/full_uat_cron.sh` when
-  that frozen runner exists in the selected checkout; and
+  that frozen runner exists in the selected checkout;
+- explain any control in place through a click-to-open help modal, and carry a
+  **Help** tab with a "how to get started" walkthrough; and
 - stream child output to the UI and a local log.
 
 Configuration is stored as mode `0600` JSON in the application's macOS config
-directory. The optional SMTP password is stored separately in macOS Keychain.
+directory; managed clones live under
+`~/Library/Application Support/app.swarm.automation/checkouts/` unless a
+workspace folder is set. The optional SMTP password is stored separately in
+macOS Keychain.
 Provider and GitHub credentials remain owned by their CLIs and are never copied
 into the app configuration or automation log.
+
+## Branch safety model
+
+The default AI integration branch is `ai-main` (the recommended name). Before
+starting a fresh issue, the worker fetches `main`, merges it into `ai-main`, and
+then creates exactly one issue branch named
+`ai/<claude|codex|xai>/issue-<number>`. If a different provider continues the
+issue later, it reuses that same branch. AI commit subjects start with the tool
+identifier, such as `[codex]`, and the worker refuses to push an untagged commit.
+
+Issue pull requests target `ai-main`; automatic approval and merging are both
+off by default. An issue
+branch cannot merge while its linked GitHub issue is open. After a person closes
+the issue, the Repository view can squash-merge its PR and delete the branch; an
+auto-merge profile performs the same reconciliation on a later cycle. Nothing
+in the worker commits or pushes to `main`. A person can create, review, and
+explicitly merge the `ai-main` → `main` promotion pull request from the Repository
+view.
 
 ## Repository layout
 
@@ -43,18 +77,23 @@ capabilities/   Tauri v2 permission manifest
 [SWARM](https://github.com/DotNetRockStar/swarm) repository's
 `scripts/issue_worker/` — SWARM's own automation still runs its own copy
 independently; this is a vendored snapshot for this app to bundle, not a
-shared/linked dependency.
+shared/linked dependency. The desktop app always launches this bundled copy;
+monitored repositories cannot override it with their own worker scripts.
 
 ## Run from source
 
 Prerequisites are Rust, Node.js/npm, Xcode command-line tools, Git, GitHub CLI,
-and Python 3. At least one of Claude Code or Codex CLI must be installed for the
-issue worker.
+and Python 3. At least one of Claude Code, Codex CLI, or Grok Build must be
+installed and signed in for the issue worker.
 
 ```bash
 npm install
 npm run dev
 ```
+
+Or run `./scripts/run_now.sh`, which installs npm dependencies on a fresh
+checkout if needed, starts the same `tauri dev` session, and on Ctrl+C also
+kills the app binary that `tauri dev` otherwise leaves hidden in the menu bar.
 
 Closing the window hides it to the menu bar and leaves active workers running.
 Use **Quit and stop workers** in the menu-bar menu to terminate every supervised

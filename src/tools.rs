@@ -140,23 +140,36 @@ fn basic_tool(id: &str, label: &str, name: &str, required: bool, configured: &st
     }
 }
 
-pub fn detect(config: &AppConfig) -> Vec<ToolInfo> {
+pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
+    let provider_bin = |id: &str| {
+        config
+            .provider(id)
+            .map(|p| p.bin.clone())
+            .unwrap_or_default()
+    };
     let mut tools = vec![
         basic_tool("git", "Git", "git", true, ""),
         basic_tool("gh", "GitHub CLI", "gh", true, &config.gh_bin),
         basic_tool("python", "Python 3", "python3", true, &config.python_bin),
         basic_tool("node", "Node.js", "node", false, ""),
         basic_tool("npm", "npm", "npm", false, ""),
-        basic_tool("claude", "Claude Code", "claude", true, &config.claude_bin),
-        basic_tool("codex", "Codex CLI", "codex", true, &config.codex_bin),
     ];
+    for id in crate::config::KNOWN_PROVIDERS {
+        let (label, name) = match id {
+            "claude" => ("Claude Code", "claude"),
+            "codex" => ("Codex CLI", "codex"),
+            "grok" => ("Grok Build", "grok"),
+            _ => continue,
+        };
+        tools.push(basic_tool(id, label, name, true, &provider_bin(id)));
+    }
     let npm_available = tools.iter().any(|tool| tool.id == "npm" && tool.installed);
     for tool in &mut tools {
         match tool.id.as_str() {
             "gh" if tool.installed => {
                 let (ready, _) = command_output(
                     Path::new(&tool.path),
-                    &["auth", "status", "--hostname", &config.github_host],
+                    &["auth", "status", "--hostname", github_host],
                 );
                 tool.authenticated = Some(ready);
                 tool.status = if ready {
@@ -195,6 +208,20 @@ pub fn detect(config: &AppConfig) -> Vec<ToolInfo> {
                 .into();
                 tool.installable = npm_available;
             }
+            "grok" if tool.installed => {
+                let auth_file = std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".grok/auth.json").is_file())
+                    .unwrap_or(false);
+                let logged_in = auth_file || std::env::var_os("XAI_API_KEY").is_some();
+                tool.authenticated = Some(logged_in);
+                tool.status = if logged_in {
+                    "Signed in"
+                } else {
+                    "Sign-in required"
+                }
+                .into();
+            }
             "claude" | "codex" => {
                 tool.installable = npm_available;
                 tool.status = if npm_available {
@@ -203,6 +230,12 @@ pub fn detect(config: &AppConfig) -> Vec<ToolInfo> {
                     "Install Node.js/npm first"
                 }
                 .into();
+            }
+            "grok" => {
+                // Grok Build installs via the official x.ai script in a
+                // Terminal window, not npm — always offerable.
+                tool.installable = true;
+                tool.status = "Ready to install".into();
             }
             _ => {}
         }
@@ -221,9 +254,9 @@ pub fn install_spec(provider: &str) -> Result<(PathBuf, Vec<String>), String> {
     let package = match provider {
         "claude" => "@anthropic-ai/claude-code",
         "codex" => "@openai/codex",
-        _ => {
-            return Err("Only Claude Code and Codex CLI can be installed from this screen.".into())
-        }
+        // Grok Build is installed via its own Terminal installer, handled
+        // before this function is reached.
+        _ => return Err("Only Claude Code and Codex CLI install via npm.".into()),
     };
     Ok((npm, vec!["install".into(), "-g".into(), package.into()]))
 }

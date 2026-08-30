@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
-"""Process at most one assigned GitHub issue with Claude or Codex.
+"""Process at most one assigned GitHub issue with Claude, Codex, or Grok.
 
 This is the Python implementation of the SWARM unattended issue worker. The
 state files and exit codes intentionally remain compatible with the former
 shell worker so an upgrade can resume existing active and quota-paused runs.
+
+Providers are an open set (see ``KNOWN_PROVIDERS`` / ``ProviderSpec``): the
+worker rotates over whichever providers are enabled for the flow, preferring a
+*different* provider for a follow-up review pass while still falling back to the
+same one when it is the only one with capacity.
+
+All AI work happens on an integration branch (``--integration-branch``, default
+``ai-main``) that is kept in parity with ``--base-branch`` but is never merged
+into it automatically — that final promotion is a human action (a PR opened
+from the desktop app's Branches view). Each issue gets one branch,
+``<prefix>/<first-ai>/issue-<n>``, reused by every later pass regardless of
+which provider runs it. Commit subjects are prefixed ``[<provider>]``.
 """
 
 from __future__ import annotations
@@ -19,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -32,6 +45,7 @@ from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
 
 ISSUE_COMPLETED_EXIT_CODE = 10
 QUOTA_PAUSED_EXIT_CODE = 11
+PROVIDER_UNAVAILABLE_EXIT_CODE = 12
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 QUOTA_RE = re.compile(
     r"usage limit|rate[ _-]?limit|quota|credits? (?:are )?(?:exhausted|unavailable)|"
@@ -40,7 +54,34 @@ QUOTA_RE = re.compile(
 )
 COMMIT_MARKER_RE = re.compile(r"swarm-issue-worker:commit:([0-9a-f]{40})")
 THROUGH_COMMENT_RE = re.compile(r"through-comment:([0-9]+)")
-PREVIOUS_AI_RE = re.compile(r"(?:Completed|Reworked) by \*\*(Claude|Codex)\*\*")
+
+# The full set of providers this worker knows how to drive, in default
+# rotation order. `key` is the lowercase id used for GitHub App lookups and CLI
+# flags; branch/commit attribution maps Grok's provider id to the vendor name
+# `xai`. `name` is the display form persisted as `ai_tool` in saved state and
+# embedded in completion comments.
+KNOWN_PROVIDERS: tuple[tuple[str, str], ...] = (
+    ("claude", "Claude"),
+    ("codex", "Codex"),
+    ("grok", "Grok"),
+)
+KNOWN_PROVIDER_KEYS: tuple[str, ...] = tuple(key for key, _ in KNOWN_PROVIDERS)
+KNOWN_PROVIDER_NAMES: tuple[str, ...] = tuple(name for _, name in KNOWN_PROVIDERS)
+BRANCH_PROVIDER_KEYS: tuple[str, ...] = tuple(
+    "xai" if key == "grok" else key for key in KNOWN_PROVIDER_KEYS
+)
+
+
+def ai_tool_key(provider_key: str) -> str:
+    """Stable identifier used in Git branch names and commit subjects."""
+    return "xai" if provider_key == "grok" else provider_key
+
+# Parses "Completed by **Claude**." / "Reworked by **Grok**." back out of a
+# completion comment. Built from the full known set so an old comment still
+# resolves even if that provider is currently excluded from the flow.
+PREVIOUS_AI_RE = re.compile(
+    r"(?:Completed|Reworked) by \*\*(" + "|".join(re.escape(n) for n in KNOWN_PROVIDER_NAMES) + r")\*\*"
+)
 AUTOPILOT_INSTRUCTION = (
     "This is an unattended autopilot run. Do not ask the user questions, request confirmation, "
     "or pause for interactive input. Resolve ambiguity from the issue and repository, make "
@@ -149,6 +190,33 @@ def flatten_pages(value: Any) -> list[dict[str, Any]]:
 
 
 @dataclasses.dataclass(frozen=True)
+class ProviderSpec:
+    """Everything the worker needs to run and account for one AI provider."""
+
+    key: str            # "claude" | "codex" | "grok"
+    name: str           # "Claude" | "Codex" | "Grok"
+    model: str
+    effort: str
+    bin: str | None
+    enabled: bool       # in the rotation for new work
+    # Claude streams human-readable output to the terminal; Codex and Grok run
+    # headless-JSON, so their final summary is printed after the fact instead.
+    streams_output: bool
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace, key: str, name: str) -> "ProviderSpec":
+        return cls(
+            key=key,
+            name=name,
+            model=getattr(args, f"{key}_model"),
+            effort=getattr(args, f"{key}_effort"),
+            bin=getattr(args, f"{key}_bin") or None,
+            enabled=key in set(args.enabled_provider or KNOWN_PROVIDER_KEYS),
+            streams_output=(key == "claude"),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     script_dir: Path
     repo_dir: Path
@@ -159,10 +227,7 @@ class Config:
     completion_authors: tuple[str, ...]
     ready_label: str
     minimum_remaining_percent: float
-    claude_model: str
-    codex_model: str
-    claude_effort: str
-    codex_effort: str
+    providers: tuple[ProviderSpec, ...]
     preferred_provider: str
     email_to: str
     smtp_credentials_file: Path | None
@@ -172,18 +237,15 @@ class Config:
     gh_bin: str
     git_bin: str
     python_bin: str
-    claude_bin: str | None
-    codex_bin: str | None
     github_apps_config: Path
     openssl_bin: str
     require_bot_auth: bool
-    delivery_mode: str
     auto_approve: bool
     auto_merge: bool
     branch_prefix: str
     base_branch: str
+    integration_branch: str
     remote_name: str
-    merge_method: str
     github_host: str
 
     @classmethod
@@ -200,10 +262,9 @@ class Config:
             completion_authors=tuple(args.completion_author),
             ready_label=args.ready_label,
             minimum_remaining_percent=args.minimum_remaining_percent,
-            claude_model=args.claude_model,
-            codex_model=args.codex_model,
-            claude_effort=args.claude_effort,
-            codex_effort=args.codex_effort,
+            providers=tuple(
+                ProviderSpec.from_args(args, key, name) for key, name in KNOWN_PROVIDERS
+            ),
             preferred_provider=args.preferred_provider,
             email_to=args.email_to,
             smtp_credentials_file=smtp_file,
@@ -213,20 +274,31 @@ class Config:
             gh_bin=args.gh_bin,
             git_bin=args.git_bin,
             python_bin=args.python_bin,
-            claude_bin=args.claude_bin or None,
-            codex_bin=args.codex_bin or None,
             github_apps_config=Path(args.github_apps_config).expanduser(),
             openssl_bin=args.openssl_bin,
             require_bot_auth=args.require_bot_auth,
-            delivery_mode=args.delivery_mode,
             auto_approve=args.auto_approve,
             auto_merge=args.auto_merge,
             branch_prefix=args.branch_prefix.strip("/"),
             base_branch=args.base_branch,
+            integration_branch=args.integration_branch,
             remote_name=args.remote_name,
-            merge_method=args.merge_method,
             github_host=args.github_host,
         )
+
+    def spec(self, provider: str) -> ProviderSpec | None:
+        provider = str(provider).lower()
+        return next((s for s in self.providers if s.key == provider), None)
+
+    def require_spec(self, provider: str) -> ProviderSpec:
+        spec = self.spec(provider)
+        if spec is None:
+            raise WorkerError(f"Unknown AI provider: {provider}")
+        return spec
+
+    @property
+    def enabled_specs(self) -> tuple[ProviderSpec, ...]:
+        return tuple(s for s in self.providers if s.enabled)
 
 
 class PidLock:
@@ -407,6 +479,7 @@ class Worker:
         self.closed_paused_dir = self.state / "closed-paused-issues"
         self.ai_output_file = self.state / "last-ai-output.log"
         self.ai_diagnostic_file = self.state / "last-ai-diagnostic.log"
+        self.ai_prompt_file = self.state / "last-ai-prompt.txt"
         self.apps = GitHubAppAuth(config.github_apps_config, config.openssl_bin)
         self.github = GitHubClient(config, self.apps)
         self.choice: ProviderChoice | None = None
@@ -467,13 +540,18 @@ class Worker:
             f"repos/{self.config.github_repository}/issues/{issue_number}/comments", {"per_page": 100}
         )
 
+    def provider_bin(self, key: str) -> str | None:
+        spec = self.config.spec(key)
+        return spec.bin if spec else None
+
     def claude_capacity(self) -> int:
-        if not command_available(self.config.claude_bin):
+        claude_bin = self.provider_bin("claude")
+        if not command_available(claude_bin):
             log("Claude remaining quota — unavailable (claude was not found in PATH).")
             return 2
         result = run_command(
             [
-                self.config.claude_bin,
+                claude_bin,
                 "-p",
                 "/usage",
                 "--output-format",
@@ -507,20 +585,33 @@ class Worker:
         )
 
     def codex_capacity(self) -> int:
-        if not command_available(self.config.codex_bin):
+        codex_bin = self.provider_bin("codex")
+        if not command_available(codex_bin):
             log("Codex quota unavailable: codex was not found in PATH.")
             return 2
-        result = run_command(
-            [
-                self.config.python_bin,
-                self.config.script_dir / "codex_rate_limits.py",
-                "--codex-bin",
-                self.config.codex_bin,
-            ],
-            check=False,
-        )
+        result: subprocess.CompletedProcess[str] | None = None
+        for attempt in range(2):
+            result = run_command(
+                [
+                    self.config.python_bin,
+                    self.config.script_dir / "codex_rate_limits.py",
+                    "--codex-bin",
+                    codex_bin,
+                    "--timeout",
+                    "10",
+                ],
+                check=False,
+            )
+            if result.returncode == 0:
+                break
+            if attempt == 0:
+                log("Codex capacity check did not respond; retrying once.")
+                time.sleep(0.5)
+        assert result is not None
         if result.returncode != 0:
-            log("Codex quota unavailable: the local rate-limit request failed.")
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            reason = f" Details: {detail[-1]}" if detail else ""
+            log(f"Codex quota unavailable after two attempts.{reason}")
             return 2
         try:
             limits = json.loads(result.stdout)
@@ -545,32 +636,62 @@ class Worker:
         )
         return 0 if available else 1
 
+    def grok_capacity(self) -> int:
+        grok_bin = self.provider_bin("grok")
+        if not command_available(grok_bin):
+            log("Grok quota unavailable: grok was not found in PATH.")
+            return 2
+        home = Path(os.environ.get("HOME", "~")).expanduser()
+        if not (home / ".grok" / "auth.json").is_file() and not os.environ.get("XAI_API_KEY"):
+            log("Grok quota unavailable: not signed in (run 'grok login').")
+            return 2
+        # Grok Build carries no per-session/weekly usage cap for signed-in
+        # accounts (open-sourced mid-2026), so a real rate limit only ever
+        # surfaces at run time and is handled like any other provider failure.
+        log("Grok remaining quota — no usage limits apply to Grok Build.")
+        return 0
+
     def provider_capacity(self, provider: str) -> int:
-        if provider.lower() == "claude":
+        key = str(provider).lower()
+        if key == "claude":
             return self.claude_capacity()
-        if provider.lower() == "codex":
+        if key == "codex":
             return self.codex_capacity()
+        if key == "grok":
+            return self.grok_capacity()
         raise WorkerError(f"Invalid AI provider in saved state: {provider}")
 
+    def new_session_id(self, spec: ProviderSpec) -> str:
+        # Claude and Grok take a caller-supplied UUID up front; Codex mints its
+        # own thread id which run_ai captures from the first JSON event.
+        return str(uuid.uuid4()) if spec.key in ("claude", "grok") else ""
+
     def choose_provider(self, previous_ai: str, available: dict[str, bool]) -> ProviderChoice | None:
-        preferred = self.config.preferred_provider.capitalize()
-        if previous_ai == "Claude":
-            preferred = "Codex"
-        elif previous_ai == "Codex":
-            preferred = "Claude"
-        order = [preferred, "Claude" if preferred == "Codex" else "Codex"]
-        for provider in order:
-            if available.get(provider, False):
-                if previous_ai and provider != previous_ai:
-                    log(f"Follow-up review prefers {provider} because {previous_ai} completed the previous pass.")
-                elif previous_ai:
-                    log(f"The alternate provider lacks capacity; falling back to {provider} for this follow-up.")
-                return ProviderChoice(
-                    name=provider,
-                    model=self.config.claude_model if provider == "Claude" else self.config.codex_model,
-                    effort=self.config.claude_effort if provider == "Claude" else self.config.codex_effort,
-                    session_id=str(uuid.uuid4()) if provider == "Claude" else "",
-                )
+        """Pick a provider for this pass. Order: the preferred provider first,
+        then the rest in config order; a provider that completed the previous
+        pass is pushed to the back so a follow-up gets an independent reviewer,
+        but is still used as a last resort when nothing else has capacity."""
+        specs = {spec.name: spec for spec in self.config.enabled_specs}
+        order = [self.config.preferred_provider.capitalize()]
+        order += [name for name in specs if name not in order]
+        previous = (previous_ai or "").capitalize()
+        if previous in order and len(order) > 1:
+            order = [name for name in order if name != previous] + [previous]
+        order = [name for name in order if name in specs]
+        for name in order:
+            if not available.get(name, False):
+                continue
+            if previous and name != previous:
+                log(f"Follow-up review prefers {name} because {previous} completed the previous pass.")
+            elif previous:
+                log(f"No other enabled provider has capacity; falling back to {name} for this follow-up.")
+            spec = specs[name]
+            return ProviderChoice(
+                name=spec.name,
+                model=spec.model,
+                effort=spec.effort,
+                session_id=self.new_session_id(spec),
+            )
         return None
 
     def validate_paused_state(self, state: dict[str, Any]) -> None:
@@ -586,7 +707,7 @@ class Worker:
             value = state.get(key, "")
             if value and (not isinstance(value, str) or not SHA_RE.fullmatch(value)):
                 raise WorkerError(f"Paused state has an invalid {key}")
-        if state["ai_tool"] not in {"Claude", "Codex"} or state.get("status") != "quota_paused":
+        if state["ai_tool"] not in KNOWN_PROVIDER_NAMES or state.get("status") != "quota_paused":
             raise WorkerError("Paused state has an invalid provider or status")
 
     def resolve_recovery_candidate(self, base_sha: str, saved_sha: str, tip_sha: str) -> str:
@@ -673,10 +794,9 @@ class Worker:
             state["worktree_stash_oid"] = stash_oid
         atomic_write_json(paused_file, state)
         self.in_progress_file.unlink()
-        if self.config.delivery_mode == "pull-request":
-            current_branch = self.git("branch", "--show-current")
-            if current_branch != self.config.base_branch:
-                self.git("switch", self.config.base_branch)
+        integ = self.config.integration_branch
+        if self.git("branch", "--show-current") != integ and not self.git("status", "--porcelain"):
+            self.git("switch", integ, check=False)
         log(f"Shelved quota-paused issue #{issue_number}; other ready issues may now run.")
 
     def restore_paused(self, paused_file: Path) -> None:
@@ -686,18 +806,17 @@ class Worker:
         self.validate_paused_state(state)
         if self.git("status", "--porcelain"):
             raise WorkerError("Repository must be clean before restoring a quota-paused issue")
-        if self.config.delivery_mode == "pull-request":
-            branch = str(
-                state.get("branch_name")
-                or f"{self.config.branch_prefix}/{str(state['ai_tool']).lower()}/issue-{state['issue_number']}"
-            )
-            if self.git("branch", "--show-current") != branch:
-                if self.git_ok("show-ref", "--verify", f"refs/heads/{branch}"):
-                    self.git("switch", branch)
-                else:
-                    self.git("switch", "-c", branch, str(state["base_sha"]))
-            state["branch_name"] = branch
-            atomic_write_json(paused_file, state)
+        branch = str(
+            state.get("branch_name")
+            or f"{self.config.branch_prefix}/{ai_tool_key(str(state['ai_tool']).lower())}/issue-{state['issue_number']}"
+        )
+        if self.git("branch", "--show-current") != branch:
+            if self.git_ok("show-ref", "--verify", f"refs/heads/{branch}"):
+                self.git("switch", branch)
+            else:
+                self.git("switch", "-c", branch, str(state["base_sha"]))
+        state["branch_name"] = branch
+        atomic_write_json(paused_file, state)
         state = self.normalize_recovery_commits(paused_file, self.git("rev-parse", "HEAD"))
         stash_oid = str(state.get("worktree_stash_oid") or "")
         issue_number = int(state["issue_number"])
@@ -732,6 +851,68 @@ class Worker:
             )
         )
         return str(issue.get("state") or "").lower() == "closed"
+
+    def merge_closed_issue_pull_requests(self) -> None:
+        """Reconcile automation for existing issue PRs.
+
+        Approval may happen while an issue is open. Squash-merging remains
+        strictly gated on the linked issue being closed.
+        """
+        if not (self.config.auto_approve or self.config.auto_merge) or self.config.dry_run:
+            return
+        output = self.github.gh(
+            [
+                "pr",
+                "list",
+                "--repo",
+                self.config.github_repository,
+                "--base",
+                self.config.integration_branch,
+                "--state",
+                "open",
+                "--limit",
+                "100",
+                "--json",
+                "url,headRefName,headRefOid,isDraft,mergeable,reviewDecision",
+            ]
+        )
+        for pull_request in json.loads(output):
+            branch = str(pull_request.get("headRefName") or "")
+            match = re.fullmatch(
+                rf"{re.escape(self.config.branch_prefix)}/([^/]+)/issue-(\d+)", branch
+            )
+            if not match or bool(pull_request.get("isDraft")):
+                continue
+            issue_number = int(match.group(2))
+            provider = match.group(1).lower()
+            if provider == "xai":
+                provider = "grok"
+            pr_url = str(pull_request.get("url") or "")
+            if not pr_url:
+                raise WorkerError(f"GitHub returned incomplete pull request data for {branch}")
+            if (
+                self.config.auto_approve
+                and str(pull_request.get("reviewDecision") or "").upper() != "APPROVED"
+            ):
+                self.approve_pull_request(pr_url, provider)
+            if not self.config.auto_merge or not self.issue_is_closed(issue_number):
+                continue
+            if str(pull_request.get("mergeable") or "").upper() == "CONFLICTING":
+                log(
+                    f"Issue #{issue_number} is closed, but {branch} has merge conflicts; "
+                    "leaving its pull request open."
+                )
+                continue
+            head_sha = str(pull_request.get("headRefOid") or "")
+            if not SHA_RE.fullmatch(head_sha):
+                raise WorkerError(f"GitHub returned incomplete pull request data for {branch}")
+            merge_sha = self.merge_pull_request(
+                pr_url, head_sha, provider, issue_number
+            )
+            log(
+                f"Issue #{issue_number} was already closed; squash-merged {branch} "
+                f"into {self.config.integration_branch} as {merge_sha}."
+            )
 
     def archive_closed_paused(self, paused_file: Path) -> Path:
         state = read_json(paused_file)
@@ -1002,22 +1183,31 @@ class Worker:
         if not metadata:
             return False
         commit_sha = str(metadata["commit_sha"])
-        main_sha = self.git(
-            "rev-parse", "--verify", f"refs/heads/{self.config.base_branch}", check=False
-        )
-        if (
-            not main_sha
-            or not self.git_ok("cat-file", "-e", f"{commit_sha}^{{commit}}")
-            or not self.git_ok("merge-base", "--is-ancestor", commit_sha, main_sha)
+        # A completion marker alone means an AI opened/updated the issue PR
+        # against the integration branch. The issue must be closed before that
+        # PR can be merged. Only treat the issue as fully landed once the commit
+        # is reachable from the integration branch.
+        landed = ""
+        for ref in (
+            f"refs/remotes/{self.config.remote_name}/{self.config.integration_branch}",
+            f"refs/heads/{self.config.integration_branch}",
         ):
-            log(
-                f"Issue #{issue_number} has a trusted completion marker for {commit_sha}, but that commit "
-                f"is not on local {self.config.base_branch}; leaving it pending until synchronized."
-            )
+            resolved = self.git("rev-parse", "--verify", ref, check=False)
+            if resolved:
+                landed = resolved
+                break
+        if (
+            not landed
+            or not self.git_ok("cat-file", "-e", f"{commit_sha}^{{commit}}")
+            or not self.git_ok("merge-base", "--is-ancestor", commit_sha, landed)
+        ):
             return False
         self.record_completed(issue_number)
         self.clear_in_progress(issue_number)
-        log(f"Recognized issue #{issue_number} as already completed by commit {commit_sha} on main; no AI run is needed.")
+        log(
+            f"Issue #{issue_number} is done — {commit_sha} has landed on "
+            f"{self.config.integration_branch}."
+        )
         return True
 
     def select_issue(self) -> IssueContext | None:
@@ -1206,10 +1396,15 @@ class Worker:
             marker += f";through-comment:{trigger}"
         marker += " -->"
         verb = "Reworked" if pending.get("work_type") == "followup" else "Completed"
+        branch_line = ""
+        if pending.get("branch_name"):
+            pr = f" → {pending['pull_request_url']}" if pending.get("pull_request_url") else ""
+            branch_line = f"- Branch: `{pending['branch_name']}`{pr}\n"
         return (
             f"{marker}\n{verb} by **{pending.get('ai_tool') or pending.get('ai')}**.\n\n"
             f"- Model: `{pending.get('model', 'unknown')}`\n"
             f"- Effort: `{pending.get('effort', 'unknown')}`\n"
+            f"{branch_line}"
             f"- Commit: `{commit_sha}` — {pending['commit_message']}\n\n"
             "<details><summary>AI completion summary</summary>\n\n"
             f"{pending.get('ai_output') or '(No captured AI output was available.)'}\n"
@@ -1323,10 +1518,13 @@ class Worker:
                     "",
                     AUTOPILOT_INSTRUCTION,
                     f"Implement this issue in {self.config.repo_dir}. Follow repository instructions, run relevant "
-                    f"tests, and remain on {self.expected_branch()}. You may commit, but do not push; the worker "
-                    f"will commit any completed changes you leave uncommitted and ensure #{issue.number} is in "
-                    "the commit message. Run verification commands in the "
-                    "foreground; do not return while tests or builds are still running.",
+                    f"tests, and remain on {self.expected_branch()} (branched from "
+                    f"{self.config.integration_branch}; the pull request targets "
+                    f"{self.config.integration_branch}, never {self.config.base_branch}). You may commit, but do "
+                    f"not push. Prefix every commit subject with `[{ai_tool_key(self.choice.key)}]` and include #{issue.number} "
+                    "(e.g. `[claude] Fix the parser (#42)`). The worker will commit anything you leave "
+                    "uncommitted. Run verification commands in the foreground; do not return while tests or "
+                    "builds are still running.",
                 ]
             )
             if issue.work_type == "followup":
@@ -1381,23 +1579,65 @@ class Worker:
             f"{comment.get('created_at', '')}:\n{comment.get('body', '')}\n"
         )
 
-    def expected_branch(self) -> str:
-        if self.config.delivery_mode == "pull-request":
-            assert self.issue and self.choice
-            suffix = ""
-            if self.issue.work_type == "followup" and self.issue.trigger_comment_id:
-                suffix = f"-followup-{self.issue.trigger_comment_id}"
-            return f"{self.config.branch_prefix}/{self.choice.key}/issue-{self.issue.number}{suffix}"
-        return self.config.base_branch
+    def first_ai_key(self) -> str:
+        """The AI that created this issue's branch. Every later pass — even by
+        a different provider — works out of that one branch. Resolved from the
+        persisted branch name, else a remote branch lookup, else the current
+        provider (a genuinely fresh issue)."""
+        assert self.issue and self.choice
+        cached = getattr(self, "_first_ai_key_cache", None)
+        if cached and cached[0] == self.issue.number:
+            return cached[1]
+        persisted = ""
+        if self.in_progress_file.exists():
+            persisted = str(self.read_state().get("branch_name") or "")
+        parts = persisted.split("/")
+        if len(parts) == 3 and parts[0] == self.config.branch_prefix:
+            key = parts[1]
+        else:
+            remote_branch = self.find_remote_issue_branch(self.issue.number)
+            remote_parts = remote_branch.split("/") if remote_branch else []
+            key = remote_parts[1] if len(remote_parts) == 3 else ai_tool_key(self.choice.key)
+        self._first_ai_key_cache = (self.issue.number, key)
+        return key
 
-    def review_provider(self) -> str:
-        assert self.choice
-        return "codex" if self.choice.key == "claude" else "claude"
+    def find_remote_issue_branch(self, issue_number: int) -> str:
+        """`<prefix>/<ai>/issue-<n>` on the remote, if it exists."""
+        pattern = re.compile(
+            rf"^{re.escape(self.config.branch_prefix)}/([^/]+)/issue-{issue_number}$"
+        )
+        listing = self.git(
+            "ls-remote", "--heads", self.config.remote_name, check=False
+        )
+        for line in listing.splitlines():
+            _, _, ref = line.partition("\t")
+            name = ref.strip().removeprefix("refs/heads/")
+            if pattern.match(name):
+                return name
+        return ""
+
+    def expected_branch(self) -> str:
+        assert self.issue and self.choice
+        return f"{self.config.branch_prefix}/{self.first_ai_key()}/issue-{self.issue.number}"
+
+    def review_provider(self, implementing_provider: str | None = None) -> str:
+        """Key of a provider to attribute the PR approval to — any enabled
+        provider other than the one that implemented the change, preferring the
+        configured `preferred_provider`. Falls back to the implementer only when
+        it is the single enabled provider."""
+        if implementing_provider is None:
+            assert self.choice
+            implementing_provider = self.choice.key
+        candidates = [s.key for s in self.config.enabled_specs if s.key != implementing_provider]
+        if not candidates:
+            return implementing_provider
+        preferred = self.config.preferred_provider.lower()
+        return preferred if preferred in candidates else candidates[0]
 
     def provider_environment(self) -> dict[str, str]:
         assert self.choice
         environment = self.github.environment(self.choice.key)
-        # SMTP secrets must never be inherited by Claude or Codex.
+        # SMTP secrets must never be inherited by an AI provider process.
         environment["SWARM_SMTP_PASSWORD"] = ""
         return environment
 
@@ -1408,50 +1648,123 @@ class Worker:
         env = os.environ.copy()
         env.update(self.provider_environment())
         env.pop("SWARM_SMTP_PASSWORD", None)
-        if self.choice.name == "Claude":
-            if not self.config.claude_bin:
-                raise WorkerError("Claude executable is unavailable")
-            command = [
-                self.config.claude_bin,
-                "--model",
-                self.choice.model,
-                "--effort",
-                self.choice.effort,
-                "--permission-mode",
-                "bypassPermissions",
-            ]
-            command.extend(
-                ["--resume", self.choice.session_id]
-                if self.choice.resume
-                else ["--session-id", self.choice.session_id]
-            )
-            command.extend(["-p", "-"])
-            process = subprocess.Popen(
+        runner = {
+            "claude": self._run_claude,
+            "codex": self._run_codex,
+            "grok": self._run_grok,
+        }.get(self.choice.key)
+        if runner is None:
+            raise WorkerError(f"No runner for provider {self.choice.name}")
+        return runner(prompt, env)
+
+    def _run_claude(self, prompt: str, env: dict[str, str]) -> int:
+        assert self.choice
+        claude_bin = self.provider_bin("claude")
+        if not claude_bin:
+            raise WorkerError("Claude executable is unavailable")
+        command = [
+            claude_bin,
+            "--model",
+            self.choice.model,
+            "--effort",
+            self.choice.effort,
+            "--permission-mode",
+            "bypassPermissions",
+        ]
+        command.extend(
+            ["--resume", self.choice.session_id]
+            if self.choice.resume
+            else ["--session-id", self.choice.session_id]
+        )
+        command.extend(["-p", "-"])
+        process = subprocess.Popen(
+            command,
+            cwd=self.config.repo_dir,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        # The process now genuinely owns self.choice.session_id (created
+        # via --session-id, or attached via --resume) — from here on a
+        # retry may legitimately --resume it. See choice_from_state.
+        self.update_state(session_started=True)
+        assert process.stdin and process.stdout
+        process.stdin.write(prompt)
+        process.stdin.close()
+        with self.ai_output_file.open("w", encoding="utf-8") as output:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                output.write(line)
+        return process.wait()
+
+    def _run_grok(self, prompt: str, env: dict[str, str]) -> int:
+        assert self.choice
+        grok_bin = self.provider_bin("grok")
+        if not grok_bin:
+            raise WorkerError("Grok executable is unavailable")
+        log(
+            "Grok is working. Detailed implementation output is hidden; its final "
+            "summary will appear when finished."
+        )
+        self.ai_prompt_file.write_text(prompt, encoding="utf-8")
+        command = [
+            grok_bin,
+            "--prompt-file",
+            str(self.ai_prompt_file),
+            "--model",
+            self.choice.model,
+            "--reasoning-effort",
+            self.choice.effort,
+            "--permission-mode",
+            "bypassPermissions",
+            "--output-format",
+            "json",
+            "--cwd",
+            str(self.config.repo_dir),
+        ]
+        command.extend(
+            ["--resume", self.choice.session_id]
+            if self.choice.resume
+            else ["--session-id", self.choice.session_id]
+        )
+        self.update_state(session_started=True)
+        with self.ai_diagnostic_file.open("w", encoding="utf-8") as diagnostic:
+            result = subprocess.run(
                 command,
                 cwd=self.config.repo_dir,
                 env=env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
                 text=True,
+                stdout=diagnostic,
+                stderr=subprocess.STDOUT,
+                check=False,
             )
-            # The process now genuinely owns self.choice.session_id (created
-            # via --session-id, or attached via --resume) — from here on a
-            # retry may legitimately --resume it. See choice_from_state.
-            self.update_state(session_started=True)
-            assert process.stdin and process.stdout
-            process.stdin.write(prompt)
-            process.stdin.close()
-            with self.ai_output_file.open("w", encoding="utf-8") as output:
-                for line in process.stdout:
-                    print(line, end="", flush=True)
-                    output.write(line)
-            return process.wait()
+        # `--output-format json` prints one object: {"text": ..., "sessionId": ...}.
+        raw = self.ai_diagnostic_file.read_text(encoding="utf-8", errors="replace")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            text = str(payload.get("text") or "")
+            if text:
+                self.ai_output_file.write_text(
+                    text if text.endswith("\n") else text + "\n", encoding="utf-8"
+                )
+            session_id = str(payload.get("sessionId") or "")
+            if session_id and session_id != self.choice.session_id:
+                self.choice.session_id = session_id
+                self.update_state(session_id=session_id, session_started=True)
+        return result.returncode
 
-        if not self.config.codex_bin:
+    def _run_codex(self, prompt: str, env: dict[str, str]) -> int:
+        assert self.choice
+        codex_bin = self.provider_bin("codex")
+        if not codex_bin:
             raise WorkerError("Codex executable is unavailable")
         log("Codex is working. Detailed implementation output is hidden; its final summary will appear when finished.")
-        command = [self.config.codex_bin, "exec"]
+        command = [codex_bin, "exec"]
         if self.choice.resume:
             command.append("resume")
         command.extend(
@@ -1493,31 +1806,148 @@ class Worker:
         return result.returncode
 
     def synchronize_base_branch(self) -> str:
+        """Fast-forward the local read-only mirror of `base_branch` from the
+        remote. Nothing is ever pushed to `base_branch`."""
+        remote = self.config.remote_name
+        base = self.config.base_branch
+        if not self.git_ok("show-ref", "--verify", f"refs/heads/{base}"):
+            self.git("branch", base, f"{remote}/{base}")
         current = self.git("branch", "--show-current")
-        if current != self.config.base_branch:
-            raise WorkerError(
-                f"Cannot synchronize {self.config.base_branch} while checked out on {current or 'detached HEAD'}"
-            )
+        if current != base:
+            if self.git("status", "--porcelain"):
+                raise WorkerError(f"Cannot synchronize {base} while the checkout is dirty on {current}")
+            self.git("switch", base)
         if self.git("status", "--porcelain"):
-            raise WorkerError(f"Cannot synchronize dirty {self.config.base_branch}")
-        self.git("pull", "--ff-only", self.config.remote_name, self.config.base_branch)
+            raise WorkerError(f"Cannot synchronize dirty {base}")
+        remote_base = self.git("rev-parse", f"{remote}/{base}")
+        self.git("merge", "--ff-only", f"{remote}/{base}", check=False)
+        if self.git("rev-parse", "HEAD") != remote_base:
+            raise WorkerError(
+                f"Local {base} has diverged from {remote}/{base}; refusing to create AI work until it is reconciled"
+            )
         synchronized = self.git("rev-parse", "HEAD")
-        log(
-            f"Synchronized local {self.config.base_branch} with "
-            f"{self.config.remote_name}/{self.config.base_branch} at {synchronized}."
-        )
+        log(f"Local {base} mirrors {remote}/{base} at {synchronized}.")
         return synchronized
 
+    def synchronize_integration_branch(self) -> str:
+        """Ensure `integration_branch` exists, merge `base_branch` into it to
+        keep parity (ff-only, else a merge commit, else abort the run), push it,
+        and leave the checkout resting on it. Returns its HEAD sha."""
+        remote = self.config.remote_name
+        base = self.config.base_branch
+        integ = self.config.integration_branch
+        self.git("fetch", remote, check=False)
+        base_head = self.synchronize_base_branch()
+
+        if not self.git_ok("show-ref", "--verify", f"refs/heads/{integ}"):
+            if self.git_ok("show-ref", "--verify", f"refs/remotes/{remote}/{integ}"):
+                self.git("branch", integ, f"{remote}/{integ}")
+            else:
+                self.git("branch", integ, base)
+                log(f"Created integration branch {integ} from {base}.")
+        if self.git("branch", "--show-current") != integ:
+            if self.git("status", "--porcelain"):
+                raise WorkerError(f"Cannot switch to {integ}: the checkout is dirty")
+            self.git("switch", integ)
+        # Catch the integration branch up with any pushed changes to itself.
+        if self.git_ok("show-ref", "--verify", f"refs/remotes/{remote}/{integ}"):
+            remote_integ = self.git("rev-parse", f"{remote}/{integ}")
+            self.git("merge", "--ff-only", f"{remote}/{integ}", check=False)
+            if not self.git_ok("merge-base", "--is-ancestor", remote_integ, "HEAD"):
+                raise WorkerError(
+                    f"Local {integ} has diverged from {remote}/{integ}; refusing to create AI work until it is reconciled"
+                )
+
+        merged = self.git("merge", "--ff-only", base, check=False)
+        if self.git("rev-parse", "HEAD") == base_head:
+            pass
+        elif self.git_ok("merge-base", "--is-ancestor", base, "HEAD"):
+            log(f"{integ} already contains {base}.")
+        else:
+            result = run_command(
+                [self.config.git_bin, "-C", self.config.repo_dir, "merge", "--no-edit",
+                 "-m", f"[{integ}] sync {base}", base],
+                check=False,
+            )
+            if result.returncode != 0:
+                self.git("merge", "--abort", check=False)
+                raise WorkerError(
+                    f"{integ} conflicts with {base}; refusing to create an issue branch until a human "
+                    "reconciles the integration branch"
+                )
+            else:
+                log(f"Merged {base} into {integ}.")
+        _ = merged
+        self.push_integration_branch()
+        head = self.git("rev-parse", "HEAD")
+        return head
+
+    def push_integration_branch(self) -> None:
+        integ = self.config.integration_branch
+        result = self.push_ref(f"HEAD:refs/heads/{integ}")
+        if result.returncode != 0:
+            raise WorkerError(
+                f"Could not push synchronized {integ}: "
+                f"{result.stderr.strip() or result.stdout.strip() or 'git push failed'}"
+            )
+
+    def push_ref(self, refspec: str):
+        """Push `refspec` to the remote. Uses a bot's installation token over
+        HTTPS when a GitHub App is configured, otherwise a plain push to the
+        configured remote (which the local checkout already authenticates)."""
+        environment = self.integration_push_environment()
+        token = environment.get("GH_TOKEN", "")
+        if token:
+            with tempfile.TemporaryDirectory(prefix="swarm-git-askpass.") as temporary:
+                askpass = Path(temporary) / "askpass.sh"
+                askpass.write_text(
+                    "#!/bin/sh\n"
+                    'case "$1" in\n'
+                    "  *Username*) printf '%s\\n' x-access-token ;;\n"
+                    "  *) printf '%s\\n' \"$SWARM_GITHUB_APP_PUSH_TOKEN\" ;;\n"
+                    "esac\n",
+                    encoding="utf-8",
+                )
+                askpass.chmod(0o700)
+                push_env = dict(environment)
+                push_env.update(
+                    {
+                        "GIT_ASKPASS": str(askpass),
+                        "GIT_TERMINAL_PROMPT": "0",
+                        "SWARM_GITHUB_APP_PUSH_TOKEN": token,
+                    }
+                )
+                return run_command(
+                    [self.config.git_bin, "-C", self.config.repo_dir, "push",
+                     f"https://{self.config.github_host}/{self.config.github_repository}.git", refspec],
+                    env=push_env,
+                    check=False,
+                )
+        return run_command(
+            [self.config.git_bin, "-C", self.config.repo_dir, "push", self.config.remote_name, refspec],
+            check=False,
+        )
+
+    def integration_push_environment(self) -> dict[str, str]:
+        """Bot env for pushing — the preferred provider's bot when configured,
+        else the current provider's, else empty."""
+        for key in (self.config.preferred_provider, getattr(self.choice, "key", "")):
+            if key and self.apps.configured(key):
+                return self.apps.bot_environment(key)
+        return {}
+
     def prune_merged_worker_branches(self) -> None:
+        provider_keys = "|".join(
+            re.escape(key) for key in (*KNOWN_PROVIDER_KEYS, *BRANCH_PROVIDER_KEYS)
+        )
         pattern = re.compile(
-            rf"^{re.escape(self.config.branch_prefix)}/(?:claude|codex)/"
-            r"issue-[0-9]+(?:-followup-[0-9]+)?$"
+            rf"^{re.escape(self.config.branch_prefix)}/(?:{provider_keys})/issue-[0-9]+$"
         )
         branches = self.git("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()
         for branch in branches:
             if not pattern.fullmatch(branch):
                 continue
-            if self.git_ok("merge-base", "--is-ancestor", branch, self.config.base_branch):
+            if self.git_ok("merge-base", "--is-ancestor", branch, self.config.integration_branch):
                 self.git("branch", "-D", branch, check=False)
                 log(f"Removed merged local worker branch {branch}.")
 
@@ -1528,39 +1958,47 @@ class Worker:
         current_branch = self.git("branch", "--show-current")
         expected = self.expected_branch()
         state_exists = self.in_progress_file.exists()
-        if self.config.delivery_mode == "local-main":
-            if current_branch != self.config.base_branch:
+        integ = self.config.integration_branch
+        if not state_exists:
+            if current_branch not in (integ, self.config.base_branch):
                 if self.git("status", "--porcelain"):
-                    raise WorkerError("Repository has changes on a non-main branch; refusing unattended recovery")
-                self.git("switch", self.config.base_branch)
-            if not state_exists:
-                if self.git("status", "--porcelain"):
-                    log("Repository has uncommitted changes unrelated to a saved attempt; deferring new issue work.")
-                    raise SystemExit(0)
-                self.synchronize_base_branch()
-        elif not state_exists:
-            if current_branch != self.config.base_branch:
-                if self.git("status", "--porcelain"):
-                    raise WorkerError("Repository has changes on a non-main branch with no recovery state")
-                self.git("switch", self.config.base_branch)
+                    raise WorkerError("Repository has changes on a work branch with no recovery state")
+                if not self.git_ok("switch", integ):
+                    self.git("switch", self.config.base_branch)
             if self.git("status", "--porcelain"):
                 log("Repository has uncommitted changes unrelated to a saved attempt; deferring new issue work.")
                 raise SystemExit(0)
-            base = self.synchronize_base_branch()
-            self.prune_merged_worker_branches()
-            # Persist ownership before creating the branch. If interrupted
-            # between these operations, the next run recreates the branch from
-            # this exact base instead of treating it as orphaned work.
-            self.save_new_state(self.issue, self.choice, base)
-            if self.git_ok("show-ref", "--verify", f"refs/heads/{expected}"):
-                if self.git_ok("merge-base", "--is-ancestor", expected, self.config.base_branch):
-                    self.git("branch", "-D", expected)
+            if self.issue.work_type == "followup":
+                # Reuse the one branch this issue has always used.
+                remote_branch = self.find_remote_issue_branch(self.issue.number)
+                self.synchronize_integration_branch()
+                if remote_branch:
+                    self.git("fetch", self.config.remote_name, remote_branch, check=False)
+                    if self.git_ok("show-ref", "--verify", f"refs/heads/{expected}"):
+                        self.git("switch", expected)
+                        self.git("merge", "--ff-only", "FETCH_HEAD", check=False)
+                    else:
+                        self.git("switch", "-c", expected, "FETCH_HEAD")
+                    log(f"Continuing issue #{self.issue.number} on its existing branch {expected}.")
                 else:
-                    raise WorkerError(
-                        f"Existing branch {expected} contains unmerged work; recovery state was preserved"
-                    )
-            self.git("switch", "-c", expected, base)
-            log(f"Created issue branch {expected} from {self.config.base_branch} at {base}.")
+                    self.git("switch", "-c", expected, integ)
+                    log(f"Follow-up: no remote branch found; recreated {expected} from {integ}.")
+                base = self.git("rev-parse", "HEAD")
+                self.save_new_state(self.issue, self.choice, base)
+            else:
+                base = self.synchronize_integration_branch()
+                self.prune_merged_worker_branches()
+                # Persist ownership before creating the branch.
+                self.save_new_state(self.issue, self.choice, base)
+                if self.git_ok("show-ref", "--verify", f"refs/heads/{expected}"):
+                    if self.git_ok("merge-base", "--is-ancestor", expected, integ):
+                        self.git("branch", "-D", expected)
+                    else:
+                        raise WorkerError(
+                            f"Existing branch {expected} contains unmerged work; recovery state was preserved"
+                        )
+                self.git("switch", "-c", expected, base)
+                log(f"Created issue branch {expected} from {integ} at {base}.")
         else:
             state = self.read_state()
             expected = str(state.get("branch_name") or expected)
@@ -1625,11 +2063,12 @@ class Worker:
                 f"Issue #{self.issue.number} left worktree changes that Git could not stage"
             )
         current = self.git("rev-parse", "HEAD")
+        tag = f"[{ai_tool_key(self.choice.key)}] "
         if current == run_start:
             title = re.sub(r"\s+", " ", self.issue.title).strip()
-            message = f"{title} (#{self.issue.number})"
+            message = f"{tag}{title} (#{self.issue.number})"
         else:
-            message = f"Commit remaining completed work (#{self.issue.number})"
+            message = f"{tag}Commit remaining completed work (#{self.issue.number})"
         run_command(
             [
                 self.config.git_bin,
@@ -1653,28 +2092,50 @@ class Worker:
     def ensure_issue_reference(self, commit_sha: str, recovered: bool) -> str:
         assert self.issue and self.choice
         body = self.git("log", "-1", "--format=%B", commit_sha)
-        if re.search(rf"(^|[^0-9])#{self.issue.number}([^0-9]|$)", body):
+        tag = f"[{ai_tool_key(self.choice.key)}]"
+        has_ref = bool(re.search(rf"(^|[^0-9])#{self.issue.number}([^0-9]|$)", body))
+        lines = body.splitlines() or [""]
+        subject = lines[0]
+        needs_tag = not subject.lstrip().startswith(tag)
+        if has_ref and not needs_tag:
             return commit_sha
         if recovered:
             log(
-                f"Recovered commit {commit_sha} is established and does not mention #{self.issue.number}; "
-                "leaving history unchanged."
+                f"Recovered commit {commit_sha} is established; leaving its message unchanged."
             )
             return commit_sha
-        lines = body.splitlines()
-        lines[0] = f"{lines[0]} (#{self.issue.number})"
-        environment = self.provider_environment()
+        if needs_tag:
+            subject = f"{tag} {subject}".strip()
+        if not has_ref:
+            subject = f"{subject} (#{self.issue.number})"
+        lines[0] = subject
         run_command(
             [self.config.git_bin, "-C", self.config.repo_dir, "commit", "--amend", "--no-verify", "-F", "-"],
-            env=environment,
+            env=self.provider_environment(),
             input_text="\n".join(lines) + "\n",
         )
         amended = self.git("rev-parse", "HEAD")
-        log(f"Added issue #{self.issue.number} to the commit message.")
+        log(f"Normalized the commit subject for issue #{self.issue.number} ({subject!r}).")
         return amended
 
-    def approve_pull_request(self, pr_url: str) -> str:
-        reviewer = self.review_provider()
+    def validate_new_commit_messages(self, run_start: str, completion: str) -> None:
+        """Keep incorrectly attributed AI commits off the remote branch."""
+        assert self.issue and self.choice
+        expected = f"[{ai_tool_key(self.choice.key)}]"
+        commits = self.git("rev-list", "--reverse", f"{run_start}..{completion}").splitlines()
+        untagged = []
+        for sha in commits:
+            subject = self.git("log", "-1", "--format=%s", sha)
+            if not subject.lstrip().startswith(expected):
+                untagged.append(f"{sha[:8]} {subject}")
+        if untagged:
+            raise WorkerError(
+                f"{self.choice.name} created commit(s) without the required {expected} prefix; "
+                "nothing was pushed: " + "; ".join(untagged)
+            )
+
+    def approve_pull_request(self, pr_url: str, implementing_provider: str | None = None) -> str:
+        reviewer = self.review_provider(implementing_provider)
         self.github.gh(
             [
                 "pr",
@@ -1691,19 +2152,22 @@ class Worker:
         log(f"{reviewer.capitalize()} Bot approved {pr_url}.")
         return reviewer
 
-    def return_to_synchronized_main(self, branch: str) -> str:
+    def return_to_integration_branch(self, branch: str) -> str:
+        integ = self.config.integration_branch
         if self.git("status", "--porcelain"):
             raise WorkerError("Cannot finish PR delivery while the issue branch is dirty")
-        if self.git("branch", "--show-current") != self.config.base_branch:
-            self.git("switch", self.config.base_branch)
-        synchronized = self.synchronize_base_branch()
-        if branch and branch != self.config.base_branch:
+        self.git("fetch", self.config.remote_name, check=False)
+        if self.git("branch", "--show-current") != integ:
+            if not self.git_ok("switch", integ):
+                self.git("switch", "-c", integ, f"{self.config.remote_name}/{integ}")
+        if self.git_ok("show-ref", "--verify", f"refs/remotes/{self.config.remote_name}/{integ}"):
+            self.git("merge", "--ff-only", f"{self.config.remote_name}/{integ}", check=False)
+        synchronized = self.git("rev-parse", "HEAD")
+        if branch and branch != integ:
             self.git("branch", "-D", branch, check=False)
-        if self.git("branch", "--show-current") != self.config.base_branch:
-            raise WorkerError(f"PR delivery did not return the checkout to {self.config.base_branch}")
-        if self.git("status", "--porcelain"):
-            raise WorkerError(f"PR delivery left {self.config.base_branch} dirty")
-        log(f"Returned the clean local checkout to {self.config.base_branch} at {synchronized}.")
+        if self.git("branch", "--show-current") != integ:
+            raise WorkerError(f"PR delivery did not return the checkout to {integ}")
+        log(f"Returned the clean local checkout to {integ} at {synchronized}.")
         return synchronized
 
     def deliver_pull_request(self, commit_sha: str) -> tuple[str, str, str]:
@@ -1733,42 +2197,17 @@ class Worker:
             delivered_sha = str((existing[0].get("mergeCommit") or {}).get("oid") or "")
             if not SHA_RE.fullmatch(delivered_sha):
                 raise WorkerError(f"Merged PR did not report a valid merge commit: {pr_url}")
-            self.return_to_synchronized_main(branch)
+            self.return_to_integration_branch(branch)
             log(f"Recovered already-merged pull request {pr_url} for issue #{self.issue.number}.")
             return pr_url, branch, delivered_sha
 
-        # GIT_ASKPASS keeps the installation token out of command-line
-        # arguments, Git configuration, and persistent remote URLs.
-        with tempfile.TemporaryDirectory(prefix="swarm-git-askpass.") as temporary:
-            askpass = Path(temporary) / "askpass.sh"
-            askpass.write_text(
-                "#!/bin/sh\n"
-                "case \"$1\" in\n"
-                "  *Username*) printf '%s\\n' x-access-token ;;\n"
-                "  *) printf '%s\\n' \"$SWARM_GITHUB_APP_PUSH_TOKEN\" ;;\n"
-                "esac\n",
-                encoding="utf-8",
+        push_result = self.push_ref(f"HEAD:refs/heads/{branch}")
+        if push_result.returncode != 0:
+            raise WorkerError(
+                f"Could not push {branch}: "
+                f"{push_result.stderr.strip() or push_result.stdout.strip() or 'git push failed'}"
             )
-            askpass.chmod(0o700)
-            push_environment = dict(environment)
-            push_environment.update(
-                {
-                    "GIT_ASKPASS": str(askpass),
-                    "GIT_TERMINAL_PROMPT": "0",
-                    "SWARM_GITHUB_APP_PUSH_TOKEN": environment["GH_TOKEN"],
-                }
-            )
-            run_command(
-                [
-                    self.config.git_bin,
-                    "-C",
-                    self.config.repo_dir,
-                    "push",
-                    f"https://{self.config.github_host}/{self.config.github_repository}.git",
-                    f"HEAD:refs/heads/{branch}",
-                ],
-                env=push_environment,
-            )
+        _ = environment
         if existing and existing[0].get("state") == "OPEN":
             pr_url = str(existing[0]["url"])
             log(f"Reusing existing pull request {pr_url} for issue #{self.issue.number}.")
@@ -1787,7 +2226,7 @@ class Worker:
                     "--head",
                     branch,
                     "--base",
-                    self.config.base_branch,
+                    self.config.integration_branch,
                     "--title",
                     title,
                     "--body-file",
@@ -1800,48 +2239,83 @@ class Worker:
         delivered_sha = commit_sha
         if self.config.auto_approve:
             self.approve_pull_request(pr_url)
-        if self.config.auto_merge:
-            self.github.gh(
-                [
-                    "pr",
-                    "merge",
-                    pr_url,
-                    "--repo",
-                    self.config.github_repository,
-                    f"--{self.config.merge_method}",
-                    "--delete-branch",
-                    "--match-head-commit",
-                    commit_sha,
-                ],
-                self.choice.key,
+        if self.config.auto_merge and self.issue_is_closed(self.issue.number):
+            delivered_sha = self.merge_pull_request(
+                pr_url, commit_sha, self.choice.key, self.issue.number
             )
-            delivered_sha = self.github.gh(
-                [
-                    "pr",
-                    "view",
-                    pr_url,
-                    "--repo",
-                    self.config.github_repository,
-                    "--json",
-                    "mergeCommit",
-                    "--jq",
-                    ".mergeCommit.oid",
-                ],
-                self.choice.key,
-            ).strip()
-            if not SHA_RE.fullmatch(delivered_sha):
-                raise WorkerError(f"Merged PR did not report a valid merge commit: {pr_url}")
-            # Fetch through normal user credentials; the local repo already has
-            # a configured authenticated origin and this avoids token persistence.
-            self.return_to_synchronized_main(branch)
+            self.return_to_integration_branch(branch)
+        elif self.config.auto_merge:
+            log(
+                f"Issue #{self.issue.number} is still open; leaving {pr_url} unmerged. "
+                "A later automation cycle may squash-merge it after the issue is closed."
+            )
         return pr_url, branch, delivered_sha
+
+    def merge_pull_request(
+        self,
+        pr_url: str,
+        head_sha: str,
+        provider: str,
+        issue_number: int,
+    ) -> str:
+        """Squash a closed issue's PR and record the result on that issue."""
+        if not self.issue_is_closed(issue_number):
+            raise WorkerError(
+                f"Refusing to merge {pr_url}: issue #{issue_number} is still open"
+            )
+        self.github.gh(
+            [
+                "pr",
+                "merge",
+                pr_url,
+                "--repo",
+                self.config.github_repository,
+                "--squash",
+                "--delete-branch",
+                "--match-head-commit",
+                head_sha,
+            ],
+            provider,
+        )
+        merge_sha = self.github.gh(
+            [
+                "pr",
+                "view",
+                pr_url,
+                "--repo",
+                self.config.github_repository,
+                "--json",
+                "mergeCommit",
+                "--jq",
+                ".mergeCommit.oid",
+            ],
+            provider,
+        ).strip()
+        if not SHA_RE.fullmatch(merge_sha):
+            raise WorkerError(f"Merged PR did not report a valid merge commit: {pr_url}")
+        body = (
+            f"Squash-merged into `{self.config.integration_branch}` "
+            f"(commit `{merge_sha}`) via {pr_url} after this issue was closed.\n\n"
+            f"`{self.config.integration_branch}` reaches `{self.config.base_branch}` only when a "
+            "human merges the integration pull request."
+        )
+        self.github.gh(
+            [
+                "issue",
+                "comment",
+                str(issue_number),
+                "--repo",
+                self.config.github_repository,
+                "--body",
+                body,
+            ],
+            provider,
+        )
+        return merge_sha
 
     def finalize_issue(self, commit_sha: str, ai_output: str) -> None:
         assert self.issue and self.choice
-        pr_url = ""
-        branch = ""
-        if self.config.delivery_mode == "pull-request":
-            pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha)
+        pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha)
         pending = {
             "issue_number": self.issue.number,
             "issue_title": self.issue.title,
@@ -1893,7 +2367,7 @@ class Worker:
                         f"Could not verify {self.choice.name} usage for pinned issue #{self.issue.number}; "
                         "leaving state active and retrying later."
                     )
-                    return 0
+                    return PROVIDER_UNAVAILABLE_EXIT_CODE
                 if capacity == 1:
                     if self.config.dry_run:
                         log(
@@ -1908,16 +2382,18 @@ class Worker:
                     return QUOTA_PAUSED_EXIT_CODE
         else:
             availability = {
-                "Claude": self.claude_capacity() == 0,
-                "Codex": self.codex_capacity() == 0,
+                spec.name: self.provider_capacity(spec.key) == 0
+                for spec in self.config.enabled_specs
             }
             self.choice = self.choose_provider(self.issue.previous_ai, availability)
             if not self.choice:
+                enabled = ", ".join(spec.name for spec in self.config.enabled_specs) or "no provider"
                 log(
-                    f"Neither Claude nor Codex has at least {self.config.minimum_remaining_percent:g}% "
-                    "remaining in every active quota window; stopping."
+                    f"No enabled provider ({enabled}) has at least "
+                    f"{self.config.minimum_remaining_percent:g}% remaining in every active quota "
+                    "window; stopping."
                 )
-                return 0
+                return PROVIDER_UNAVAILABLE_EXIT_CODE
 
         assert self.choice
         if self.choice.resume:
@@ -1960,8 +2436,9 @@ class Worker:
             )
 
         output = self.ai_output_file.read_text(encoding="utf-8", errors="replace")
-        if self.choice.name == "Codex":
-            print("\n--- Codex completion summary ---")
+        spec = self.config.spec(self.choice.key)
+        if spec is not None and not spec.streams_output:
+            print(f"\n--- {self.choice.name} completion summary ---")
             print(output, end="" if output.endswith("\n") else "\n")
         if self.git("branch", "--show-current") != self.expected_branch():
             raise WorkerError(
@@ -1989,6 +2466,7 @@ class Worker:
         if not self.git_ok("merge-base", "--is-ancestor", base, after):
             raise WorkerError(f"{self.choice.name} rewrote history instead of adding a descendant commit")
         completion = self.ensure_issue_reference(completion, recovered)
+        self.validate_new_commit_messages(run_start, completion)
         if self.git("status", "--porcelain"):
             raise WorkerError(
                 f"Issue #{self.issue.number} cannot be delivered with uncommitted changes"
@@ -2006,6 +2484,7 @@ class Worker:
                 if not command_available(executable):
                     raise WorkerError(f"{label} is required but was not found in PATH")
             self.deliver_pending()
+            self.merge_closed_issue_pull_requests()
             if self.prepare_paused_resume():
                 return 0
             self.issue = self.select_issue()
@@ -2049,13 +2528,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=float(env_value("SWARM_MIN_REMAINING_PERCENT", "10")),
     )
-    parser.add_argument("--claude-model", default=env_value("SWARM_CLAUDE_MODEL", "claude-sonnet-5"))
-    parser.add_argument("--codex-model", default=env_value("SWARM_CODEX_MODEL", "gpt-5.6-sol"))
-    parser.add_argument("--claude-effort", default=env_value("SWARM_CLAUDE_EFFORT", "high"))
-    parser.add_argument("--codex-effort", default=env_value("SWARM_CODEX_EFFORT", "high"))
+    _provider_model_defaults = {
+        "claude": "claude-sonnet-5",
+        "codex": "gpt-5.6-sol",
+        "grok": "grok-4.6",
+    }
+    for _key in KNOWN_PROVIDER_KEYS:
+        parser.add_argument(
+            f"--{_key}-model",
+            default=env_value(f"SWARM_{_key.upper()}_MODEL", _provider_model_defaults[_key]),
+        )
+        parser.add_argument(
+            f"--{_key}-effort",
+            default=env_value(f"SWARM_{_key.upper()}_EFFORT", "high"),
+        )
+        parser.add_argument(
+            f"--{_key}-bin",
+            default=env_value(f"{_key.upper()}_BIN", executable_default(_key)),
+        )
+    parser.add_argument(
+        "--enabled-provider",
+        action="append",
+        choices=KNOWN_PROVIDER_KEYS,
+        default=list(csv_values(env_value("SWARM_ENABLED_PROVIDERS", ""))) or None,
+        help="Provider id to include in the rotation (repeatable). Defaults to all known providers.",
+    )
     parser.add_argument(
         "--preferred-provider",
-        choices=("claude", "codex"),
+        choices=KNOWN_PROVIDER_KEYS,
         default=env_value("SWARM_PREFERRED_PROVIDER", "claude").lower(),
     )
     parser.add_argument("--email-to", default=env_value("SWARM_EMAIL_TO", "mr_jerrodh@hotmail.com"))
@@ -2065,8 +2565,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gh-bin", default=env_value("GH_BIN", executable_default("gh")))
     parser.add_argument("--git-bin", default=env_value("GIT_BIN", executable_default("git")))
     parser.add_argument("--python-bin", default=env_value("PYTHON_BIN", executable_default("python3")))
-    parser.add_argument("--claude-bin", default=env_value("CLAUDE_BIN", executable_default("claude")))
-    parser.add_argument("--codex-bin", default=env_value("CODEX_BIN", executable_default("codex")))
     parser.add_argument(
         "--github-apps-config",
         default=env_value("SWARM_GITHUB_APPS_CONFIG", str(DEFAULT_CONFIG_PATH)),
@@ -2078,28 +2576,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=env_bool("SWARM_REQUIRE_BOT_AUTH", True),
     )
     parser.add_argument(
-        "--delivery-mode",
-        choices=("local-main", "pull-request"),
-        default=env_value("SWARM_DELIVERY_MODE", "pull-request"),
-    )
-    parser.add_argument(
         "--auto-approve",
         action=argparse.BooleanOptionalAction,
-        default=env_bool("SWARM_AUTO_APPROVE", True),
+        default=env_bool("SWARM_AUTO_APPROVE", False),
     )
     parser.add_argument(
         "--auto-merge",
         action=argparse.BooleanOptionalAction,
-        default=env_bool("SWARM_AUTO_MERGE", True),
+        default=env_bool("SWARM_AUTO_MERGE", False),
     )
-    parser.add_argument("--branch-prefix", default=env_value("SWARM_BRANCH_PREFIX", "swarm"))
+    parser.add_argument("--branch-prefix", default=env_value("SWARM_BRANCH_PREFIX", "ai"))
     parser.add_argument("--base-branch", default=env_value("SWARM_BASE_BRANCH", "main"))
-    parser.add_argument("--remote-name", default=env_value("SWARM_GIT_REMOTE", "origin"))
     parser.add_argument(
-        "--merge-method",
-        choices=("merge", "squash", "rebase"),
-        default=env_value("SWARM_PR_MERGE_METHOD", "merge"),
+        "--integration-branch",
+        default=env_value("SWARM_INTEGRATION_BRANCH", "ai-main"),
     )
+    parser.add_argument("--remote-name", default=env_value("SWARM_GIT_REMOTE", "origin"))
     parser.add_argument("--github-host", default=env_value("SWARM_GITHUB_HOST", "github.com"))
     return parser
 
@@ -2108,10 +2600,18 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not 0 <= args.minimum_remaining_percent <= 100:
         raise WorkerError("--minimum-remaining-percent must be between 0 and 100")
-    if args.auto_merge and args.delivery_mode != "pull-request":
-        raise WorkerError("--auto-merge requires --delivery-mode pull-request")
-    if args.auto_approve and args.delivery_mode != "pull-request":
-        raise WorkerError("--auto-approve requires --delivery-mode pull-request")
+    if args.base_branch == args.integration_branch:
+        raise WorkerError("--integration-branch must differ from --base-branch")
+    enabled = set(args.enabled_provider or KNOWN_PROVIDER_KEYS)
+    if not enabled:
+        raise WorkerError("At least one --enabled-provider is required")
+    if args.preferred_provider not in enabled:
+        fallback = next(key for key in KNOWN_PROVIDER_KEYS if key in enabled)
+        log(
+            f"Preferred provider '{args.preferred_provider}' is not enabled; "
+            f"using '{fallback}' as the first choice."
+        )
+        args.preferred_provider = fallback
     config = Config.from_args(args)
     return Worker(config).run()
 

@@ -1,33 +1,310 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = "config.json";
 
+/// Every AI provider the app knows how to drive. Order here is the default
+/// rotation order and the order provider cards render in.
+pub const KNOWN_PROVIDERS: [&str; 3] = ["claude", "codex", "grok"];
+
+fn default_true() -> bool {
+    true
+}
+
+/// Human label for a provider id (`"claude"` -> `"Claude"`).
+pub fn provider_label(id: &str) -> &'static str {
+    match id {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "grok" => "Grok",
+        _ => "Unknown",
+    }
+}
+
+/// `owner/name` as a filesystem-safe directory / slot key (`owner/name` ->
+/// `owner__name`). Also the stable `id` of a [`RepoConfig`].
+pub fn repo_slug(github_repository: &str) -> String {
+    github_repository
+        .trim()
+        .replace('/', "__")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Per-provider settings. One entry per id in [`KNOWN_PROVIDERS`]. `enabled`
+/// is the "include this provider in the flow" switch; a disabled provider is
+/// never selected by the worker and drops out of the readiness checks and the
+/// preferred-provider choice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderSettings {
+    pub id: String,
+    pub enabled: bool,
+    pub model: String,
+    pub effort: String,
+    /// Executable path override; empty means auto-detect on PATH.
+    pub bin: String,
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            enabled: true,
+            model: String::new(),
+            effort: "high".into(),
+            bin: String::new(),
+        }
+    }
+}
+
+impl ProviderSettings {
+    fn preset(id: &str) -> Self {
+        let (model, effort) = match id {
+            "claude" => ("claude-sonnet-5", "high"),
+            "codex" => ("gpt-5.6-sol", "high"),
+            "grok" => ("grok-4.6", "high"),
+            _ => ("", "high"),
+        };
+        Self {
+            id: id.into(),
+            enabled: true,
+            model: model.into(),
+            effort: effort.into(),
+            bin: String::new(),
+        }
+    }
+}
+
+fn default_providers() -> Vec<ProviderSettings> {
+    KNOWN_PROVIDERS
+        .iter()
+        .map(|id| ProviderSettings::preset(id))
+        .collect()
+}
+
+/// One monitored GitHub repository. The AI worker clones it into a managed
+/// workspace, cuts issue branches from `integration_branch`, and never lets
+/// code reach `base_branch` without a human.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RepoConfig {
+    /// Stable key = `repo_slug(github_repository)`. Used for the process slot
+    /// and the workspace directory name.
+    pub id: String,
+    /// Include this repository in the monitoring rotation.
+    pub enabled: bool,
+    pub github_repository: String,
+    pub assignee: String,
+    /// The branch the integration branch mirrors and PRs eventually land on
+    /// (via a human). Default `"main"`.
+    pub base_branch: String,
+    /// The shared AI-work branch. Issue branches are cut from it; issue PRs
+    /// target it. Default `"ai-main"`.
+    pub integration_branch: String,
+    /// Issue-branch namespace: `<prefix>/<ai>/issue-<n>`. Default `"ai"`.
+    pub branch_prefix: String,
+    pub remote_name: String,
+    pub github_host: String,
+    /// Path to this repo's GitHub App keys. Empty = the per-repo default
+    /// (`~/.config/swarm/github-apps-<id>.json`).
+    pub github_apps_config: String,
+    pub require_bot_auth: bool,
+    pub ready_label: String,
+    pub trusted_followup_authors: Vec<String>,
+    pub completion_authors: Vec<String>,
+    /// First provider tried for a fresh issue in this repo. Empty = use the
+    /// global `preferred_provider`.
+    pub preferred_provider: String,
+    pub auto_approve: bool,
+    /// Auto-merge (squash) an approved issue PR into `integration_branch` only
+    /// after its issue is closed. `base_branch` is never touched automatically.
+    pub auto_merge: bool,
+    /// Advanced: an existing local checkout to operate on as-is instead of a
+    /// managed clone.
+    pub repo_dir: String,
+    pub uat_enabled: bool,
+    pub uat_hour: u8,
+    pub uat_issue_label: String,
+    pub uat_batocera_host: String,
+    pub uat_triage_enabled: bool,
+    pub run_dir: String,
+}
+
+impl Default for RepoConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            enabled: true,
+            github_repository: String::new(),
+            assignee: String::new(),
+            base_branch: "main".into(),
+            integration_branch: "ai-main".into(),
+            branch_prefix: "ai".into(),
+            remote_name: "origin".into(),
+            github_host: "github.com".into(),
+            github_apps_config: String::new(),
+            require_bot_auth: true,
+            ready_label: "Ready For Testing".into(),
+            trusted_followup_authors: Vec::new(),
+            completion_authors: Vec::new(),
+            preferred_provider: String::new(),
+            auto_approve: false,
+            auto_merge: false,
+            repo_dir: String::new(),
+            uat_enabled: false,
+            uat_hour: 3,
+            uat_issue_label: "Testing".into(),
+            uat_batocera_host: "batocera.local".into(),
+            uat_triage_enabled: true,
+            run_dir: String::new(),
+        }
+    }
+}
+
+impl RepoConfig {
+    fn with_repository(github_repository: &str) -> Self {
+        let github_repository = github_repository.trim().to_string();
+        Self {
+            id: repo_slug(&github_repository),
+            github_repository,
+            ..Self::default()
+        }
+    }
+
+    /// A short human label — `owner/name` if set, else the id.
+    pub fn label(&self) -> String {
+        let repo = self.github_repository.trim();
+        if repo.is_empty() {
+            self.id.clone()
+        } else {
+            repo.to_string()
+        }
+    }
+
+    /// The provider tried first for this repo (`preferred_provider` when set,
+    /// else the global default).
+    pub fn effective_preferred_provider<'a>(&'a self, global: &'a str) -> &'a str {
+        if self.preferred_provider.trim().is_empty() {
+            global
+        } else {
+            self.preferred_provider.trim()
+        }
+    }
+
+    /// Path to this repo's GitHub App keys (`github_apps_config` when set,
+    /// else the per-repo default under `~/.config/swarm`).
+    pub fn effective_apps_config(&self) -> String {
+        let configured = self.github_apps_config.trim();
+        if !configured.is_empty() {
+            return configured.to_string();
+        }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.effective_apps_config_at(&home)
+    }
+
+    fn effective_apps_config_at(&self, home: &Path) -> String {
+        // Before multi-repository profiles, every installation used this one
+        // path. Keep using it when present so an upgrade does not appear to
+        // lose already-created GitHub Apps and their non-recoverable PEM keys.
+        let legacy = home.join(".config/swarm/github-apps.json");
+        if legacy.is_file() {
+            return legacy.to_string_lossy().into_owned();
+        }
+        home.join(format!(".config/swarm/github-apps-{}.json", self.id))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Where the UAT runner keeps its state. Defaults to `<workspace>/.run`.
+    pub fn effective_run_dir(&self, workspace: &Path) -> PathBuf {
+        if self.run_dir.trim().is_empty() {
+            workspace.join(".run")
+        } else {
+            PathBuf::from(&self.run_dir)
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let repository = self.github_repository.trim();
+        if repository.is_empty() {
+            return Err("set the GitHub repository (owner/name)".into());
+        }
+        if repository.split('/').count() != 2
+            || repository.starts_with('/')
+            || repository.ends_with('/')
+        {
+            return Err("GitHub repository must use owner/name format".into());
+        }
+        if self.assignee.trim().is_empty() {
+            return Err("set the GitHub assignee whose issues the worker may select".into());
+        }
+        let base = self.base_branch.trim();
+        let integration = self.integration_branch.trim();
+        if base.is_empty() {
+            return Err("base branch cannot be empty".into());
+        }
+        if integration.is_empty() {
+            return Err("integration branch cannot be empty".into());
+        }
+        if base == integration {
+            return Err("the integration branch must differ from the base branch".into());
+        }
+        let prefix = self.branch_prefix.trim();
+        if prefix.is_empty() || prefix.contains(char::is_whitespace) || prefix.contains('/') {
+            return Err(
+                "branch prefix must be one non-empty path segment with no spaces or slashes".into(),
+            );
+        }
+        if self.remote_name.trim().is_empty() {
+            return Err("git remote cannot be empty".into());
+        }
+        if self.uat_hour > 23 {
+            return Err("UAT hour must be between 0 and 23".into());
+        }
+        let override_path = self.repo_dir.trim();
+        if !override_path.is_empty() {
+            let repo = Path::new(override_path);
+            if !repo.is_dir() {
+                return Err("the working-copy override path does not exist".into());
+            }
+            if !repo.join(".git").exists() {
+                return Err("the working-copy override is not a Git checkout".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
-    pub profile_name: String,
-    pub repo_dir: String,
-    pub github_repository: String,
-    pub assignee: String,
-    pub trusted_followup_authors: Vec<String>,
-    pub completion_authors: Vec<String>,
-    pub ready_label: String,
-    pub base_branch: String,
-    pub remote_name: String,
-    pub github_host: String,
-    pub github_apps_config: String,
-    pub require_bot_auth: bool,
-    pub delivery_mode: String,
-    pub auto_approve: bool,
-    pub auto_merge: bool,
-    pub merge_method: String,
-    pub branch_prefix: String,
+    /// One entry per monitored repository. Empty only in an old config file
+    /// written before this field existed; `normalize()` folds the legacy
+    /// single-repo fields into `repositories[0]` on load.
+    #[serde(default)]
+    pub repositories: Vec<RepoConfig>,
+
+    /// Parent directory for managed clones. Empty means
+    /// `<app-data-dir>/checkouts`; each repo lives in `<root>/<repo id>`.
+    pub workspace_root: String,
+
+    /// Global default first provider for a repo that does not override it.
     pub preferred_provider: String,
-    pub claude_model: String,
-    pub claude_effort: String,
-    pub codex_model: String,
-    pub codex_effort: String,
+    /// One entry per known provider.
+    #[serde(default)]
+    pub providers: Vec<ProviderSettings>,
+
     pub minimum_remaining_percent: u8,
     pub schedule_mode: String,
     pub schedule_time: String,
@@ -37,16 +314,65 @@ pub struct AppConfig {
     pub email_to: String,
     pub smtp_credentials_file: String,
     pub worker_state_dir: String,
-    pub claude_bin: String,
-    pub codex_bin: String,
     pub gh_bin: String,
     pub python_bin: String,
+
+    // --- Legacy fields (pre-`repositories` / pre-`providers`). Read once by
+    //     `normalize()` to carry a v1 config forward, then never written. ---
+    #[serde(default, skip_serializing)]
+    pub profile_name: String,
+    #[serde(default, skip_serializing)]
+    pub repo_dir: String,
+    #[serde(default, skip_serializing)]
+    pub github_repository: String,
+    #[serde(default, skip_serializing)]
+    pub assignee: String,
+    #[serde(default, skip_serializing)]
+    pub trusted_followup_authors: Vec<String>,
+    #[serde(default, skip_serializing)]
+    pub completion_authors: Vec<String>,
+    #[serde(default, skip_serializing)]
+    pub ready_label: String,
+    #[serde(default, skip_serializing)]
+    pub base_branch: String,
+    #[serde(default, skip_serializing)]
+    pub remote_name: String,
+    #[serde(default, skip_serializing)]
+    pub github_host: String,
+    #[serde(default, skip_serializing)]
+    pub github_apps_config: String,
+    #[serde(default = "default_true", skip_serializing)]
+    pub require_bot_auth: bool,
+    #[serde(default, skip_serializing)]
+    pub auto_approve: bool,
+    #[serde(default, skip_serializing)]
+    pub auto_merge: bool,
+    #[serde(default, skip_serializing)]
+    pub branch_prefix: String,
+    #[serde(default, skip_serializing)]
     pub uat_enabled: bool,
+    #[serde(default, skip_serializing)]
     pub uat_hour: u8,
+    #[serde(default, skip_serializing)]
     pub uat_issue_label: String,
+    #[serde(default, skip_serializing)]
     pub uat_batocera_host: String,
+    #[serde(default, skip_serializing)]
     pub uat_triage_enabled: bool,
+    #[serde(default, skip_serializing)]
     pub run_dir: String,
+    #[serde(default, skip_serializing)]
+    pub claude_model: String,
+    #[serde(default, skip_serializing)]
+    pub claude_effort: String,
+    #[serde(default, skip_serializing)]
+    pub codex_model: String,
+    #[serde(default, skip_serializing)]
+    pub codex_effort: String,
+    #[serde(default, skip_serializing)]
+    pub claude_bin: String,
+    #[serde(default, skip_serializing)]
+    pub codex_bin: String,
 }
 
 impl Default for AppConfig {
@@ -55,31 +381,10 @@ impl Default for AppConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
-            profile_name: "My repository".into(),
-            repo_dir: String::new(),
-            github_repository: String::new(),
-            assignee: String::new(),
-            trusted_followup_authors: Vec::new(),
-            completion_authors: Vec::new(),
-            ready_label: "Ready For Testing".into(),
-            base_branch: "main".into(),
-            remote_name: "origin".into(),
-            github_host: "github.com".into(),
-            github_apps_config: home
-                .join(".config/swarm/github-apps.json")
-                .to_string_lossy()
-                .into_owned(),
-            require_bot_auth: true,
-            delivery_mode: "pull-request".into(),
-            auto_approve: true,
-            auto_merge: true,
-            merge_method: "merge".into(),
-            branch_prefix: "swarm".into(),
+            repositories: Vec::new(),
+            workspace_root: String::new(),
             preferred_provider: "claude".into(),
-            claude_model: "claude-sonnet-5".into(),
-            claude_effort: "high".into(),
-            codex_model: "gpt-5.6-sol".into(),
-            codex_effort: "high".into(),
+            providers: default_providers(),
             minimum_remaining_percent: 10,
             schedule_mode: "continuous".into(),
             schedule_time: "09:00".into(),
@@ -95,42 +400,67 @@ impl Default for AppConfig {
                 .join(".local/state/swarm-issue-worker")
                 .to_string_lossy()
                 .into_owned(),
-            claude_bin: String::new(),
-            codex_bin: String::new(),
             gh_bin: String::new(),
             python_bin: String::new(),
-            uat_enabled: true,
-            uat_hour: 3,
-            uat_issue_label: "Testing".into(),
-            uat_batocera_host: "batocera.local".into(),
-            uat_triage_enabled: true,
+            profile_name: String::new(),
+            repo_dir: String::new(),
+            github_repository: String::new(),
+            assignee: String::new(),
+            trusted_followup_authors: Vec::new(),
+            completion_authors: Vec::new(),
+            ready_label: String::new(),
+            base_branch: String::new(),
+            remote_name: String::new(),
+            github_host: String::new(),
+            github_apps_config: String::new(),
+            require_bot_auth: true,
+            auto_approve: false,
+            auto_merge: false,
+            branch_prefix: String::new(),
+            uat_enabled: false,
+            uat_hour: 0,
+            uat_issue_label: String::new(),
+            uat_batocera_host: String::new(),
+            uat_triage_enabled: false,
             run_dir: String::new(),
+            claude_model: String::new(),
+            claude_effort: String::new(),
+            codex_model: String::new(),
+            codex_effort: String::new(),
+            claude_bin: String::new(),
+            codex_bin: String::new(),
         }
     }
 }
 
 impl AppConfig {
     pub fn validate(&self) -> Result<(), String> {
-        let repo = Path::new(self.repo_dir.trim());
-        if self.repo_dir.trim().is_empty() || !repo.is_dir() {
-            return Err("Choose an existing local repository folder.".into());
+        if self.repositories.is_empty() {
+            return Err("Add at least one GitHub repository to monitor.".into());
         }
-        if !repo.join(".git").exists() {
-            return Err("The selected folder is not a Git checkout (.git was not found).".into());
+        let mut seen = HashSet::new();
+        for repo in &self.repositories {
+            if !seen.insert(repo.id.as_str()) {
+                return Err(format!("Repository {} is listed twice.", repo.label()));
+            }
+            repo.validate()
+                .map_err(|error| format!("Repository {}: {error}.", repo.label()))?;
+            let preferred = repo.effective_preferred_provider(&self.preferred_provider);
+            if !self
+                .enabled_providers()
+                .any(|provider| provider.id == preferred)
+            {
+                return Err(format!(
+                    "Repository {}: preferred provider '{preferred}' is not an enabled provider.",
+                    repo.label()
+                ));
+            }
         }
-        let repository = self.github_repository.trim();
-        if repository.split('/').count() != 2
-            || repository.starts_with('/')
-            || repository.ends_with('/')
-        {
-            return Err("GitHub repository must use owner/name format.".into());
+        if self.enabled_repos().next().is_none() {
+            return Err("Enable at least one repository.".into());
         }
-        if self.assignee.trim().is_empty() {
-            return Err("Set the GitHub assignee whose issues the worker may select.".into());
-        }
-        if !matches!(self.preferred_provider.as_str(), "claude" | "codex") {
-            return Err("Preferred provider must be claude or codex.".into());
-        }
+
+        self.validate_providers()?;
         if !matches!(
             self.schedule_mode.as_str(),
             "continuous" | "daily" | "weekdays" | "custom" | "manual"
@@ -155,28 +485,6 @@ impl AppConfig {
         if self.minimum_remaining_percent > 100 {
             return Err("Minimum remaining quota must be between 0 and 100 percent.".into());
         }
-        if self.uat_hour > 23 {
-            return Err("UAT hour must be between 0 and 23.".into());
-        }
-        if !matches!(self.delivery_mode.as_str(), "pull-request" | "local-main") {
-            return Err("Unknown delivery mode.".into());
-        }
-        if self.delivery_mode != "pull-request" && (self.auto_approve || self.auto_merge) {
-            return Err("Automatic approval and merge require pull-request delivery.".into());
-        }
-        if !matches!(self.merge_method.as_str(), "merge" | "squash" | "rebase") {
-            return Err("Unknown pull-request merge method.".into());
-        }
-        for (label, value) in [
-            ("Claude model", &self.claude_model),
-            ("Codex model", &self.codex_model),
-            ("base branch", &self.base_branch),
-            ("remote", &self.remote_name),
-        ] {
-            if value.trim().is_empty() {
-                return Err(format!("{label} cannot be empty."));
-            }
-        }
         if self.email_enabled {
             if self.email_to.trim().is_empty() {
                 return Err("Email notifications need a recipient address.".into());
@@ -188,12 +496,198 @@ impl AppConfig {
         Ok(())
     }
 
-    pub fn effective_run_dir(&self) -> PathBuf {
-        if self.run_dir.trim().is_empty() {
-            Path::new(&self.repo_dir).join(".run")
-        } else {
-            PathBuf::from(&self.run_dir)
+    pub fn repositories(&self) -> &[RepoConfig] {
+        &self.repositories
+    }
+
+    pub fn repo(&self, id: &str) -> Option<&RepoConfig> {
+        self.repositories.iter().find(|repo| repo.id == id)
+    }
+
+    pub fn enabled_repos(&self) -> impl Iterator<Item = &RepoConfig> {
+        self.repositories.iter().filter(|repo| repo.enabled)
+    }
+
+    fn validate_providers(&self) -> Result<(), String> {
+        let mut seen = HashSet::new();
+        for provider in &self.providers {
+            if !KNOWN_PROVIDERS.contains(&provider.id.as_str()) {
+                return Err(format!("Unknown AI provider id: {}", provider.id));
+            }
+            if !seen.insert(provider.id.as_str()) {
+                return Err(format!("Duplicate AI provider entry: {}", provider.id));
+            }
+            if provider.enabled && provider.model.trim().is_empty() {
+                return Err(format!(
+                    "{} model cannot be empty while {} is enabled.",
+                    provider_label(&provider.id),
+                    provider_label(&provider.id),
+                ));
+            }
         }
+        if self.enabled_providers().next().is_none() {
+            return Err("Enable at least one AI provider.".into());
+        }
+        if !self
+            .enabled_providers()
+            .any(|provider| provider.id == self.preferred_provider)
+        {
+            return Err(
+                "The global preferred provider must be one of the enabled providers.".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn enabled_providers(&self) -> impl Iterator<Item = &ProviderSettings> {
+        self.providers.iter().filter(|provider| provider.enabled)
+    }
+
+    pub fn provider(&self, id: &str) -> Option<&ProviderSettings> {
+        self.providers.iter().find(|provider| provider.id == id)
+    }
+
+    #[cfg(test)]
+    fn provider_mut(&mut self, id: &str) -> Option<&mut ProviderSettings> {
+        self.providers.iter_mut().find(|provider| provider.id == id)
+    }
+
+    /// Fold a legacy single-repo / pre-`providers` config forward, guarantee a
+    /// full provider set, dedupe + re-key repositories, and clear the
+    /// transitional fields so they never round-trip.
+    pub fn normalize(&mut self) {
+        self.normalize_providers();
+        self.normalize_repositories();
+    }
+
+    fn normalize_providers(&mut self) {
+        if self.providers.is_empty() {
+            let legacy = |value: &str, id: &str| {
+                let value = value.trim();
+                if value.is_empty() {
+                    ProviderSettings::preset(id).model
+                } else {
+                    value.to_string()
+                }
+            };
+            let legacy_effort = |value: &str| {
+                let value = value.trim();
+                if value.is_empty() {
+                    "high".to_string()
+                } else {
+                    value.to_string()
+                }
+            };
+            self.providers = vec![
+                ProviderSettings {
+                    id: "claude".into(),
+                    enabled: true,
+                    model: legacy(&self.claude_model, "claude"),
+                    effort: legacy_effort(&self.claude_effort),
+                    bin: std::mem::take(&mut self.claude_bin),
+                },
+                ProviderSettings {
+                    id: "codex".into(),
+                    enabled: true,
+                    model: legacy(&self.codex_model, "codex"),
+                    effort: legacy_effort(&self.codex_effort),
+                    bin: std::mem::take(&mut self.codex_bin),
+                },
+                ProviderSettings::preset("grok"),
+            ];
+        }
+        for id in KNOWN_PROVIDERS {
+            if self.provider(id).is_none() {
+                self.providers.push(ProviderSettings::preset(id));
+            }
+        }
+        self.claude_model.clear();
+        self.claude_effort.clear();
+        self.codex_model.clear();
+        self.codex_effort.clear();
+        self.claude_bin.clear();
+        self.codex_bin.clear();
+        if !KNOWN_PROVIDERS.contains(&self.preferred_provider.as_str()) {
+            self.preferred_provider = "claude".into();
+        }
+    }
+
+    fn normalize_repositories(&mut self) {
+        if self.repositories.is_empty() && !self.github_repository.trim().is_empty() {
+            let mut repo = RepoConfig::with_repository(&self.github_repository);
+            repo.assignee = std::mem::take(&mut self.assignee);
+            repo.repo_dir = std::mem::take(&mut self.repo_dir);
+            repo.trusted_followup_authors = std::mem::take(&mut self.trusted_followup_authors);
+            repo.completion_authors = std::mem::take(&mut self.completion_authors);
+            if !self.ready_label.trim().is_empty() {
+                repo.ready_label = std::mem::take(&mut self.ready_label);
+            }
+            if !self.base_branch.trim().is_empty() {
+                repo.base_branch = std::mem::take(&mut self.base_branch);
+            }
+            if !self.remote_name.trim().is_empty() {
+                repo.remote_name = std::mem::take(&mut self.remote_name);
+            }
+            if !self.github_host.trim().is_empty() {
+                repo.github_host = std::mem::take(&mut self.github_host);
+            }
+            repo.github_apps_config = std::mem::take(&mut self.github_apps_config);
+            repo.require_bot_auth = self.require_bot_auth;
+            repo.auto_approve = self.auto_approve;
+            repo.auto_merge = self.auto_merge;
+            // A migrated config keeps whatever prefix it already used; a fresh
+            // repo defaults to "ai".
+            if !self.branch_prefix.trim().is_empty() {
+                repo.branch_prefix = std::mem::take(&mut self.branch_prefix);
+            }
+            repo.uat_enabled = self.uat_enabled;
+            if self.uat_hour <= 23 {
+                repo.uat_hour = self.uat_hour;
+            }
+            if !self.uat_issue_label.trim().is_empty() {
+                repo.uat_issue_label = std::mem::take(&mut self.uat_issue_label);
+            }
+            if !self.uat_batocera_host.trim().is_empty() {
+                repo.uat_batocera_host = std::mem::take(&mut self.uat_batocera_host);
+            }
+            repo.uat_triage_enabled = self.uat_triage_enabled;
+            repo.run_dir = std::mem::take(&mut self.run_dir);
+            self.repositories.push(repo);
+        }
+
+        // Re-key every repo from its current `github_repository`, drop
+        // unparseable entries, dedupe by id (first wins).
+        let mut seen = HashSet::new();
+        let mut kept = Vec::new();
+        for mut repo in std::mem::take(&mut self.repositories) {
+            let slug = repo_slug(&repo.github_repository);
+            if slug.is_empty() || !repo.github_repository.trim().contains('/') {
+                continue;
+            }
+            repo.id = slug;
+            if seen.insert(repo.id.clone()) {
+                if repo.integration_branch.trim().is_empty() {
+                    repo.integration_branch = "ai-main".into();
+                }
+                if repo.branch_prefix.trim().is_empty() {
+                    repo.branch_prefix = "ai".into();
+                }
+                if repo.base_branch.trim().is_empty() {
+                    repo.base_branch = "main".into();
+                }
+                if repo.remote_name.trim().is_empty() {
+                    repo.remote_name = "origin".into();
+                }
+                // Enterprise hosts are intentionally out of scope for now.
+                // Normalize older profiles to the one supported GitHub host.
+                repo.github_host = "github.com".into();
+                kept.push(repo);
+            }
+        }
+        self.repositories = kept;
+
+        // Clear transitional scalars regardless of migration path.
+        self.profile_name.clear();
     }
 }
 
@@ -214,10 +708,12 @@ fn validate_time(value: &str) -> Result<(), String> {
 }
 
 pub fn load(path: &Path) -> AppConfig {
-    std::fs::read(path)
+    let mut config: AppConfig = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    config.normalize();
+    config
 }
 
 pub fn save(path: &Path, config: &AppConfig) -> Result<(), String> {
@@ -241,10 +737,153 @@ pub fn save(path: &Path, config: &AppConfig) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn config_with_one_repo() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.repositories.push(RepoConfig {
+            assignee: "octocat".into(),
+            ..RepoConfig::with_repository("octocat/example")
+        });
+        config
+    }
+
     #[test]
     fn time_validation_is_strict() {
         assert!(validate_time("03:00").is_ok());
         assert!(validate_time("3:00").is_err());
         assert!(validate_time("24:00").is_err());
+    }
+
+    #[test]
+    fn normalize_folds_a_legacy_single_repo_config_forward() {
+        let legacy = r#"{
+            "github_repository": "octocat/Hello-World",
+            "assignee": "octocat",
+            "base_branch": "trunk",
+            "branch_prefix": "swarm",
+            "auto_merge": false,
+            "claude_model": "claude-opus-5",
+            "preferred_provider": "codex"
+        }"#;
+        let mut config: AppConfig = serde_json::from_str(legacy).expect("legacy config parses");
+        assert!(config.repositories.is_empty());
+        config.normalize();
+
+        assert_eq!(config.repositories.len(), 1);
+        let repo = &config.repositories[0];
+        assert_eq!(repo.id, "octocat__Hello-World");
+        assert_eq!(repo.github_repository, "octocat/Hello-World");
+        assert_eq!(repo.assignee, "octocat");
+        assert_eq!(repo.base_branch, "trunk");
+        assert_eq!(repo.integration_branch, "ai-main", "new default");
+        assert_eq!(repo.branch_prefix, "swarm", "migrated prefix preserved");
+        assert_eq!(repo.github_host, "github.com", "only supported host");
+        assert!(repo.require_bot_auth, "bot authentication defaults on");
+        assert!(!repo.auto_approve, "automatic PR approval defaults off");
+        assert!(!repo.auto_merge);
+        assert_eq!(config.provider("claude").unwrap().model, "claude-opus-5");
+        assert_eq!(config.preferred_provider, "codex");
+
+        let value: serde_json::Value = serde_json::to_value(&config).unwrap();
+        let top = value.as_object().unwrap();
+        assert!(top.contains_key("repositories"));
+        for legacy in [
+            "github_repository",
+            "assignee",
+            "base_branch",
+            "claude_model",
+            "profile_name",
+        ] {
+            assert!(
+                !top.contains_key(legacy),
+                "top-level legacy key {legacy} must not serialize"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_bot_config_prefers_an_existing_legacy_file() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = home.path().join(".config/swarm/github-apps.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "{}\n").unwrap();
+        let repo = RepoConfig::with_repository("octocat/example");
+        assert_eq!(
+            repo.effective_apps_config_at(home.path()),
+            legacy.to_string_lossy()
+        );
+
+        std::fs::remove_file(&legacy).unwrap();
+        assert!(repo
+            .effective_apps_config_at(home.path())
+            .ends_with("github-apps-octocat__example.json"));
+    }
+
+    #[test]
+    fn validate_rejects_a_broken_repo_set() {
+        let mut config = config_with_one_repo();
+        assert!(config.validate().is_ok());
+
+        // no repositories
+        let empty = AppConfig::default();
+        assert!(empty
+            .validate()
+            .unwrap_err()
+            .contains("at least one GitHub repository"));
+
+        // base == integration
+        config.repositories[0].integration_branch = "main".into();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("must differ from the base branch"));
+        config.repositories[0].integration_branch = "ai-main".into();
+
+        // duplicate repo
+        config.repositories.push(RepoConfig {
+            assignee: "octocat".into(),
+            ..RepoConfig::with_repository("octocat/example")
+        });
+        assert!(config.validate().unwrap_err().contains("listed twice"));
+        config.repositories.pop();
+
+        // per-repo preferred provider not enabled
+        config.repositories[0].preferred_provider = "grok".into();
+        for provider in &mut config.providers {
+            provider.enabled = provider.id == "claude";
+        }
+        config.preferred_provider = "claude".into();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("not an enabled provider"));
+    }
+
+    #[test]
+    fn validate_providers_rejects_a_broken_provider_set() {
+        let mut config = config_with_one_repo();
+        for provider in &mut config.providers {
+            provider.enabled = provider.id == "codex";
+        }
+        config.preferred_provider = "claude".into();
+        assert!(config
+            .validate_providers()
+            .unwrap_err()
+            .contains("preferred provider"));
+
+        for provider in &mut config.providers {
+            provider.enabled = false;
+        }
+        assert!(config
+            .validate_providers()
+            .unwrap_err()
+            .contains("at least one"));
+
+        config.providers = default_providers();
+        config.preferred_provider = "claude".into();
+        config.provider_mut("claude").unwrap().model.clear();
+        assert!(config
+            .validate_providers()
+            .unwrap_err()
+            .contains("model cannot be empty"));
     }
 }

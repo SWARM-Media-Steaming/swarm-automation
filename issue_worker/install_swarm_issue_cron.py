@@ -11,6 +11,7 @@ import argparse
 import atexit
 import datetime as dt
 import getpass
+import json
 import os
 import shutil
 import signal
@@ -23,6 +24,7 @@ from typing import Sequence
 
 ISSUE_COMPLETED_EXIT_CODE = 10
 QUOTA_PAUSED_EXIT_CODE = 11
+PROVIDER_UNAVAILABLE_EXIT_CODE = 12
 BEGIN_MARKER = "# BEGIN SWARM ISSUE WORKER"
 END_MARKER = "# END SWARM ISSUE WORKER"
 WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -73,10 +75,49 @@ class Runner:
         self.lock_dir = self.state_dir / "runner.lock"
         self.worker = Path(args.worker).expanduser().resolve()
         self.snapshot = self.state_dir / "swarm_issue_worker.snapshot.py"
-        self.in_progress_file = self.state_dir / "in-progress-issue.json"
         self.acquired_lock = False
         self.stop_requested = False
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # A single scheduler services every configured repo, one at a time.
+        # `--repos-file` is a JSON array of per-repo objects; without it we
+        # synthesize one entry from the flat `--repo-dir` args (tests / legacy).
+        self.repos = self._load_repos()
+        self.repo = self.repos[0]
+
+    def _load_repos(self) -> list[dict[str, object]]:
+        if getattr(self.args, "repos_file", ""):
+            entries = json.loads(Path(self.args.repos_file).expanduser().read_text(encoding="utf-8"))
+            if not isinstance(entries, list) or not entries:
+                raise RuntimeError(f"--repos-file has no repositories: {self.args.repos_file}")
+            return [self._normalize_repo(entry) for entry in entries]
+        workspace = str(Path(self.args.repo_dir).expanduser().resolve())
+        return [
+            self._normalize_repo(
+                {
+                    "label": self.args.repo_dir,
+                    "workspace_dir": workspace,
+                    "state_dir": str(self.state_dir),
+                    "base_branch": self.args.base_branch,
+                    "remote_name": self.args.remote_name,
+                    "integration_branch": getattr(self.args, "integration_branch", "ai-main"),
+                    "worker_args": [],
+                }
+            )
+        ]
+
+    @staticmethod
+    def _normalize_repo(entry: dict[str, object]) -> dict[str, object]:
+        entry = dict(entry)
+        entry["state_dir"] = str(Path(str(entry["state_dir"])).expanduser().resolve())
+        entry["workspace_dir"] = str(Path(str(entry["workspace_dir"])).expanduser().resolve())
+        entry.setdefault("worker_args", [])
+        entry.setdefault("label", entry["workspace_dir"])
+        return entry
+
+    @property
+    def in_progress_file(self) -> Path:
+        return Path(str(self.repo["state_dir"])) / "in-progress-issue.json"
 
     def log(self, message: str) -> None:
         line = f"[{timestamp()}] {message}"
@@ -168,7 +209,7 @@ class Runner:
         target = (
             Path(self.args.cargo_target_dir).expanduser().resolve()
             if self.args.cargo_target_dir
-            else Path(self.args.repo_dir).expanduser().resolve() / "target"
+            else Path(str(self.repo["workspace_dir"])) / "target"
         )
         if not target.is_dir():
             return
@@ -195,7 +236,9 @@ class Runner:
         self.log(
             f"Cargo target exceeds {self.args.cargo_target_max_gib} GiB; removing generated build artifacts."
         )
-        result = subprocess.run([self.args.cargo_bin, "clean"], cwd=self.args.repo_dir, check=False)
+        result = subprocess.run(
+            [self.args.cargo_bin, "clean"], cwd=str(self.repo["workspace_dir"]), check=False
+        )
         self.log(
             "Cargo build-artifact cleanup completed."
             if result.returncode == 0
@@ -204,72 +247,64 @@ class Runner:
 
     def git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [self.args.git_bin, "-C", self.args.repo_dir, *arguments],
+            [self.args.git_bin, "-C", str(self.repo["workspace_dir"]), *arguments],
             text=True,
             capture_output=True,
             check=False,
         )
 
     def synchronize_repository(self) -> bool:
+        """Light pre-flight for the current repo. The worker itself does the
+        real branch positioning and the base -> integration parity merge; here
+        we only confirm the checkout is usable and refresh remote refs."""
         if not self.args.git_bin:
-            self.log("Git is unavailable; deferring the worker until the repository can be synchronized.")
+            self.log("Git is unavailable; deferring the worker.")
             return False
         if self.git("rev-parse", "--is-inside-work-tree").returncode != 0:
-            self.log(f"Worker repository is not a Git checkout: {self.args.repo_dir}; deferring this run.")
-            return False
-        branch = self.git("branch", "--show-current").stdout.strip()
-        if self.in_progress_file.exists():
             self.log(
-                f"Saved issue work owns {branch or 'the current checkout'}; repository synchronization "
-                "will occur after the worker returns to main."
+                f"Worker repository is not a Git checkout: {self.repo['workspace_dir']}; deferring this run."
             )
+            return False
+        if self.in_progress_file.exists():
+            # A saved issue owns the checkout — leave it exactly as it is; the
+            # worker resumes it and does its own fetching.
             return True
         if self.git("status", "--porcelain").stdout.strip():
-            self.log("Repository has uncommitted work with no saved issue owner; deferring synchronization and AI.")
-            return False
-        if branch != self.args.base_branch:
-            switched = self.git("switch", self.args.base_branch)
-            if switched.returncode != 0:
-                detail = switched.stderr.strip() or switched.stdout.strip() or "git switch failed"
-                self.log(f"Could not return to {self.args.base_branch}: {detail}; deferring this run.")
-                return False
-            self.log(f"Returned the idle checkout to {self.args.base_branch} before synchronization.")
-        before = self.git("rev-parse", "HEAD").stdout.strip()
-        pulled = self.git("pull", "--ff-only", self.args.remote_name, self.args.base_branch)
-        if pulled.returncode != 0:
-            detail = pulled.stderr.strip() or pulled.stdout.strip() or "git pull failed"
             self.log(
-                f"Could not fast-forward {self.args.base_branch} from {self.args.remote_name}: "
-                f"{detail}; deferring this run."
+                "Repository has uncommitted work with no saved issue owner; deferring synchronization and AI."
             )
             return False
-        after = self.git("rev-parse", "HEAD").stdout.strip()
-        if after != before:
-            self.log(
-                f"Fast-forwarded {self.args.base_branch} from {self.args.remote_name} "
-                f"({before[:8]} -> {after[:8]}); the next worker snapshot uses the updated code."
-            )
-        else:
-            self.log(f"Local {self.args.base_branch} is synchronized with {self.args.remote_name}.")
+        fetched = self.git("fetch", "--prune", str(self.repo["remote_name"]))
+        if fetched.returncode != 0:
+            detail = fetched.stderr.strip() or fetched.stdout.strip() or "git fetch failed"
+            self.log(f"Could not fetch {self.repo['remote_name']}: {detail}; deferring this run.")
+            return False
         return True
 
     def run_worker(self, smtp_password: str) -> int:
         shutil.copy2(self.worker, self.snapshot)
+        workspace = str(self.repo["workspace_dir"])
         environment = os.environ.copy()
         environment["SWARM_SMTP_PASSWORD"] = smtp_password
-        environment["SWARM_REPO_DIR"] = str(Path(self.args.repo_dir).expanduser().resolve())
-        environment["SWARM_ISSUE_WORKER_STATE_DIR"] = str(self.state_dir)
+        environment["SWARM_REPO_DIR"] = workspace
+        environment["SWARM_ISSUE_WORKER_STATE_DIR"] = str(self.repo["state_dir"])
         environment["SWARM_ISSUE_WORKER_SCRIPT_DIR"] = str(self.script_dir)
         environment["GIT_BIN"] = self.args.git_bin
-        environment["SWARM_BASE_BRANCH"] = self.args.base_branch
-        environment["SWARM_GIT_REMOTE"] = self.args.remote_name
+        environment["SWARM_BASE_BRANCH"] = str(self.repo["base_branch"])
+        environment["SWARM_GIT_REMOTE"] = str(self.repo["remote_name"])
+        environment["SWARM_INTEGRATION_BRANCH"] = str(self.repo["integration_branch"])
         environment["PYTHONPATH"] = os.pathsep.join(
             [str(self.script_dir), environment.get("PYTHONPATH", "")]
         ).rstrip(os.pathsep)
-        command = [self.args.python_bin, str(self.snapshot), *self.worker_arguments]
+        command = [
+            self.args.python_bin,
+            str(self.snapshot),
+            *[str(arg) for arg in self.repo["worker_args"]],
+            *self.worker_arguments,
+        ]
         process = subprocess.Popen(
             command,
-            cwd=self.args.repo_dir,
+            cwd=workspace,
             env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -366,7 +401,7 @@ class Runner:
                     if not self.wait_for_schedule():
                         break
                     scheduled_tick_active = True
-                self.log("Starting a worker run.")
+                self.log(f"Starting a cycle over {len(self.repos)} repository(ies).")
                 if self.transcode_active():
                     self.log(
                         f"A SWARM media transcode is active; deferring AI and build work for "
@@ -376,41 +411,49 @@ class Runner:
                         return 0
                     self.sleep()
                     continue
-                if not self.synchronize_repository():
-                    if self.args.once:
-                        return 0
-                    self.sleep()
-                    continue
-                status = self.run_worker(smtp_password)
-                self.prune_cargo_target()
-                if status == ISSUE_COMPLETED_EXIT_CODE:
-                    self.log("Issue completed successfully; checking the queue again immediately.")
-                    if self.args.once:
-                        return status
-                    continue
-                if status == QUOTA_PAUSED_EXIT_CODE:
-                    self.log(
-                        "The active AI session was safely shelved for usage; checking immediately for another ready issue."
-                    )
-                    if self.args.once:
-                        return status
-                    continue
-                if status:
-                    self.log(
-                        f"Worker exited with status {status}; it will retry after {self.args.interval_seconds} seconds."
-                    )
-                else:
-                    self.log(
-                        f"No issue can be worked now; checking again in {self.args.interval_seconds} seconds."
-                    )
+
+                progressed = False
+                queued = False
+                errored = False
+                last_status = 0
+                for repo in self.repos:
+                    if self.stop_requested:
+                        break
+                    self.repo = repo
+                    self.log(f"=== repo: {repo['label']} ===")
+                    if not self.synchronize_repository():
+                        continue
+                    status = self.run_worker(smtp_password)
+                    self.prune_cargo_target()
+                    last_status = status
+                    if status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE):
+                        progressed = True
+                        self.log(f"{repo['label']}: made progress; will re-check on the next cycle.")
+                    elif status == PROVIDER_UNAVAILABLE_EXIT_CODE:
+                        queued = True
+                        self.log(
+                            f"{repo['label']}: an issue is queued, but no enabled AI provider has "
+                            "enough verified capacity; will retry on schedule."
+                        )
+                    elif status:
+                        errored = True
+                        self.log(f"{repo['label']}: worker exited with status {status}; will retry.")
+                    else:
+                        self.log(f"{repo['label']}: no issue to work right now.")
+
+                if queued:
+                    self.log("Cycle complete: queued issue work is waiting for AI capacity.")
+                elif not progressed and not errored:
+                    self.log("Cycle complete: no ready issues were found in enabled repositories.")
+
                 if self.args.once:
-                    return status
+                    return last_status
+                if progressed and self.args.schedule_mode == "continuous":
+                    # Drain more ready work across the repos without waiting.
+                    continue
                 if self.args.schedule_mode == "continuous":
                     self.sleep()
                 else:
-                    # A scheduled tick drains completed/quota-shelved issues
-                    # immediately via the branches above. Once the worker is
-                    # idle (or errored), return to the next configured slot.
                     scheduled_tick_active = False
         finally:
             self.release_lock()
@@ -457,6 +500,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=positive_integer(env_value("SWARM_CARGO_TARGET_MAX_GIB", "5")),
     )
     parser.add_argument("--repo-dir", default=env_value("SWARM_REPO_DIR", str(script_dir.parent.parent)))
+    parser.add_argument(
+        "--repos-file",
+        default=env_value("SWARM_REPOS_FILE", ""),
+        help="JSON array of per-repo objects to cycle over (multi-repo mode)",
+    )
+    parser.add_argument(
+        "--integration-branch",
+        default=env_value("SWARM_INTEGRATION_BRANCH", "ai-main"),
+    )
     parser.add_argument(
         "--state-dir",
         default=env_value("SWARM_ISSUE_WORKER_STATE_DIR", str(home / ".local/state/swarm-issue-worker")),

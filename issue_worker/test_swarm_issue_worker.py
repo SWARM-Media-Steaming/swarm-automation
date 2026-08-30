@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime as dt
 import io
 import json
@@ -19,8 +20,10 @@ import setup_github_bots as setup_module
 from swarm_issue_worker import (
     Config,
     IssueContext,
+    PROVIDER_UNAVAILABLE_EXIT_CODE,
     ProviderChoice,
     Worker,
+    WorkerError,
     build_parser,
     extract_completion_metadata,
     extract_followup_metadata,
@@ -47,15 +50,24 @@ class WorkerTestCase(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", str(self.remote)], check=True)
         self.git("remote", "add", "origin", str(self.remote))
         self.git("push", "-q", "-u", "origin", "main")
-        args = build_parser().parse_args(
-            [
-                "--repo-dir", str(self.repo), "--state-dir", str(self.state), "--no-email",
-                "--gh-bin", "/usr/bin/false", "--claude-bin", "", "--codex-bin", "",
-                "--delivery-mode", "local-main", "--no-auto-approve", "--no-auto-merge",
-                "--no-require-bot-auth",
-            ]
-        )
+        # The AI integration branch the worker cuts issue branches from.
+        self.git("branch", "ai-main", "main")
+        self.git("push", "-q", "origin", "ai-main")
+        args = build_parser().parse_args(self._worker_argv(auto=False))
         self.worker = Worker(Config.from_args(args))
+
+    def _worker_argv(self, auto: bool) -> list[str]:
+        return [
+            "--repo-dir", str(self.repo), "--state-dir", str(self.state), "--no-email",
+            "--gh-bin", "/usr/bin/false", "--claude-bin", "", "--codex-bin", "", "--grok-bin", "",
+            "--branch-prefix", "ai", "--integration-branch", "ai-main", "--base-branch", "main",
+            # Isolate from any real ~/.config/swarm/github-apps.json on the host
+            # so pushes stay local and no GitHub API calls are made.
+            "--github-apps-config", str(self.root / "no-github-apps.json"),
+            "--auto-approve" if auto else "--no-auto-approve",
+            "--auto-merge" if auto else "--no-auto-merge",
+            "--no-require-bot-auth",
+        ]
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -67,20 +79,13 @@ class WorkerTestCase(unittest.TestCase):
         ).stdout.strip()
 
     def pr_worker(self) -> Worker:
-        args = build_parser().parse_args(
-            [
-                "--repo-dir", str(self.repo), "--state-dir", str(self.state), "--no-email",
-                "--gh-bin", "/usr/bin/false", "--claude-bin", "", "--codex-bin", "",
-                "--delivery-mode", "pull-request", "--auto-approve", "--auto-merge",
-                "--no-require-bot-auth",
-            ]
-        )
-        return Worker(Config.from_args(args))
+        return Worker(Config.from_args(build_parser().parse_args(self._worker_argv(auto=True))))
 
     def paused_state(self, issue_number: int = 101) -> dict[str, object]:
         return {
             "issue_number": issue_number, "issue_title": "Paused work",
             "issue_url": f"https://example.invalid/issues/{issue_number}", "base_sha": self.base_sha,
+            "branch_name": f"ai/claude/issue-{issue_number}",
             "work_type": "initial", "previous_commit_sha": "", "previous_completion_comment": None,
             "followup_comments": [], "trigger_comment_id": None, "ai_tool": "Claude",
             "model": "test-model", "effort": "high", "session_id": f"session-{issue_number}",
@@ -111,14 +116,90 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(completion["commit_sha"], "1" * 40)
         self.assertIsNone(extract_completion_metadata(comments, {"someone-else"}))
 
-    def test_followup_prefers_opposite_provider(self) -> None:
-        choice = self.worker.choose_provider("Claude", {"Claude": True, "Codex": True})
-        assert choice is not None
-        self.assertEqual(choice.name, "Codex")
-        choice = self.worker.choose_provider("Codex", {"Claude": True, "Codex": True})
-        assert choice is not None
-        self.assertEqual(choice.name, "Claude")
-        self.assertTrue(choice.session_id)
+    def test_followup_rotates_away_from_the_previous_provider(self) -> None:
+        # Fresh issue: the preferred provider (Claude by default) goes first.
+        fresh = self.worker.choose_provider("", {"Claude": True, "Codex": True, "Grok": True})
+        assert fresh is not None
+        self.assertEqual(fresh.name, "Claude")
+        self.assertTrue(fresh.session_id, "Claude sessions are created up front")
+
+        # Follow-up: the provider that did the previous pass is pushed to the
+        # back, so a different enabled provider reviews.
+        after_claude = self.worker.choose_provider(
+            "Claude", {"Claude": True, "Codex": True, "Grok": True}
+        )
+        assert after_claude is not None
+        self.assertNotEqual(after_claude.name, "Claude")
+
+        after_grok = self.worker.choose_provider(
+            "Grok", {"Claude": True, "Codex": True, "Grok": True}
+        )
+        assert after_grok is not None
+        self.assertNotEqual(after_grok.name, "Grok")
+
+        # Last resort: the previous provider is still used when it is the only
+        # one with capacity.
+        only_claude = self.worker.choose_provider(
+            "Claude", {"Claude": True, "Codex": False, "Grok": False}
+        )
+        assert only_claude is not None
+        self.assertEqual(only_claude.name, "Claude")
+
+    def test_grok_capacity_reflects_install_and_sign_in(self) -> None:
+        # Empty --grok-bin in setUp -> not installed -> unavailable.
+        self.assertEqual(self.worker.grok_capacity(), 2)
+
+    def test_codex_capacity_retries_one_transient_failure(self) -> None:
+        failed = subprocess.CompletedProcess(
+            ["codex-rate-limits"], 1, stdout="", stderr="temporary app-server timeout"
+        )
+        succeeded = subprocess.CompletedProcess(
+            ["codex-rate-limits"],
+            0,
+            stdout=json.dumps(
+                {
+                    "primary": {"usedPercent": 55},
+                    "secondary": {"usedPercent": 29},
+                    "rateLimitReachedType": None,
+                    "spendControlReached": False,
+                }
+            ),
+            stderr="",
+        )
+        with (
+            mock.patch.object(self.worker, "provider_bin", return_value="/test/codex"),
+            mock.patch("swarm_issue_worker.command_available", return_value=True),
+            mock.patch("swarm_issue_worker.run_command", side_effect=[failed, succeeded]) as run,
+            mock.patch("swarm_issue_worker.time.sleep"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(self.worker.codex_capacity(), 0)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("--timeout", run.call_args.args[0])
+
+    def test_queued_issue_without_provider_capacity_has_distinct_status(self) -> None:
+        self.worker.issue = IssueContext(137, "Queued work", "", [], "https://example.invalid/137")
+        with (
+            mock.patch.object(self.worker, "provider_capacity", return_value=1),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = self.worker.run_selected_issue()
+        self.assertEqual(status, PROVIDER_UNAVAILABLE_EXIT_CODE)
+
+    def test_grok_issue_branch_name(self) -> None:
+        worker = self.pr_worker()
+        worker.choice = ProviderChoice("Grok", "grok-4.6", "high", "session")
+        worker.issue = IssueContext(7, "t", "", [], "https://example.invalid/7")
+        worker.issue.work_type = "followup"
+        worker.issue.trigger_comment_id = 3
+        self.assertEqual(worker.expected_branch(), "ai/xai/issue-7")
+
+    def test_previous_ai_regex_parses_grok(self) -> None:
+        from swarm_issue_worker import PREVIOUS_AI_RE
+
+        self.assertEqual(
+            PREVIOUS_AI_RE.search("Reworked by **Grok**.").group(1), "Grok"
+        )
 
     def test_choice_from_state_does_not_resume_a_session_that_never_started(self) -> None:
         # prepare_repository persists a freshly-generated Claude session_id
@@ -221,6 +302,8 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(selected.work_type, "followup")
 
     def test_pause_shelves_and_restore_preserves_newer_commit(self) -> None:
+        # The paused issue owns its own branch.
+        self.git("switch", "-q", "-c", "ai/claude/issue-101")
         self.worker.write_state(self.paused_state())
         (self.repo / "tracked.txt").write_text("base\npaused change\n", encoding="utf-8")
         (self.repo / "untracked.txt").write_text("untracked change\n", encoding="utf-8")
@@ -229,10 +312,13 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(paused_file.is_file())
         self.assertFalse(self.worker.in_progress_file.exists())
         self.assertEqual(self.git("status", "--porcelain"), "")
+        # A newer commit lands on the issue branch while it is shelved.
+        self.git("switch", "-q", "ai/claude/issue-101")
         (self.repo / "other.txt").write_text("other issue\n", encoding="utf-8")
         self.git("add", "other.txt")
         self.git("commit", "-q", "-m", "other issue")
         newer_sha = self.git("rev-parse", "HEAD")
+        self.git("switch", "-q", "ai-main")
         self.worker.restore_paused(paused_file)
         self.assertEqual(self.git("rev-parse", "HEAD"), newer_sha)
         self.assertIn("paused change", (self.repo / "tracked.txt").read_text())
@@ -280,7 +366,7 @@ class WorkerTestCase(unittest.TestCase):
 
         notifications.assert_not_called()
         capacity.assert_not_called()
-        self.assertEqual(self.git("branch", "--show-current"), "main")
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertFalse(worker.in_progress_file.exists())
         archive = worker.closed_paused_dir / "102.json"
@@ -315,6 +401,82 @@ class WorkerTestCase(unittest.TestCase):
             ["api", "--method", "GET", "repos/DotNetRockStar/swarm/issues/104"]
         )
 
+    def test_auto_merge_leaves_open_issue_pull_requests_waiting(self) -> None:
+        worker = self.pr_worker()
+        pull_requests = json.dumps(
+            [
+                {
+                    "url": "https://example.invalid/pull/105",
+                    "headRefName": "ai/claude/issue-105",
+                    "headRefOid": "1" * 40,
+                    "isDraft": False,
+                    "mergeable": "MERGEABLE",
+                }
+            ]
+        )
+        with (
+            mock.patch.object(worker.github, "gh", return_value=pull_requests),
+            mock.patch.object(worker, "issue_is_closed", return_value=False),
+            mock.patch.object(worker, "approve_pull_request") as approve,
+            mock.patch.object(worker, "merge_pull_request") as merge,
+        ):
+            worker.merge_closed_issue_pull_requests()
+        approve.assert_called_once_with("https://example.invalid/pull/105", "claude")
+        merge.assert_not_called()
+
+    def test_auto_merge_reconciles_a_pull_request_after_issue_closure(self) -> None:
+        worker = self.pr_worker()
+        pull_requests = json.dumps(
+            [
+                {
+                    "url": "https://example.invalid/pull/106",
+                    "headRefName": "ai/codex/issue-106",
+                    "headRefOid": "2" * 40,
+                    "isDraft": False,
+                    "mergeable": "MERGEABLE",
+                }
+            ]
+        )
+        with (
+            mock.patch.object(worker.github, "gh", return_value=pull_requests),
+            mock.patch.object(worker, "issue_is_closed", return_value=True),
+            mock.patch.object(worker, "approve_pull_request") as approve,
+            mock.patch.object(worker, "merge_pull_request", return_value="3" * 40) as merge,
+        ):
+            worker.merge_closed_issue_pull_requests()
+        approve.assert_called_once_with("https://example.invalid/pull/106", "codex")
+        merge.assert_called_once_with(
+            "https://example.invalid/pull/106", "2" * 40, "codex", 106
+        )
+
+    def test_merge_helper_rechecks_issue_state_before_github_merge(self) -> None:
+        worker = self.pr_worker()
+        with (
+            mock.patch.object(worker, "issue_is_closed", return_value=False),
+            mock.patch.object(worker.github, "gh") as gh,
+        ):
+            with self.assertRaisesRegex(WorkerError, "issue #107 is still open"):
+                worker.merge_pull_request(
+                    "https://example.invalid/pull/107", "4" * 40, "claude", 107
+                )
+        gh.assert_not_called()
+
+    def test_closed_issue_merge_comments_without_closing_the_issue(self) -> None:
+        worker = self.pr_worker()
+        merge_sha = "5" * 40
+        with (
+            mock.patch.object(worker, "issue_is_closed", return_value=True),
+            mock.patch.object(worker.github, "gh", side_effect=["", merge_sha, ""]) as gh,
+        ):
+            result = worker.merge_pull_request(
+                "https://example.invalid/pull/108", "6" * 40, "codex", 108
+            )
+        self.assertEqual(result, merge_sha)
+        commands = [call.args[0] for call in gh.call_args_list]
+        self.assertEqual(commands[0][:2], ["pr", "merge"])
+        self.assertEqual(commands[2][:2], ["issue", "comment"])
+        self.assertNotIn(["issue", "close"], [command[:2] for command in commands])
+
     def test_damaged_recovery_sha_is_repaired_by_unique_prefix(self) -> None:
         (self.repo / "tracked.txt").write_text("base\nissue work\n", encoding="utf-8")
         self.git("add", "tracked.txt")
@@ -329,6 +491,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(normalized["candidate_sha"], candidate)
 
     def test_recovery_records_existing_candidate_with_dirty_worktree(self) -> None:
+        self.git("switch", "-q", "-c", "ai/codex/issue-303")
         self.worker.issue = IssueContext(303, "Recovery", "", [], "https://example.invalid/303")
         self.worker.choice = ProviderChoice("Codex", "test", "high", "session", True)
         self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
@@ -357,16 +520,16 @@ class WorkerTestCase(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "simulated interruption"):
                 worker.prepare_repository()
         state = worker.read_state()
-        self.assertEqual(state["branch_name"], "swarm/codex/issue-401")
-        self.assertEqual(state["base_sha"], self.git("rev-parse", "main"))
-        self.assertEqual(self.git("branch", "--show-current"), "main")
+        self.assertEqual(state["branch_name"], "ai/codex/issue-401")
+        self.assertEqual(state["base_sha"], self.git("rev-parse", "ai-main"))
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
 
         run_start, recovery, candidate, dirty = worker.prepare_repository()
         self.assertTrue(recovery)
         self.assertFalse(candidate)
         self.assertFalse(dirty)
         self.assertEqual(run_start, state["base_sha"])
-        self.assertEqual(self.git("branch", "--show-current"), "swarm/codex/issue-401")
+        self.assertEqual(self.git("branch", "--show-current"), "ai/codex/issue-401")
 
     def test_fresh_pr_branch_fast_forwards_main_before_branching(self) -> None:
         updater = self.root / "updater"
@@ -393,9 +556,39 @@ class WorkerTestCase(unittest.TestCase):
         self.assertFalse(recovery)
         self.assertEqual(run_start, remote_main)
         self.assertEqual(self.git("rev-parse", "main"), remote_main)
-        self.assertEqual(self.git("branch", "--show-current"), "swarm/claude/issue-402")
+        self.assertEqual(self.git("branch", "--show-current"), "ai/claude/issue-402")
 
-    def test_worker_commits_uncommitted_completed_work(self) -> None:
+    def test_conflicting_main_sync_refuses_to_cut_an_issue_branch(self) -> None:
+        self.git("switch", "-q", "ai-main")
+        (self.repo / "shared.txt").write_text("integration\n", encoding="utf-8")
+        self.git("add", "shared.txt")
+        self.git("commit", "-q", "-m", "integration change")
+        self.git("push", "-q", "origin", "ai-main")
+
+        updater = self.root / "conflicting-main"
+        subprocess.run(
+            ["git", "clone", "-q", "--branch", "main", str(self.remote), str(updater)],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(updater), "config", "user.name", "Other"], check=True)
+        subprocess.run(["git", "-C", str(updater), "config", "user.email", "other@example.com"], check=True)
+        (updater / "shared.txt").write_text("main\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(updater), "add", "shared.txt"], check=True)
+        subprocess.run(["git", "-C", str(updater), "commit", "-q", "-m", "main change"], check=True)
+        subprocess.run(["git", "-C", str(updater), "push", "-q", "origin", "main"], check=True)
+
+        worker = self.pr_worker()
+        worker.issue = IssueContext(413, "Conflicting parity", "", [], "https://example.invalid/413")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+        with self.assertRaisesRegex(WorkerError, "refusing to create an issue branch"):
+            worker.prepare_repository()
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+        self.assertNotIn(
+            "ai/claude/issue-413",
+            self.git("branch", "--format=%(refname:short)").splitlines(),
+        )
+
+    def test_worker_commits_uncommitted_completed_work_with_the_tool_prefix(self) -> None:
         worker = self.pr_worker()
         worker.issue = IssueContext(403, "Commit completed files", "", [], "https://example.invalid/403")
         worker.choice = ProviderChoice("Codex", "test", "high", "session")
@@ -404,7 +597,66 @@ class WorkerTestCase(unittest.TestCase):
         committed = worker.commit_completed_work(run_start)
         self.assertNotEqual(committed, run_start)
         self.assertEqual(self.git("status", "--porcelain"), "")
-        self.assertIn("#403", self.git("log", "-1", "--format=%B"))
+        subject = self.git("log", "-1", "--format=%s")
+        self.assertTrue(subject.startswith("[codex] "), subject)
+        self.assertIn("#403", subject)
+
+    def test_worker_refuses_to_push_an_untagged_commit_from_a_multi_commit_run(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(412, "Tagged history", "", [], "https://example.invalid/412")
+        worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        run_start, _, _, _ = worker.prepare_repository()
+        (self.repo / "first.txt").write_text("first\n", encoding="utf-8")
+        self.git("add", "first.txt")
+        self.git("commit", "-q", "-m", "missing provider tag (#412)")
+        (self.repo / "second.txt").write_text("second\n", encoding="utf-8")
+        self.git("add", "second.txt")
+        self.git("commit", "-q", "-m", "[codex] tagged commit (#412)")
+        completion = self.git("rev-parse", "HEAD")
+
+        with self.assertRaisesRegex(WorkerError, r"required \[codex\] prefix"):
+            worker.validate_new_commit_messages(run_start, completion)
+
+    def test_issue_branch_is_cut_from_the_integration_branch(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(410, "From ai-main", "", [], "https://example.invalid/410")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+        run_start, recovery, _, _ = worker.prepare_repository()
+        self.assertFalse(recovery)
+        self.assertEqual(self.git("branch", "--show-current"), "ai/claude/issue-410")
+        # The branch descends from ai-main, and ai-main contains main.
+        self.assertEqual(run_start, self.git("rev-parse", "ai-main"))
+        self.assertTrue(
+            worker.git_ok("merge-base", "--is-ancestor", "main", "ai/claude/issue-410")
+        )
+
+    def test_a_second_provider_follow_up_reuses_the_same_branch(self) -> None:
+        # First pass by Claude creates the branch and pushes it.
+        first = self.pr_worker()
+        first.issue = IssueContext(411, "Reuse branch", "", [], "https://example.invalid/411")
+        first.choice = ProviderChoice("Claude", "test", "high", "session")
+        run_start, _, _, _ = first.prepare_repository()
+        (self.repo / "one.txt").write_text("first pass\n", encoding="utf-8")
+        first_commit = first.commit_completed_work(run_start)
+        branch = first.expected_branch()
+        self.assertEqual(branch, "ai/claude/issue-411")
+        self.git("push", "-q", "origin", branch)
+        # Reset local state as if a fresh scheduler cycle picked up a follow-up.
+        first.in_progress_file.unlink()
+        self.git("switch", "-q", "ai-main")
+        self.git("branch", "-D", branch)
+
+        second = self.pr_worker()
+        second.issue = IssueContext(411, "Reuse branch", "", [], "https://example.invalid/411")
+        second.issue.work_type = "followup"
+        second.issue.trigger_comment_id = 99
+        second.issue.previous_commit_sha = first_commit
+        second.choice = ProviderChoice("Codex", "test", "high", "")
+        second.prepare_repository()
+        # Same branch name (Claude's), and the previous commit is present.
+        self.assertEqual(second.expected_branch(), "ai/claude/issue-411")
+        self.assertEqual(self.git("branch", "--show-current"), "ai/claude/issue-411")
+        self.assertTrue(second.git_ok("cat-file", "-e", f"{first_commit}^{{commit}}"))
 
     def test_start_comment_is_posted_once_by_selected_provider(self) -> None:
         self.worker.issue = IssueContext(407, "Start notice", "", [], "https://example.invalid/407")
@@ -422,7 +674,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("issue", arguments)
         self.assertIn("**Codex Bot** started working on this issue", body)
         self.assertIn("- Model: `test-model`", body)
-        self.assertIn("- Branch: `main`", body)
+        self.assertIn("- Branch: `ai/codex/issue-407`", body)
         self.assertTrue(is_worker_comment({"body": body}))
         self.assertTrue(self.worker.read_state()["started_comment_posted"])
 
@@ -444,7 +696,7 @@ class WorkerTestCase(unittest.TestCase):
             [
                 "--repo-dir", str(self.repo), "--state-dir", str(self.state), "--no-email",
                 "--dry-run", "--no-require-bot-auth", "--gh-bin", "/usr/bin/false",
-                "--claude-bin", "", "--codex-bin", "",
+                "--claude-bin", "", "--codex-bin", "", "--grok-bin", "",
             ]
         )
         worker = Worker(Config.from_args(args))
@@ -452,20 +704,33 @@ class WorkerTestCase(unittest.TestCase):
         with (
             mock.patch.object(worker, "claude_capacity", return_value=0),
             mock.patch.object(worker, "codex_capacity", return_value=0),
+            mock.patch.object(worker, "grok_capacity", return_value=0),
             mock.patch.object(worker, "post_started_comment") as start_comment,
         ):
             self.assertEqual(worker.run_selected_issue(), 0)
         start_comment.assert_not_called()
 
-    def test_opposite_provider_approves_pull_request(self) -> None:
+    def test_a_different_provider_approves_the_pull_request(self) -> None:
         worker = self.pr_worker()
         worker.issue = IssueContext(404, "Approval", "", [], "https://example.invalid/404")
         worker.choice = ProviderChoice("Claude", "test", "high", "session")
         with mock.patch.object(worker.github, "gh", return_value="") as github:
             reviewer = worker.approve_pull_request("https://example.invalid/pull/404")
-        self.assertEqual(reviewer, "codex")
-        self.assertEqual(github.call_args.args[1], "codex")
+        self.assertNotEqual(reviewer, "claude", "the implementer must not approve its own PR")
+        self.assertIn(reviewer, {"codex", "grok"})
+        self.assertEqual(github.call_args.args[1], reviewer)
         self.assertIn("--approve", github.call_args.args[0])
+
+        # When the implementer is the only enabled provider, it falls back to
+        # approving its own PR rather than blocking.
+        worker.config = dataclasses.replace(
+            worker.config,
+            providers=tuple(
+                dataclasses.replace(s, enabled=(s.key == "claude"))
+                for s in worker.config.providers
+            ),
+        )
+        self.assertEqual(worker.review_provider(), "claude")
 
     def test_followup_uses_a_new_comment_specific_branch(self) -> None:
         worker = self.pr_worker()
@@ -479,11 +744,11 @@ class WorkerTestCase(unittest.TestCase):
             trigger_comment_id=9876,
         )
         worker.choice = ProviderChoice("Codex", "test", "high", "session")
-        self.assertEqual(worker.expected_branch(), "swarm/codex/issue-404-followup-9876")
+        self.assertEqual(worker.expected_branch(), "ai/codex/issue-404")
 
-    def test_pr_completion_returns_clean_checkout_to_updated_main(self) -> None:
+    def test_pr_completion_returns_clean_checkout_to_the_integration_branch(self) -> None:
         worker = self.pr_worker()
-        worker.issue = IssueContext(405, "Return to main", "", [], "https://example.invalid/405")
+        worker.issue = IssueContext(405, "Return to ai-main", "", [], "https://example.invalid/405")
         worker.choice = ProviderChoice("Codex", "test", "high", "session")
         run_start, _, _, _ = worker.prepare_repository()
         (self.repo / "merged.txt").write_text("merged\n", encoding="utf-8")
@@ -491,9 +756,10 @@ class WorkerTestCase(unittest.TestCase):
         branch = worker.expected_branch()
         self.git("push", "-q", "-u", "origin", branch)
 
+        # Simulate the squash-merge of the issue branch into ai-main on the remote.
         merger = self.root / "merger"
         subprocess.run(
-            ["git", "clone", "-q", "--branch", "main", str(self.remote), str(merger)], check=True
+            ["git", "clone", "-q", "--branch", "ai-main", str(self.remote), str(merger)], check=True
         )
         subprocess.run(["git", "-C", str(merger), "config", "user.name", "merger"], check=True)
         subprocess.run(
@@ -504,15 +770,15 @@ class WorkerTestCase(unittest.TestCase):
             ["git", "-C", str(merger), "merge", "-q", "--no-ff", "FETCH_HEAD", "-m", "merge issue"],
             check=True,
         )
-        subprocess.run(["git", "-C", str(merger), "push", "-q", "origin", "main"], check=True)
-        merged_main = subprocess.run(
+        subprocess.run(["git", "-C", str(merger), "push", "-q", "origin", "ai-main"], check=True)
+        merged_head = subprocess.run(
             ["git", "-C", str(merger), "rev-parse", "HEAD"], text=True,
             stdout=subprocess.PIPE, check=True,
         ).stdout.strip()
 
-        synchronized = worker.return_to_synchronized_main(branch)
-        self.assertEqual(synchronized, merged_main)
-        self.assertEqual(self.git("branch", "--show-current"), "main")
+        synchronized = worker.return_to_integration_branch(branch)
+        self.assertEqual(synchronized, merged_head)
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertNotIn(branch, self.git("branch", "--format=%(refname:short)").splitlines())
 
@@ -527,11 +793,11 @@ class WorkerTestCase(unittest.TestCase):
         (self.repo / "paused.txt").write_text("paused work\n", encoding="utf-8")
         worker.suspend_paused()
         paused_file = worker.paused_dir / "406.json"
-        self.assertEqual(self.git("branch", "--show-current"), "main")
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
         self.assertTrue(paused_file.is_file())
 
         worker.restore_paused(paused_file)
-        self.assertEqual(self.git("branch", "--show-current"), "swarm/claude/issue-406")
+        self.assertEqual(self.git("branch", "--show-current"), "ai/claude/issue-406")
         self.assertEqual((self.repo / "paused.txt").read_text(), "paused work\n")
         self.assertTrue(worker.in_progress_file.is_file())
 
@@ -551,15 +817,22 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(args.github_repository, "DotNetRockStar/swarm")
         self.assertEqual(args.assignee, "DotNetRockStar")
         self.assertEqual(args.minimum_remaining_percent, 10)
-        self.assertEqual(args.delivery_mode, "pull-request")
+        self.assertEqual(args.base_branch, "main")
+        self.assertEqual(args.integration_branch, "ai-main")
+        self.assertEqual(args.branch_prefix, "ai")
         self.assertTrue(args.require_bot_auth)
-        self.assertTrue(args.auto_approve)
-        self.assertTrue(args.auto_merge)
+        self.assertFalse(args.auto_approve)
+        self.assertFalse(args.auto_merge)
+        # delivery-mode / merge-method were removed with the integration model.
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["--delivery-mode", "pull-request"])
         overridden = build_parser().parse_args(
-            ["--github-repository", "example/repo", "--preferred-provider", "codex", "--delivery-mode", "pull-request"]
+            ["--github-repository", "example/repo", "--preferred-provider", "codex",
+             "--integration-branch", "staging"]
         )
         self.assertEqual(overridden.github_repository, "example/repo")
         self.assertEqual(overridden.preferred_provider, "codex")
+        self.assertEqual(overridden.integration_branch, "staging")
 
 
 class RunnerTestCase(unittest.TestCase):
@@ -584,6 +857,34 @@ class RunnerTestCase(unittest.TestCase):
             runner_module.build_parser().parse_args(["--schedule-time", "25:00"])
         with self.assertRaises(SystemExit):
             runner_module.build_parser().parse_args(["--schedule-days", "monday,nonesday"])
+
+    def test_scheduler_reports_queued_issue_waiting_for_provider(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-capacity-test.") as temporary:
+            root = Path(temporary)
+            worker = root / "worker.py"
+            worker.write_text("raise SystemExit(12)\n", encoding="utf-8")
+            args = runner_module.build_parser().parse_args(
+                [
+                    "--repo-dir", str(root), "--state-dir", str(root / "state"),
+                    "--worker", str(worker), "--once", "--no-email",
+                    "--crontab-bin", "", "--pgrep-bin", "",
+                ]
+            )
+            runner = runner_module.Runner(args, [])
+            output = io.StringIO()
+            with (
+                mock.patch.object(runner, "synchronize_repository", return_value=True),
+                mock.patch.object(
+                    runner, "run_worker", return_value=runner_module.PROVIDER_UNAVAILABLE_EXIT_CODE
+                ),
+                mock.patch.object(runner, "prune_cargo_target"),
+                contextlib.redirect_stdout(output),
+            ):
+                status = runner.run()
+        self.assertEqual(status, runner_module.PROVIDER_UNAVAILABLE_EXIT_CODE)
+        self.assertIn("an issue is queued", output.getvalue())
+        self.assertIn("Cycle complete: queued issue work is waiting for AI capacity", output.getvalue())
+        self.assertNotIn("no issue to work", output.getvalue())
 
     def test_active_transcode_diagnostic_and_runner_lock(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-test.") as temporary:
@@ -645,7 +946,7 @@ class RunnerTestCase(unittest.TestCase):
             self.assertEqual(result["state"], str(state.resolve()))
             self.assertEqual(result["args"], ["--github-repository", "example/repo", "--no-email"])
 
-    def test_scheduler_fast_forwards_before_copying_worker_snapshot(self) -> None:
+    def test_scheduler_preflight_fetches_and_runs_the_worker_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-sync-test.") as temporary:
             root = Path(temporary)
             repo = root / "repo"
@@ -659,27 +960,25 @@ class RunnerTestCase(unittest.TestCase):
             worker = repo / "worker.py"
             worker.write_text(
                 "import os\nfrom pathlib import Path\n"
-                "Path(os.environ['FAKE_RESULT_FILE']).write_text('old')\n",
+                "Path(os.environ['FAKE_RESULT_FILE']).write_text('ran')\n",
                 encoding="utf-8",
             )
             subprocess.run(["git", "-C", str(repo), "add", "worker.py"], check=True)
-            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "old worker"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "worker"], check=True)
             subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(remote)], check=True)
             subprocess.run(["git", "-C", str(repo), "push", "-q", "-u", "origin", "main"], check=True)
 
+            # A commit lands on origin/main after the scheduler starts.
             updater = root / "updater"
             subprocess.run(
                 ["git", "clone", "-q", "--branch", "main", str(remote), str(updater)], check=True
             )
             for name, value in (("user.name", "updater"), ("user.email", "updater@example.invalid")):
                 subprocess.run(["git", "-C", str(updater), "config", name, value], check=True)
-            (updater / "worker.py").write_text(
-                "import os\nfrom pathlib import Path\n"
-                "Path(os.environ['FAKE_RESULT_FILE']).write_text('new')\n",
-                encoding="utf-8",
+            subprocess.run(
+                ["git", "-C", str(updater), "commit", "-q", "--allow-empty", "-m", "remote update"],
+                check=True,
             )
-            subprocess.run(["git", "-C", str(updater), "add", "worker.py"], check=True)
-            subprocess.run(["git", "-C", str(updater), "commit", "-q", "-m", "new worker"], check=True)
             subprocess.run(["git", "-C", str(updater), "push", "-q", "origin", "main"], check=True)
             remote_sha = subprocess.run(
                 ["git", "-C", str(updater), "rev-parse", "HEAD"], text=True,
@@ -695,12 +994,14 @@ class RunnerTestCase(unittest.TestCase):
             with mock.patch.dict(os.environ, {"FAKE_RESULT_FILE": str(result_file)}):
                 self.assertEqual(runner_module.Runner(args, []).run(), 0)
 
-            self.assertEqual(result_file.read_text(encoding="utf-8"), "new")
-            local_sha = subprocess.run(
-                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True,
+            # The worker ran, and the pre-flight fetched (origin/main now points
+            # at the update the worker's own integration sync would use).
+            self.assertEqual(result_file.read_text(encoding="utf-8"), "ran")
+            fetched = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "origin/main"], text=True,
                 stdout=subprocess.PIPE, check=True,
             ).stdout.strip()
-            self.assertEqual(local_sha, remote_sha)
+            self.assertEqual(fetched, remote_sha)
 
     def test_scheduler_does_not_switch_an_active_issue_checkout(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-active-test.") as temporary:
@@ -713,7 +1014,7 @@ class RunnerTestCase(unittest.TestCase):
                 ["git", "-C", str(repo), "config", "user.email", "runner@example.invalid"], check=True
             )
             subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "base"], check=True)
-            subprocess.run(["git", "-C", str(repo), "switch", "-q", "-c", "swarm/codex/issue-114"], check=True)
+            subprocess.run(["git", "-C", str(repo), "switch", "-q", "-c", "ai/codex/issue-114"], check=True)
             state.mkdir()
             (state / "in-progress-issue.json").write_text("{}\n", encoding="utf-8")
             (repo / "dirty.txt").write_text("active work\n", encoding="utf-8")
@@ -727,7 +1028,7 @@ class RunnerTestCase(unittest.TestCase):
                 ["git", "-C", str(repo), "branch", "--show-current"], text=True,
                 stdout=subprocess.PIPE, check=True,
             ).stdout.strip()
-            self.assertEqual(branch, "swarm/codex/issue-114")
+            self.assertEqual(branch, "ai/codex/issue-114")
             self.assertTrue((repo / "dirty.txt").is_file())
 
 
@@ -799,6 +1100,8 @@ class GitHubAppAuthTestCase(unittest.TestCase):
             manifest = state.manifest("codex")
             self.assertFalse(manifest["public"])
             self.assertNotIn("hook_attributes", manifest)
+            self.assertNotIn("setup_url", manifest)
+            self.assertNotIn("setup_on_update", manifest)
             self.assertEqual(
                 manifest["default_permissions"],
                 {
@@ -808,6 +1111,111 @@ class GitHubAppAuthTestCase(unittest.TestCase):
                     "workflows": "write",
                 },
             )
+
+    def test_setup_registers_private_apps_with_the_repository_owner(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-owner-test.") as temporary:
+            state = setup_module.SetupState(
+                "SWARM-Media-Steaming/swarm",
+                Path(temporary) / "apps.json",
+                8765,
+            )
+            state.repository_owner_type = "Organization"
+            self.assertEqual(
+                state.registration_url(),
+                "https://github.com/organizations/SWARM-Media-Steaming/settings/apps/new",
+            )
+            self.assertLessEqual(len(state.app_name("claude")), 34)
+
+    def test_setup_replaces_a_private_app_owned_by_the_wrong_account(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-owner-mismatch-test.") as temporary:
+            root = Path(temporary)
+            key = root / "claude.pem"
+            key.write_text("not used", encoding="utf-8")
+            key.chmod(0o600)
+            config = root / "apps.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "claude": {
+                            "app_id": 1,
+                            "installation_id": 2,
+                            "private_key_path": str(key),
+                            "bot_login": "swarm-claude[bot]",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = setup_module.SetupState(
+                "SWARM-Media-Steaming/swarm", config, 8765, ("claude",)
+            )
+            with mock.patch.object(state, "detect_repository_owner"):
+                with mock.patch.object(setup_module, "GitHubAppAuth") as auth_type:
+                    auth_type.return_value.app_profile.return_value = {
+                        "owner": {"login": "DotNetRockStar"}
+                    }
+                    state.validate_existing()
+                    self.assertEqual(
+                        state.owner_mismatches, {"claude": "DotNetRockStar"}
+                    )
+                    auth_type.return_value.find_installation_for_repository.assert_not_called()
+
+    def test_setup_only_waits_for_enabled_providers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-provider-test.") as temporary:
+            state = setup_module.SetupState(
+                "octocat/example",
+                Path(temporary) / "apps.json",
+                8765,
+                ("claude",),
+            )
+            self.assertFalse(state.complete.is_set())
+            state.valid_installations.add("claude")
+            state.refresh_complete()
+            self.assertTrue(state.complete.is_set())
+
+    def test_app_definition_can_exist_before_repository_installation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-partial-test.") as temporary:
+            root = Path(temporary)
+            key = root / "bot.pem"
+            key.write_text("not used", encoding="utf-8")
+            key.chmod(0o600)
+            config = root / "apps.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "claude": {
+                            "app_id": 1,
+                            "installation_id": 0,
+                            "private_key_path": str(key),
+                            "bot_login": "swarm-claude[bot]",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            auth = auth_module.GitHubAppAuth(config)
+            self.assertEqual(auth.definition("claude").app_id, 1)
+            self.assertFalse(auth.configured("claude"))
+            with self.assertRaisesRegex(RuntimeError, "has not been installed"):
+                auth.token("claude")
+
+    def test_setup_confirms_installation_access_before_saving_callback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-install-test.") as temporary:
+            state = setup_module.SetupState(
+                "octocat/example",
+                Path(temporary) / "apps.json",
+                8765,
+                ("claude",),
+            )
+            with mock.patch.object(setup_module, "GitHubAppAuth") as auth_type:
+                with mock.patch.object(state, "save_installation") as save_installation:
+                    auth_type.return_value.find_installation_for_repository.return_value = 42
+                    self.assertTrue(state.confirm_installation("claude", 42))
+                    save_installation.assert_called_once_with("claude", 42)
+
+                    save_installation.reset_mock()
+                    self.assertFalse(state.confirm_installation("claude", 99))
+                    save_installation.assert_not_called()
 
 
 if __name__ == "__main__":
