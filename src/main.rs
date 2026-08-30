@@ -29,6 +29,10 @@ const REQUIRED_WORKER_RESOURCES: [&str; 6] = [
 struct AppState {
     config: Mutex<AppConfig>,
     processes: ProcessManager,
+    /// Cached presence of the optional SMTP password. Checking Keychain can
+    /// trigger a macOS access prompt, so status polling must not probe it every
+    /// two seconds.
+    smtp_password_configured: Mutex<Option<bool>>,
     /// Test-only override for `app_config_path`/`automation_log_path`.
     /// `mock_context()`'s identifier defaults to empty, so every test would
     /// otherwise resolve to the same shared OS path; this gives each test's
@@ -43,6 +47,7 @@ impl Default for AppState {
         Self {
             config: Mutex::new(AppConfig::default()),
             processes: ProcessManager::default(),
+            smtp_password_configured: Mutex::new(None),
             test_data_dir: None,
         }
     }
@@ -140,6 +145,33 @@ fn current_config(state: &State<'_, AppState>) -> Result<AppConfig, String> {
         .lock()
         .map(|config| config.clone())
         .map_err(|_| "Configuration state lock was poisoned".into())
+}
+
+fn cached_smtp_password_configured(
+    state: &AppState,
+    probe: impl FnOnce() -> bool,
+) -> Result<bool, String> {
+    if let Some(configured) = *state
+        .smtp_password_configured
+        .lock()
+        .map_err(|_| "SMTP password state lock was poisoned".to_string())?
+    {
+        return Ok(configured);
+    }
+    let configured = probe();
+    *state
+        .smtp_password_configured
+        .lock()
+        .map_err(|_| "SMTP password state lock was poisoned".to_string())? = Some(configured);
+    Ok(configured)
+}
+
+fn set_cached_smtp_password_configured(state: &AppState, configured: bool) -> Result<(), String> {
+    *state
+        .smtp_password_configured
+        .lock()
+        .map_err(|_| "SMTP password state lock was poisoned".to_string())? = Some(configured);
+    Ok(())
 }
 
 #[tauri::command]
@@ -270,8 +302,8 @@ async fn detect_tools_background(app: tauri::AppHandle) -> Result<Vec<tools::Too
 }
 
 #[tauri::command]
-fn get_automation_status(
-    app: tauri::AppHandle,
+fn get_automation_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<AutomationStatus, String> {
     let config = current_config(&state)?;
@@ -320,7 +352,9 @@ fn get_automation_status(
             .iter()
             .all(|repo| Path::new(&repo.effective_apps_config()).is_file()),
         repos,
-        smtp_password_configured: smtp_password().is_ok(),
+        smtp_password_configured: cached_smtp_password_configured(state.inner(), || {
+            smtp_password().is_ok()
+        })?,
         config_error: config.validate().err().unwrap_or_default(),
         log_path: log_path.to_string_lossy().into_owned(),
     })
@@ -450,7 +484,9 @@ fn start_issue_worker(
         ),
     ];
     if config.email_enabled {
-        environment.push(("SWARM_SMTP_PASSWORD".into(), smtp_password()?));
+        let password = smtp_password()?;
+        set_cached_smtp_password_configured(state.inner(), true)?;
+        environment.push(("SWARM_SMTP_PASSWORD".into(), password));
         arguments.extend([
             "--smtp-credentials-file".into(),
             config.smtp_credentials_file.clone(),
@@ -1597,20 +1633,22 @@ fn open_provider_login(state: State<'_, AppState>, provider: String) -> Result<(
 }
 
 #[tauri::command]
-fn set_smtp_password(password: String) -> Result<bool, String> {
+fn set_smtp_password(state: State<'_, AppState>, password: String) -> Result<bool, String> {
     let entry = keyring::Entry::new(SMTP_KEYRING_SERVICE, SMTP_KEYRING_ACCOUNT)
         .map_err(|error| error.to_string())?;
-    if password.is_empty() {
+    let configured = if password.is_empty() {
         match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(false),
-            Err(error) => Err(error.to_string()),
+            Ok(()) | Err(keyring::Error::NoEntry) => false,
+            Err(error) => return Err(error.to_string()),
         }
     } else {
         entry
             .set_password(&password)
             .map_err(|error| error.to_string())?;
-        Ok(true)
-    }
+        true
+    };
+    set_cached_smtp_password_configured(state.inner(), configured)?;
+    Ok(configured)
 }
 
 fn smtp_password() -> Result<String, String> {

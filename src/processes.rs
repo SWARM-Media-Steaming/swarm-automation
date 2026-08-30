@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,9 +156,9 @@ impl ProcessManager {
         })
     }
 
-    pub fn status(
+    pub fn status<R: Runtime>(
         &self,
-        app: &AppHandle,
+        app: &AppHandle<R>,
         slot_name: &str,
         source: &str,
         log_path: &Path,
@@ -233,7 +233,12 @@ impl ProcessManager {
     }
 }
 
-fn refresh_slot(slot: &mut ProcessSlot, source: &str, app: &AppHandle, log_path: &Path) {
+fn refresh_slot<R: Runtime>(
+    slot: &mut ProcessSlot,
+    source: &str,
+    app: &AppHandle<R>,
+    log_path: &Path,
+) {
     let Some(process) = slot.process.as_mut() else {
         return;
     };
@@ -322,7 +327,13 @@ fn stream_lines<R: std::io::Read + Send + 'static>(
     });
 }
 
-fn emit_log(app: &AppHandle, log_path: &Path, source: &str, stream: &str, line: &str) {
+fn emit_log<R: Runtime>(
+    app: &AppHandle<R>,
+    log_path: &Path,
+    source: &str,
+    stream: &str,
+    line: &str,
+) {
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
