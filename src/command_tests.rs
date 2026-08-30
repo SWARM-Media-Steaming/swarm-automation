@@ -1,6 +1,7 @@
 use super::{
-    detect_tools, get_config, inspect_repository, repo_worker_args, require_closed_issue,
-    save_config, scheduler_arguments, validate_worker_script_dir, AppState, ResolvedProvider,
+    detect_tools, get_config, inspect_repository, issue_branch_is_complete, repo_worker_args,
+    require_closed_issue, save_config, scheduler_arguments, validate_worker_script_dir, AppState,
+    ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -296,6 +297,8 @@ fn repo_worker_args_carries_per_repo_branch_config() {
     assert_eq!(pair(&args, "--assignee"), Some("octocat"));
     assert!(args.contains(&"--no-auto-approve".to_string()));
     assert!(args.contains(&"--no-auto-merge".to_string()));
+    assert!(args.contains(&"--no-require-issue-tests".to_string()));
+    assert!(args.contains(&"--no-allow-environment-only-summary".to_string()));
     // The old delivery/merge flags are gone.
     assert!(!args.iter().any(|value| value == "--delivery-mode"));
     assert!(!args.iter().any(|value| value == "--merge-method"));
@@ -333,6 +336,18 @@ fn repo_worker_args_uses_the_global_preferred_provider_when_unset() {
 }
 
 #[test]
+fn repo_worker_args_carries_advanced_issue_policy() {
+    let repo = RepoConfig {
+        require_issue_tests: true,
+        allow_environment_only_summary: true,
+        ..repo("octocat/example")
+    };
+    let args = args_for(&repo);
+    assert!(args.contains(&"--require-issue-tests".to_string()));
+    assert!(args.contains(&"--allow-environment-only-summary".to_string()));
+}
+
+#[test]
 fn scheduler_arguments_degrade_manual_to_continuous_and_pass_the_repos_file() {
     let mut config = AppConfig::default();
     config.schedule_mode = "manual".into();
@@ -355,6 +370,14 @@ fn issue_branch_merge_requires_the_issue_to_be_closed() {
         .expect_err("an open issue must block its branch merge");
     assert!(error.contains("Issue #42 must be closed"), "got: {error}");
     require_closed_issue(42, "CLOSED", "ai-main").expect("closed issue may merge");
+}
+
+#[test]
+fn issue_branch_is_complete_only_after_both_close_and_merge() {
+    assert!(issue_branch_is_complete("CLOSED", "MERGED"));
+    assert!(!issue_branch_is_complete("CLOSED", "OPEN"));
+    assert!(!issue_branch_is_complete("OPEN", "MERGED"));
+    assert!(!issue_branch_is_complete("OPEN", "OPEN"));
 }
 
 // ----- provider round-trips (unchanged behaviour) ----------------------

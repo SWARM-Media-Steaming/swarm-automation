@@ -128,6 +128,11 @@ pub struct RepoConfig {
     /// Auto-merge (squash) an approved issue PR into `integration_branch` only
     /// after its issue is closed. `base_branch` is never touched automatically.
     pub auto_merge: bool,
+    /// Ask the AI to add or update UAT and integration tests for each issue.
+    pub require_issue_tests: bool,
+    /// Let the AI return a summary without code when the issue is caused by
+    /// local environment, credentials, services, or infrastructure state.
+    pub allow_environment_only_summary: bool,
     /// Advanced: an existing local checkout to operate on as-is instead of a
     /// managed clone.
     pub repo_dir: String,
@@ -159,6 +164,8 @@ impl Default for RepoConfig {
             preferred_provider: String::new(),
             auto_approve: false,
             auto_merge: false,
+            require_issue_tests: false,
+            allow_environment_only_summary: false,
             repo_dir: String::new(),
             uat_enabled: false,
             uat_hour: 3,
@@ -348,6 +355,10 @@ pub struct AppConfig {
     #[serde(default, skip_serializing)]
     pub auto_merge: bool,
     #[serde(default, skip_serializing)]
+    pub require_issue_tests: bool,
+    #[serde(default, skip_serializing)]
+    pub allow_environment_only_summary: bool,
+    #[serde(default, skip_serializing)]
     pub branch_prefix: String,
     #[serde(default, skip_serializing)]
     pub uat_enabled: bool,
@@ -416,6 +427,8 @@ impl Default for AppConfig {
             require_bot_auth: true,
             auto_approve: false,
             auto_merge: false,
+            require_issue_tests: false,
+            allow_environment_only_summary: false,
             branch_prefix: String::new(),
             uat_enabled: false,
             uat_hour: 0,
@@ -635,6 +648,8 @@ impl AppConfig {
             repo.require_bot_auth = self.require_bot_auth;
             repo.auto_approve = self.auto_approve;
             repo.auto_merge = self.auto_merge;
+            repo.require_issue_tests = self.require_issue_tests;
+            repo.allow_environment_only_summary = self.allow_environment_only_summary;
             // A migrated config keeps whatever prefix it already used; a fresh
             // repo defaults to "ai".
             if !self.branch_prefix.trim().is_empty() {
@@ -780,6 +795,8 @@ mod tests {
         assert!(repo.require_bot_auth, "bot authentication defaults on");
         assert!(!repo.auto_approve, "automatic PR approval defaults off");
         assert!(!repo.auto_merge);
+        assert!(!repo.require_issue_tests);
+        assert!(!repo.allow_environment_only_summary);
         assert_eq!(config.provider("claude").unwrap().model, "claude-opus-5");
         assert_eq!(config.preferred_provider, "codex");
 

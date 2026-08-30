@@ -99,6 +99,7 @@ SUMMARY_INSTRUCTION = (
     "Do not include code snippets, diffs, file contents, command transcripts, or step-by-step "
     "implementation output."
 )
+ENVIRONMENT_ONLY_MARKER = "SWARM_ENVIRONMENT_ONLY"
 
 
 class WorkerError(RuntimeError):
@@ -114,7 +115,8 @@ def iso_timestamp() -> str:
 
 
 def log(message: str) -> None:
-    print(f"[{timestamp()}] {message}", file=sys.stderr, flush=True)
+    stream = sys.stderr if message.lstrip().upper().startswith("ERROR:") else sys.stdout
+    print(f"[{timestamp()}] {message}", file=stream, flush=True)
 
 
 def env_value(name: str, fallback: str) -> str:
@@ -242,6 +244,8 @@ class Config:
     require_bot_auth: bool
     auto_approve: bool
     auto_merge: bool
+    require_issue_tests: bool
+    allow_environment_only_summary: bool
     branch_prefix: str
     base_branch: str
     integration_branch: str
@@ -279,6 +283,8 @@ class Config:
             require_bot_auth=args.require_bot_auth,
             auto_approve=args.auto_approve,
             auto_merge=args.auto_merge,
+            require_issue_tests=args.require_issue_tests,
+            allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
             base_branch=args.base_branch,
             integration_branch=args.integration_branch,
@@ -694,6 +700,46 @@ class Worker:
             )
         return None
 
+    def choose_handoff_provider(self, previous_choice: ProviderChoice, reason: str) -> ProviderChoice | None:
+        """Pick a different enabled provider for an already-owned issue branch.
+
+        A saved branch remains the source of truth. The replacement provider
+        starts a fresh session on that same branch instead of resuming the
+        original provider's session.
+        """
+        specs = {spec.key: spec for spec in self.config.enabled_specs if spec.name != previous_choice.name}
+        order = [self.config.preferred_provider]
+        order += [spec.key for spec in self.config.enabled_specs if spec.key not in order]
+        replacement_spec = None
+        for key in order:
+            spec = specs.get(key)
+            if spec and self.provider_capacity(spec.key) == 0:
+                replacement_spec = spec
+                break
+        if replacement_spec is None:
+            return None
+        assert self.issue
+        replacement = ProviderChoice(
+            name=replacement_spec.name,
+            model=replacement_spec.model,
+            effort=replacement_spec.effort,
+            session_id=self.new_session_id(replacement_spec),
+        )
+        log(
+            f"{previous_choice.name} cannot continue issue #{self.issue.number} ({reason}); "
+            f"{replacement.name} will continue on the existing issue branch."
+        )
+        return replacement
+
+    def update_state_for_choice(self, choice: ProviderChoice) -> None:
+        self.update_state(
+            ai_tool=choice.name,
+            model=choice.model,
+            effort=choice.effort,
+            session_id=choice.session_id,
+            session_started=False,
+        )
+
     def validate_paused_state(self, state: dict[str, Any]) -> None:
         required_strings = ("issue_title", "issue_url", "base_sha", "ai_tool", "model", "effort", "session_id")
         if not isinstance(state.get("issue_number"), int):
@@ -858,7 +904,7 @@ class Worker:
         Approval may happen while an issue is open. Squash-merging remains
         strictly gated on the linked issue being closed.
         """
-        if not (self.config.auto_approve or self.config.auto_merge) or self.config.dry_run:
+        if self.config.dry_run:
             return
         output = self.github.gh(
             [
@@ -869,11 +915,11 @@ class Worker:
                 "--base",
                 self.config.integration_branch,
                 "--state",
-                "open",
+                "all",
                 "--limit",
-                "100",
+                "1000",
                 "--json",
-                "url,headRefName,headRefOid,isDraft,mergeable,reviewDecision",
+                "url,state,headRefName,headRefOid,isDraft,mergeable,reviewDecision",
             ]
         )
         for pull_request in json.loads(output):
@@ -890,6 +936,16 @@ class Worker:
             pr_url = str(pull_request.get("url") or "")
             if not pr_url:
                 raise WorkerError(f"GitHub returned incomplete pull request data for {branch}")
+            pr_state = str(pull_request.get("state") or "").upper()
+            if pr_state == "MERGED":
+                remote_ref = f"refs/remotes/{self.config.remote_name}/{branch}"
+                if self.git_ok("show-ref", "--verify", remote_ref) and self.issue_is_closed(
+                    issue_number
+                ):
+                    self.delete_remote_issue_branch(branch, provider)
+                continue
+            if pr_state != "OPEN":
+                continue
             if (
                 self.config.auto_approve
                 and str(pull_request.get("reviewDecision") or "").upper() != "APPROVED"
@@ -909,6 +965,7 @@ class Worker:
             merge_sha = self.merge_pull_request(
                 pr_url, head_sha, provider, issue_number
             )
+            self.delete_remote_issue_branch(branch, provider)
             log(
                 f"Issue #{issue_number} was already closed; squash-merged {branch} "
                 f"into {self.config.integration_branch} as {merge_sha}."
@@ -1330,13 +1387,25 @@ class Worker:
                         int(state["issue_number"]), str(state["issue_title"]), "", [], str(state["issue_url"])
                     )
                     self.choice = self.choice_from_state(state)
-                    if not self.config.dry_run:
-                        self.deliver_quota_notifications()
                     capacity = self.provider_capacity(self.choice.name)
                     if capacity != 0:
+                        handoff = self.choose_handoff_provider(self.choice, "usage is unavailable")
+                        if handoff:
+                            if self.config.dry_run:
+                                log(
+                                    f"Dry run: would let {handoff.name} continue quota-paused "
+                                    f"issue #{self.issue.number} on the existing branch."
+                                )
+                                return True
+                            self.choice = handoff
+                            self.update_state(status="active", quota_resumed_at=iso_timestamp())
+                            self.update_state_for_choice(handoff)
+                            self.quota_resume_ready = True
+                            return False
                         if self.config.dry_run:
                             log(f"Dry run: issue #{self.issue.number} remains quota-paused on {self.choice.name}.")
                             return True
+                        self.deliver_quota_notifications()
                         self.suspend_paused()
                         raise SystemExit(QUOTA_PAUSED_EXIT_CODE)
                     if self.config.dry_run:
@@ -1369,7 +1438,29 @@ class Worker:
                     continue
                 provider = str(state["ai_tool"])
                 if self.provider_capacity(provider) != 0:
-                    continue
+                    self.issue = IssueContext(
+                        int(state["issue_number"]), str(state["issue_title"]), "", [], str(state["issue_url"])
+                    )
+                    pinned_choice = self.choice_from_state(state)
+                    handoff = self.choose_handoff_provider(pinned_choice, "usage is unavailable")
+                    if not handoff:
+                        continue
+                    if self.config.dry_run:
+                        log(
+                            f"Dry run: would restore quota-paused issue #{state['issue_number']} "
+                            f"and let {handoff.name} continue on the existing branch."
+                        )
+                        return True
+                    self.restore_paused(paused_file)
+                    self.update_state_for_choice(handoff)
+                    restored = self.read_state()
+                    self.choice = self.choice_from_state(restored)
+                    self.quota_resume_ready = True
+                    log(
+                        f"{handoff.name} restored quota-paused issue #{restored['issue_number']} "
+                        "on the existing branch."
+                    )
+                    break
                 if self.config.dry_run:
                     log(
                         f"Dry run: would restore quota-paused issue #{state['issue_number']} "
@@ -1556,6 +1647,17 @@ class Worker:
                     ]
                 )
                 lines.extend(self.format_comment(comment) for comment in issue.followup_comments)
+        if self.config.require_issue_tests:
+            lines.append(
+                "Also add or update UAT and integration tests that cover this issue. If the repository "
+                "does not have a relevant test layer, say why under Verification."
+            )
+        if self.config.allow_environment_only_summary:
+            lines.append(
+                "If repository evidence shows this is caused only by local environment, credentials, "
+                "external services, or infrastructure state, do not write code. Provide the requested "
+                f"summary and put {ENVIRONMENT_ONLY_MARKER} on its own final line."
+            )
         lines.append(SUMMARY_INSTRUCTION)
         if recovery_dirty:
             lines.append(
@@ -1571,6 +1673,15 @@ class Worker:
                 "your summary. If incomplete, finish it; the worker will commit any remaining completed changes."
             )
         return "\n".join(lines) + "\n"
+
+    def ai_reported_environment_only(self, output: str) -> tuple[bool, str]:
+        if not self.config.allow_environment_only_summary:
+            return False, output
+        pattern = rf"^\s*{re.escape(ENVIRONMENT_ONLY_MARKER)}\s*$\n?"
+        if not re.search(pattern, output, re.MULTILINE):
+            return False, output
+        cleaned = re.sub(pattern, "", output, flags=re.MULTILINE).rstrip() + "\n"
+        return True, cleaned
 
     @staticmethod
     def format_comment(comment: dict[str, Any]) -> str:
@@ -1891,11 +2002,11 @@ class Worker:
                 f"{result.stderr.strip() or result.stdout.strip() or 'git push failed'}"
             )
 
-    def push_ref(self, refspec: str):
+    def push_ref(self, refspec: str, provider: str | None = None):
         """Push `refspec` to the remote. Uses a bot's installation token over
         HTTPS when a GitHub App is configured, otherwise a plain push to the
         configured remote (which the local checkout already authenticates)."""
-        environment = self.integration_push_environment()
+        environment = self.integration_push_environment(provider)
         token = environment.get("GH_TOKEN", "")
         if token:
             with tempfile.TemporaryDirectory(prefix="swarm-git-askpass.") as temporary:
@@ -1928,13 +2039,31 @@ class Worker:
             check=False,
         )
 
-    def integration_push_environment(self) -> dict[str, str]:
+    def integration_push_environment(self, provider: str | None = None) -> dict[str, str]:
         """Bot env for pushing — the preferred provider's bot when configured,
         else the current provider's, else empty."""
-        for key in (self.config.preferred_provider, getattr(self.choice, "key", "")):
+        for key in (provider, self.config.preferred_provider, getattr(self.choice, "key", "")):
             if key and self.apps.configured(key):
                 return self.apps.bot_environment(key)
         return {}
+
+    def delete_remote_issue_branch(self, branch: str, provider: str | None = None) -> None:
+        provider_keys = "|".join(
+            re.escape(key) for key in (*KNOWN_PROVIDER_KEYS, *BRANCH_PROVIDER_KEYS)
+        )
+        pattern = re.compile(
+            rf"^{re.escape(self.config.branch_prefix)}/(?:{provider_keys})/issue-[0-9]+$"
+        )
+        if not pattern.fullmatch(branch):
+            raise WorkerError(f"Refusing to delete unexpected branch name: {branch}")
+        result = self.push_ref(f":refs/heads/{branch}", provider)
+        detail = (result.stderr or result.stdout or "").strip()
+        if result.returncode != 0 and "remote ref does not exist" not in detail.lower():
+            raise WorkerError(
+                f"Could not remove merged issue branch {branch}: {detail or 'git push failed'}"
+            )
+        self.git("fetch", "--prune", self.config.remote_name, check=False)
+        log(f"Removed merged remote issue branch {branch}.")
 
     def prune_merged_worker_branches(self) -> None:
         provider_keys = "|".join(
@@ -2187,16 +2316,22 @@ class Worker:
                 "--limit",
                 "1",
                 "--json",
-                "url,state,mergeCommit",
+                "url,state,mergeCommit,baseRefName",
             ],
             self.choice.key,
         )
         existing = json.loads(existing_text)
-        if existing and existing[0].get("state") == "MERGED":
+        if (
+            existing
+            and existing[0].get("state") == "MERGED"
+            and existing[0].get("baseRefName") == self.config.integration_branch
+        ):
             pr_url = str(existing[0]["url"])
             delivered_sha = str((existing[0].get("mergeCommit") or {}).get("oid") or "")
             if not SHA_RE.fullmatch(delivered_sha):
                 raise WorkerError(f"Merged PR did not report a valid merge commit: {pr_url}")
+            if self.issue_is_closed(self.issue.number):
+                self.delete_remote_issue_branch(branch, self.choice.key)
             self.return_to_integration_branch(branch)
             log(f"Recovered already-merged pull request {pr_url} for issue #{self.issue.number}.")
             return pr_url, branch, delivered_sha
@@ -2243,6 +2378,7 @@ class Worker:
             delivered_sha = self.merge_pull_request(
                 pr_url, commit_sha, self.choice.key, self.issue.number
             )
+            self.delete_remote_issue_branch(branch, self.choice.key)
             self.return_to_integration_branch(branch)
         elif self.config.auto_merge:
             log(
@@ -2347,6 +2483,39 @@ class Worker:
             f"{pending['commit_message']} ({commit_sha})."
         )
 
+    def finalize_environment_only(self, ai_output: str) -> None:
+        assert self.issue and self.choice
+        marker = (
+            f"<!-- swarm-issue-worker:environment-only:issue:{self.issue.number};"
+            f"provider:{self.choice.key} -->"
+        )
+        body = (
+            f"{marker}\nReviewed by **{self.choice.name}** with no code changes.\n\n"
+            "- Result: this appears to be environmental rather than a code change.\n\n"
+            "<details><summary>AI summary</summary>\n\n"
+            f"{ai_output or '(No captured AI output was available.)'}\n"
+            "</details>\n"
+        )
+        existing = any(marker in str(comment.get("body") or "") for comment in self.comments(self.issue.number))
+        if not existing:
+            log(f"Posting the environment-only summary to GitHub issue #{self.issue.number}.")
+            self.github.gh(
+                [
+                    "issue",
+                    "comment",
+                    str(self.issue.number),
+                    "--repo",
+                    self.config.github_repository,
+                    "--body-file",
+                    "-",
+                ],
+                self.choice.key,
+                body,
+            )
+        self.record_completed(self.issue.number)
+        self.clear_in_progress(self.issue.number)
+        log(f"Finished issue #{self.issue.number} with {self.choice.name}: environment-only summary posted.")
+
     def run_selected_issue(self) -> int:
         assert self.issue
         if self.issue.work_type == "followup":
@@ -2363,23 +2532,33 @@ class Worker:
             if not self.quota_resume_ready:
                 capacity = self.provider_capacity(self.choice.name)
                 if capacity == 2:
-                    log(
-                        f"Could not verify {self.choice.name} usage for pinned issue #{self.issue.number}; "
-                        "leaving state active and retrying later."
-                    )
-                    return PROVIDER_UNAVAILABLE_EXIT_CODE
-                if capacity == 1:
-                    if self.config.dry_run:
+                    handoff = self.choose_handoff_provider(self.choice, "usage could not be verified")
+                    if handoff:
+                        self.choice = handoff
+                        self.update_state_for_choice(handoff)
+                    else:
                         log(
-                            f"Dry run: pinned {self.choice.name} session {self.choice.session_id} is waiting for usage."
+                            f"Could not verify {self.choice.name} usage for pinned issue #{self.issue.number}; "
+                            "leaving state active and retrying later."
                         )
-                        return 0
-                    if not self.choice.session_id:
-                        raise WorkerError(f"Pinned {self.choice.name} attempt has no resumable session ID")
-                    self.mark_quota_paused()
-                    self.deliver_quota_notifications()
-                    self.suspend_paused()
-                    return QUOTA_PAUSED_EXIT_CODE
+                        return PROVIDER_UNAVAILABLE_EXIT_CODE
+                if capacity == 1:
+                    handoff = self.choose_handoff_provider(self.choice, "usage is unavailable")
+                    if handoff:
+                        self.choice = handoff
+                        self.update_state_for_choice(handoff)
+                    else:
+                        if self.config.dry_run:
+                            log(
+                                f"Dry run: pinned {self.choice.name} session {self.choice.session_id} is waiting for usage."
+                            )
+                            return 0
+                        if not self.choice.session_id:
+                            raise WorkerError(f"Pinned {self.choice.name} attempt has no resumable session ID")
+                        self.mark_quota_paused()
+                        self.deliver_quota_notifications()
+                        self.suspend_paused()
+                        return QUOTA_PAUSED_EXIT_CODE
         else:
             availability = {
                 spec.name: self.provider_capacity(spec.key) == 0
@@ -2447,6 +2626,7 @@ class Worker:
         after = self.commit_completed_work(run_start)
         completion = after
         recovered = False
+        environment_only, output = self.ai_reported_environment_only(output)
         if after != run_start:
             pass
         elif recovery_mode and candidate and re.search(r"^\s*SWARM_RECOVERY_COMPLETE\s*$", output, re.MULTILINE):
@@ -2455,6 +2635,14 @@ class Worker:
             output = re.sub(r"^\s*SWARM_RECOVERY_COMPLETE\s*$\n?", "", output, flags=re.MULTILINE)
             self.ai_output_file.write_text(output, encoding="utf-8")
             log(f"Accepted commit {completion} as recovered implementation for issue #{self.issue.number}.")
+        elif environment_only:
+            if self.git("status", "--porcelain"):
+                raise WorkerError(
+                    f"{self.choice.name} reported an environmental issue but left uncommitted changes"
+                )
+            self.ai_output_file.write_text(output, encoding="utf-8")
+            self.finalize_environment_only(output)
+            return ISSUE_COMPLETED_EXIT_CODE
         else:
             raise WorkerError(
                 f"{self.choice.name} finished without producing changes or a new commit. "
@@ -2584,6 +2772,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-merge",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_AUTO_MERGE", False),
+    )
+    parser.add_argument(
+        "--require-issue-tests",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_REQUIRE_ISSUE_TESTS", False),
+    )
+    parser.add_argument(
+        "--allow-environment-only-summary",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_ALLOW_ENVIRONMENT_ONLY_SUMMARY", False),
     )
     parser.add_argument("--branch-prefix", default=env_value("SWARM_BRANCH_PREFIX", "ai"))
     parser.add_argument("--base-branch", default=env_value("SWARM_BASE_BRANCH", "main"))

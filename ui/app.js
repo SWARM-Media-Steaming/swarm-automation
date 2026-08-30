@@ -10,6 +10,7 @@
     tools: [],
     logs: [],
     logFilter: "all",
+    logSearch: "",
     activityFilter: "all",
     activityPaused: false,
     activitySnapshot: null,
@@ -136,6 +137,11 @@
       html: "<p>This box can send an email when issue work finishes.</p><ul><li><strong>Send email notifications</strong> — turns completion email on or off.</li><li><strong>Recipient</strong> — the address that receives the message.</li><li><strong>SMTP credentials file</strong> — a local file containing the mail server settings and username.</li><li><strong>SMTP password</strong> — the mail account password.</li><li><strong>Save password to Keychain</strong> — stores that password securely in macOS.</li></ul>",
       links: [],
     },
+    "work-policy": {
+      title: "Issue instructions",
+      html: "<p>These switches add instructions to each AI issue prompt.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>Both start off and apply only to this repository.</p>",
+      links: [],
+    },
     "advanced-paths": {
       title: "Local path overrides",
       html: "<p>Leave these values alone unless the defaults do not fit your Mac.</p><ul><li><strong>Workspace folder</strong> — parent folder for app-managed repository copies.</li><li><strong>Working-copy override</strong> — uses a specific existing copy instead of an app-managed one.</li><li><strong>Worker state directory</strong> — stores progress needed to resume work.</li><li><strong>UAT run data directory</strong> — stores test-run state and results.</li><li><strong>GitHub Apps configuration</strong> — uses a specific bot-settings file.</li><li><strong>GitHub CLI / Python 3 binary</strong> — uses a specific program file when automatic detection fails.</li></ul>",
@@ -251,6 +257,8 @@
       preferred_provider: "",
       auto_approve: false,
       auto_merge: false,
+      require_issue_tests: false,
+      allow_environment_only_summary: false,
       repo_dir: "",
       uat_enabled: false,
       uat_hour: 3,
@@ -870,14 +878,41 @@
   }
 
   function makeActivity(log, summary, description, tone = "info", category = activityCategory(log.source)) {
+    const issueNumber = log.message.match(/\bissue\s*:?\s*#(\d+)/i)?.[1]
+      || log.message.match(/\bissue-(\d+)/i)?.[1]
+      || log.message.match(/\bissue\s+(\d+)/i)?.[1]
+      || "";
+    const branchName = log.message.match(
+      /\b([A-Za-z0-9._-]+\/(?:claude|codex|xai|grok)\/issue-\d+)\b/i,
+    )?.[1] || "";
     return {
       ...log,
       summary,
       description,
       tone,
       category,
+      issueNumber,
+      branchName,
       sourceLabel: activitySourceLabel(log.source, category),
     };
+  }
+
+  function githubUrl(repository, ...parts) {
+    const segments = String(repository || "").trim().split("/");
+    if (segments.length !== 2 || segments.some((segment) => !segment)) return "";
+    return `https://github.com/${segments.map(encodeURIComponent).join("/")}${
+      parts.length ? `/${parts.flatMap((part) => String(part).split("/")).map(encodeURIComponent).join("/")}` : ""
+    }`;
+  }
+
+  function externalLink(label, url, className = "") {
+    const link = document.createElement("a");
+    link.href = url;
+    link.dataset.external = url;
+    link.className = className;
+    link.textContent = label;
+    link.title = `Open ${label} on GitHub`;
+    return link;
   }
 
   // Overview is intentionally an allowlist of meaningful milestones. Every
@@ -1012,9 +1047,22 @@
     if (!feed) return;
     const sourceLogs = state.activityPaused ? (state.activitySnapshot || []) : state.logs;
     const events = [];
+    const repositoryBySource = new Map();
+    const configuredRepositories = (state.config?.repositories || [])
+      .map((repo) => normalizeRepoRef(repo.github_repository))
+      .filter((repo) => repo.split("/").length === 2);
     sourceLogs.forEach((raw) => {
+      const parsed = parseAutomationLog(raw);
+      if (!parsed) return;
+      const repositoryMarker = parsed.message.match(/^=== repo:\s*([^\s]+\/[^\s=]+)\s*===$/i)?.[1];
+      if (repositoryMarker) repositoryBySource.set(parsed.source, normalizeRepoRef(repositoryMarker));
       const event = importantActivity(raw);
       if (!event) return;
+      const namedRepository = parsed.message.match(/^([^:\s]+\/[^:\s]+):/)?.[1];
+      event.repository = normalizeRepoRef(namedRepository || repositoryBySource.get(parsed.source) || "");
+      if (!event.repository && configuredRepositories.length === 1) {
+        [event.repository] = configuredRepositories;
+      }
       const previous = events[events.length - 1];
       if (previous && previous.summary === event.summary && previous.category === event.category) {
         events[events.length - 1] = event;
@@ -1062,6 +1110,21 @@
       const description = document.createElement("p");
       description.textContent = event.description;
       item.append(summary, description);
+      const references = document.createElement("div");
+      references.className = "activity-links";
+      const issueUrl = event.issueNumber
+        ? githubUrl(event.repository, "issues", event.issueNumber)
+        : "";
+      const branchUrl = event.branchName
+        ? githubUrl(event.repository, "tree", event.branchName)
+        : "";
+      if (issueUrl) {
+        references.appendChild(externalLink(`Open issue #${event.issueNumber} ↗`, issueUrl, "activity-reference"));
+      }
+      if (branchUrl) {
+        references.appendChild(externalLink(`Open branch ${event.branchName} ↗`, branchUrl, "activity-reference"));
+      }
+      if (references.childElementCount) item.appendChild(references);
       feed.appendChild(item);
     });
 
@@ -1075,7 +1138,12 @@
   }
 
   function renderLogs() {
-    const filtered = state.logFilter === "all" ? state.logs : state.logs.filter((line) => line.includes(`[${state.logFilter}/`));
+    const search = state.logSearch.trim().toLowerCase();
+    const filtered = state.logs.filter((line) => {
+      if (state.logFilter !== "all" && !line.includes(`[${state.logFilter}/`)) return false;
+      if (search && !line.toLowerCase().includes(search)) return false;
+      return true;
+    });
     const text = filtered.length ? filtered.join("\n") : "Waiting for output…";
     const full = byId("full-log");
     const stayAtBottom = full.scrollTop + full.clientHeight >= full.scrollHeight - 28;
@@ -1184,17 +1252,22 @@
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
   }
 
-  function branchNode(label, name, tip, meta = "") {
+  function branchNode(label, name, tip, meta = "", links = {}) {
     const row = document.createElement("div");
     row.className = "branch-node";
     const rail = document.createElement("span");
     rail.className = "branch-rail";
     const body = document.createElement("div");
     body.className = "branch-node-body";
-    const kicker = document.createElement("span");
-    kicker.className = "branch-kind";
+    const kicker = links.labelUrl
+      ? externalLink(label, links.labelUrl, "branch-kind branch-kind-link")
+      : document.createElement("span");
+    if (!links.labelUrl) kicker.className = "branch-kind";
     kicker.textContent = label;
-    const title = document.createElement("strong");
+    const title = links.nameUrl
+      ? externalLink(name, links.nameUrl, "branch-name branch-name-link")
+      : document.createElement("strong");
+    if (!links.nameUrl) title.className = "branch-name";
     title.textContent = name;
     const detail = document.createElement("span");
     detail.className = "branch-detail";
@@ -1225,13 +1298,17 @@
 
     const panel = document.createElement("article");
     panel.className = "panel branch-map";
-    const base = branchNode("HUMAN-OWNED", overview.baseBranch, overview.baseTip);
+    const base = branchNode("HUMAN-OWNED", overview.baseBranch, overview.baseTip, "", {
+      nameUrl: githubUrl(overview.githubRepository, "tree", overview.baseBranch),
+    });
     panel.appendChild(base.row);
 
     const relation = overview.integrationExists
       ? `${overview.integrationVsBase.ahead} ahead · ${overview.integrationVsBase.behind} behind ${overview.baseBranch}`
       : "Created automatically before the next issue";
-    const integration = branchNode("AI INTEGRATION", overview.integrationBranch, overview.integrationTip, relation);
+    const integration = branchNode("AI INTEGRATION", overview.integrationBranch, overview.integrationTip, relation, {
+      nameUrl: githubUrl(overview.githubRepository, "tree", overview.integrationBranch),
+    });
     integration.row.classList.add("integration-node");
     const integrationActions = document.createElement("div");
     integrationActions.className = "branch-actions";
@@ -1270,7 +1347,11 @@
       const issueClosed = branch.issueState === "CLOSED";
       const issueStatus = issueClosed ? "issue closed" : branch.issueState === "OPEN" ? "issue open" : "issue state unknown";
       const meta = `${providerLabel(branch.aiTool)} · ${issueStatus} · ${branch.aheadOfIntegration} ahead · ${branch.behindIntegration} behind`;
-      const node = branchNode(`ISSUE #${branch.issueNumber}`, branch.name.replace(/^origin\//, ""), branch.lastCommit, meta);
+      const branchName = branch.name.replace(/^origin\//, "");
+      const node = branchNode(`ISSUE #${branch.issueNumber}`, branchName, branch.lastCommit, meta, {
+        labelUrl: githubUrl(overview.githubRepository, "issues", branch.issueNumber),
+        nameUrl: githubUrl(overview.githubRepository, "tree", branchName),
+      });
       node.row.classList.add("issue-node");
       const actions = document.createElement("div");
       actions.className = "branch-actions";
@@ -1435,6 +1516,10 @@
       document.querySelectorAll("[data-log-filter]").forEach((candidate) => candidate.classList.toggle("active", candidate === button));
       renderLogs();
     }));
+    byId("log-search-input").addEventListener("input", (event) => {
+      state.logSearch = event.target.value;
+      renderLogs();
+    });
     document.querySelectorAll("[data-activity-filter]").forEach((button) => button.addEventListener("click", () => {
       state.activityFilter = button.dataset.activityFilter;
       renderActivity();

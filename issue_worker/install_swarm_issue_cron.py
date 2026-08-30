@@ -17,9 +17,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, TextIO
 
 
 ISSUE_COMPLETED_EXIT_CODE = 10
@@ -307,16 +308,35 @@ class Runner:
             cwd=workspace,
             env=environment,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             text=True,
         )
-        assert process.stdout
-        with process.stdout, self.log_path.open("a", encoding="utf-8") as log_stream:
-            for line in process.stdout:
-                print(line, end="", flush=True)
+        assert process.stdout and process.stderr
+        threads = [
+            threading.Thread(
+                target=self.forward_worker_stream,
+                args=(process.stdout, sys.stdout),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=self.forward_worker_stream,
+                args=(process.stderr, sys.stderr),
+                daemon=True,
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        status = process.wait()
+        for thread in threads:
+            thread.join()
+        return status
+
+    def forward_worker_stream(self, source: TextIO, destination: TextIO) -> None:
+        with source, self.log_path.open("a", encoding="utf-8") as log_stream:
+            for line in source:
+                print(line, end="", file=destination, flush=True)
                 log_stream.write(line)
                 log_stream.flush()
-        return process.wait()
 
     def sleep(self) -> None:
         deadline = time.monotonic() + self.args.interval_seconds

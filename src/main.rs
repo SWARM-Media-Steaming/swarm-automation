@@ -597,6 +597,18 @@ fn repo_worker_args(
             "--no-auto-merge"
         }
         .into(),
+        if repo.require_issue_tests {
+            "--require-issue-tests"
+        } else {
+            "--no-require-issue-tests"
+        }
+        .into(),
+        if repo.allow_environment_only_summary {
+            "--allow-environment-only-summary"
+        } else {
+            "--no-allow-environment-only-summary"
+        }
+        .into(),
     ];
     // A blank list is a genuine "trust no one" — fall back to the assignee so
     // a first run works without filling in two more fields.
@@ -961,6 +973,11 @@ fn require_closed_issue(
     }
 }
 
+fn issue_branch_is_complete(issue_state: &str, pull_request_state: &str) -> bool {
+    issue_state.trim().eq_ignore_ascii_case("closed")
+        && pull_request_state.trim().eq_ignore_ascii_case("merged")
+}
+
 #[tauri::command]
 fn git_overview(
     app: tauri::AppHandle,
@@ -1050,9 +1067,9 @@ fn git_overview(
                 "--repo".into(),
                 repo.github_repository.clone(),
                 "--state".into(),
-                "open".into(),
+                "all".into(),
                 "--limit".into(),
-                "100".into(),
+                "1000".into(),
                 "--json".into(),
                 "number,url,headRefName,state,mergeable,baseRefName".into(),
             ],
@@ -1068,11 +1085,20 @@ fn git_overview(
                         pr["state"].as_str().unwrap_or_default().to_string(),
                         pr["mergeable"].as_str().unwrap_or_default().to_string(),
                     );
-                    if head == repo.integration_branch && base == repo.base_branch {
+                    if head == repo.integration_branch
+                        && base == repo.base_branch
+                        && entry.2 == "OPEN"
+                    {
                         overview.integration_pr_url = entry.1.clone();
                         overview.integration_pr_number = Some(entry.0);
                     }
-                    pr_by_head.insert(head, entry);
+                    // Only a PR targeting the configured AI integration
+                    // branch can make an issue branch complete. GitHub
+                    // returns newest first, so keep the newest matching PR
+                    // when historical and current PRs share a head.
+                    if base == repo.integration_branch {
+                        pr_by_head.entry(head).or_insert(entry);
+                    }
                 }
             }
         }
@@ -1104,6 +1130,24 @@ fn git_overview(
             }
         }
     }
+
+    // A closed issue whose PR is already merged has no active promotion work.
+    // Hide a stale remote ref immediately; the worker and manual merge command
+    // also remove that ref explicitly.
+    branches.retain(|(name, _, number)| {
+        let head_ref = name
+            .strip_prefix(&format!("{}/", repo.remote_name))
+            .unwrap_or(name);
+        let pull_request_state = pr_by_head
+            .get(head_ref)
+            .map(|pr| pr.2.as_str())
+            .unwrap_or_default();
+        let issue_state = issue_states
+            .get(number)
+            .map(String::as_str)
+            .unwrap_or_default();
+        !issue_branch_is_complete(issue_state, pull_request_state)
+    });
 
     for (name, ai, number) in &branches {
         let ab = if overview.integration_exists {
@@ -1200,6 +1244,10 @@ fn merge_issue_branch(
     }
     let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
     let git = tools::configured_or_detected("", "git")?;
+    // Establish the cleanup path before the irreversible GitHub merge. This
+    // guarantees that a successful merge can be followed by branch removal.
+    let workspace = prepared_workspace(&app, &config, &repo)?;
+    let ws = workspace.to_string_lossy().into_owned();
 
     let (issue_ok, issue_state) = run_capture_owned(
         &gh,
@@ -1316,36 +1364,64 @@ fn merge_issue_branch(
             comment,
         ],
     );
-    if !comment_ok {
+    let comment_error = (!comment_ok).then(|| {
+        format!(
+            "PR #{pr_number} was merged and its branch was removed, but issue #{issue_number} could not be updated: {comment_message}"
+        )
+    });
+
+    let (fetched, fetch_message) = git_c(&git, &ws, &["fetch", "--prune", &repo.remote_name]);
+    if !fetched {
         return Err(format!(
-            "PR #{pr_number} was merged, but issue #{issue_number} could not be updated: {comment_message}"
+            "PR #{pr_number} was merged, but its branch could not be checked for removal: {fetch_message}"
         ));
     }
-
-    if let Ok(workspace) = resolve_workspace(&app, &config, &repo) {
-        let ws = workspace.to_string_lossy().into_owned();
-        let _ = git_c(&git, &ws, &["fetch", "--prune", &repo.remote_name]);
-        let current = git_c(&git, &ws, &["branch", "--show-current"]).1;
-        let clean = git_c(&git, &ws, &["status", "--porcelain"]).1.is_empty();
-        if current == head && clean {
-            let remote_integration = format!("{}/{}", repo.remote_name, repo.integration_branch);
-            if !git_c(&git, &ws, &["switch", &repo.integration_branch]).0 {
-                let _ = git_c(
-                    &git,
-                    &ws,
-                    &[
-                        "switch",
-                        "-c",
-                        &repo.integration_branch,
-                        &remote_integration,
-                    ],
-                );
-            }
-            let _ = git_c(&git, &ws, &["merge", "--ff-only", &remote_integration]);
-            let _ = git_c(&git, &ws, &["branch", "-D", head]);
-        } else if current != head {
-            let _ = git_c(&git, &ws, &["branch", "-D", head]);
+    let remote_head = format!("{}/{}", repo.remote_name, head);
+    if git_c(
+        &git,
+        &ws,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{remote_head}"),
+        ],
+    )
+    .0
+    {
+        let (deleted, delete_message) =
+            git_c(&git, &ws, &["push", &repo.remote_name, "--delete", head]);
+        if !deleted {
+            return Err(format!(
+                "PR #{pr_number} was merged, but its branch {head} could not be removed: {delete_message}"
+            ));
         }
+        let _ = git_c(&git, &ws, &["fetch", "--prune", &repo.remote_name]);
+    }
+    let current = git_c(&git, &ws, &["branch", "--show-current"]).1;
+    let clean = git_c(&git, &ws, &["status", "--porcelain"]).1.is_empty();
+    if current == head && clean {
+        let remote_integration = format!("{}/{}", repo.remote_name, repo.integration_branch);
+        if !git_c(&git, &ws, &["switch", &repo.integration_branch]).0 {
+            let _ = git_c(
+                &git,
+                &ws,
+                &[
+                    "switch",
+                    "-c",
+                    &repo.integration_branch,
+                    &remote_integration,
+                ],
+            );
+        }
+        let _ = git_c(&git, &ws, &["merge", "--ff-only", &remote_integration]);
+        let _ = git_c(&git, &ws, &["branch", "-D", head]);
+    } else if current != head {
+        let _ = git_c(&git, &ws, &["branch", "-D", head]);
+    }
+
+    if let Some(error) = comment_error {
+        return Err(error);
     }
 
     git_overview(app, state, repo_id)

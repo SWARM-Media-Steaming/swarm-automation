@@ -19,6 +19,7 @@ import install_swarm_issue_cron as runner_module
 import setup_github_bots as setup_module
 from swarm_issue_worker import (
     Config,
+    ISSUE_COMPLETED_EXIT_CODE,
     IssueContext,
     PROVIDER_UNAVAILABLE_EXIT_CODE,
     ProviderChoice,
@@ -144,6 +145,93 @@ class WorkerTestCase(unittest.TestCase):
         )
         assert only_claude is not None
         self.assertEqual(only_claude.name, "Claude")
+
+    def test_prompt_policy_toggles_add_issue_instructions(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config,
+            require_issue_tests=True,
+            allow_environment_only_summary=True,
+        )
+        self.worker.issue = IssueContext(141, "Policy prompt", "Body", [], "https://example.invalid/141")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+
+        prompt = self.worker.build_prompt(False, "", False)
+
+        self.assertIn("add or update UAT and integration tests", prompt)
+        self.assertIn("SWARM_ENVIRONMENT_ONLY", prompt)
+        self.assertIn("do not write code", prompt)
+
+    def test_environment_only_marker_finishes_without_commit(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config,
+            allow_environment_only_summary=True,
+        )
+        self.worker.issue = IssueContext(142, "Env issue", "Body", [], "https://example.invalid/142")
+
+        def fake_run_ai(_prompt: str) -> int:
+            self.worker.ai_output_file.write_text(
+                "## Summary\nThis needs a missing local service.\nSWARM_ENVIRONMENT_ONLY\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with (
+            mock.patch.object(self.worker, "provider_capacity", return_value=0),
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = self.worker.run_selected_issue()
+
+        self.assertEqual(status, ISSUE_COMPLETED_EXIT_CODE)
+        self.assertIn(142, self.worker.completed_numbers())
+        self.assertFalse(self.worker.in_progress_file.exists())
+        body = github.call_args.args[2]
+        self.assertIn("environment-only", body)
+        self.assertNotIn("SWARM_ENVIRONMENT_ONLY", body)
+
+    def test_saved_issue_can_handoff_to_another_provider(self) -> None:
+        self.worker.issue = IssueContext(143, "Handoff", "Body", [], "https://example.invalid/143")
+        original = ProviderChoice("Claude", "claude-test", "high", "claude-session")
+        self.worker.choice = original
+        self.worker.save_new_state(self.worker.issue, original, self.base_sha)
+        self.worker.update_state(session_started=True)
+        self.git("switch", "-q", "-c", "ai/claude/issue-143")
+
+        def capacity(provider: str) -> int:
+            return 0 if provider.lower() == "codex" else 1
+
+        def fake_handoff_run(_prompt: str) -> int:
+            self.worker.ai_output_file.write_text("## Summary\nDone.\n", encoding="utf-8")
+            return 0
+
+        def fake_handoff_commit(_run_start: str) -> str:
+            (self.repo / "handoff.txt").write_text("continued\n", encoding="utf-8")
+            self.git("add", "handoff.txt")
+            self.git("commit", "-q", "-m", "[codex] Continue handoff (#143)")
+            return self.git("rev-parse", "HEAD")
+
+        with (
+            mock.patch.object(self.worker, "provider_capacity", side_effect=capacity),
+            mock.patch.object(self.worker, "prepare_repository", return_value=(self.base_sha, False, "", False)),
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_handoff_run),
+            mock.patch.object(self.worker, "commit_completed_work", side_effect=fake_handoff_commit),
+            mock.patch.object(self.worker, "ensure_issue_reference", side_effect=lambda sha, _recovered: sha),
+            mock.patch.object(self.worker, "validate_new_commit_messages"),
+            mock.patch.object(self.worker, "finalize_issue"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(self.worker.run_selected_issue(), ISSUE_COMPLETED_EXIT_CODE)
+
+        state = self.worker.read_state()
+        self.assertEqual(self.worker.choice.name, "Codex")
+        self.assertEqual(state["ai_tool"], "Codex")
+        self.assertEqual(state["branch_name"], "ai/claude/issue-143")
+        self.assertFalse(state["session_started"])
 
     def test_grok_capacity_reflects_install_and_sign_in(self) -> None:
         # Empty --grok-bin in setUp -> not installed -> unavailable.
@@ -407,6 +495,7 @@ class WorkerTestCase(unittest.TestCase):
             [
                 {
                     "url": "https://example.invalid/pull/105",
+                    "state": "OPEN",
                     "headRefName": "ai/claude/issue-105",
                     "headRefOid": "1" * 40,
                     "isDraft": False,
@@ -430,6 +519,7 @@ class WorkerTestCase(unittest.TestCase):
             [
                 {
                     "url": "https://example.invalid/pull/106",
+                    "state": "OPEN",
                     "headRefName": "ai/codex/issue-106",
                     "headRefOid": "2" * 40,
                     "isDraft": False,
@@ -442,12 +532,94 @@ class WorkerTestCase(unittest.TestCase):
             mock.patch.object(worker, "issue_is_closed", return_value=True),
             mock.patch.object(worker, "approve_pull_request") as approve,
             mock.patch.object(worker, "merge_pull_request", return_value="3" * 40) as merge,
+            mock.patch.object(worker, "delete_remote_issue_branch") as delete,
         ):
             worker.merge_closed_issue_pull_requests()
         approve.assert_called_once_with("https://example.invalid/pull/106", "codex")
         merge.assert_called_once_with(
             "https://example.invalid/pull/106", "2" * 40, "codex", 106
         )
+        delete.assert_called_once_with("ai/codex/issue-106", "codex")
+
+    def test_closed_merged_pull_request_prunes_its_stale_remote_branch(self) -> None:
+        # Cleanup is a safety reconciliation, not opt-in auto-merge behavior.
+        worker = self.worker
+        pull_requests = json.dumps(
+            [
+                {
+                    "url": "https://example.invalid/pull/109",
+                    "state": "MERGED",
+                    "headRefName": "ai/codex/issue-109",
+                    "headRefOid": "7" * 40,
+                    "isDraft": False,
+                    "mergeable": "UNKNOWN",
+                    "reviewDecision": "APPROVED",
+                }
+            ]
+        )
+        with (
+            mock.patch.object(worker.github, "gh", return_value=pull_requests),
+            mock.patch.object(worker, "git_ok", return_value=True),
+            mock.patch.object(worker, "issue_is_closed", return_value=True),
+            mock.patch.object(worker, "delete_remote_issue_branch") as delete,
+            mock.patch.object(worker, "merge_pull_request") as merge,
+        ):
+            worker.merge_closed_issue_pull_requests()
+        delete.assert_called_once_with("ai/codex/issue-109", "codex")
+        merge.assert_not_called()
+
+    def test_merged_pull_request_keeps_branch_until_issue_is_closed(self) -> None:
+        pull_requests = json.dumps(
+            [
+                {
+                    "url": "https://example.invalid/pull/110",
+                    "state": "MERGED",
+                    "headRefName": "ai/claude/issue-110",
+                    "headRefOid": "8" * 40,
+                    "isDraft": False,
+                    "mergeable": "UNKNOWN",
+                    "reviewDecision": "APPROVED",
+                }
+            ]
+        )
+        with (
+            mock.patch.object(self.worker.github, "gh", return_value=pull_requests),
+            mock.patch.object(self.worker, "git_ok", return_value=True),
+            mock.patch.object(self.worker, "issue_is_closed", return_value=False),
+            mock.patch.object(self.worker, "delete_remote_issue_branch") as delete,
+        ):
+            self.worker.merge_closed_issue_pull_requests()
+        delete.assert_not_called()
+
+    def test_merged_pull_request_skips_cleanup_when_remote_branch_is_already_gone(self) -> None:
+        pull_requests = json.dumps(
+            [
+                {
+                    "url": "https://example.invalid/pull/111",
+                    "state": "MERGED",
+                    "headRefName": "ai/codex/issue-111",
+                    "headRefOid": "9" * 40,
+                    "isDraft": False,
+                    "mergeable": "UNKNOWN",
+                    "reviewDecision": "APPROVED",
+                }
+            ]
+        )
+        with (
+            mock.patch.object(self.worker.github, "gh", return_value=pull_requests),
+            mock.patch.object(self.worker, "git_ok", return_value=False),
+            mock.patch.object(self.worker, "issue_is_closed") as issue_is_closed,
+            mock.patch.object(self.worker, "delete_remote_issue_branch") as delete,
+        ):
+            self.worker.merge_closed_issue_pull_requests()
+        issue_is_closed.assert_not_called()
+        delete.assert_not_called()
+
+    def test_remote_branch_deletion_rejects_non_issue_branch(self) -> None:
+        with mock.patch.object(self.worker, "push_ref") as push:
+            with self.assertRaisesRegex(WorkerError, "unexpected branch name"):
+                self.worker.delete_remote_issue_branch("ai-main", "codex")
+        push.assert_not_called()
 
     def test_merge_helper_rechecks_issue_state_before_github_merge(self) -> None:
         worker = self.pr_worker()
@@ -836,6 +1008,21 @@ class WorkerTestCase(unittest.TestCase):
 
 
 class RunnerTestCase(unittest.TestCase):
+    def test_scheduler_keeps_repos_file_out_of_worker_arguments(self) -> None:
+        args, worker_arguments = runner_module.build_parser().parse_known_args(
+            [
+                "--repos-file", "/tmp/repos.json",
+                "--state-dir", "/tmp/state",
+                "--enabled-provider", "codex",
+                "--codex-model", "gpt-test",
+            ]
+        )
+
+        self.assertEqual(args.repos_file, "/tmp/repos.json")
+        self.assertNotIn("--repos-file", worker_arguments)
+        self.assertIn("--enabled-provider", worker_arguments)
+        self.assertIn("--codex-model", worker_arguments)
+
     def test_schedule_parser_and_next_run(self) -> None:
         args = runner_module.build_parser().parse_args(
             [
