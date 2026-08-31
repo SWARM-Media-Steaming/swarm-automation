@@ -898,11 +898,11 @@ class Worker:
         )
         return str(issue.get("state") or "").lower() == "closed"
 
-    def merge_closed_issue_pull_requests(self) -> None:
+    def reconcile_issue_pull_requests(self) -> None:
         """Reconcile automation for existing issue PRs.
 
-        Approval may happen while an issue is open. Squash-merging remains
-        strictly gated on the linked issue being closed.
+        The approval setting is intentionally one operation: approve an issue
+        PR and then squash-merge it into the AI integration branch.
         """
         if self.config.dry_run:
             return
@@ -951,11 +951,11 @@ class Worker:
                 and str(pull_request.get("reviewDecision") or "").upper() != "APPROVED"
             ):
                 self.approve_pull_request(pr_url, provider)
-            if not self.config.auto_merge or not self.issue_is_closed(issue_number):
+            if not self.config.auto_approve:
                 continue
             if str(pull_request.get("mergeable") or "").upper() == "CONFLICTING":
                 log(
-                    f"Issue #{issue_number} is closed, but {branch} has merge conflicts; "
+                    f"Issue #{issue_number} has merge conflicts on {branch}; "
                     "leaving its pull request open."
                 )
                 continue
@@ -967,7 +967,7 @@ class Worker:
             )
             self.delete_remote_issue_branch(branch, provider)
             log(
-                f"Issue #{issue_number} was already closed; squash-merged {branch} "
+                f"Approved and squash-merged issue #{issue_number} from {branch} "
                 f"into {self.config.integration_branch} as {merge_sha}."
             )
 
@@ -2394,17 +2394,11 @@ class Worker:
         delivered_sha = commit_sha
         if self.config.auto_approve:
             self.approve_pull_request(pr_url)
-        if self.config.auto_merge and self.issue_is_closed(self.issue.number):
             delivered_sha = self.merge_pull_request(
                 pr_url, commit_sha, self.choice.key, self.issue.number
             )
             self.delete_remote_issue_branch(branch, self.choice.key)
             self.return_to_integration_branch(branch)
-        elif self.config.auto_merge:
-            log(
-                f"Issue #{self.issue.number} is still open; leaving {pr_url} unmerged. "
-                "A later automation cycle may squash-merge it after the issue is closed."
-            )
         return pr_url, branch, delivered_sha
 
     def merge_pull_request(
@@ -2414,11 +2408,7 @@ class Worker:
         provider: str,
         issue_number: int,
     ) -> str:
-        """Squash a closed issue's PR and record the result on that issue."""
-        if not self.issue_is_closed(issue_number):
-            raise WorkerError(
-                f"Refusing to merge {pr_url}: issue #{issue_number} is still open"
-            )
+        """Squash an approved issue PR and record the result on its issue."""
         self.github.gh(
             [
                 "pr",
@@ -2451,7 +2441,7 @@ class Worker:
             raise WorkerError(f"Merged PR did not report a valid merge commit: {pr_url}")
         body = (
             f"Squash-merged into `{self.config.integration_branch}` "
-            f"(commit `{merge_sha}`) via {pr_url} after this issue was closed.\n\n"
+            f"(commit `{merge_sha}`) via {pr_url}.\n\n"
             f"`{self.config.integration_branch}` reaches `{self.config.base_branch}` only when a "
             "human merges the integration pull request."
         )
@@ -2692,7 +2682,7 @@ class Worker:
                 if not command_available(executable):
                     raise WorkerError(f"{label} is required but was not found in PATH")
             self.deliver_pending()
-            self.merge_closed_issue_pull_requests()
+            self.reconcile_issue_pull_requests()
             if self.prepare_paused_resume():
                 return 0
             self.issue = self.select_issue()

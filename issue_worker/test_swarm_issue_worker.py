@@ -508,7 +508,7 @@ class WorkerTestCase(unittest.TestCase):
             ["api", "--method", "GET", "repos/DotNetRockStar/swarm/issues/104"]
         )
 
-    def test_auto_merge_leaves_open_issue_pull_requests_waiting(self) -> None:
+    def test_auto_approval_also_merges_an_open_issue_pull_request(self) -> None:
         worker = self.pr_worker()
         pull_requests = json.dumps(
             [
@@ -524,15 +524,20 @@ class WorkerTestCase(unittest.TestCase):
         )
         with (
             mock.patch.object(worker.github, "gh", return_value=pull_requests),
-            mock.patch.object(worker, "issue_is_closed", return_value=False),
+            mock.patch.object(worker, "issue_is_closed", return_value=False) as issue_is_closed,
             mock.patch.object(worker, "approve_pull_request") as approve,
-            mock.patch.object(worker, "merge_pull_request") as merge,
+            mock.patch.object(worker, "merge_pull_request", return_value="2" * 40) as merge,
+            mock.patch.object(worker, "delete_remote_issue_branch") as delete,
         ):
-            worker.merge_closed_issue_pull_requests()
+            worker.reconcile_issue_pull_requests()
         approve.assert_called_once_with("https://example.invalid/pull/105", "claude")
-        merge.assert_not_called()
+        merge.assert_called_once_with(
+            "https://example.invalid/pull/105", "1" * 40, "claude", 105
+        )
+        delete.assert_called_once_with("ai/claude/issue-105", "claude")
+        issue_is_closed.assert_not_called()
 
-    def test_auto_merge_reconciles_a_pull_request_after_issue_closure(self) -> None:
+    def test_auto_approval_leaves_a_conflicting_pull_request_open(self) -> None:
         worker = self.pr_worker()
         pull_requests = json.dumps(
             [
@@ -542,23 +547,20 @@ class WorkerTestCase(unittest.TestCase):
                     "headRefName": "ai/codex/issue-106",
                     "headRefOid": "2" * 40,
                     "isDraft": False,
-                    "mergeable": "MERGEABLE",
+                    "mergeable": "CONFLICTING",
                 }
             ]
         )
         with (
             mock.patch.object(worker.github, "gh", return_value=pull_requests),
-            mock.patch.object(worker, "issue_is_closed", return_value=True),
             mock.patch.object(worker, "approve_pull_request") as approve,
-            mock.patch.object(worker, "merge_pull_request", return_value="3" * 40) as merge,
+            mock.patch.object(worker, "merge_pull_request") as merge,
             mock.patch.object(worker, "delete_remote_issue_branch") as delete,
         ):
-            worker.merge_closed_issue_pull_requests()
+            worker.reconcile_issue_pull_requests()
         approve.assert_called_once_with("https://example.invalid/pull/106", "codex")
-        merge.assert_called_once_with(
-            "https://example.invalid/pull/106", "2" * 40, "codex", 106
-        )
-        delete.assert_called_once_with("ai/codex/issue-106", "codex")
+        merge.assert_not_called()
+        delete.assert_not_called()
 
     def test_closed_merged_pull_request_prunes_its_stale_remote_branch(self) -> None:
         # Cleanup is a safety reconciliation, not opt-in auto-merge behavior.
@@ -583,7 +585,7 @@ class WorkerTestCase(unittest.TestCase):
             mock.patch.object(worker, "delete_remote_issue_branch") as delete,
             mock.patch.object(worker, "merge_pull_request") as merge,
         ):
-            worker.merge_closed_issue_pull_requests()
+            worker.reconcile_issue_pull_requests()
         delete.assert_called_once_with("ai/codex/issue-109", "codex")
         merge.assert_not_called()
 
@@ -607,7 +609,7 @@ class WorkerTestCase(unittest.TestCase):
             mock.patch.object(self.worker, "issue_is_closed", return_value=False),
             mock.patch.object(self.worker, "delete_remote_issue_branch") as delete,
         ):
-            self.worker.merge_closed_issue_pull_requests()
+            self.worker.reconcile_issue_pull_requests()
         delete.assert_not_called()
 
     def test_merged_pull_request_skips_cleanup_when_remote_branch_is_already_gone(self) -> None:
@@ -630,7 +632,7 @@ class WorkerTestCase(unittest.TestCase):
             mock.patch.object(self.worker, "issue_is_closed") as issue_is_closed,
             mock.patch.object(self.worker, "delete_remote_issue_branch") as delete,
         ):
-            self.worker.merge_closed_issue_pull_requests()
+            self.worker.reconcile_issue_pull_requests()
         issue_is_closed.assert_not_called()
         delete.assert_not_called()
 
@@ -640,19 +642,21 @@ class WorkerTestCase(unittest.TestCase):
                 self.worker.delete_remote_issue_branch("ai-main", "codex")
         push.assert_not_called()
 
-    def test_merge_helper_rechecks_issue_state_before_github_merge(self) -> None:
+    def test_merge_helper_does_not_require_issue_closure(self) -> None:
         worker = self.pr_worker()
+        merge_sha = "5" * 40
         with (
-            mock.patch.object(worker, "issue_is_closed", return_value=False),
-            mock.patch.object(worker.github, "gh") as gh,
+            mock.patch.object(worker, "issue_is_closed", return_value=False) as issue_is_closed,
+            mock.patch.object(worker.github, "gh", side_effect=["", merge_sha, ""]) as gh,
         ):
-            with self.assertRaisesRegex(WorkerError, "issue #107 is still open"):
-                worker.merge_pull_request(
-                    "https://example.invalid/pull/107", "4" * 40, "claude", 107
-                )
-        gh.assert_not_called()
+            result = worker.merge_pull_request(
+                "https://example.invalid/pull/107", "4" * 40, "claude", 107
+            )
+            issue_is_closed.assert_not_called()
+        self.assertEqual(result, merge_sha)
+        self.assertEqual(gh.call_args_list[0].args[0][:2], ["pr", "merge"])
 
-    def test_closed_issue_merge_comments_without_closing_the_issue(self) -> None:
+    def test_issue_pr_merge_comments_without_closing_the_issue(self) -> None:
         worker = self.pr_worker()
         merge_sha = "5" * 40
         with (

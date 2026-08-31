@@ -125,8 +125,8 @@ pub struct RepoConfig {
     /// global `preferred_provider`.
     pub preferred_provider: String,
     pub auto_approve: bool,
-    /// Auto-merge (squash) an approved issue PR into `integration_branch` only
-    /// after its issue is closed. `base_branch` is never touched automatically.
+    /// Compatibility mirror of `auto_approve`. Approval and squash-merging are
+    /// one UI operation; `base_branch` is never touched automatically.
     pub auto_merge: bool,
     /// Ask the AI to add or update UAT and integration tests for each issue.
     pub require_issue_tests: bool,
@@ -162,8 +162,8 @@ impl Default for RepoConfig {
             trusted_followup_authors: Vec::new(),
             completion_authors: Vec::new(),
             preferred_provider: String::new(),
-            auto_approve: false,
-            auto_merge: false,
+            auto_approve: true,
+            auto_merge: true,
             require_issue_tests: false,
             allow_environment_only_summary: false,
             repo_dir: String::new(),
@@ -350,7 +350,7 @@ pub struct AppConfig {
     pub github_apps_config: String,
     #[serde(default = "default_true", skip_serializing)]
     pub require_bot_auth: bool,
-    #[serde(default, skip_serializing)]
+    #[serde(default = "default_true", skip_serializing)]
     pub auto_approve: bool,
     #[serde(default, skip_serializing)]
     pub auto_merge: bool,
@@ -425,7 +425,7 @@ impl Default for AppConfig {
             github_host: String::new(),
             github_apps_config: String::new(),
             require_bot_auth: true,
-            auto_approve: false,
+            auto_approve: true,
             auto_merge: false,
             require_issue_tests: false,
             allow_environment_only_summary: false,
@@ -696,6 +696,8 @@ impl AppConfig {
                 // Enterprise hosts are intentionally out of scope for now.
                 // Normalize older profiles to the one supported GitHub host.
                 repo.github_host = "github.com".into();
+                // Approval and issue-PR merging are one user-facing operation.
+                repo.auto_merge = repo.auto_approve;
                 kept.push(repo);
             }
         }
@@ -793,8 +795,8 @@ mod tests {
         assert_eq!(repo.branch_prefix, "swarm", "migrated prefix preserved");
         assert_eq!(repo.github_host, "github.com", "only supported host");
         assert!(repo.require_bot_auth, "bot authentication defaults on");
-        assert!(!repo.auto_approve, "automatic PR approval defaults off");
-        assert!(!repo.auto_merge);
+        assert!(repo.auto_approve, "automatic PR approval defaults on");
+        assert!(repo.auto_merge, "approval also enables issue PR merging");
         assert!(!repo.require_issue_tests);
         assert!(!repo.allow_environment_only_summary);
         assert_eq!(config.provider("claude").unwrap().model, "claude-opus-5");

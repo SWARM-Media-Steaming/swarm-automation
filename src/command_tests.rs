@@ -321,8 +321,8 @@ fn repo_worker_args_carries_per_repo_branch_config() {
     assert_eq!(pair(&args, "--branch-prefix"), Some("ai"));
     assert_eq!(pair(&args, "--github-repository"), Some("octocat/example"));
     assert_eq!(pair(&args, "--assignee"), Some("octocat"));
-    assert!(args.contains(&"--no-auto-approve".to_string()));
-    assert!(args.contains(&"--no-auto-merge".to_string()));
+    assert!(args.contains(&"--auto-approve".to_string()));
+    assert!(args.contains(&"--auto-merge".to_string()));
     assert!(args.contains(&"--no-require-issue-tests".to_string()));
     assert!(args.contains(&"--no-allow-environment-only-summary".to_string()));
     // The old delivery/merge flags are gone.

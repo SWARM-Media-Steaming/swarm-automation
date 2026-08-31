@@ -110,7 +110,7 @@
     },
     "auto-approve-merge": {
       title: "Approve & merge automatically",
-      html: "<p><strong>Automatically approve issue PRs</strong> uses a bot identity to approve each AI pull request. A different provider is used when available.</p><p><strong>Automatically merge closed issue PRs</strong> merges only after the linked issue is closed. It creates one tidy commit in the AI integration branch and removes the issue branch.</p><p>Both settings are off by default. Neither setting merges AI work into <code>main</code>.</p>",
+      html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention. This never merges the AI integration branch into <code>main</code>.</p>",
       links: [],
     },
     "schedule-modes": {
@@ -267,8 +267,8 @@
       trusted_followup_authors: [],
       completion_authors: [],
       preferred_provider: "",
-      auto_approve: false,
-      auto_merge: false,
+      auto_approve: true,
+      auto_merge: true,
       require_issue_tests: false,
       allow_environment_only_summary: false,
       repo_dir: "",
@@ -332,6 +332,8 @@
       else if (input.type === "number" || key === "uat_hour") repo[key] = Number(input.value);
       else repo[key] = input.value.trim();
     });
+    // Approval and squash-merging are intentionally one repository setting.
+    repo.auto_merge = repo.auto_approve;
   }
 
   function modelSpecs(providerId) {
@@ -1067,7 +1069,7 @@
       return makeActivity(log, "A second AI approved the pull request", "The reviewing provider used a different GitHub identity from the provider that wrote the changes.", "success", "work");
     }
     if (/squash-merged/i.test(message) && issueNumber) {
-      return makeActivity(log, `Merged closed issue #${issueNumber} into the AI branch`, "The issue branch was combined into one commit and removed. The human-owned branch was not changed.", "success", "work");
+      return makeActivity(log, `Merged issue #${issueNumber} into the AI branch`, "The approved issue branch was combined into one commit and removed. The human-owned branch was not changed.", "success", "work");
     }
     if (/Adding the .* label to GitHub issue/i.test(message) && issueNumber) {
       return makeActivity(log, `Marked issue #${issueNumber} ready for testing`, "The configured ready label was added on GitHub.", "success", "work");

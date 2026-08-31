@@ -622,7 +622,7 @@ fn repo_worker_args(
             "--no-auto-approve"
         }
         .into(),
-        if repo.auto_merge {
+        if repo.auto_approve {
             "--auto-merge"
         } else {
             "--no-auto-merge"

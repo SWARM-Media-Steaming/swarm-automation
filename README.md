@@ -28,9 +28,9 @@ The application can:
   interactive provider sign-in;
 - launch and verify a Claude Bot / Codex Bot / Grok Bot GitHub App setup for the
   configured repository;
-- show the base, AI-integration, and active issue branches as a Git tree; after
-  an issue is closed, squash its pull request into the AI-integration branch,
-  delete its branch, and expose the explicit human promotion gate;
+- show the base, AI-integration, and active issue branches as a Git tree;
+  optionally approve and squash issue pull requests into the AI-integration
+  branch, delete their branches, and expose the explicit human promotion gate;
 - supervise a target repository's own `scripts/tests/full_uat_cron.sh` when
   that frozen runner exists in the selected checkout;
 - explain any control in place through a click-to-open help modal, and carry a
