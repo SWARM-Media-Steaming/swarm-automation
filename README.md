@@ -21,6 +21,10 @@ The application can:
 - monitor multiple GitHub repositories in one scheduler, with an independent
   managed clone, assignee, branch policy, bot identities, and UAT process for
   each repository;
+- work the repositories one at a time with a single shared worker (the
+  default), or turn on **One worker per repository** to run a worker for every
+  repository at once — faster through a backlog, but AI credits are spent
+  faster too;
 - detect Git, GitHub CLI, Python, Node/npm, Claude Code, Codex, and Grok Build
   using the macOS login-shell path;
 - install Claude Code or Codex with the vendor's npm package, run xAI's official

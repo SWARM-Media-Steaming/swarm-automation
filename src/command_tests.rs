@@ -502,6 +502,38 @@ fn scheduler_arguments_degrade_manual_to_continuous_and_pass_the_repos_file() {
 }
 
 #[test]
+fn scheduler_arguments_request_one_worker_per_repository_only_when_enabled() {
+    let mut config = AppConfig::default();
+    let runner = PathBuf::from("/bin/runner.py");
+    let python = PathBuf::from("/usr/bin/python3");
+    let git = PathBuf::from("/usr/bin/git");
+    let repos = PathBuf::from("/state/repos.json");
+
+    let off = scheduler_arguments(&config, &runner, &python, &git, &repos, false);
+    assert!(
+        !off.contains(&"--parallel-repos".to_string()),
+        "the single shared worker is the default"
+    );
+
+    config.parallel_repo_workers = true;
+    let on = scheduler_arguments(&config, &runner, &python, &git, &repos, false);
+    assert!(on.contains(&"--parallel-repos".to_string()));
+}
+
+#[test]
+fn save_config_round_trips_the_parallel_repo_worker_toggle() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let mut config = AppConfig::default();
+    config.repositories.push(repo("octocat/one"));
+    config.parallel_repo_workers = true;
+
+    save_config(app.clone(), app.state(), config).expect("config with the toggle on is valid");
+    let loaded = get_config(app.state()).expect("get_config");
+    assert!(loaded.parallel_repo_workers);
+}
+
+#[test]
 fn issue_branch_merge_requires_the_issue_to_be_closed() {
     let error = require_closed_issue(42, "OPEN", "ai-main")
         .expect_err("an open issue must block its branch merge");

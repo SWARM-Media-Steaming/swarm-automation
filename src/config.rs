@@ -322,6 +322,11 @@ pub struct AppConfig {
     pub providers: Vec<ProviderSettings>,
 
     pub minimum_remaining_percent: u8,
+    /// One issue worker per repository, running at the same time, instead of a
+    /// single worker that visits each repository in turn. Faster when several
+    /// repositories have ready issues, but AI credits are spent faster too.
+    /// Off by default.
+    pub parallel_repo_workers: bool,
     pub schedule_mode: String,
     pub schedule_time: String,
     pub schedule_days: Vec<String>,
@@ -406,6 +411,7 @@ impl Default for AppConfig {
             preferred_provider: "claude".into(),
             providers: default_providers(),
             minimum_remaining_percent: 10,
+            parallel_repo_workers: false,
             schedule_mode: "continuous".into(),
             schedule_time: "09:00".into(),
             schedule_days: vec!["mon", "tue", "wed", "thu", "fri"]
