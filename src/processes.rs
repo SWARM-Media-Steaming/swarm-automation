@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -165,7 +165,7 @@ impl ProcessManager {
     /// Python scheduler owns a PID lock and process group, so a live PID is
     /// enough to restore status plus pause/resume/stop controls even though
     /// Rust can no longer recover the original `Child` handle.
-    pub fn adopt_external<R: tauri::Runtime>(
+    pub fn adopt_external<R: Runtime>(
         &self,
         app: &AppHandle<R>,
         slot_name: &str,
@@ -210,9 +210,9 @@ impl ProcessManager {
         Ok(status_for_slot(&slot))
     }
 
-    pub fn status(
+    pub fn status<R: Runtime>(
         &self,
-        app: &AppHandle,
+        app: &AppHandle<R>,
         slot_name: &str,
         source: &str,
         log_path: &Path,
@@ -296,7 +296,7 @@ impl ProcessManager {
     }
 }
 
-fn refresh_slot<R: tauri::Runtime>(
+fn refresh_slot<R: Runtime>(
     slot: &mut ProcessSlot,
     source: &str,
     app: &AppHandle<R>,
@@ -423,7 +423,7 @@ fn stream_lines<R: std::io::Read + Send + 'static>(
 /// process, but its own durable cron log continues. Follow only newly appended
 /// lines so Overview and Info & Debug resume updating without duplicating
 /// history already present in the application log.
-fn follow_existing_log<R: tauri::Runtime>(
+fn follow_existing_log<R: Runtime>(
     app: AppHandle<R>,
     source: String,
     pid: u32,
@@ -455,7 +455,7 @@ fn follow_existing_log<R: tauri::Runtime>(
     });
 }
 
-fn emit_log<R: tauri::Runtime>(
+fn emit_log<R: Runtime>(
     app: &AppHandle<R>,
     log_path: &Path,
     source: &str,

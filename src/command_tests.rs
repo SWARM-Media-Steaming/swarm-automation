@@ -25,6 +25,7 @@ fn test_app() -> TestApp {
         .manage(AppState {
             config: std::sync::Mutex::new(AppConfig::default()),
             processes: Default::default(),
+            smtp_password_configured: std::sync::Mutex::new(None),
             test_data_dir: Some(data_dir.path().to_path_buf()),
         })
         .build(mock_context(noop_assets()))
@@ -330,6 +331,66 @@ fn detect_tools_finds_real_git_on_this_machine_without_panicking() {
         .expect("git should always be a reported tool");
     assert!(git.installed, "this dev machine has git on PATH");
     assert!(!git.path.is_empty());
+}
+
+#[test]
+fn smtp_password_status_probe_is_cached_after_the_first_check() {
+    let test_app = test_app();
+    let mut probes = 0;
+
+    let first =
+        super::cached_smtp_password_configured(test_app.app.state::<AppState>().inner(), || {
+            probes += 1;
+            true
+        })
+        .expect("first SMTP password status check succeeds");
+    let second =
+        super::cached_smtp_password_configured(test_app.app.state::<AppState>().inner(), || {
+            probes += 1;
+            false
+        })
+        .expect("second SMTP password status check succeeds");
+
+    assert!(first);
+    assert!(second);
+    assert_eq!(probes, 1, "status polling should not keep probing Keychain");
+}
+
+#[test]
+fn smtp_password_status_cache_can_be_updated_after_explicit_password_actions() {
+    let test_app = test_app();
+
+    super::set_cached_smtp_password_configured(test_app.app.state::<AppState>().inner(), false)
+        .expect("cache false");
+    assert!(!super::cached_smtp_password_configured(
+        test_app.app.state::<AppState>().inner(),
+        || true
+    )
+    .expect("cached false should be returned"));
+
+    super::set_cached_smtp_password_configured(test_app.app.state::<AppState>().inner(), true)
+        .expect("cache true");
+    assert!(super::cached_smtp_password_configured(
+        test_app.app.state::<AppState>().inner(),
+        || false
+    )
+    .expect("cached true should be returned"));
+}
+
+#[test]
+fn automation_status_uses_cached_smtp_password_state() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let config = valid_config(repo_dir.path());
+    save_config(app.clone(), app.state(), config).expect("config saves");
+    super::set_cached_smtp_password_configured(app.state::<AppState>().inner(), true)
+        .expect("cache true");
+
+    let status = super::get_automation_status(app.clone(), app.state())
+        .expect("status should use cached SMTP password state");
+
+    assert!(status.smtp_password_configured);
 }
 
 // ----- scheduler / repo worker args --------------------------------------
