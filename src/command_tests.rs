@@ -1,7 +1,7 @@
 use super::{
-    detect_tools, get_config, inspect_repository, issue_branch_pr_is_visible, repo_worker_args,
-    require_closed_issue, save_config, scheduler_arguments, validate_worker_script_dir, AppState,
-    ResolvedProvider,
+    detect_tools, get_config, get_test_plan, inspect_repository, issue_branch_pr_is_visible,
+    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
+    validate_worker_script_dir, AppState, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ fn test_app() -> TestApp {
         .manage(AppState {
             config: std::sync::Mutex::new(AppConfig::default()),
             processes: Default::default(),
+            smtp_password_configured: std::sync::Mutex::new(None),
             test_data_dir: Some(data_dir.path().to_path_buf()),
         })
         .build(mock_context(noop_assets()))
@@ -254,6 +255,56 @@ fn inspect_repository_detects_a_target_repos_own_script_bundles() {
 }
 
 #[test]
+fn repository_test_definition_is_discovered_through_the_command_layer() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    std::fs::create_dir_all(repo_dir.path().join(".swarm")).unwrap();
+    std::fs::write(
+        repo_dir.path().join(".swarm/tests.json"),
+        r#"{"version":1,"suites":[{"id":"integration","name":"Integration","command":["/usr/bin/true"],"requirements":{"files":["Cargo.toml"]}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(repo_dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let mut config = valid_config(repo_dir.path());
+    config.repositories[0].uat_enabled = true;
+    save_config(app.clone(), app.state(), config).unwrap();
+
+    let plan = get_test_plan(app.clone(), app.state(), "octocat__example".into()).unwrap();
+    assert!(plan.available);
+    assert!(!plan.legacy);
+    assert_eq!(plan.suites.len(), 1);
+    assert_eq!(plan.suites[0].result.state, "Ready");
+}
+
+#[test]
+fn device_choice_round_trips_per_repository_without_touching_other_profiles() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let first = real_git_checkout();
+    let second = real_git_checkout();
+    let mut config = valid_config(first.path());
+    config.repositories.push(RepoConfig {
+        repo_dir: second.path().to_string_lossy().into_owned(),
+        ..repo("octocat/second")
+    });
+    save_config(app.clone(), app.state(), config).unwrap();
+
+    let saved = save_test_device(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        "192.0.2.8:5555".into(),
+    )
+    .unwrap();
+    assert_eq!(
+        saved.repositories[0].test_inputs.get("fireTvSerial"),
+        Some(&"192.0.2.8:5555".to_string())
+    );
+    assert!(saved.repositories[1].test_inputs.is_empty());
+}
+
+#[test]
 fn bundled_worker_resources_are_validated_as_one_versioned_set() {
     let resources = tempfile::tempdir().expect("create resource dir");
     for name in super::REQUIRED_WORKER_RESOURCES {
@@ -280,6 +331,66 @@ fn detect_tools_finds_real_git_on_this_machine_without_panicking() {
         .expect("git should always be a reported tool");
     assert!(git.installed, "this dev machine has git on PATH");
     assert!(!git.path.is_empty());
+}
+
+#[test]
+fn smtp_password_status_probe_is_cached_after_the_first_check() {
+    let test_app = test_app();
+    let mut probes = 0;
+
+    let first =
+        super::cached_smtp_password_configured(test_app.app.state::<AppState>().inner(), || {
+            probes += 1;
+            true
+        })
+        .expect("first SMTP password status check succeeds");
+    let second =
+        super::cached_smtp_password_configured(test_app.app.state::<AppState>().inner(), || {
+            probes += 1;
+            false
+        })
+        .expect("second SMTP password status check succeeds");
+
+    assert!(first);
+    assert!(second);
+    assert_eq!(probes, 1, "status polling should not keep probing Keychain");
+}
+
+#[test]
+fn smtp_password_status_cache_can_be_updated_after_explicit_password_actions() {
+    let test_app = test_app();
+
+    super::set_cached_smtp_password_configured(test_app.app.state::<AppState>().inner(), false)
+        .expect("cache false");
+    assert!(!super::cached_smtp_password_configured(
+        test_app.app.state::<AppState>().inner(),
+        || true
+    )
+    .expect("cached false should be returned"));
+
+    super::set_cached_smtp_password_configured(test_app.app.state::<AppState>().inner(), true)
+        .expect("cache true");
+    assert!(super::cached_smtp_password_configured(
+        test_app.app.state::<AppState>().inner(),
+        || false
+    )
+    .expect("cached true should be returned"));
+}
+
+#[test]
+fn automation_status_uses_cached_smtp_password_state() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let config = valid_config(repo_dir.path());
+    save_config(app.clone(), app.state(), config).expect("config saves");
+    super::set_cached_smtp_password_configured(app.state::<AppState>().inner(), true)
+        .expect("cache true");
+
+    let status = super::get_automation_status(app.clone(), app.state())
+        .expect("status should use cached SMTP password state");
+
+    assert!(status.smtp_password_configured);
 }
 
 // ----- scheduler / repo worker args --------------------------------------

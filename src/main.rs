@@ -1,5 +1,6 @@
 mod config;
 mod processes;
+mod testing;
 mod tools;
 
 use config::{AppConfig, RepoConfig, CONFIG_FILE};
@@ -29,6 +30,10 @@ const REQUIRED_WORKER_RESOURCES: [&str; 6] = [
 struct AppState {
     config: Mutex<AppConfig>,
     processes: ProcessManager,
+    /// Cached presence of the optional SMTP password. Checking Keychain can
+    /// trigger a macOS access prompt, so status polling must not probe it every
+    /// two seconds.
+    smtp_password_configured: Mutex<Option<bool>>,
     /// Test-only override for `app_config_path`/`automation_log_path`.
     /// `mock_context()`'s identifier defaults to empty, so every test would
     /// otherwise resolve to the same shared OS path; this gives each test's
@@ -43,6 +48,7 @@ impl Default for AppState {
         Self {
             config: Mutex::new(AppConfig::default()),
             processes: ProcessManager::default(),
+            smtp_password_configured: Mutex::new(None),
             test_data_dir: None,
         }
     }
@@ -142,8 +148,35 @@ fn current_config(state: &State<'_, AppState>) -> Result<AppConfig, String> {
         .map_err(|_| "Configuration state lock was poisoned".into())
 }
 
-fn reconnect_issue_scheduler(
-    app: &tauri::AppHandle,
+fn cached_smtp_password_configured(
+    state: &AppState,
+    probe: impl FnOnce() -> bool,
+) -> Result<bool, String> {
+    if let Some(configured) = *state
+        .smtp_password_configured
+        .lock()
+        .map_err(|_| "SMTP password state lock was poisoned".to_string())?
+    {
+        return Ok(configured);
+    }
+    let configured = probe();
+    *state
+        .smtp_password_configured
+        .lock()
+        .map_err(|_| "SMTP password state lock was poisoned".to_string())? = Some(configured);
+    Ok(configured)
+}
+
+fn set_cached_smtp_password_configured(state: &AppState, configured: bool) -> Result<(), String> {
+    *state
+        .smtp_password_configured
+        .lock()
+        .map_err(|_| "SMTP password state lock was poisoned".to_string())? = Some(configured);
+    Ok(())
+}
+
+fn reconnect_issue_scheduler<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     config: &AppConfig,
     log_path: &Path,
@@ -227,7 +260,7 @@ fn inspect_repository_path(path: &Path) -> RepositoryInspection {
         worker_available: canonical
             .join("scripts/issue_worker/install_swarm_issue_cron.py")
             .is_file(),
-        uat_available: canonical.join("scripts/tests/full_uat_cron.sh").is_file(),
+        uat_available: testing::available(&canonical),
         error: String::new(),
     };
     if !canonical.is_dir() {
@@ -298,8 +331,8 @@ async fn detect_tools_background(app: tauri::AppHandle) -> Result<Vec<tools::Too
 }
 
 #[tauri::command]
-fn get_automation_status(
-    app: tauri::AppHandle,
+fn get_automation_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<AutomationStatus, String> {
     let config = current_config(&state)?;
@@ -323,7 +356,7 @@ fn get_automation_status(
             uat: state.processes.status(
                 &app,
                 &format!("uat:{}", repo.id),
-                &format!("UAT scheduler · {}", repo.label()),
+                &format!("Test scheduler · {}", repo.label()),
                 &log_path,
             )?,
             workspace_path: workspace.to_string_lossy().into_owned(),
@@ -349,7 +382,9 @@ fn get_automation_status(
             .iter()
             .all(|repo| Path::new(&repo.effective_apps_config()).is_file()),
         repos,
-        smtp_password_configured: smtp_password().is_ok(),
+        smtp_password_configured: cached_smtp_password_configured(state.inner(), || {
+            smtp_password().is_ok()
+        })?,
         config_error: config.validate().err().unwrap_or_default(),
         log_path: log_path.to_string_lossy().into_owned(),
     })
@@ -481,7 +516,9 @@ fn start_issue_worker(
         ),
     ];
     if config.email_enabled {
-        environment.push(("SWARM_SMTP_PASSWORD".into(), smtp_password()?));
+        let password = smtp_password()?;
+        set_cached_smtp_password_configured(state.inner(), true)?;
+        environment.push(("SWARM_SMTP_PASSWORD".into(), password));
         arguments.extend([
             "--smtp-credentials-file".into(),
             config.smtp_credentials_file.clone(),
@@ -670,31 +707,139 @@ fn start_uat_scheduler(
     run_once: bool,
 ) -> Result<ProcessStatus, String> {
     let config = current_config(&state)?;
-    config.validate()?;
     let repo = resolve_repo(&config, &repo_id)?;
     if !repo.uat_enabled {
-        return Err(format!("UAT scheduling is disabled for {}.", repo.label()));
+        return Err(format!("Test scheduling is disabled for {}.", repo.label()));
     }
     let workspace = prepared_workspace(&app, &config, repo)?;
-    let script = workspace.join("scripts/tests/full_uat_cron.sh");
-    if !script.is_file() {
-        return Err("This repository does not contain scripts/tests/full_uat_cron.sh.".into());
-    }
-    let mut arguments = vec![script.to_string_lossy().into_owned()];
+    let definition = testing::definition_path(&workspace);
+    let legacy = testing::legacy_runner_path(&workspace);
+    let (program, mut arguments, environment) = if definition.is_file() {
+        // Validate before spawning so malformed repository definitions are a
+        // clear configuration error, never an opaque failed test process.
+        testing::load_definition(&workspace)?;
+        let program = std::env::current_exe()
+            .map_err(|error| format!("Could not locate the test runner: {error}"))?;
+        let mut arguments = vec![
+            "--swarm-test-runner".into(),
+            "--workspace".into(),
+            workspace.to_string_lossy().into_owned(),
+            "--run-dir".into(),
+            repo.effective_run_dir(&workspace)
+                .to_string_lossy()
+                .into_owned(),
+            "--repository".into(),
+            repo.github_repository.clone(),
+            "--device".into(),
+            repo.test_inputs
+                .get("fireTvSerial")
+                .cloned()
+                .unwrap_or_default(),
+            "--hour".into(),
+            repo.uat_hour.to_string(),
+        ];
+        if repo.allow_disruptive_tests {
+            arguments.push("--allow-disruptive".into());
+        }
+        if repo.uat_triage_enabled {
+            arguments.push("--triage".into());
+        }
+        (
+            program,
+            arguments,
+            vec![("PATH".into(), tools::enhanced_path())],
+        )
+    } else if legacy.is_file() {
+        (
+            PathBuf::from("/bin/bash"),
+            vec![legacy.to_string_lossy().into_owned()],
+            uat_environment(&config, repo, &workspace),
+        )
+    } else {
+        return Err(format!(
+            "This repository contains neither {} nor scripts/tests/full_uat_cron.sh.",
+            testing::TEST_DEFINITION_PATH
+        ));
+    };
     if run_once {
         arguments.push("--once".into());
     }
-    let environment = uat_environment(&config, repo, &workspace);
     state.processes.spawn(
         &app,
         &format!("uat:{}", repo.id),
-        &format!("UAT scheduler · {}", repo.label()),
-        Path::new("/bin/bash"),
+        &format!("Test scheduler · {}", repo.label()),
+        &program,
         &arguments,
         &environment,
         &workspace,
         automation_log_path(&app)?,
     )
+}
+
+#[tauri::command]
+fn get_test_plan<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<testing::TestPlan, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = resolve_workspace(&app, &config, repo)?;
+    Ok(testing::build_plan(
+        &workspace,
+        &repo.effective_run_dir(&workspace),
+        &repo.test_inputs,
+        repo.allow_disruptive_tests,
+    ))
+}
+
+#[tauri::command]
+async fn get_test_plan_background(
+    app: tauri::AppHandle,
+    repo_id: String,
+) -> Result<testing::TestPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_test_plan(app.clone(), state, repo_id)
+    })
+    .await
+    .map_err(|error| format!("Test requirement discovery failed: {error}"))?
+}
+
+#[tauri::command]
+fn save_test_device<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+    serial: String,
+) -> Result<AppConfig, String> {
+    let mut config = current_config(&state)?;
+    let repo = config
+        .repositories
+        .iter_mut()
+        .find(|repo| repo.id == repo_id)
+        .ok_or_else(|| format!("Unknown repository id: {repo_id}"))?;
+    if serial.trim().is_empty() {
+        repo.test_inputs.remove("fireTvSerial");
+    } else {
+        repo.test_inputs
+            .insert("fireTvSerial".into(), serial.trim().into());
+    }
+    let selected_inputs = repo.test_inputs.clone();
+    let repo_snapshot = repo.clone();
+    let workspace = resolve_workspace(&app, &config, &repo_snapshot)?;
+    if workspace.is_dir() {
+        testing::save_inputs(
+            &repo_snapshot.effective_run_dir(&workspace),
+            &selected_inputs,
+        )?;
+    }
+    config::save(&app_config_path(&app)?, &config)?;
+    *state
+        .config
+        .lock()
+        .map_err(|_| "Configuration state lock was poisoned".to_string())? = config.clone();
+    Ok(config)
 }
 
 fn uat_environment(
@@ -1625,20 +1770,22 @@ fn open_provider_login(state: State<'_, AppState>, provider: String) -> Result<(
 }
 
 #[tauri::command]
-fn set_smtp_password(password: String) -> Result<bool, String> {
+fn set_smtp_password(state: State<'_, AppState>, password: String) -> Result<bool, String> {
     let entry = keyring::Entry::new(SMTP_KEYRING_SERVICE, SMTP_KEYRING_ACCOUNT)
         .map_err(|error| error.to_string())?;
-    if password.is_empty() {
+    let configured = if password.is_empty() {
         match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(false),
-            Err(error) => Err(error.to_string()),
+            Ok(()) | Err(keyring::Error::NoEntry) => false,
+            Err(error) => return Err(error.to_string()),
         }
     } else {
         entry
             .set_password(&password)
             .map_err(|error| error.to_string())?;
-        Ok(true)
-    }
+        true
+    };
+    set_cached_smtp_password_configured(state.inner(), configured)?;
+    Ok(configured)
 }
 
 fn smtp_password() -> Result<String, String> {
@@ -1983,6 +2130,10 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
+    let arguments: Vec<String> = std::env::args().collect();
+    if let Some(exit_code) = testing::run_cli(&arguments) {
+        std::process::exit(exit_code);
+    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_main_window(app)
@@ -2021,6 +2172,9 @@ fn main() {
             get_automation_status_background,
             start_issue_worker,
             start_uat_scheduler,
+            get_test_plan,
+            get_test_plan_background,
+            save_test_device,
             pause_process,
             resume_process,
             stop_process,

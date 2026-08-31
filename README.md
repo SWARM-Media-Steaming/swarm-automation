@@ -1,8 +1,8 @@
 # SWARM Automation
 
 SWARM Automation is a macOS-first native desktop control center for running
-an AI issue worker and (when the target repository has one) a closed-loop
-UAT scheduler against **any GitHub repository** — not just SWARM's own. You
+an AI issue worker and (when the target repository has one) a deterministic
+test scheduler against **any GitHub repository** — not just SWARM's own. You
 give it `owner/name` and it clones the repo into a workspace it manages
 itself (never a checkout you work in); a power-user override can point it at
 an existing checkout instead. It bundles its own Python issue-worker
@@ -30,9 +30,13 @@ The application can:
   configured repository;
 - show the base, AI-integration, and active issue branches as a Git tree;
   optionally approve and squash issue pull requests into the AI-integration
-  branch, delete their branches, and expose the explicit human promotion gate;
-- supervise a target repository's own `scripts/tests/full_uat_cron.sh` when
-  that frozen runner exists in the selected checkout;
+  branch (a per-repository policy), delete their branches once the linked
+  issue is closed, and expose the explicit human promotion gate;
+- discover and run a target repository's suites from `.swarm/tests.json`,
+  resolving tools, files, services, mounts, credentials, and Fire TV devices
+  independently for each suite without using AI credits;
+- supervise a target repository's existing `scripts/tests/full_uat_cron.sh`
+  as a compatibility fallback when no test definition exists;
 - explain any control in place through a click-to-open help modal, and carry a
   **Help** tab with a "how to get started" walkthrough; and
 - stream child output to the UI and a local log.
@@ -108,10 +112,82 @@ npm run build
 
 The packaged application includes the vendored Python issue-worker
 implementation, so a selected repository does not need to contain any
-automation scripts of its own. Full UAT controls are intentionally
-repository-specific: they are enabled only when the selected checkout
-contains `scripts/tests/full_uat_cron.sh`, and the desktop app invokes that
-runner without modifying its test logic.
+automation scripts of its own. Test controls are repository-specific. The app
+prefers `.swarm/tests.json` and falls back to
+`scripts/tests/full_uat_cron.sh` without modifying its test logic.
+
+## Repository test definitions
+
+Add `.swarm/tests.json` to a repository to make its test inventory explicit and
+portable. The checked-in definition in this repository is a working example.
+The current schema version is `1`:
+
+```json
+{
+  "version": 1,
+  "suites": [
+    {
+      "id": "backend",
+      "name": "Backend tests",
+      "command": ["cargo", "test"],
+      "timeoutSeconds": 1800,
+      "disruptive": false,
+      "requirements": {
+        "executables": ["cargo"],
+        "files": ["Cargo.toml"],
+        "servers": [
+          { "name": "API", "host": "127.0.0.1", "port": 8080, "timeoutSeconds": 3 }
+        ],
+        "mounts": [
+          { "name": "ROM share", "path": "/Volumes/roms", "kind": "smb" }
+        ],
+        "credentials": [
+          { "name": "Test token", "environment": "TEST_TOKEN" },
+          { "name": "Device key", "file": "~/.config/example/device-key.json" }
+        ],
+        "devices": [
+          { "type": "fireTv", "input": "fireTvSerial" }
+        ]
+      }
+    }
+  ],
+  "reporting": {
+    "command": ["scripts/tests/report_results.sh"],
+    "timeoutSeconds": 300
+  },
+  "failureTriage": {
+    "command": ["scripts/tests/triage_failure_read_only.sh"],
+    "timeoutSeconds": 300
+  }
+}
+```
+
+Suite IDs must be unique and use letters, digits, `-`, or `_`. Commands are
+argument arrays and run directly from the repository root with closed stdin;
+they are never placed in an interactive shell. `timeoutSeconds` defaults to
+1800. Disabled suites and disruptive suites that have not been allowed in the
+repository profile are skipped.
+
+Every requirement is evaluated per suite. Missing equipment or configuration
+marks only that suite as blocked/Skipped; it does not create a test failure or
+stop eligible suites. When exactly one authorized device is returned by
+`adb devices -l`, it is selected automatically. A saved repository choice is
+reused when present, while multiple eligible devices produce Waiting for input
+until a device is selected in Test Scheduler. The selected serial is exposed to
+commands as `SWARM_FIRE_TV_SERIAL`.
+
+Results are updated atomically after each state change in
+`<run-dir>/test-results.json`. States are Ready, Running, Passed, Failed,
+Skipped, and Waiting for input. Suite logs are retained beside the result file.
+An optional deterministic reporting command runs after the cycle and receives
+the result path in `SWARM_TEST_RESULTS`, allowing an existing GitHub issue
+reporter to remain in place. Reporting and triage commands default to a
+300-second timeout and also receive closed stdin. AI is never used for discovery, preflight,
+execution, or structured reporting. `failureTriage.command` is invoked only
+after a real failure and only when **Read-only AI triage on failure** is enabled;
+it receives the same results environment variable and must not change the
+checkout. Disable triage for an entirely zero-credit workflow. The legacy
+runner continues to receive its existing triage setting.
 
 The initial release targets macOS. Most backend supervision is Unix-compatible,
 but interactive provider sign-in, Keychain integration, and packaging need

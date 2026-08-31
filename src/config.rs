@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = "config.json";
@@ -141,6 +141,13 @@ pub struct RepoConfig {
     pub uat_issue_label: String,
     pub uat_batocera_host: String,
     pub uat_triage_enabled: bool,
+    /// Repository-local selections used only by the deterministic test runner.
+    /// Values are deliberately limited to non-secret discovery choices (for
+    /// example an adb serial); credentials remain in the environment/files
+    /// declared by the repository test definition.
+    pub test_inputs: HashMap<String, String>,
+    /// Disruptive suites are visible but blocked until explicitly enabled.
+    pub allow_disruptive_tests: bool,
     pub run_dir: String,
 }
 
@@ -172,6 +179,8 @@ impl Default for RepoConfig {
             uat_issue_label: "Testing".into(),
             uat_batocera_host: "batocera.local".into(),
             uat_triage_enabled: true,
+            test_inputs: HashMap::new(),
+            allow_disruptive_tests: false,
             run_dir: String::new(),
         }
     }

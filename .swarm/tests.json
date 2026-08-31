@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "suites": [
+    {
+      "id": "backend",
+      "name": "Rust backend and command integration",
+      "command": ["cargo", "test"],
+      "timeoutSeconds": 1800,
+      "disruptive": false,
+      "requirements": {
+        "executables": ["cargo"],
+        "files": ["Cargo.toml", "src/main.rs"]
+      }
+    },
+    {
+      "id": "frontend",
+      "name": "Scheduler UI syntax",
+      "command": ["node", "--check", "ui/app.js"],
+      "timeoutSeconds": 60,
+      "disruptive": false,
+      "requirements": {
+        "executables": ["node"],
+        "files": ["ui/app.js", "ui/index.html", "ui/style.css"]
+      }
+    }
+  ]
+}
