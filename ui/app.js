@@ -105,7 +105,7 @@
     },
     "delivery-mode": {
       title: "Protected AI branch flow",
-      html: "<p>This box keeps AI work separate from the branch people use.</p><ul><li><strong>Human-owned branch</strong> — the protected branch, usually <code>main</code>. AI never commits to it.</li><li><strong>AI integration branch</strong> — collects finished AI work, usually <code>ai-main</code>.</li><li><strong>Git remote</strong> — the saved connection to GitHub, usually <code>origin</code>.</li><li><strong>Issue branch prefix</strong> — the first part of AI branch names, usually <code>ai</code>.</li><li><strong>Automatically approve issue PRs</strong> — uses a bot identity to approve an AI pull request. A different provider is used when available.</li><li><strong>Automatically merge closed issue PRs</strong> — after the linked issue is closed, combines its commits into one, merges it into the AI integration branch, and deletes the issue branch.</li></ul><p>Both automation options start off. Moving <code>ai-main</code> into <code>main</code> always requires a person.</p>",
+      html: "<p>This box keeps AI work separate from the branch people use.</p><ul><li><strong>Human-owned branch</strong> — the protected branch, usually <code>main</code>. AI never commits to it.</li><li><strong>AI integration branch</strong> — collects finished AI work, usually <code>ai-main</code>.</li><li><strong>Git remote</strong> — the saved connection to GitHub, usually <code>origin</code>.</li><li><strong>Issue branch prefix</strong> — the first part of AI branch names, usually <code>ai</code>.</li></ul>",
       links: [],
     },
     "auto-approve-merge": {
@@ -169,6 +169,7 @@
     ["Including / excluding a provider", "provider-include-exclude"],
     ["GitHub App bot identities", "bot-identities"],
     ["Protected branch flow", "delivery-mode"],
+    ["Pull request automation", "auto-approve-merge"],
     ["Minimum quota remaining", "quota-threshold"],
     ["Test scheduler", "uat-suite"],
     ["Where your data lives", "data-location"],

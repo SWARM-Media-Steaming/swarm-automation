@@ -1,5 +1,5 @@
 use super::{
-    detect_tools, get_config, inspect_repository, issue_branch_is_complete, repo_worker_args,
+    detect_tools, get_config, inspect_repository, issue_branch_pr_is_visible, repo_worker_args,
     require_closed_issue, save_config, scheduler_arguments, validate_worker_script_dir, AppState,
     ResolvedProvider,
 };
@@ -399,11 +399,11 @@ fn issue_branch_merge_requires_the_issue_to_be_closed() {
 }
 
 #[test]
-fn issue_branch_is_complete_only_after_both_close_and_merge() {
-    assert!(issue_branch_is_complete("CLOSED", "MERGED"));
-    assert!(!issue_branch_is_complete("CLOSED", "OPEN"));
-    assert!(!issue_branch_is_complete("OPEN", "MERGED"));
-    assert!(!issue_branch_is_complete("OPEN", "OPEN"));
+fn issue_branch_tree_only_shows_open_pull_requests() {
+    assert!(issue_branch_pr_is_visible(None));
+    assert!(issue_branch_pr_is_visible(Some("OPEN")));
+    assert!(!issue_branch_pr_is_visible(Some("CLOSED")));
+    assert!(!issue_branch_pr_is_visible(Some("MERGED")));
 }
 
 // ----- provider round-trips (unchanged behaviour) ----------------------

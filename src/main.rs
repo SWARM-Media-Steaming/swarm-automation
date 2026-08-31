@@ -1004,9 +1004,13 @@ fn require_closed_issue(
     }
 }
 
-fn issue_branch_is_complete(issue_state: &str, pull_request_state: &str) -> bool {
-    issue_state.trim().eq_ignore_ascii_case("closed")
-        && pull_request_state.trim().eq_ignore_ascii_case("merged")
+fn issue_branch_pr_is_visible(pull_request_state: Option<&str>) -> bool {
+    // A branch may appear briefly before its PR is created. Keep that useful
+    // in-progress state, but once GitHub associates a PR with the branch only
+    // an open PR belongs in the active Branches and promotion tree.
+    pull_request_state
+        .map(|state| state.trim().eq_ignore_ascii_case("open"))
+        .unwrap_or(true)
 }
 
 #[tauri::command]
@@ -1162,22 +1166,15 @@ fn git_overview(
         }
     }
 
-    // A closed issue whose PR is already merged has no active promotion work.
-    // Hide a stale remote ref immediately; the worker and manual merge command
-    // also remove that ref explicitly.
-    branches.retain(|(name, _, number)| {
+    // Closed and merged PRs are historical, not active promotion work. Hide
+    // their remote refs even when GitHub branch deletion has not completed.
+    // A branch with no PR remains visible while the worker is still preparing
+    // or publishing its pull request.
+    branches.retain(|(name, _, _)| {
         let head_ref = name
             .strip_prefix(&format!("{}/", repo.remote_name))
             .unwrap_or(name);
-        let pull_request_state = pr_by_head
-            .get(head_ref)
-            .map(|pr| pr.2.as_str())
-            .unwrap_or_default();
-        let issue_state = issue_states
-            .get(number)
-            .map(String::as_str)
-            .unwrap_or_default();
-        !issue_branch_is_complete(issue_state, pull_request_state)
+        issue_branch_pr_is_visible(pr_by_head.get(head_ref).map(|pr| pr.2.as_str()))
     });
 
     for (name, ai, number) in &branches {
