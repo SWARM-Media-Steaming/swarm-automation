@@ -1,5 +1,5 @@
 use super::{
-    detect_tools, get_config, get_test_plan, inspect_repository, issue_branch_is_complete,
+    detect_tools, get_config, get_test_plan, inspect_repository, issue_branch_pr_is_visible,
     repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
     validate_worker_script_dir, AppState, ResolvedProvider,
 };
@@ -432,8 +432,8 @@ fn repo_worker_args_carries_per_repo_branch_config() {
     assert_eq!(pair(&args, "--branch-prefix"), Some("ai"));
     assert_eq!(pair(&args, "--github-repository"), Some("octocat/example"));
     assert_eq!(pair(&args, "--assignee"), Some("octocat"));
-    assert!(args.contains(&"--no-auto-approve".to_string()));
-    assert!(args.contains(&"--no-auto-merge".to_string()));
+    assert!(args.contains(&"--auto-approve".to_string()));
+    assert!(args.contains(&"--auto-merge".to_string()));
     assert!(args.contains(&"--no-require-issue-tests".to_string()));
     assert!(args.contains(&"--no-allow-environment-only-summary".to_string()));
     // The old delivery/merge flags are gone.
@@ -510,11 +510,11 @@ fn issue_branch_merge_requires_the_issue_to_be_closed() {
 }
 
 #[test]
-fn issue_branch_is_complete_only_after_both_close_and_merge() {
-    assert!(issue_branch_is_complete("CLOSED", "MERGED"));
-    assert!(!issue_branch_is_complete("CLOSED", "OPEN"));
-    assert!(!issue_branch_is_complete("OPEN", "MERGED"));
-    assert!(!issue_branch_is_complete("OPEN", "OPEN"));
+fn issue_branch_tree_only_shows_open_pull_requests() {
+    assert!(issue_branch_pr_is_visible(None));
+    assert!(issue_branch_pr_is_visible(Some("OPEN")));
+    assert!(!issue_branch_pr_is_visible(Some("CLOSED")));
+    assert!(!issue_branch_pr_is_visible(Some("MERGED")));
 }
 
 // ----- provider round-trips (unchanged behaviour) ----------------------
