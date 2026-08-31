@@ -1,7 +1,7 @@
 use super::{
-    detect_tools, get_config, inspect_repository, issue_branch_is_complete, repo_worker_args,
-    require_closed_issue, save_config, scheduler_arguments, validate_worker_script_dir, AppState,
-    ResolvedProvider,
+    detect_tools, get_config, get_test_plan, inspect_repository, issue_branch_is_complete,
+    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
+    validate_worker_script_dir, AppState, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -251,6 +251,56 @@ fn inspect_repository_detects_a_target_repos_own_script_bundles() {
     assert!(inspection.valid);
     assert!(inspection.worker_available);
     assert!(inspection.uat_available);
+}
+
+#[test]
+fn repository_test_definition_is_discovered_through_the_command_layer() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    std::fs::create_dir_all(repo_dir.path().join(".swarm")).unwrap();
+    std::fs::write(
+        repo_dir.path().join(".swarm/tests.json"),
+        r#"{"version":1,"suites":[{"id":"integration","name":"Integration","command":["/usr/bin/true"],"requirements":{"files":["Cargo.toml"]}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(repo_dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let mut config = valid_config(repo_dir.path());
+    config.repositories[0].uat_enabled = true;
+    save_config(app.clone(), app.state(), config).unwrap();
+
+    let plan = get_test_plan(app.clone(), app.state(), "octocat__example".into()).unwrap();
+    assert!(plan.available);
+    assert!(!plan.legacy);
+    assert_eq!(plan.suites.len(), 1);
+    assert_eq!(plan.suites[0].result.state, "Ready");
+}
+
+#[test]
+fn device_choice_round_trips_per_repository_without_touching_other_profiles() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let first = real_git_checkout();
+    let second = real_git_checkout();
+    let mut config = valid_config(first.path());
+    config.repositories.push(RepoConfig {
+        repo_dir: second.path().to_string_lossy().into_owned(),
+        ..repo("octocat/second")
+    });
+    save_config(app.clone(), app.state(), config).unwrap();
+
+    let saved = save_test_device(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        "192.0.2.8:5555".into(),
+    )
+    .unwrap();
+    assert_eq!(
+        saved.repositories[0].test_inputs.get("fireTvSerial"),
+        Some(&"192.0.2.8:5555".to_string())
+    );
+    assert!(saved.repositories[1].test_inputs.is_empty());
 }
 
 #[test]
