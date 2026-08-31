@@ -602,6 +602,9 @@ fn scheduler_arguments(
         "--schedule-days".into(),
         config.schedule_days.join(","),
     ];
+    if config.parallel_repo_workers {
+        arguments.push("--parallel-repos".into());
+    }
     if run_once {
         arguments.push("--once".into());
     }

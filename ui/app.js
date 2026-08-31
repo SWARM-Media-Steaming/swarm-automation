@@ -114,6 +114,11 @@
       html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention. This never merges the AI integration branch into <code>main</code>.</p>",
       links: [],
     },
+    "parallel-repo-workers": {
+      title: "One worker per repository",
+      html: "<p>This chooses how the issue worker handles more than one repository.</p><ul><li><strong>Off (default)</strong> — a single worker visits each repository in turn and picks up one issue at a time.</li><li><strong>On</strong> — every repository with a ready issue gets its own worker, all running at the same time. With repositories A, B, C and D, if B, C and D have ready issues, three workers run together.</li></ul><p>Turning this on works through a backlog faster, <strong>but it uses AI credits faster</strong> because several providers run at once. Each repository still keeps its own branch, state, and one-issue-at-a-time limit.</p>",
+      links: [],
+    },
     "schedule-modes": {
       title: "Pickup schedule",
       html: "<ul><li><strong>Continuous</strong> — checks repeatedly and handles ready issues one after another.</li><li><strong>Daily</strong> — checks once each day.</li><li><strong>Weekdays</strong> — checks Monday through Friday.</li><li><strong>Custom</strong> — checks on the days you choose.</li><li><strong>Manual</strong> — checks only when you select <em>Run now</em>.</li></ul>",
@@ -176,6 +181,7 @@
     ["GitHub App bot identities", "bot-identities"],
     ["Protected branch flow", "delivery-mode"],
     ["Pull request automation", "auto-approve-merge"],
+    ["One worker per repository", "parallel-repo-workers"],
     ["Minimum quota remaining", "quota-threshold"],
     ["Test scheduler", "uat-suite"],
     ["Where your data lives", "data-location"],
