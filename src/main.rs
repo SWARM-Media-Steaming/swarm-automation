@@ -3,7 +3,7 @@ mod processes;
 mod tools;
 
 use config::{AppConfig, RepoConfig, CONFIG_FILE};
-use processes::{ProcessManager, ProcessStatus};
+use processes::{process_is_running, ProcessManager, ProcessStatus};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -142,6 +142,34 @@ fn current_config(state: &State<'_, AppState>) -> Result<AppConfig, String> {
         .map_err(|_| "Configuration state lock was poisoned".into())
 }
 
+fn reconnect_issue_scheduler(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    config: &AppConfig,
+    log_path: &Path,
+) -> Result<(), String> {
+    let pid_path = PathBuf::from(&config.worker_state_dir).join("runner.lock/pid");
+    let Ok(raw_pid) = std::fs::read_to_string(&pid_path) else {
+        return Ok(());
+    };
+    let Ok(pid) = raw_pid.trim().parse::<u32>() else {
+        return Ok(());
+    };
+    if !process_is_running(pid) {
+        return Ok(());
+    }
+    state.processes.adopt_external(
+        app,
+        "issue",
+        "Issue worker scheduler",
+        pid,
+        format!("Existing scheduler recorded by {}", pid_path.display()),
+        log_path,
+        Some(PathBuf::from(&config.worker_state_dir).join("cron.log")),
+    )?;
+    Ok(())
+}
+
 #[tauri::command]
 fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
     current_config(&state)
@@ -276,6 +304,7 @@ fn get_automation_status(
 ) -> Result<AutomationStatus, String> {
     let config = current_config(&state)?;
     let log_path = automation_log_path(&app)?;
+    reconnect_issue_scheduler(&app, &state, &config, &log_path)?;
     let worker_available = worker_script_dir(&app).is_ok();
     let mut repos = Vec::new();
     for repo in config.repositories() {
@@ -365,6 +394,8 @@ fn start_issue_worker(
 ) -> Result<ProcessStatus, String> {
     let config = current_config(&state)?;
     config.validate()?;
+    let log_path = automation_log_path(&app)?;
+    reconnect_issue_scheduler(&app, &state, &config, &log_path)?;
     if config.schedule_mode == "manual" && !run_once {
         return Err(
             "The schedule is set to Manual only. Use Run now or choose a recurring schedule."
@@ -469,7 +500,7 @@ fn start_issue_worker(
         &arguments,
         &environment,
         &state_root,
-        automation_log_path(&app)?,
+        log_path,
     )
 }
 

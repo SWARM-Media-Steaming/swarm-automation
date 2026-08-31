@@ -35,6 +35,32 @@ fn test_app() -> TestApp {
     }
 }
 
+#[test]
+fn process_manager_reconnects_to_a_live_external_process() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let log_path = test_app._data_dir.path().join("automation.log");
+    let status = app
+        .state::<AppState>()
+        .processes
+        .adopt_external(
+            &app,
+            "issue",
+            "Issue worker scheduler",
+            std::process::id(),
+            "test external scheduler".into(),
+            &log_path,
+            None,
+        )
+        .expect("adopt live process");
+
+    assert_eq!(status.state, "running");
+    assert_eq!(status.pid, Some(std::process::id()));
+    assert!(std::fs::read_to_string(log_path)
+        .unwrap()
+        .contains("Reconnected to existing Issue worker scheduler"));
+}
+
 /// A real, on-disk `git init`-ed directory — enough for `inspect_repository`
 /// to see a genuine Git checkout without needing a real GitHub remote.
 fn real_git_checkout() -> tempfile::TempDir {

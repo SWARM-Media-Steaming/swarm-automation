@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -40,7 +40,11 @@ pub struct LogEvent {
 }
 
 struct ManagedProcess {
-    child: Child,
+    /// Present for processes started by this app instance. A process adopted
+    /// after an app restart has only its PID, but can still be supervised and
+    /// signalled through its process group.
+    child: Option<Child>,
+    pid: u32,
     paused: bool,
     started_at: u64,
     detail: String,
@@ -142,7 +146,8 @@ impl ProcessManager {
         slot.last_exit = None;
         slot.last_detail.clear();
         slot.process = Some(ManagedProcess {
-            child,
+            child: Some(child),
+            pid,
             paused: false,
             started_at,
             detail: detail.clone(),
@@ -154,6 +159,55 @@ impl ProcessManager {
             exit_code: None,
             detail,
         })
+    }
+
+    /// Reconnects the UI to a scheduler that survived an app restart. The
+    /// Python scheduler owns a PID lock and process group, so a live PID is
+    /// enough to restore status plus pause/resume/stop controls even though
+    /// Rust can no longer recover the original `Child` handle.
+    pub fn adopt_external<R: tauri::Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        slot_name: &str,
+        source: &str,
+        pid: u32,
+        detail: String,
+        log_path: &Path,
+        source_log_path: Option<PathBuf>,
+    ) -> Result<ProcessStatus, String> {
+        let mutex = self.slot(slot_name)?;
+        let mut slot = mutex
+            .lock()
+            .map_err(|_| "Process state lock was poisoned".to_string())?;
+        refresh_slot(&mut slot, source, app, log_path);
+        if slot.process.is_none() && process_is_running(pid) {
+            emit_log(
+                app,
+                log_path,
+                source,
+                "system",
+                &format!("Reconnected to existing {source} process {pid} after app restart."),
+            );
+            slot.last_exit = None;
+            slot.last_detail.clear();
+            slot.process = Some(ManagedProcess {
+                child: None,
+                pid,
+                paused: false,
+                started_at: unix_timestamp(),
+                detail,
+            });
+            if let Some(source_log_path) = source_log_path {
+                follow_existing_log(
+                    app.clone(),
+                    source.to_string(),
+                    pid,
+                    source_log_path,
+                    log_path.to_path_buf(),
+                );
+            }
+        }
+        Ok(status_for_slot(&slot))
     }
 
     pub fn status(
@@ -188,7 +242,7 @@ impl ProcessManager {
             .process
             .as_mut()
             .ok_or_else(|| "The process is not running.".to_string())?;
-        signal_group(process.child.id(), signal)?;
+        signal_group(process.pid, signal)?;
         process.paused = paused;
         Ok(status_for_slot(&slot))
     }
@@ -203,20 +257,29 @@ impl ProcessManager {
         };
         // A stopped process cannot handle SIGTERM until it is resumed.
         if process.paused {
-            let _ = signal_group(process.child.id(), libc::SIGCONT);
+            let _ = signal_group(process.pid, libc::SIGCONT);
         }
-        let _ = signal_group(process.child.id(), libc::SIGTERM);
+        let _ = signal_group(process.pid, libc::SIGTERM);
         for _ in 0..20 {
-            if let Ok(Some(status)) = process.child.try_wait() {
-                slot.last_exit = status.code();
+            if let Some(child) = process.child.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    slot.last_exit = status.code();
+                    slot.last_detail = process.detail;
+                    return Ok(status_for_slot(&slot));
+                }
+            } else if !process_is_running(process.pid) {
+                slot.last_exit = Some(0);
                 slot.last_detail = process.detail;
                 return Ok(status_for_slot(&slot));
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        let _ = signal_group(process.child.id(), libc::SIGKILL);
-        let status = process.child.wait().ok();
-        slot.last_exit = status.and_then(|status| status.code());
+        let _ = signal_group(process.pid, libc::SIGKILL);
+        slot.last_exit = process
+            .child
+            .as_mut()
+            .and_then(|child| child.wait().ok())
+            .and_then(|status| status.code());
         slot.last_detail = process.detail;
         Ok(status_for_slot(&slot))
     }
@@ -233,11 +296,32 @@ impl ProcessManager {
     }
 }
 
-fn refresh_slot(slot: &mut ProcessSlot, source: &str, app: &AppHandle, log_path: &Path) {
+fn refresh_slot<R: tauri::Runtime>(
+    slot: &mut ProcessSlot,
+    source: &str,
+    app: &AppHandle<R>,
+    log_path: &Path,
+) {
     let Some(process) = slot.process.as_mut() else {
         return;
     };
-    match process.child.try_wait() {
+    let Some(child) = process.child.as_mut() else {
+        if !process_is_running(process.pid) {
+            let detail = process.detail.clone();
+            emit_log(
+                app,
+                log_path,
+                source,
+                "system",
+                &format!("Reconnected {source} process {} has exited.", process.pid),
+            );
+            slot.last_exit = Some(0);
+            slot.last_detail = detail;
+            slot.process = None;
+        }
+        return;
+    };
+    match child.try_wait() {
         Ok(Some(status)) => {
             let code = status.code();
             let detail = process.detail.clone();
@@ -272,7 +356,7 @@ fn status_for_slot(slot: &ProcessSlot) -> ProcessStatus {
     if let Some(process) = &slot.process {
         ProcessStatus {
             state: if process.paused { "paused" } else { "running" }.into(),
-            pid: Some(process.child.id()),
+            pid: Some(process.pid),
             started_at: Some(process.started_at),
             exit_code: None,
             detail: process.detail.clone(),
@@ -285,6 +369,19 @@ fn status_for_slot(slot: &ProcessSlot) -> ProcessStatus {
             exit_code: slot.last_exit,
             detail: slot.last_detail.clone(),
         }
+    }
+}
+
+pub(crate) fn process_is_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
     }
 }
 
@@ -322,7 +419,49 @@ fn stream_lines<R: std::io::Read + Send + 'static>(
     });
 }
 
-fn emit_log(app: &AppHandle, log_path: &Path, source: &str, stream: &str, line: &str) {
+/// After an app restart the scheduler's stdout pipe belongs to the previous
+/// process, but its own durable cron log continues. Follow only newly appended
+/// lines so Overview and Info & Debug resume updating without duplicating
+/// history already present in the application log.
+fn follow_existing_log<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    source: String,
+    pid: u32,
+    source_log_path: PathBuf,
+    app_log_path: PathBuf,
+) {
+    std::thread::spawn(move || {
+        let Ok(mut file) = OpenOptions::new().read(true).open(source_log_path) else {
+            return;
+        };
+        if file.seek(SeekFrom::End(0)).is_err() {
+            return;
+        }
+        let mut reader = BufReader::new(file);
+        while process_is_running(pid) {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                Ok(_) => emit_log(
+                    &app,
+                    &app_log_path,
+                    &source,
+                    "stdout",
+                    line.trim_end_matches(['\r', '\n']),
+                ),
+                Err(_) => return,
+            }
+        }
+    });
+}
+
+fn emit_log<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    log_path: &Path,
+    source: &str,
+    stream: &str,
+    line: &str,
+) {
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
