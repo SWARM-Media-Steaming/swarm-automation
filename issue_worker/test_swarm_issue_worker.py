@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1233,13 +1234,107 @@ class RunnerTestCase(unittest.TestCase):
             )
             runner = runner_module.Runner(args, [])
 
-            self.assertTrue(runner.synchronize_repository())
+            self.assertTrue(runner.synchronize_repository(runner.repos[0]))
             branch = subprocess.run(
                 ["git", "-C", str(repo), "branch", "--show-current"], text=True,
                 stdout=subprocess.PIPE, check=True,
             ).stdout.strip()
             self.assertEqual(branch, "ai/codex/issue-114")
             self.assertTrue((repo / "dirty.txt").is_file())
+
+    @staticmethod
+    def _repos_file(root: Path, labels: tuple[str, ...]) -> Path:
+        entries = []
+        for label in labels:
+            workspace = root / label
+            workspace.mkdir(parents=True, exist_ok=True)
+            entries.append(
+                {
+                    "label": label,
+                    "workspace_dir": str(workspace),
+                    "state_dir": str(root / "state" / label),
+                    "base_branch": "main",
+                    "remote_name": "origin",
+                    "integration_branch": "ai-main",
+                    "worker_args": ["--github-repository", f"acme/{label}"],
+                }
+            )
+        path = root / "repos.json"
+        path.write_text(json.dumps(entries), encoding="utf-8")
+        return path
+
+    def test_parallel_repos_flag_is_ignored_for_a_single_repository(self) -> None:
+        args = runner_module.build_parser().parse_args(
+            ["--repo-dir", "/tmp/repo", "--state-dir", "/tmp/state", "--no-email", "--parallel-repos"]
+        )
+        self.assertTrue(args.parallel_repos)
+        # One synthesized repo -> nothing to parallelize.
+        self.assertFalse(runner_module.Runner(args, []).parallel_repos)
+
+    def test_parallel_cycle_works_every_repository_and_aggregates_status(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-parallel-test.") as temporary:
+            root = Path(temporary)
+            repos_file = self._repos_file(root, ("beta", "gamma", "delta"))
+            args = runner_module.build_parser().parse_args(
+                [
+                    "--repos-file", str(repos_file), "--state-dir", str(root / "state"),
+                    "--once", "--no-email", "--parallel-repos", "--pgrep-bin", "",
+                ]
+            )
+            runner = runner_module.Runner(args, [])
+            self.assertTrue(runner.parallel_repos)
+
+            worked: list[str] = []
+            lock = threading.Lock()
+
+            def fake_worker(repo: dict[str, object], _password: str, _prefix: str = "") -> int:
+                with lock:
+                    worked.append(str(repo["label"]))
+                return (
+                    runner_module.ISSUE_COMPLETED_EXIT_CODE
+                    if repo["label"] == "gamma"
+                    else 0
+                )
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(runner, "synchronize_repository", return_value=True),
+                mock.patch.object(runner, "run_worker", side_effect=fake_worker),
+                mock.patch.object(runner, "prune_cargo_target"),
+                contextlib.redirect_stdout(output),
+            ):
+                status = runner.run()
+
+            self.assertEqual(sorted(worked), ["beta", "delta", "gamma"])
+            self.assertEqual(status, runner_module.ISSUE_COMPLETED_EXIT_CODE)
+            self.assertIn("repositories in parallel", output.getvalue())
+
+    def test_sequential_cycle_is_the_default(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-sequential-test.") as temporary:
+            root = Path(temporary)
+            repos_file = self._repos_file(root, ("beta", "gamma"))
+            args = runner_module.build_parser().parse_args(
+                [
+                    "--repos-file", str(repos_file), "--state-dir", str(root / "state"),
+                    "--once", "--no-email", "--pgrep-bin", "",
+                ]
+            )
+            runner = runner_module.Runner(args, [])
+            self.assertFalse(runner.parallel_repos)
+
+            order: list[str] = []
+            with (
+                mock.patch.object(runner, "synchronize_repository", return_value=True),
+                mock.patch.object(
+                    runner,
+                    "run_worker",
+                    side_effect=lambda repo, *_: order.append(str(repo["label"])) or 0,
+                ),
+                mock.patch.object(runner, "prune_cargo_target"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(runner.run(), 0)
+            self.assertEqual(order, ["beta", "gamma"])
 
 
 class GitHubAppAuthTestCase(unittest.TestCase):

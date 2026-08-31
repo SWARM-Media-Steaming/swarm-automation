@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Sequence, TextIO
 
@@ -75,16 +76,15 @@ class Runner:
         )
         self.lock_dir = self.state_dir / "runner.lock"
         self.worker = Path(args.worker).expanduser().resolve()
-        self.snapshot = self.state_dir / "swarm_issue_worker.snapshot.py"
         self.acquired_lock = False
         self.stop_requested = False
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # A single scheduler services every configured repo, one at a time.
-        # `--repos-file` is a JSON array of per-repo objects; without it we
-        # synthesize one entry from the flat `--repo-dir` args (tests / legacy).
+        # A single scheduler services every configured repo. By default the
+        # repos are worked one at a time; with --parallel-repos each repo gets
+        # its own worker in the same cycle (faster, but AI credits burn faster).
         self.repos = self._load_repos()
-        self.repo = self.repos[0]
+        self.parallel_repos = bool(getattr(args, "parallel_repos", False)) and len(self.repos) > 1
 
     def _load_repos(self) -> list[dict[str, object]]:
         if getattr(self.args, "repos_file", ""):
@@ -116,9 +116,8 @@ class Runner:
         entry.setdefault("label", entry["workspace_dir"])
         return entry
 
-    @property
-    def in_progress_file(self) -> Path:
-        return Path(str(self.repo["state_dir"])) / "in-progress-issue.json"
+    def in_progress_file(self, repo: dict[str, object]) -> Path:
+        return Path(str(repo["state_dir"])) / "in-progress-issue.json"
 
     def log(self, message: str) -> None:
         line = f"[{timestamp()}] {message}"
@@ -206,11 +205,11 @@ class Runner:
         )
         return result.returncode == 0
 
-    def prune_cargo_target(self) -> None:
+    def prune_cargo_target(self, repo: dict[str, object]) -> None:
         target = (
             Path(self.args.cargo_target_dir).expanduser().resolve()
             if self.args.cargo_target_dir
-            else Path(str(self.repo["workspace_dir"])) / "target"
+            else Path(str(repo["workspace_dir"])) / "target"
         )
         if not target.is_dir():
             return
@@ -238,7 +237,7 @@ class Runner:
             f"Cargo target exceeds {self.args.cargo_target_max_gib} GiB; removing generated build artifacts."
         )
         result = subprocess.run(
-            [self.args.cargo_bin, "clean"], cwd=str(self.repo["workspace_dir"]), check=False
+            [self.args.cargo_bin, "clean"], cwd=str(repo["workspace_dir"]), check=False
         )
         self.log(
             "Cargo build-artifact cleanup completed."
@@ -246,61 +245,65 @@ class Runner:
             else "Warning: Cargo build-artifact cleanup failed; it will be retried later."
         )
 
-    def git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def git(self, repo: dict[str, object], *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [self.args.git_bin, "-C", str(self.repo["workspace_dir"]), *arguments],
+            [self.args.git_bin, "-C", str(repo["workspace_dir"]), *arguments],
             text=True,
             capture_output=True,
             check=False,
         )
 
-    def synchronize_repository(self) -> bool:
-        """Light pre-flight for the current repo. The worker itself does the
-        real branch positioning and the base -> integration parity merge; here
-        we only confirm the checkout is usable and refresh remote refs."""
+    def synchronize_repository(self, repo: dict[str, object]) -> bool:
+        """Light pre-flight for one repo. The worker itself does the real
+        branch positioning and the base -> integration parity merge; here we
+        only confirm the checkout is usable and refresh remote refs."""
         if not self.args.git_bin:
             self.log("Git is unavailable; deferring the worker.")
             return False
-        if self.git("rev-parse", "--is-inside-work-tree").returncode != 0:
+        if self.git(repo, "rev-parse", "--is-inside-work-tree").returncode != 0:
             self.log(
-                f"Worker repository is not a Git checkout: {self.repo['workspace_dir']}; deferring this run."
+                f"Worker repository is not a Git checkout: {repo['workspace_dir']}; deferring this run."
             )
             return False
-        if self.in_progress_file.exists():
+        if self.in_progress_file(repo).exists():
             # A saved issue owns the checkout — leave it exactly as it is; the
             # worker resumes it and does its own fetching.
             return True
-        if self.git("status", "--porcelain").stdout.strip():
+        if self.git(repo, "status", "--porcelain").stdout.strip():
             self.log(
                 "Repository has uncommitted work with no saved issue owner; deferring synchronization and AI."
             )
             return False
-        fetched = self.git("fetch", "--prune", str(self.repo["remote_name"]))
+        fetched = self.git(repo, "fetch", "--prune", str(repo["remote_name"]))
         if fetched.returncode != 0:
             detail = fetched.stderr.strip() or fetched.stdout.strip() or "git fetch failed"
-            self.log(f"Could not fetch {self.repo['remote_name']}: {detail}; deferring this run.")
+            self.log(f"Could not fetch {repo['remote_name']}: {detail}; deferring this run.")
             return False
         return True
 
-    def run_worker(self, smtp_password: str) -> int:
-        shutil.copy2(self.worker, self.snapshot)
-        workspace = str(self.repo["workspace_dir"])
+    def run_worker(self, repo: dict[str, object], smtp_password: str, prefix: str = "") -> int:
+        # Each repo gets its own snapshot so parallel workers never race on a
+        # half-written file.
+        snapshot = Path(str(repo["state_dir"])) / "swarm_issue_worker.snapshot.py"
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.worker, snapshot)
+        workspace = str(repo["workspace_dir"])
         environment = os.environ.copy()
         environment["SWARM_SMTP_PASSWORD"] = smtp_password
         environment["SWARM_REPO_DIR"] = workspace
-        environment["SWARM_ISSUE_WORKER_STATE_DIR"] = str(self.repo["state_dir"])
+        environment["SWARM_ISSUE_WORKER_STATE_DIR"] = str(repo["state_dir"])
         environment["SWARM_ISSUE_WORKER_SCRIPT_DIR"] = str(self.script_dir)
         environment["GIT_BIN"] = self.args.git_bin
-        environment["SWARM_BASE_BRANCH"] = str(self.repo["base_branch"])
-        environment["SWARM_GIT_REMOTE"] = str(self.repo["remote_name"])
-        environment["SWARM_INTEGRATION_BRANCH"] = str(self.repo["integration_branch"])
+        environment["SWARM_BASE_BRANCH"] = str(repo["base_branch"])
+        environment["SWARM_GIT_REMOTE"] = str(repo["remote_name"])
+        environment["SWARM_INTEGRATION_BRANCH"] = str(repo["integration_branch"])
         environment["PYTHONPATH"] = os.pathsep.join(
             [str(self.script_dir), environment.get("PYTHONPATH", "")]
         ).rstrip(os.pathsep)
         command = [
             self.args.python_bin,
-            str(self.snapshot),
-            *[str(arg) for arg in self.repo["worker_args"]],
+            str(snapshot),
+            *[str(arg) for arg in repo["worker_args"]],
             *self.worker_arguments,
         ]
         process = subprocess.Popen(
@@ -315,12 +318,12 @@ class Runner:
         threads = [
             threading.Thread(
                 target=self.forward_worker_stream,
-                args=(process.stdout, sys.stdout),
+                args=(process.stdout, sys.stdout, prefix),
                 daemon=True,
             ),
             threading.Thread(
                 target=self.forward_worker_stream,
-                args=(process.stderr, sys.stderr),
+                args=(process.stderr, sys.stderr, prefix),
                 daemon=True,
             ),
         ]
@@ -331,11 +334,11 @@ class Runner:
             thread.join()
         return status
 
-    def forward_worker_stream(self, source: TextIO, destination: TextIO) -> None:
+    def forward_worker_stream(self, source: TextIO, destination: TextIO, prefix: str = "") -> None:
         with source, self.log_path.open("a", encoding="utf-8") as log_stream:
             for line in source:
-                print(line, end="", file=destination, flush=True)
-                log_stream.write(line)
+                print(prefix + line, end="", file=destination, flush=True)
+                log_stream.write(prefix + line)
                 log_stream.flush()
 
     def sleep(self) -> None:
@@ -375,6 +378,73 @@ class Runner:
                 return True
             time.sleep(min(1, remaining))
         return False
+
+    def work_repo(self, repo: dict[str, object], smtp_password: str) -> int | None:
+        """One repo's turn in a cycle. Returns the worker exit status, or None
+        when the pre-flight deferred the repo this run."""
+        if self.stop_requested:
+            return None
+        label = str(repo["label"])
+        prefix = f"[{label}] " if self.parallel_repos else ""
+        self.log(f"=== repo: {label} ===")
+        if not self.synchronize_repository(repo):
+            return None
+        status = self.run_worker(repo, smtp_password, prefix)
+        self.prune_cargo_target(repo)
+        if status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE):
+            self.log(f"{label}: made progress; will re-check on the next cycle.")
+        elif status == PROVIDER_UNAVAILABLE_EXIT_CODE:
+            self.log(
+                f"{label}: an issue is queued, but no enabled AI provider has "
+                "enough verified capacity; will retry on schedule."
+            )
+        elif status:
+            self.log(f"{label}: worker exited with status {status}; will retry.")
+        else:
+            self.log(f"{label}: no issue to work right now.")
+        return status
+
+    @staticmethod
+    def _cycle_exit_status(statuses: Sequence[int | None]) -> int:
+        """Fold one cycle's per-repo worker statuses into a single exit code
+        for --once. A lone repo keeps its exact status; across several repos
+        the most significant outcome wins (error, then progress, then queued)."""
+        real = [status for status in statuses if status is not None]
+        if not real:
+            return 0
+        if len(real) == 1:
+            return real[0]
+        expected = (
+            ISSUE_COMPLETED_EXIT_CODE,
+            QUOTA_PAUSED_EXIT_CODE,
+            PROVIDER_UNAVAILABLE_EXIT_CODE,
+        )
+        errors = [status for status in real if status != 0 and status not in expected]
+        if errors:
+            return errors[0]
+        for code in expected:
+            if code in real:
+                return code
+        return 0
+
+    def run_cycle(self, smtp_password: str) -> list[int | None]:
+        """Work every configured repo once. Sequentially by default; with
+        --parallel-repos, one worker per repository runs at the same time."""
+        if self.parallel_repos:
+            self.log(
+                f"Working {len(self.repos)} repositories in parallel "
+                "(one worker each); AI credits are consumed faster this way."
+            )
+            with ThreadPoolExecutor(max_workers=len(self.repos)) as executor:
+                return list(
+                    executor.map(lambda repo: self.work_repo(repo, smtp_password), self.repos)
+                )
+        results: list[int | None] = []
+        for repo in self.repos:
+            if self.stop_requested:
+                break
+            results.append(self.work_repo(repo, smtp_password))
+        return results
 
     def run(self) -> int:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -432,34 +502,24 @@ class Runner:
                     self.sleep()
                     continue
 
-                progressed = False
-                queued = False
-                errored = False
-                last_status = 0
-                for repo in self.repos:
-                    if self.stop_requested:
-                        break
-                    self.repo = repo
-                    self.log(f"=== repo: {repo['label']} ===")
-                    if not self.synchronize_repository():
-                        continue
-                    status = self.run_worker(smtp_password)
-                    self.prune_cargo_target()
-                    last_status = status
-                    if status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE):
-                        progressed = True
-                        self.log(f"{repo['label']}: made progress; will re-check on the next cycle.")
-                    elif status == PROVIDER_UNAVAILABLE_EXIT_CODE:
-                        queued = True
-                        self.log(
-                            f"{repo['label']}: an issue is queued, but no enabled AI provider has "
-                            "enough verified capacity; will retry on schedule."
-                        )
-                    elif status:
-                        errored = True
-                        self.log(f"{repo['label']}: worker exited with status {status}; will retry.")
-                    else:
-                        self.log(f"{repo['label']}: no issue to work right now.")
+                statuses = self.run_cycle(smtp_password)
+                progressed = any(
+                    status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE)
+                    for status in statuses
+                )
+                queued = any(status == PROVIDER_UNAVAILABLE_EXIT_CODE for status in statuses)
+                errored = any(
+                    status
+                    not in (
+                        None,
+                        0,
+                        ISSUE_COMPLETED_EXIT_CODE,
+                        QUOTA_PAUSED_EXIT_CODE,
+                        PROVIDER_UNAVAILABLE_EXIT_CODE,
+                    )
+                    for status in statuses
+                )
+                last_status = self._cycle_exit_status(statuses)
 
                 if queued:
                     self.log("Cycle complete: queued issue work is waiting for AI capacity.")
@@ -524,6 +584,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--repos-file",
         default=env_value("SWARM_REPOS_FILE", ""),
         help="JSON array of per-repo objects to cycle over (multi-repo mode)",
+    )
+    parser.add_argument(
+        "--parallel-repos",
+        action="store_true",
+        default=env_value("SWARM_ISSUE_WORKER_PARALLEL_REPOS", "") not in ("", "0", "false"),
+        help="run one worker per repository at the same time instead of one at a time",
     )
     parser.add_argument(
         "--integration-branch",
