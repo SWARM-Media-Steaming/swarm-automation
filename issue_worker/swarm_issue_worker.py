@@ -604,7 +604,7 @@ class Worker:
                     "--codex-bin",
                     codex_bin,
                     "--timeout",
-                    "10",
+                    "30",
                 ],
                 check=False,
             )

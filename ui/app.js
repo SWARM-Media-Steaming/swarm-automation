@@ -37,17 +37,28 @@
   const PROVIDER_META = {
     claude: {
       label: "Claude", cli: "Claude Code", help: "provider-claude",
-      efforts: ["low", "medium", "high", "max"],
+      models: [
+        { value: "claude-sonnet-5", label: "Claude Sonnet 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
+        { value: "claude-opus-5", label: "Claude Opus 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
+        { value: "claude-fable-5", label: "Claude Fable 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
+      ],
       docs: "https://docs.anthropic.com/en/docs/claude-code/overview",
     },
     codex: {
       label: "Codex", cli: "Codex CLI", help: "provider-codex",
-      efforts: ["low", "medium", "high", "xhigh", "max"],
+      models: [
+        { value: "gpt-5.6-sol", label: "GPT-5.6 Sol", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "high" },
+        { value: "gpt-5.6-terra", label: "GPT-5.6 Terra", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "medium" },
+        { value: "gpt-5.6-luna", label: "GPT-5.6 Luna", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "medium" },
+        { value: "gpt-5.5", label: "GPT-5.5", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium" },
+      ],
       docs: "https://developers.openai.com/codex/cli/",
     },
     grok: {
       label: "Grok", cli: "Grok Build", help: "provider-grok",
-      efforts: ["low", "medium", "high", "xhigh"],
+      models: [
+        { value: "grok-4.6", label: "Grok 4.6", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "high" },
+      ],
       docs: "https://docs.x.ai/build/overview",
     },
   };
@@ -59,17 +70,17 @@
   const HELP_TOPICS = {
     "provider-claude": {
       title: "Claude Code",
-      html: "<p>Claude can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Claude from new work.</li><li><strong>Model</strong> — the Claude model to use. The filled-in default is recommended.</li><li><strong>Effort</strong> — how much time Claude may spend reasoning.</li><li><strong>Install / Sign in</strong> — prepares Claude on this Mac.</li></ul>",
+      html: "<p>Claude can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Claude from new work.</li><li><strong>Model</strong> — choose the Claude model that should handle work.</li><li><strong>Effort</strong> — choose how hard Claude should think before acting. The choices update for the selected model.</li><li><strong>Install / Sign in</strong> — prepares Claude on this Mac.</li></ul>",
       links: [{ label: "Claude Code docs", url: "https://docs.anthropic.com/en/docs/claude-code/overview" }],
     },
     "provider-codex": {
       title: "Codex CLI",
-      html: "<p>Codex can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Codex from new work.</li><li><strong>Model</strong> — the Codex model to use. The filled-in default is recommended.</li><li><strong>Effort</strong> — how much time Codex may spend reasoning.</li><li><strong>Install / Sign in</strong> — prepares Codex on this Mac.</li></ul>",
+      html: "<p>Codex can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Codex from new work.</li><li><strong>Model</strong> — choose the Codex model that should handle work.</li><li><strong>Effort</strong> — choose how hard Codex should think before acting. The choices update for the selected model.</li><li><strong>Install / Sign in</strong> — prepares Codex on this Mac.</li></ul>",
       links: [{ label: "Codex CLI docs", url: "https://developers.openai.com/codex/cli/" }],
     },
     "provider-grok": {
       title: "Grok Build",
-      html: "<p>Grok can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Grok from new work.</li><li><strong>Model</strong> — the Grok model to use. The filled-in default is recommended.</li><li><strong>Effort</strong> — how much time Grok may spend reasoning.</li><li><strong>Install / Sign in</strong> — prepares Grok on this Mac.</li></ul>",
+      html: "<p>Grok can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Grok from new work.</li><li><strong>Model</strong> — choose the Grok model that should handle work.</li><li><strong>Effort</strong> — choose how hard Grok should think before acting. The choices update for the selected model.</li><li><strong>Install / Sign in</strong> — prepares Grok on this Mac.</li></ul>",
       links: [{ label: "Grok Build docs", url: "https://docs.x.ai/build/overview" }],
     },
     "provider-rotation": {
@@ -322,6 +333,41 @@
     });
   }
 
+  function modelSpecs(providerId) {
+    return PROVIDER_META[providerId]?.models || [];
+  }
+
+  function defaultModel(providerId) {
+    return modelSpecs(providerId)[0]?.value || "";
+  }
+
+  function selectedModelSpec(providerId, model) {
+    const models = modelSpecs(providerId);
+    return models.find((entry) => entry.value === model) || models[0] || null;
+  }
+
+  function effortOptions(providerId, model) {
+    return selectedModelSpec(providerId, model)?.efforts || ["high"];
+  }
+
+  function defaultEffort(providerId, model) {
+    const spec = selectedModelSpec(providerId, model);
+    const efforts = spec?.efforts || ["high"];
+    return spec?.defaultEffort || (efforts.includes("high") ? "high" : efforts[0] || "high");
+  }
+
+  function populateEffortSelect(select, providerId, model, currentEffort) {
+    const efforts = effortOptions(providerId, model);
+    select.replaceChildren();
+    efforts.forEach((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+    });
+    select.value = efforts.includes(currentEffort) ? currentEffort : defaultEffort(providerId, model);
+  }
+
   function providerList(config) {
     // Guarantee one card per known provider, in canonical order, even if a
     // hand-edited config dropped one.
@@ -331,8 +377,8 @@
       return {
         id,
         enabled: entry.enabled !== false,
-        model: entry.model || "",
-        effort: entry.effort || "high",
+        model: entry.model || defaultModel(id),
+        effort: entry.effort || defaultEffort(id, entry.model || defaultModel(id)),
         bin: entry.bin || "",
       };
     });
@@ -396,22 +442,32 @@
       modelReq.textContent = "*";
       modelReq.hidden = !provider.enabled;
       modelLabel.appendChild(modelReq);
-      const modelInput = document.createElement("input");
+      const modelInput = document.createElement("select");
       modelInput.className = "provider-model";
-      modelInput.value = provider.model;
-      modelInput.addEventListener("input", setDirty);
+      const knownModels = modelSpecs(provider.id);
+      knownModels.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.value;
+        option.textContent = entry.label;
+        modelInput.appendChild(option);
+      });
+      if (provider.model && !knownModels.some((entry) => entry.value === provider.model)) {
+        const option = document.createElement("option");
+        option.value = provider.model;
+        option.textContent = `Current unsupported: ${provider.model}`;
+        modelInput.appendChild(option);
+      }
+      modelInput.value = provider.model || defaultModel(provider.id);
       modelLabel.appendChild(modelInput);
       const effortLabel = document.createElement("label");
       effortLabel.textContent = "Effort ";
       const effortSelect = document.createElement("select");
       effortSelect.className = "provider-effort";
-      meta.efforts.forEach((value) => {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = value;
-        effortSelect.appendChild(option);
+      populateEffortSelect(effortSelect, provider.id, modelInput.value, provider.effort);
+      modelInput.addEventListener("change", () => {
+        populateEffortSelect(effortSelect, provider.id, modelInput.value, effortSelect.value);
+        setDirty();
       });
-      effortSelect.value = meta.efforts.includes(provider.effort) ? provider.effort : "high";
       effortSelect.addEventListener("change", setDirty);
       effortLabel.appendChild(effortSelect);
       fields.append(modelLabel, effortLabel);
@@ -989,6 +1045,10 @@
     const provider = message.match(/^Selected (Claude|Codex|Grok) model/i)?.[1];
     if (provider) {
       return makeActivity(log, `${provider} is starting work`, "This provider has enough capacity and was selected for the current issue.", "info", "work");
+    }
+    const workingProvider = message.match(/^(Claude|Codex|Grok) is working/i)?.[1];
+    if (workingProvider) {
+      return makeActivity(log, `${workingProvider} is working`, "Detailed AI output is hidden here. The final summary will appear when the issue pass finishes.", "info", "work");
     }
     if (/Created issue branch|Continuing issue .* existing branch|Recreated interrupted issue branch/i.test(message) && issueNumber) {
       return makeActivity(log, `Prepared a safe branch for issue #${issueNumber}`, "AI changes stay on this issue branch. They are not written directly to the human-owned branch.", "success", "work");
