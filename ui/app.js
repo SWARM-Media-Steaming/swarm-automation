@@ -16,9 +16,10 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false },
+    refreshing: { status: false, tools: false, branches: false, tests: false },
     activeRepoId: "",
     branchOverview: null,
+    testPlan: null,
   };
 
   const pageTitles = {
@@ -37,17 +38,28 @@
   const PROVIDER_META = {
     claude: {
       label: "Claude", cli: "Claude Code", help: "provider-claude",
-      efforts: ["low", "medium", "high", "max"],
+      models: [
+        { value: "claude-sonnet-5", label: "Claude Sonnet 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
+        { value: "claude-opus-5", label: "Claude Opus 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
+        { value: "claude-fable-5", label: "Claude Fable 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
+      ],
       docs: "https://docs.anthropic.com/en/docs/claude-code/overview",
     },
     codex: {
       label: "Codex", cli: "Codex CLI", help: "provider-codex",
-      efforts: ["low", "medium", "high", "xhigh", "max"],
+      models: [
+        { value: "gpt-5.6-sol", label: "GPT-5.6 Sol", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "high" },
+        { value: "gpt-5.6-terra", label: "GPT-5.6 Terra", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "medium" },
+        { value: "gpt-5.6-luna", label: "GPT-5.6 Luna", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "medium" },
+        { value: "gpt-5.5", label: "GPT-5.5", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium" },
+      ],
       docs: "https://developers.openai.com/codex/cli/",
     },
     grok: {
       label: "Grok", cli: "Grok Build", help: "provider-grok",
-      efforts: ["low", "medium", "high", "xhigh"],
+      models: [
+        { value: "grok-4.6", label: "Grok 4.6", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "high" },
+      ],
       docs: "https://docs.x.ai/build/overview",
     },
   };
@@ -59,17 +71,17 @@
   const HELP_TOPICS = {
     "provider-claude": {
       title: "Claude Code",
-      html: "<p>Claude can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Claude from new work.</li><li><strong>Model</strong> — the Claude model to use. The filled-in default is recommended.</li><li><strong>Effort</strong> — how much time Claude may spend reasoning.</li><li><strong>Install / Sign in</strong> — prepares Claude on this Mac.</li></ul>",
+      html: "<p>Claude can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Claude from new work.</li><li><strong>Model</strong> — choose the Claude model that should handle work.</li><li><strong>Effort</strong> — choose how hard Claude should think before acting. The choices update for the selected model.</li><li><strong>Install / Sign in</strong> — prepares Claude on this Mac.</li></ul>",
       links: [{ label: "Claude Code docs", url: "https://docs.anthropic.com/en/docs/claude-code/overview" }],
     },
     "provider-codex": {
       title: "Codex CLI",
-      html: "<p>Codex can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Codex from new work.</li><li><strong>Model</strong> — the Codex model to use. The filled-in default is recommended.</li><li><strong>Effort</strong> — how much time Codex may spend reasoning.</li><li><strong>Install / Sign in</strong> — prepares Codex on this Mac.</li></ul>",
+      html: "<p>Codex can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Codex from new work.</li><li><strong>Model</strong> — choose the Codex model that should handle work.</li><li><strong>Effort</strong> — choose how hard Codex should think before acting. The choices update for the selected model.</li><li><strong>Install / Sign in</strong> — prepares Codex on this Mac.</li></ul>",
       links: [{ label: "Codex CLI docs", url: "https://developers.openai.com/codex/cli/" }],
     },
     "provider-grok": {
       title: "Grok Build",
-      html: "<p>Grok can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Grok from new work.</li><li><strong>Model</strong> — the Grok model to use. The filled-in default is recommended.</li><li><strong>Effort</strong> — how much time Grok may spend reasoning.</li><li><strong>Install / Sign in</strong> — prepares Grok on this Mac.</li></ul>",
+      html: "<p>Grok can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Grok from new work.</li><li><strong>Model</strong> — choose the Grok model that should handle work.</li><li><strong>Effort</strong> — choose how hard Grok should think before acting. The choices update for the selected model.</li><li><strong>Install / Sign in</strong> — prepares Grok on this Mac.</li></ul>",
       links: [{ label: "Grok Build docs", url: "https://docs.x.ai/build/overview" }],
     },
     "provider-rotation": {
@@ -109,7 +121,12 @@
     },
     "uat-suite": {
       title: "Test scheduler",
-      html: "<p>Runs the repository’s full test set on a schedule when that repository includes one. It avoids overlapping runs and reports real failures without changing the tests.</p>",
+      html: "<p>Discovers suites from <code>.swarm/tests.json</code>, checks each suite’s requirements independently, and runs every eligible suite without AI. A legacy <code>scripts/tests/full_uat_cron.sh</code> runner remains supported.</p>",
+      links: [],
+    },
+    "test-requirements": {
+      title: "Test requirements",
+      html: "<p>Repositories declare executables, files, healthy servers, mounts, credentials, and devices per suite.</p><ul><li><strong>Ready</strong> — the requirement was discovered.</li><li><strong>Waiting for input</strong> — choose between multiple detected devices.</li><li><strong>Blocked</strong> — equipment or configuration is absent; this is not a test failure.</li></ul><p>Selections are saved only for this repository. Test commands receive no interactive input.</p>",
       links: [],
     },
     "repo-profile": {
@@ -198,6 +215,7 @@
     byId("page-title").textContent = pageTitles[view] || pageTitles.overview;
     if (view === "repository") void refreshBranches({ quiet: true });
     if (view === "debug") void refreshTools({ quiet: true });
+    if (view === "scheduler") void refreshTestPlan({ quiet: true });
   }
 
   function populateHours() {
@@ -265,6 +283,8 @@
       uat_issue_label: "Testing",
       uat_batocera_host: "batocera.local",
       uat_triage_enabled: true,
+      test_inputs: {},
+      allow_disruptive_tests: false,
       run_dir: "",
     };
   }
@@ -322,6 +342,41 @@
     });
   }
 
+  function modelSpecs(providerId) {
+    return PROVIDER_META[providerId]?.models || [];
+  }
+
+  function defaultModel(providerId) {
+    return modelSpecs(providerId)[0]?.value || "";
+  }
+
+  function selectedModelSpec(providerId, model) {
+    const models = modelSpecs(providerId);
+    return models.find((entry) => entry.value === model) || models[0] || null;
+  }
+
+  function effortOptions(providerId, model) {
+    return selectedModelSpec(providerId, model)?.efforts || ["high"];
+  }
+
+  function defaultEffort(providerId, model) {
+    const spec = selectedModelSpec(providerId, model);
+    const efforts = spec?.efforts || ["high"];
+    return spec?.defaultEffort || (efforts.includes("high") ? "high" : efforts[0] || "high");
+  }
+
+  function populateEffortSelect(select, providerId, model, currentEffort) {
+    const efforts = effortOptions(providerId, model);
+    select.replaceChildren();
+    efforts.forEach((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+    });
+    select.value = efforts.includes(currentEffort) ? currentEffort : defaultEffort(providerId, model);
+  }
+
   function providerList(config) {
     // Guarantee one card per known provider, in canonical order, even if a
     // hand-edited config dropped one.
@@ -331,8 +386,8 @@
       return {
         id,
         enabled: entry.enabled !== false,
-        model: entry.model || "",
-        effort: entry.effort || "high",
+        model: entry.model || defaultModel(id),
+        effort: entry.effort || defaultEffort(id, entry.model || defaultModel(id)),
         bin: entry.bin || "",
       };
     });
@@ -396,22 +451,32 @@
       modelReq.textContent = "*";
       modelReq.hidden = !provider.enabled;
       modelLabel.appendChild(modelReq);
-      const modelInput = document.createElement("input");
+      const modelInput = document.createElement("select");
       modelInput.className = "provider-model";
-      modelInput.value = provider.model;
-      modelInput.addEventListener("input", setDirty);
+      const knownModels = modelSpecs(provider.id);
+      knownModels.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.value;
+        option.textContent = entry.label;
+        modelInput.appendChild(option);
+      });
+      if (provider.model && !knownModels.some((entry) => entry.value === provider.model)) {
+        const option = document.createElement("option");
+        option.value = provider.model;
+        option.textContent = `Current unsupported: ${provider.model}`;
+        modelInput.appendChild(option);
+      }
+      modelInput.value = provider.model || defaultModel(provider.id);
       modelLabel.appendChild(modelInput);
       const effortLabel = document.createElement("label");
       effortLabel.textContent = "Effort ";
       const effortSelect = document.createElement("select");
       effortSelect.className = "provider-effort";
-      meta.efforts.forEach((value) => {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = value;
-        effortSelect.appendChild(option);
+      populateEffortSelect(effortSelect, provider.id, modelInput.value, provider.effort);
+      modelInput.addEventListener("change", () => {
+        populateEffortSelect(effortSelect, provider.id, modelInput.value, effortSelect.value);
+        setDirty();
       });
-      effortSelect.value = meta.efforts.includes(provider.effort) ? provider.effort : "high";
       effortSelect.addEventListener("change", setDirty);
       effortLabel.appendChild(effortSelect);
       fields.append(modelLabel, effortLabel);
@@ -561,7 +626,7 @@
         const args = { runOnce: action.startsWith("run-") };
         if (!isIssue) args.repoId = currentRepo().id;
         await invoke(command, args);
-        showToast(`${isIssue ? "Issue worker" : "UAT scheduler"} started.`, "success");
+        showToast(`${isIssue ? "Issue worker" : "Test scheduler"} started.`, "success");
       } else if (action.startsWith("pause-")) {
         const current = isIssue ? state.status?.issue?.state : currentRepoStatus()?.uat?.state;
         const command = current === "paused" ? "resume_process" : "pause_process";
@@ -572,6 +637,7 @@
         showToast("Process stopped.", "success");
       }
       await refreshStatus();
+      if (!isIssue) await refreshTestPlan({ quiet: true });
     });
   }
 
@@ -609,7 +675,7 @@
     else if (kind === "issue" && status?.exitCode === 11) copy.textContent = "Work was safely saved until the selected AI provider has capacity again.";
     else if (kind === "issue" && status?.exitCode === 12) copy.textContent = "An issue is queued, but the enabled AI providers cannot start it yet. The worker will retry on schedule.";
     else if (status?.exitCode !== null && status?.exitCode !== undefined) copy.textContent = `Last run exited with status ${status.exitCode}. Review Info & Debug for details.`;
-    else copy.textContent = kind === "issue" ? "Ready when your repository and AI providers are configured." : "Runs the repository’s frozen backend, Fire TV E2E, and TV UAT suites.";
+    else copy.textContent = kind === "issue" ? "Ready when your repository and AI providers are configured." : "Discovers repository-defined suites and runs every suite whose requirements are ready.";
   }
 
   function renderControls() {
@@ -660,8 +726,153 @@
     addFact(container, "GitHub remote", repo?.githubRepository || "Not inferred");
     if (repo?.error) addFact(container, "Problem", repo.error);
     const availability = byId("uat-availability");
-    availability.textContent = repo?.uatAvailable ? "UAT runner found" : "UAT runner not present";
+    availability.textContent = repo?.uatAvailable ? "Test definition or legacy runner found" : "Test definition not present";
     availability.classList.toggle("ready", Boolean(repo?.uatAvailable));
+  }
+
+  function renderTestPlan() {
+    const plan = state.testPlan;
+    const summary = byId("test-definition-summary");
+    const requirementsBox = byId("test-requirements");
+    const suitesBox = byId("test-suite-list");
+    if (!summary || !requirementsBox || !suitesBox) return;
+    requirementsBox.replaceChildren();
+    suitesBox.replaceChildren();
+    if (!plan) {
+      summary.textContent = "Requirements have not been checked yet.";
+      suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No test plan loaded." }));
+      return;
+    }
+    const availability = byId("uat-availability");
+    availability.textContent = plan.available ? (plan.legacy ? "Legacy runner found" : "Definition loaded") : "Definition needed";
+    availability.classList.toggle("ready", Boolean(plan.available));
+    summary.textContent = plan.error || (plan.legacy
+      ? "Compatibility mode uses scripts/tests/full_uat_cron.sh. Add .swarm/tests.json for suite-level status and requirements."
+      : `.swarm/tests.json · structured results: ${plan.resultsPath}`);
+
+    const allRequirements = [];
+    const seen = new Set();
+    (plan.suites || []).forEach((suite) => (suite.requirements || []).forEach((requirement) => {
+      const key = `${requirement.kind}:${requirement.label}:${requirement.detail}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        allRequirements.push(requirement);
+      }
+    }));
+    if (!allRequirements.length) {
+      requirementsBox.appendChild(Object.assign(document.createElement("span"), { className: "fine-print", textContent: plan.legacy ? "Requirements are managed by the legacy runner." : "No external requirements declared." }));
+    } else {
+      allRequirements.forEach((requirement) => {
+        const row = document.createElement("div");
+        row.className = `requirement-item ${requirement.state}`;
+        const mark = document.createElement("span");
+        mark.className = "requirement-mark";
+        mark.textContent = requirement.state === "ready" ? "✓" : requirement.state === "waiting" ? "…" : "!";
+        const copy = document.createElement("div");
+        const title = document.createElement("strong");
+        title.textContent = `${requirement.label} · ${requirement.state === "ready" ? "Ready" : requirement.state === "waiting" ? "Waiting for input" : "Blocked"}`;
+        const detail = document.createElement("small");
+        detail.textContent = requirement.action || requirement.detail;
+        copy.append(title, detail);
+        row.append(mark, copy);
+        requirementsBox.appendChild(row);
+      });
+    }
+
+    const deviceRequirements = allRequirements.filter((requirement) => requirement.kind === "device");
+    const deviceField = byId("test-device-field");
+    const deviceSelect = byId("test-device-select");
+    deviceField.classList.toggle("hidden", deviceRequirements.length === 0);
+    deviceSelect.replaceChildren();
+    const eligibleDevices = (plan.devices || []).filter((device) => device.eligible);
+    if (!eligibleDevices.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No authorized adb devices detected";
+      deviceSelect.appendChild(option);
+      deviceSelect.disabled = true;
+    } else {
+      deviceSelect.disabled = false;
+      if (plan.deviceSelectionRequired) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "Choose a device…";
+        deviceSelect.appendChild(option);
+      }
+      eligibleDevices.forEach((device) => {
+        const option = document.createElement("option");
+        option.value = device.serial;
+        option.textContent = `${device.serial}${device.description ? ` · ${device.description}` : ""}`;
+        deviceSelect.appendChild(option);
+      });
+      deviceSelect.value = plan.selectedDevice || "";
+    }
+
+    byId("test-suite-count").textContent = `${(plan.suites || []).length} suite${plan.suites?.length === 1 ? "" : "s"}`;
+    if (!(plan.suites || []).length) {
+      suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: plan.legacy ? "Suite-level status is unavailable in compatibility mode." : "No suites discovered." }));
+      return;
+    }
+    plan.suites.forEach((suite) => {
+      const card = document.createElement("article");
+      const stateClass = suite.state.toLowerCase().replaceAll(" ", "-");
+      card.className = `test-suite ${stateClass}${suite.blocked ? " blocked" : ""}`;
+      const heading = document.createElement("div");
+      heading.className = "test-suite-heading";
+      const words = document.createElement("div");
+      const name = document.createElement("strong");
+      name.textContent = suite.name;
+      const meta = document.createElement("small");
+      meta.textContent = `${suite.id} · ${suite.timeoutSeconds}s${suite.disruptive ? " · disruptive" : ""}`;
+      words.append(name, meta);
+      const badge = document.createElement("span");
+      badge.className = `suite-state ${stateClass}`;
+      badge.textContent = suite.state;
+      heading.append(words, badge);
+      card.appendChild(heading);
+      if (suite.detail) {
+        const detail = document.createElement("p");
+        detail.textContent = suite.detail;
+        card.appendChild(detail);
+      }
+      const command = document.createElement("code");
+      command.textContent = suite.command;
+      card.appendChild(command);
+      suitesBox.appendChild(card);
+    });
+  }
+
+  async function refreshTestPlan({ quiet = false } = {}) {
+    const repo = currentRepo();
+    if (!repo || state.refreshing.tests) return;
+    state.refreshing.tests = true;
+    try {
+      state.testPlan = await invoke("get_test_plan_background", { repoId: repo.id });
+      if (repo.id === state.activeRepoId) renderTestPlan();
+    } catch (error) {
+      if (!quiet) showToast(errorText(error), "error");
+    } finally {
+      state.refreshing.tests = false;
+    }
+  }
+
+  async function selectTestDevice(event) {
+    const serial = event.target.value;
+    if (!serial || !currentRepo()) return;
+    await withBusy("test-device", async () => {
+      await saveBeforeAction();
+      state.config = await invoke("save_test_device", { repoId: currentRepo().id, serial });
+      bindConfig(state.config);
+      await refreshTestPlan();
+      const repo = currentRepo();
+      const process = currentRepoStatus()?.uat;
+      if (repo?.uat_enabled && process?.state === "stopped") {
+        await invoke("start_uat_scheduler", { repoId: repo.id, runOnce: true });
+        showToast("Device saved; blocked suites are retrying.", "success");
+      } else {
+        showToast("Device selection saved for this repository.", "success");
+      }
+    });
   }
 
   // Accepts "owner/name", a full github.com URL, or an SSH remote; returns
@@ -990,6 +1201,10 @@
     if (provider) {
       return makeActivity(log, `${provider} is starting work`, "This provider has enough capacity and was selected for the current issue.", "info", "work");
     }
+    const workingProvider = message.match(/^(Claude|Codex|Grok) is working/i)?.[1];
+    if (workingProvider) {
+      return makeActivity(log, `${workingProvider} is working`, "Detailed AI output is hidden here. The final summary will appear when the issue pass finishes.", "info", "work");
+    }
     if (/Created issue branch|Continuing issue .* existing branch|Recreated interrupted issue branch/i.test(message) && issueNumber) {
       return makeActivity(log, `Prepared a safe branch for issue #${issueNumber}`, "AI changes stay on this issue branch. They are not written directly to the human-owned branch.", "success", "work");
     }
@@ -1245,11 +1460,13 @@
     stashRepositoryForm();
     state.activeRepoId = repoId;
     state.branchOverview = null;
+    state.testPlan = null;
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
     renderStatus();
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
+    if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
   }
 
   function branchNode(label, name, tip, meta = "", links = {}) {
@@ -1533,6 +1750,8 @@
     byId("hide-button").addEventListener("click", () => invoke("hide_to_tray").catch((error) => showToast(errorText(error), "error")));
     byId("refresh-tools").addEventListener("click", () => refreshTools());
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
+    byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
+    byId("test-device-select").addEventListener("change", selectTestDevice);
     byId("active-repo-select").addEventListener("change", (event) => selectRepository(event.target.value));
     byId("add-repo").addEventListener("click", addRepository);
     byId("remove-repo").addEventListener("click", removeRepository);
@@ -1578,7 +1797,11 @@
       // Git checks from freezing navigation and configuration editing.
       void refreshStatus();
       void refreshTools();
+      void refreshTestPlan({ quiet: true });
       window.setInterval(() => void refreshStatus({ quiet: true }), 2000);
+      window.setInterval(() => {
+        if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
+      }, 4000);
       window.setInterval(() => {
         if (state.busy.size === 0) void refreshTools({ quiet: true });
       }, 30000);

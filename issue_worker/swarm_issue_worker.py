@@ -604,7 +604,7 @@ class Worker:
                     "--codex-bin",
                     codex_bin,
                     "--timeout",
-                    "10",
+                    "30",
                 ],
                 check=False,
             )
@@ -1529,18 +1529,38 @@ class Worker:
         provider = str(pending.get("ai_tool") or pending.get("ai") or "").lower()
         issue_number = int(pending["issue_number"])
         log(f"Adding the '{self.config.ready_label}' label to GitHub issue #{issue_number}.")
-        self.github.gh(
-            [
-                "issue",
-                "edit",
-                str(issue_number),
-                "--repo",
-                self.config.github_repository,
-                "--add-label",
-                self.config.ready_label,
-            ],
-            provider,
-        )
+        edit_arguments = [
+            "issue",
+            "edit",
+            str(issue_number),
+            "--repo",
+            self.config.github_repository,
+            "--add-label",
+            self.config.ready_label,
+        ]
+        try:
+            self.github.gh(edit_arguments, provider)
+        except WorkerError as error:
+            if "not found" not in str(error).lower():
+                raise
+            log(
+                f"The '{self.config.ready_label}' label does not exist; creating it before retrying."
+            )
+            self.github.gh(
+                [
+                    "label",
+                    "create",
+                    self.config.ready_label,
+                    "--repo",
+                    self.config.github_repository,
+                    "--color",
+                    "0E8A16",
+                    "--description",
+                    "AI work is ready for human testing",
+                ],
+                provider,
+            )
+            self.github.gh(edit_arguments, provider)
         pending["ready_for_testing_label_added"] = True
         atomic_write_json(self.pending_file, pending)
         return pending

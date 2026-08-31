@@ -1,6 +1,6 @@
 [package]
 name = "swarm-automation"
-description = "Desktop control center for AI issue workers and UAT schedulers on any local Git checkout."
+description = "Desktop control center for AI issue workers and deterministic test schedulers on any local Git checkout."
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"

@@ -162,6 +162,25 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("SWARM_ENVIRONMENT_ONLY", prompt)
         self.assertIn("do not write code", prompt)
 
+    def test_missing_ready_label_is_created_and_retried(self) -> None:
+        pending = {
+            "issue_number": 144,
+            "ready_for_testing_label_added": False,
+        }
+        missing = WorkerError("failed to update issue: 'Ready For Testing' not found")
+        with mock.patch.object(
+            self.worker.github,
+            "gh",
+            side_effect=[missing, "", ""],
+        ) as github:
+            result = self.worker.add_pending_label(pending)
+
+        self.assertTrue(result["ready_for_testing_label_added"])
+        self.assertEqual(github.call_count, 3)
+        self.assertEqual(github.call_args_list[0].args[0][0:2], ["issue", "edit"])
+        self.assertEqual(github.call_args_list[1].args[0][0:2], ["label", "create"])
+        self.assertEqual(github.call_args_list[2].args[0][0:2], ["issue", "edit"])
+
     def test_environment_only_marker_finishes_without_commit(self) -> None:
         self.worker.config = dataclasses.replace(
             self.worker.config,

@@ -1,9 +1,10 @@
 mod config;
 mod processes;
+mod testing;
 mod tools;
 
 use config::{AppConfig, RepoConfig, CONFIG_FILE};
-use processes::{ProcessManager, ProcessStatus};
+use processes::{process_is_running, ProcessManager, ProcessStatus};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -174,6 +175,34 @@ fn set_cached_smtp_password_configured(state: &AppState, configured: bool) -> Re
     Ok(())
 }
 
+fn reconnect_issue_scheduler<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &State<'_, AppState>,
+    config: &AppConfig,
+    log_path: &Path,
+) -> Result<(), String> {
+    let pid_path = PathBuf::from(&config.worker_state_dir).join("runner.lock/pid");
+    let Ok(raw_pid) = std::fs::read_to_string(&pid_path) else {
+        return Ok(());
+    };
+    let Ok(pid) = raw_pid.trim().parse::<u32>() else {
+        return Ok(());
+    };
+    if !process_is_running(pid) {
+        return Ok(());
+    }
+    state.processes.adopt_external(
+        app,
+        "issue",
+        "Issue worker scheduler",
+        pid,
+        format!("Existing scheduler recorded by {}", pid_path.display()),
+        log_path,
+        Some(PathBuf::from(&config.worker_state_dir).join("cron.log")),
+    )?;
+    Ok(())
+}
+
 #[tauri::command]
 fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
     current_config(&state)
@@ -231,7 +260,7 @@ fn inspect_repository_path(path: &Path) -> RepositoryInspection {
         worker_available: canonical
             .join("scripts/issue_worker/install_swarm_issue_cron.py")
             .is_file(),
-        uat_available: canonical.join("scripts/tests/full_uat_cron.sh").is_file(),
+        uat_available: testing::available(&canonical),
         error: String::new(),
     };
     if !canonical.is_dir() {
@@ -308,6 +337,7 @@ fn get_automation_status<R: tauri::Runtime>(
 ) -> Result<AutomationStatus, String> {
     let config = current_config(&state)?;
     let log_path = automation_log_path(&app)?;
+    reconnect_issue_scheduler(&app, &state, &config, &log_path)?;
     let worker_available = worker_script_dir(&app).is_ok();
     let mut repos = Vec::new();
     for repo in config.repositories() {
@@ -326,7 +356,7 @@ fn get_automation_status<R: tauri::Runtime>(
             uat: state.processes.status(
                 &app,
                 &format!("uat:{}", repo.id),
-                &format!("UAT scheduler · {}", repo.label()),
+                &format!("Test scheduler · {}", repo.label()),
                 &log_path,
             )?,
             workspace_path: workspace.to_string_lossy().into_owned(),
@@ -399,6 +429,8 @@ fn start_issue_worker(
 ) -> Result<ProcessStatus, String> {
     let config = current_config(&state)?;
     config.validate()?;
+    let log_path = automation_log_path(&app)?;
+    reconnect_issue_scheduler(&app, &state, &config, &log_path)?;
     if config.schedule_mode == "manual" && !run_once {
         return Err(
             "The schedule is set to Manual only. Use Run now or choose a recurring schedule."
@@ -505,7 +537,7 @@ fn start_issue_worker(
         &arguments,
         &environment,
         &state_root,
-        automation_log_path(&app)?,
+        log_path,
     )
 }
 
@@ -675,31 +707,139 @@ fn start_uat_scheduler(
     run_once: bool,
 ) -> Result<ProcessStatus, String> {
     let config = current_config(&state)?;
-    config.validate()?;
     let repo = resolve_repo(&config, &repo_id)?;
     if !repo.uat_enabled {
-        return Err(format!("UAT scheduling is disabled for {}.", repo.label()));
+        return Err(format!("Test scheduling is disabled for {}.", repo.label()));
     }
     let workspace = prepared_workspace(&app, &config, repo)?;
-    let script = workspace.join("scripts/tests/full_uat_cron.sh");
-    if !script.is_file() {
-        return Err("This repository does not contain scripts/tests/full_uat_cron.sh.".into());
-    }
-    let mut arguments = vec![script.to_string_lossy().into_owned()];
+    let definition = testing::definition_path(&workspace);
+    let legacy = testing::legacy_runner_path(&workspace);
+    let (program, mut arguments, environment) = if definition.is_file() {
+        // Validate before spawning so malformed repository definitions are a
+        // clear configuration error, never an opaque failed test process.
+        testing::load_definition(&workspace)?;
+        let program = std::env::current_exe()
+            .map_err(|error| format!("Could not locate the test runner: {error}"))?;
+        let mut arguments = vec![
+            "--swarm-test-runner".into(),
+            "--workspace".into(),
+            workspace.to_string_lossy().into_owned(),
+            "--run-dir".into(),
+            repo.effective_run_dir(&workspace)
+                .to_string_lossy()
+                .into_owned(),
+            "--repository".into(),
+            repo.github_repository.clone(),
+            "--device".into(),
+            repo.test_inputs
+                .get("fireTvSerial")
+                .cloned()
+                .unwrap_or_default(),
+            "--hour".into(),
+            repo.uat_hour.to_string(),
+        ];
+        if repo.allow_disruptive_tests {
+            arguments.push("--allow-disruptive".into());
+        }
+        if repo.uat_triage_enabled {
+            arguments.push("--triage".into());
+        }
+        (
+            program,
+            arguments,
+            vec![("PATH".into(), tools::enhanced_path())],
+        )
+    } else if legacy.is_file() {
+        (
+            PathBuf::from("/bin/bash"),
+            vec![legacy.to_string_lossy().into_owned()],
+            uat_environment(&config, repo, &workspace),
+        )
+    } else {
+        return Err(format!(
+            "This repository contains neither {} nor scripts/tests/full_uat_cron.sh.",
+            testing::TEST_DEFINITION_PATH
+        ));
+    };
     if run_once {
         arguments.push("--once".into());
     }
-    let environment = uat_environment(&config, repo, &workspace);
     state.processes.spawn(
         &app,
         &format!("uat:{}", repo.id),
-        &format!("UAT scheduler · {}", repo.label()),
-        Path::new("/bin/bash"),
+        &format!("Test scheduler · {}", repo.label()),
+        &program,
         &arguments,
         &environment,
         &workspace,
         automation_log_path(&app)?,
     )
+}
+
+#[tauri::command]
+fn get_test_plan<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<testing::TestPlan, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = resolve_workspace(&app, &config, repo)?;
+    Ok(testing::build_plan(
+        &workspace,
+        &repo.effective_run_dir(&workspace),
+        &repo.test_inputs,
+        repo.allow_disruptive_tests,
+    ))
+}
+
+#[tauri::command]
+async fn get_test_plan_background(
+    app: tauri::AppHandle,
+    repo_id: String,
+) -> Result<testing::TestPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_test_plan(app.clone(), state, repo_id)
+    })
+    .await
+    .map_err(|error| format!("Test requirement discovery failed: {error}"))?
+}
+
+#[tauri::command]
+fn save_test_device<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+    serial: String,
+) -> Result<AppConfig, String> {
+    let mut config = current_config(&state)?;
+    let repo = config
+        .repositories
+        .iter_mut()
+        .find(|repo| repo.id == repo_id)
+        .ok_or_else(|| format!("Unknown repository id: {repo_id}"))?;
+    if serial.trim().is_empty() {
+        repo.test_inputs.remove("fireTvSerial");
+    } else {
+        repo.test_inputs
+            .insert("fireTvSerial".into(), serial.trim().into());
+    }
+    let selected_inputs = repo.test_inputs.clone();
+    let repo_snapshot = repo.clone();
+    let workspace = resolve_workspace(&app, &config, &repo_snapshot)?;
+    if workspace.is_dir() {
+        testing::save_inputs(
+            &repo_snapshot.effective_run_dir(&workspace),
+            &selected_inputs,
+        )?;
+    }
+    config::save(&app_config_path(&app)?, &config)?;
+    *state
+        .config
+        .lock()
+        .map_err(|_| "Configuration state lock was poisoned".to_string())? = config.clone();
+    Ok(config)
 }
 
 fn uat_environment(
@@ -1993,6 +2133,10 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
+    let arguments: Vec<String> = std::env::args().collect();
+    if let Some(exit_code) = testing::run_cli(&arguments) {
+        std::process::exit(exit_code);
+    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_main_window(app)
@@ -2031,6 +2175,9 @@ fn main() {
             get_automation_status_background,
             start_issue_worker,
             start_uat_scheduler,
+            get_test_plan,
+            get_test_plan_background,
+            save_test_device,
             pause_process,
             resume_process,
             stop_process,
