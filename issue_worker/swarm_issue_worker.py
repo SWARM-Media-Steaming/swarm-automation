@@ -412,10 +412,13 @@ class ProviderUsage:
     remaining_percent: headroom left in the provider's most constrained usage
             window (Grok, which has no cap, reports 100). None when it could
             not be determined.
+    detail: a short human-readable breakdown of each usage window (e.g.
+            "session 82% / week 95% remaining"). None when unavailable.
     """
 
     status: int
     remaining_percent: float | None = None
+    detail: str | None = None
 
     @property
     def usable(self) -> bool:
@@ -511,6 +514,10 @@ class Worker:
         self.choice: ProviderChoice | None = None
         self.issue: IssueContext | None = None
         self.quota_resume_ready = False
+        # Remaining-usage snapshot for the chosen provider taken while selecting
+        # it for a fresh run, reused by post_started_comment so the start notice
+        # doesn't probe /usage a second time.
+        self.start_usage: ProviderUsage | None = None
 
     def git(self, *arguments: str, env: dict[str, str] | None = None, check: bool = True) -> str:
         return run_command(
@@ -604,8 +611,9 @@ class Worker:
         week_remaining = 100 - float(week.group(1))
         log(f"Claude remaining quota — session: {session_remaining:g}%; week: {week_remaining:g}%.")
         remaining = min(session_remaining, week_remaining)
+        detail = f"session {session_remaining:g}% / week {week_remaining:g}% remaining"
         below_minimum = remaining < self.config.minimum_remaining_percent
-        return ProviderUsage(1 if below_minimum else 0, remaining)
+        return ProviderUsage(1 if below_minimum else 0, remaining, detail)
 
     def claude_capacity(self) -> int:
         return self.claude_usage().status
@@ -656,12 +664,13 @@ class Worker:
         )
         log(f"Codex remaining quota — {summary}.")
         remaining = min(100 - amount for amount in used)
+        detail = f"{summary} remaining"
         available = (
             limits.get("rateLimitReachedType") is None
             and not bool(limits.get("spendControlReached", False))
             and remaining >= self.config.minimum_remaining_percent
         )
-        return ProviderUsage(0 if available else 1, remaining)
+        return ProviderUsage(0 if available else 1, remaining, detail)
 
     def codex_capacity(self) -> int:
         return self.codex_usage().status
@@ -681,7 +690,7 @@ class Worker:
         # A full 100% headroom keeps the unlimited provider ahead of the
         # metered ones when choose_provider ranks by remaining usage.
         log("Grok remaining quota — no usage limits apply to Grok Build.")
-        return ProviderUsage(0, 100.0)
+        return ProviderUsage(0, 100.0, "no usage limits apply to Grok Build")
 
     def grok_capacity(self) -> int:
         return self.grok_usage().status
@@ -698,6 +707,60 @@ class Worker:
 
     def provider_capacity(self, provider: str) -> int:
         return self.provider_usage(provider).status
+
+    def usage_snapshot(self, provider: str) -> dict[str, Any] | None:
+        """Probe a provider's remaining usage and return a JSON-safe snapshot.
+
+        Used to record how much of a provider's quota was left when a bot
+        picked up an issue and again when it finished, so the difference
+        approximates what the issue cost. Returns None when the probe failed
+        (provider missing, signed out, or an unrecognized response).
+        """
+        return self.snapshot_from_usage(self.provider_usage(provider))
+
+    @staticmethod
+    def snapshot_from_usage(usage: ProviderUsage | None) -> dict[str, Any] | None:
+        if usage is None or usage.remaining_percent is None:
+            return None
+        return {
+            "remaining_percent": usage.remaining_percent,
+            "detail": usage.detail,
+            "captured_at": iso_timestamp(),
+        }
+
+    @staticmethod
+    def format_usage_snapshot(snapshot: dict[str, Any] | None) -> str:
+        if not snapshot or snapshot.get("remaining_percent") is None:
+            return "unavailable"
+        line = f"{float(snapshot['remaining_percent']):g}% remaining"
+        if snapshot.get("detail"):
+            line += f" ({snapshot['detail']})"
+        return line
+
+    def render_usage_report(self, provider: str, start: dict[str, Any] | None, end: dict[str, Any] | None) -> str:
+        """Build the Markdown usage block shown on the completion comment."""
+        if not start and not end:
+            return ""
+        lines = [f"- {provider} usage at start: {self.format_usage_snapshot(start)}"]
+        lines.append(f"- {provider} usage at completion: {self.format_usage_snapshot(end)}")
+        if (
+            start
+            and end
+            and start.get("remaining_percent") is not None
+            and end.get("remaining_percent") is not None
+        ):
+            spent = float(start["remaining_percent"]) - float(end["remaining_percent"])
+            if spent >= 0:
+                lines.append(
+                    f"- Approx. {provider} usage for this issue: {spent:g} percentage "
+                    "points of its most constrained quota window"
+                )
+            else:
+                lines.append(
+                    f"- {provider} quota window reset during this run; "
+                    "per-issue consumption could not be measured"
+                )
+        return "\n".join(lines) + "\n"
 
     def new_session_id(self, spec: ProviderSpec) -> str:
         # Claude and Grok take a caller-supplied UUID up front; Codex mints its
@@ -1178,12 +1241,18 @@ class Worker:
             marker in str(comment.get("body") or "")
             for comment in self.comments(self.issue.number)
         )
+        usage_at_start: dict[str, Any] | None = None
         if not already_posted:
             action = "started follow-up work on" if self.issue.work_type == "followup" else "started working on"
+            if self.start_usage is not None:
+                usage_at_start = self.snapshot_from_usage(self.start_usage)
+            else:
+                usage_at_start = self.usage_snapshot(self.choice.key)
             body = (
                 f"{marker}\n🤖 **{self.choice.name} Bot** {action} this issue.\n\n"
                 f"- Model: `{self.choice.model}`\n"
                 f"- Branch: `{self.expected_branch()}`\n"
+                f"- {self.choice.name} usage remaining: {self.format_usage_snapshot(usage_at_start)}\n"
             )
             self.github.gh(
                 [
@@ -1201,7 +1270,7 @@ class Worker:
             log(f"Posted {self.choice.name} Bot start notice to issue #{self.issue.number}.")
         else:
             log(f"Issue #{self.issue.number} already has this work-round start notice.")
-        self.update_state(started_comment_posted=True)
+        self.update_state(started_comment_posted=True, usage_at_start=usage_at_start)
 
     def ai_failure_is_quota(self) -> bool:
         combined = ""
@@ -1543,16 +1612,21 @@ class Worker:
             marker += f";through-comment:{trigger}"
         marker += " -->"
         verb = "Reworked" if pending.get("work_type") == "followup" else "Completed"
+        provider = str(pending.get("ai_tool") or pending.get("ai") or "the AI")
         branch_line = ""
         if pending.get("branch_name"):
             pr = f" → {pending['pull_request_url']}" if pending.get("pull_request_url") else ""
             branch_line = f"- Branch: `{pending['branch_name']}`{pr}\n"
+        usage_lines = self.render_usage_report(
+            provider, pending.get("usage_at_start"), pending.get("usage_at_completion")
+        )
         return (
             f"{marker}\n{verb} by **{pending.get('ai_tool') or pending.get('ai')}**.\n\n"
             f"- Model: `{pending.get('model', 'unknown')}`\n"
             f"- Effort: `{pending.get('effort', 'unknown')}`\n"
             f"{branch_line}"
-            f"- Commit: `{commit_sha}` — {pending['commit_message']}\n\n"
+            f"- Commit: `{commit_sha}` — {pending['commit_message']}\n"
+            f"{usage_lines}\n"
             "<details><summary>AI completion summary</summary>\n\n"
             f"{pending.get('ai_output') or '(No captured AI output was available.)'}\n"
             "</details>\n"
@@ -2631,6 +2705,7 @@ class Worker:
     def finalize_issue(self, commit_sha: str, ai_output: str) -> None:
         assert self.issue and self.choice
         pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha)
+        usage_at_start = self.read_state().get("usage_at_start")
         pending = {
             "issue_number": self.issue.number,
             "issue_title": self.issue.title,
@@ -2648,6 +2723,8 @@ class Worker:
             "ready_for_testing_label_added": False,
             "pull_request_url": pr_url,
             "branch_name": branch,
+            "usage_at_start": usage_at_start,
+            "usage_at_completion": self.usage_snapshot(self.choice.key),
         }
         atomic_write_json(self.pending_file, pending)
         pending = self.post_pending_comment(pending)
@@ -2668,9 +2745,15 @@ class Worker:
             f"<!-- swarm-issue-worker:environment-only:issue:{self.issue.number};"
             f"provider:{self.choice.key} -->"
         )
+        usage_lines = self.render_usage_report(
+            self.choice.name,
+            self.read_state().get("usage_at_start"),
+            self.usage_snapshot(self.choice.key),
+        )
         body = (
             f"{marker}\nReviewed by **{self.choice.name}** with no code changes.\n\n"
-            "- Result: this appears to be environmental rather than a code change.\n\n"
+            "- Result: this appears to be environmental rather than a code change.\n"
+            f"{usage_lines}\n"
             "<details><summary>AI summary</summary>\n\n"
             f"{ai_output or '(No captured AI output was available.)'}\n"
             "</details>\n"
@@ -2757,6 +2840,7 @@ class Worker:
                     "window; stopping."
                 )
                 return PROVIDER_UNAVAILABLE_EXIT_CODE
+            self.start_usage = usages.get(self.choice.name)
 
         assert self.choice
         if self.choice.resume:

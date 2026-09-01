@@ -992,6 +992,45 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(is_worker_comment({"body": body}))
         self.assertTrue(self.worker.read_state()["started_comment_posted"])
 
+    def test_start_comment_reports_provider_usage_remaining(self) -> None:
+        self.worker.issue = IssueContext(410, "Usage notice", "", [], "https://example.invalid/410")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.start_usage = ProviderUsage(0, 82.0, "session 82% / week 95% remaining")
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_started_comment()
+        body = github.call_args.args[2]
+        self.assertIn(
+            "Claude usage remaining: 82% remaining (session 82% / week 95% remaining)", body
+        )
+        self.assertEqual(self.worker.read_state()["usage_at_start"]["remaining_percent"], 82.0)
+
+    def test_completion_comment_reports_usage_spent_on_the_issue(self) -> None:
+        pending = {
+            "ai": "Claude", "ai_tool": "Claude", "model": "m", "effort": "high",
+            "commit_sha": "1" * 40, "commit_message": "Do it (#410)",
+            "ai_output": "done", "work_type": "initial",
+            "usage_at_start": {"remaining_percent": 80.0, "detail": "session 80% / week 95% remaining"},
+            "usage_at_completion": {"remaining_percent": 73.5, "detail": "session 73.5% / week 95% remaining"},
+        }
+        rendered = self.worker.render_pending_comment(pending)
+        self.assertIn("Claude usage at start: 80% remaining", rendered)
+        self.assertIn("Claude usage at completion: 73.5% remaining", rendered)
+        self.assertIn("Approx. Claude usage for this issue: 6.5 percentage points", rendered)
+
+    def test_completion_comment_without_usage_snapshots_is_unchanged(self) -> None:
+        pending = {
+            "ai": "Codex", "ai_tool": "Codex", "model": "m", "effort": "high",
+            "commit_sha": "2" * 40, "commit_message": "Do it (#411)",
+            "ai_output": "done", "work_type": "initial",
+        }
+        rendered = self.worker.render_pending_comment(pending)
+        self.assertNotIn("usage at start", rendered)
+        self.assertIn("Completed by **Codex**.", rendered)
+
     def test_existing_start_marker_repairs_state_without_duplicate_comment(self) -> None:
         self.worker.issue = IssueContext(408, "Crash-safe notice", "", [], "https://example.invalid/408")
         self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session")
