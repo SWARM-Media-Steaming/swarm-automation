@@ -98,16 +98,20 @@ launchctl_stop() {
 }
 
 launchctl_start() {
+    # `open -W -a` (used in the plist) does not forward a plist's
+    # EnvironmentVariables, so publish PATH session-wide instead — the app
+    # and the issue workers it spawns need git/gh/python3/claude/codex/grok
+    # on PATH, which a bare launchd environment lacks. Session-scoped.
+    launchctl setenv PATH "$SERVICE_PATH" 2>/dev/null || true
+    launchctl setenv RUST_LOG "info" 2>/dev/null || true
     launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null \
         || launchctl load "$PLIST" 2>/dev/null \
         || true
-    launchctl kickstart -k "$DOMAIN/$LABEL" 2>/dev/null || true
 }
 
 service_pid() {
-    launchctl print "$DOMAIN/$LABEL" 2>/dev/null \
-        | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' \
-        | head -n1
+    # The LaunchAgent runs `open -W`; find the real app process by its path.
+    pgrep -f "$EXECUTABLE" 2>/dev/null | head -n1
 }
 
 scheduler_running() {
@@ -238,10 +242,23 @@ do_install() {
 <dict>
     <key>Label</key>
     <string>$LABEL</string>
-    <key>Program</key>
-    <string>$EXECUTABLE</string>
+    <!-- Launch via 'open', not the raw binary: a Tauri/Cocoa app started
+         straight from its executable under launchd gets no proper GUI
+         session and self-terminates after ~15-30s. 'open -W' gives it a real
+         session and blocks for the app's lifetime. PATH/RUST_LOG come from
+         'launchctl setenv' (launchctl_start) since 'open -W -a' does not
+         forward a plist's EnvironmentVariables. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-W</string>
+        <string>-a</string>
+        <string>$APP_PATH</string>
+    </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- Relaunch only on a crash: a deliberate "Quit and stop workers" from
+         the menu bar stays stopped. -->
     <key>KeepAlive</key>
     <dict>
         <key>Crashed</key>
@@ -251,13 +268,8 @@ do_install() {
     <string>Background</string>
     <key>LowPriorityIO</key>
     <true/>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>$SERVICE_PATH</string>
-        <key>RUST_LOG</key>
-        <string>info</string>
-    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>$OUT_LOG</string>
     <key>StandardErrorPath</key>
