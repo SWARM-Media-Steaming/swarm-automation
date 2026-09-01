@@ -15,9 +15,10 @@ The application can:
 - run issue pickup continuously, daily, on weekdays, on selected days, or only
   when **Run now** is clicked;
 - drive up to three AI coding agents — **Claude Code**, **Codex CLI**, and
-  **Grok Build** — rotating over whichever ones you include in the flow;
-  include/exclude each provider with a switch on its card, and pick which one
-  is tried first;
+  **Grok Build** — giving each new issue to whichever included provider has the
+  most usage remaining, and handing follow-up comments to a different agent than
+  the one that did the previous pass; include/exclude each provider with a
+  switch on its card, and pick which one wins ties;
 - monitor multiple GitHub repositories in one scheduler, with an independent
   managed clone, assignee, branch policy, bot identities, and UAT process for
   each repository;
@@ -59,7 +60,9 @@ The default AI integration branch is `ai-main` (the recommended name). Before
 starting a fresh issue, the worker fetches `main`, merges it into `ai-main`, and
 then creates exactly one issue branch named
 `ai/<claude|codex|xai>/issue-<number>`. If a different provider continues the
-issue later, it reuses that same branch. AI commit subjects start with the tool
+issue later, it reuses that same branch. On GitHub remotes, the worker creates
+the branch through the issue so it appears as a linked branch in the issue's
+Development section. AI commit subjects start with the tool
 identifier, such as `[codex]`, and the worker refuses to push an untagged commit.
 
 Issue pull requests target `ai-main`; automatic approval and merging are both

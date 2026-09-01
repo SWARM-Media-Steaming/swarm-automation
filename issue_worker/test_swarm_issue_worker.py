@@ -24,6 +24,7 @@ from swarm_issue_worker import (
     IssueContext,
     PROVIDER_UNAVAILABLE_EXIT_CODE,
     ProviderChoice,
+    ProviderUsage,
     Worker,
     WorkerError,
     build_parser,
@@ -118,32 +119,46 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(completion["commit_sha"], "1" * 40)
         self.assertIsNone(extract_completion_metadata(comments, {"someone-else"}))
 
-    def test_followup_rotates_away_from_the_previous_provider(self) -> None:
-        # Fresh issue: the preferred provider (Claude by default) goes first.
-        fresh = self.worker.choose_provider("", {"Claude": True, "Codex": True, "Grok": True})
+    def test_new_issue_prefers_the_provider_with_most_usage_remaining(self) -> None:
+        # Fresh issue: the least-drained provider goes first regardless of the
+        # preferred-provider setting, so no account is exhausted before the rest.
+        fresh = self.worker.choose_provider(
+            "", {"Claude": 90.0, "Codex": 40.0, "Grok": 55.0}
+        )
         assert fresh is not None
         self.assertEqual(fresh.name, "Claude")
         self.assertTrue(fresh.session_id, "Claude sessions are created up front")
 
-        # Follow-up: the provider that did the previous pass is pushed to the
-        # back, so a different enabled provider reviews.
-        after_claude = self.worker.choose_provider(
-            "Claude", {"Claude": True, "Codex": True, "Grok": True}
+        drained_claude = self.worker.choose_provider(
+            "", {"Claude": 12.0, "Codex": 12.0, "Grok": 80.0}
         )
-        assert after_claude is not None
-        self.assertNotEqual(after_claude.name, "Claude")
+        assert drained_claude is not None
+        self.assertEqual(drained_claude.name, "Grok")
 
-        after_grok = self.worker.choose_provider(
-            "Grok", {"Claude": True, "Codex": True, "Grok": True}
+    def test_equal_headroom_falls_back_to_the_preferred_provider(self) -> None:
+        choice = self.worker.choose_provider(
+            "", {"Claude": 50.0, "Codex": 50.0, "Grok": 50.0}
         )
+        assert choice is not None
+        self.assertEqual(choice.name, "Claude")
+
+    def test_followup_rotates_away_from_the_previous_provider(self) -> None:
+        headroom = {"Claude": 90.0, "Codex": 40.0, "Grok": 55.0}
+
+        # Follow-up: the provider that did the previous pass is pushed to the
+        # back even when it has the most headroom, so a different enabled
+        # provider reviews; the rest keep their most-usage-first order.
+        after_claude = self.worker.choose_provider("Claude", headroom)
+        assert after_claude is not None
+        self.assertEqual(after_claude.name, "Grok")
+
+        after_grok = self.worker.choose_provider("Grok", headroom)
         assert after_grok is not None
-        self.assertNotEqual(after_grok.name, "Grok")
+        self.assertEqual(after_grok.name, "Claude")
 
         # Last resort: the previous provider is still used when it is the only
         # one with capacity.
-        only_claude = self.worker.choose_provider(
-            "Claude", {"Claude": True, "Codex": False, "Grok": False}
-        )
+        only_claude = self.worker.choose_provider("Claude", {"Claude": 90.0})
         assert only_claude is not None
         self.assertEqual(only_claude.name, "Claude")
 
@@ -197,7 +212,7 @@ class WorkerTestCase(unittest.TestCase):
             return 0
 
         with (
-            mock.patch.object(self.worker, "provider_capacity", return_value=0),
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
             mock.patch.object(self.worker, "post_started_comment"),
             mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
             mock.patch.object(self.worker, "comments", return_value=[]),
@@ -288,7 +303,7 @@ class WorkerTestCase(unittest.TestCase):
     def test_queued_issue_without_provider_capacity_has_distinct_status(self) -> None:
         self.worker.issue = IssueContext(137, "Queued work", "", [], "https://example.invalid/137")
         with (
-            mock.patch.object(self.worker, "provider_capacity", return_value=1),
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(1, 3.0)),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             status = self.worker.run_selected_issue()
@@ -727,6 +742,70 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(run_start, state["base_sha"])
         self.assertEqual(self.git("branch", "--show-current"), "ai/codex/issue-401")
 
+    def test_linked_issue_branch_uses_github_graphql_mutation(self) -> None:
+        self.worker.issue = IssueContext(419, "Linked branch", "", [], "https://example.invalid/419")
+        self.worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        issue_id = "I_kwDOExample"
+        with mock.patch.object(
+            self.worker.github,
+            "gh",
+            side_effect=[
+                json.dumps({"node_id": issue_id}),
+                json.dumps(
+                    {"data": {"createLinkedBranch": {"issue": {"id": issue_id}}}}
+                ),
+            ],
+        ) as github:
+            self.worker.create_linked_issue_branch(
+                "ai/codex/issue-419", "1" * 40
+            )
+
+        self.assertEqual(
+            github.call_args_list[0].args,
+            (["api", "--method", "GET", "repos/DotNetRockStar/swarm/issues/419"], "codex"),
+        )
+        mutation_args = github.call_args_list[1].args[0]
+        self.assertEqual(mutation_args[:2], ["api", "graphql"])
+        self.assertIn(f"issueId={issue_id}", mutation_args)
+        self.assertIn("oid=" + "1" * 40, mutation_args)
+        self.assertIn("name=ai/codex/issue-419", mutation_args)
+
+    def test_fresh_github_branch_is_created_from_the_issue(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(420, "Linked branch", "", [], "https://example.invalid/420")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+        with (
+            mock.patch.object(worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(worker, "create_linked_issue_branch") as create_linked,
+        ):
+            run_start, recovery, _, _ = worker.prepare_repository()
+
+        self.assertFalse(recovery)
+        create_linked.assert_called_once_with("ai/claude/issue-420", run_start)
+        self.assertTrue(worker.read_state()["branch_linked"])
+        self.assertEqual(self.git("branch", "--show-current"), "ai/claude/issue-420")
+
+    def test_followup_recreated_github_branch_is_linked_to_the_issue(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(
+            421,
+            "Recreated linked branch",
+            "",
+            [],
+            "https://example.invalid/421",
+            work_type="followup",
+            previous_commit_sha=self.base_sha,
+        )
+        worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        with (
+            mock.patch.object(worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(worker, "create_linked_issue_branch") as create_linked,
+        ):
+            run_start, _, _, _ = worker.prepare_repository()
+
+        create_linked.assert_called_once_with("ai/codex/issue-421", run_start)
+        self.assertTrue(worker.read_state()["branch_linked"])
+
     def test_fresh_pr_branch_fast_forwards_main_before_branching(self) -> None:
         updater = self.root / "updater"
         subprocess.run(
@@ -937,9 +1016,7 @@ class WorkerTestCase(unittest.TestCase):
         worker = Worker(Config.from_args(args))
         worker.issue = IssueContext(409, "Dry run", "", [], "https://example.invalid/409")
         with (
-            mock.patch.object(worker, "claude_capacity", return_value=0),
-            mock.patch.object(worker, "codex_capacity", return_value=0),
-            mock.patch.object(worker, "grok_capacity", return_value=0),
+            mock.patch.object(worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
             mock.patch.object(worker, "post_started_comment") as start_comment,
         ):
             self.assertEqual(worker.run_selected_issue(), 0)
