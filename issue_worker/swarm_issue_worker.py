@@ -1747,6 +1747,72 @@ class Worker:
                 return name
         return ""
 
+    def remote_is_github_host(self) -> bool:
+        """Whether the configured Git remote is hosted by this GitHub server."""
+        remote_url = self.git("remote", "get-url", self.config.remote_name, check=False).strip()
+        host = re.escape(self.config.github_host.strip().lower())
+        normalized = remote_url.lower()
+        return bool(
+            host
+            and (
+                re.search(rf"^[^@/]+@{host}:", normalized)
+                or re.search(rf"^[a-z][a-z0-9+.-]*://(?:[^@/]+@)?{host}(?::[0-9]+)?/", normalized)
+            )
+        )
+
+    def create_linked_issue_branch(self, branch: str, base_sha: str) -> None:
+        """Create a remote branch through its issue so GitHub tracks the link."""
+        assert self.issue and self.choice
+        issue_text = self.github.gh(
+            [
+                "api",
+                "--method",
+                "GET",
+                f"repos/{self.config.github_repository}/issues/{self.issue.number}",
+            ],
+            self.choice.key,
+        )
+        try:
+            issue_id = str(json.loads(issue_text)["node_id"])
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise WorkerError(
+                f"GitHub did not return a node ID for issue #{self.issue.number}"
+            ) from error
+        if not issue_id:
+            raise WorkerError(f"GitHub returned an empty node ID for issue #{self.issue.number}")
+        mutation = (
+            "mutation($issueId:ID!,$oid:GitObjectID!,$name:String!){"
+            "createLinkedBranch(input:{issueId:$issueId,oid:$oid,name:$name}){issue{id}}}"
+        )
+        response_text = self.github.gh(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={mutation}",
+                "-f",
+                f"issueId={issue_id}",
+                "-f",
+                f"oid={base_sha}",
+                "-f",
+                f"name={branch}",
+            ],
+            self.choice.key,
+        )
+        try:
+            linked_issue_id = str(
+                json.loads(response_text)["data"]["createLinkedBranch"]["issue"]["id"]
+            )
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise WorkerError(
+                f"GitHub did not confirm the linked branch for issue #{self.issue.number}"
+            ) from error
+        if linked_issue_id != issue_id:
+            raise WorkerError(
+                f"GitHub linked branch {branch} to an unexpected issue"
+            )
+        log(f"Created GitHub-linked branch {branch} for issue #{self.issue.number}.")
+
     def expected_branch(self) -> str:
         assert self.issue and self.choice
         return f"{self.config.branch_prefix}/{self.first_ai_key()}/issue-{self.issue.number}"
@@ -2120,6 +2186,7 @@ class Worker:
             if self.issue.work_type == "followup":
                 # Reuse the one branch this issue has always used.
                 remote_branch = self.find_remote_issue_branch(self.issue.number)
+                recreated_linked_branch = False
                 self.synchronize_integration_branch()
                 if remote_branch:
                     self.git("fetch", self.config.remote_name, remote_branch, check=False)
@@ -2143,10 +2210,17 @@ class Worker:
                             )
                     log(f"Continuing issue #{self.issue.number} on its existing branch {expected}.")
                 else:
+                    base = self.git("rev-parse", integ)
+                    self.save_new_state(self.issue, self.choice, base)
+                    if self.remote_is_github_host():
+                        self.create_linked_issue_branch(expected, base)
+                        recreated_linked_branch = True
                     self.git("switch", "-c", expected, integ)
                     log(f"Follow-up: no remote branch found; recreated {expected} from {integ}.")
                 base = self.git("rev-parse", "HEAD")
                 self.save_new_state(self.issue, self.choice, base)
+                if recreated_linked_branch:
+                    self.update_state(branch_linked=True)
             else:
                 base = self.synchronize_integration_branch()
                 self.prune_merged_worker_branches()
@@ -2159,11 +2233,21 @@ class Worker:
                         raise WorkerError(
                             f"Existing branch {expected} contains unmerged work; recovery state was preserved"
                         )
+                if self.remote_is_github_host():
+                    self.create_linked_issue_branch(expected, base)
+                    self.update_state(branch_linked=True)
                 self.git("switch", "-c", expected, base)
                 log(f"Created issue branch {expected} from {integ} at {base}.")
         else:
             state = self.read_state()
             expected = str(state.get("branch_name") or expected)
+            if self.remote_is_github_host() and not state.get("branch_linked"):
+                remote_branch = self.find_remote_issue_branch(self.issue.number)
+                if remote_branch == expected:
+                    self.update_state(branch_linked=True)
+                else:
+                    self.create_linked_issue_branch(expected, str(state["base_sha"]))
+                    self.update_state(branch_linked=True)
             if current_branch != expected:
                 if self.git("status", "--porcelain"):
                     raise WorkerError(f"Repository must be on saved issue branch {expected} before recovery")
