@@ -136,10 +136,10 @@ pub struct RepoConfig {
     /// Advanced: an existing local checkout to operate on as-is instead of a
     /// managed clone.
     pub repo_dir: String,
-    pub uat_enabled: bool,
+    /// Hour of the day (local, 0-23) the test scheduler runs its daily cycle
+    /// once **Start** has been pressed. **Run now** ignores it.
     pub uat_hour: u8,
-    pub uat_issue_label: String,
-    pub uat_batocera_host: String,
+    /// Run the repository-defined `failureTriage` command after a real failure.
     pub uat_triage_enabled: bool,
     /// Repository-local selections used only by the deterministic test runner.
     /// Values are deliberately limited to non-secret discovery choices (for
@@ -174,10 +174,7 @@ impl Default for RepoConfig {
             require_issue_tests: false,
             allow_environment_only_summary: false,
             repo_dir: String::new(),
-            uat_enabled: false,
             uat_hour: 3,
-            uat_issue_label: "Testing".into(),
-            uat_batocera_host: "batocera.local".into(),
             uat_triage_enabled: true,
             test_inputs: HashMap::new(),
             allow_disruptive_tests: false,
@@ -242,7 +239,7 @@ impl RepoConfig {
             .into_owned()
     }
 
-    /// Where the UAT runner keeps its state. Defaults to `<workspace>/.run`.
+    /// Where the test runner keeps its state. Defaults to `<workspace>/.run`.
     pub fn effective_run_dir(&self, workspace: &Path) -> PathBuf {
         if self.run_dir.trim().is_empty() {
             workspace.join(".run")
@@ -286,7 +283,7 @@ impl RepoConfig {
             return Err("git remote cannot be empty".into());
         }
         if self.uat_hour > 23 {
-            return Err("UAT hour must be between 0 and 23".into());
+            return Err("the daily test hour must be between 0 and 23".into());
         }
         let override_path = self.repo_dir.trim();
         if !override_path.is_empty() {
@@ -375,13 +372,7 @@ pub struct AppConfig {
     #[serde(default, skip_serializing)]
     pub branch_prefix: String,
     #[serde(default, skip_serializing)]
-    pub uat_enabled: bool,
-    #[serde(default, skip_serializing)]
     pub uat_hour: u8,
-    #[serde(default, skip_serializing)]
-    pub uat_issue_label: String,
-    #[serde(default, skip_serializing)]
-    pub uat_batocera_host: String,
     #[serde(default, skip_serializing)]
     pub uat_triage_enabled: bool,
     #[serde(default, skip_serializing)]
@@ -445,10 +436,7 @@ impl Default for AppConfig {
             require_issue_tests: false,
             allow_environment_only_summary: false,
             branch_prefix: String::new(),
-            uat_enabled: false,
             uat_hour: 0,
-            uat_issue_label: String::new(),
-            uat_batocera_host: String::new(),
             uat_triage_enabled: false,
             run_dir: String::new(),
             claude_model: String::new(),
@@ -670,15 +658,8 @@ impl AppConfig {
             if !self.branch_prefix.trim().is_empty() {
                 repo.branch_prefix = std::mem::take(&mut self.branch_prefix);
             }
-            repo.uat_enabled = self.uat_enabled;
             if self.uat_hour <= 23 {
                 repo.uat_hour = self.uat_hour;
-            }
-            if !self.uat_issue_label.trim().is_empty() {
-                repo.uat_issue_label = std::mem::take(&mut self.uat_issue_label);
-            }
-            if !self.uat_batocera_host.trim().is_empty() {
-                repo.uat_batocera_host = std::mem::take(&mut self.uat_batocera_host);
             }
             repo.uat_triage_enabled = self.uat_triage_enabled;
             repo.run_dir = std::mem::take(&mut self.run_dir);

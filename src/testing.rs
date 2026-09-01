@@ -183,7 +183,6 @@ pub struct SuitePlan {
 #[serde(rename_all = "camelCase")]
 pub struct TestPlan {
     pub available: bool,
-    pub legacy: bool,
     pub definition_path: String,
     pub results_path: String,
     pub error: String,
@@ -201,6 +200,9 @@ pub struct TestRunResults {
     pub definition_path: String,
     pub started_at: u64,
     pub finished_at: Option<u64>,
+    /// How the run was initiated: `"manual"` (Run now) or `"scheduled"`.
+    #[serde(default)]
+    pub trigger: String,
     pub suites: Vec<SuiteResult>,
 }
 
@@ -208,13 +210,14 @@ pub fn definition_path(workspace: &Path) -> PathBuf {
     workspace.join(TEST_DEFINITION_PATH)
 }
 
-pub fn legacy_runner_path(workspace: &Path) -> PathBuf {
-    workspace.join("scripts/tests/full_uat_cron.sh")
+pub fn available(workspace: &Path) -> bool {
+    definition_path(workspace).is_file()
 }
 
-pub fn available(workspace: &Path) -> bool {
-    definition_path(workspace).is_file() || legacy_runner_path(workspace).is_file()
-}
+/// Subdirectory of the run directory that keeps one JSON file per completed
+/// test run so the UI can show run history and per-suite outcomes.
+const HISTORY_DIR: &str = "test-runs";
+const HISTORY_LIMIT: usize = 50;
 
 pub fn load_definition(workspace: &Path) -> Result<TestDefinition, String> {
     let path = definition_path(workspace);
@@ -343,17 +346,11 @@ pub fn build_plan(
     let path = definition_path(workspace);
     let results_path = run_dir.join("test-results.json");
     if !path.is_file() {
-        let legacy = legacy_runner_path(workspace).is_file();
         return TestPlan {
-            available: legacy,
-            legacy,
+            available: false,
             definition_path: String::new(),
             results_path: results_path.to_string_lossy().into_owned(),
-            error: if legacy {
-                String::new()
-            } else {
-                format!("Add {TEST_DEFINITION_PATH} to this repository")
-            },
+            error: format!("Add {TEST_DEFINITION_PATH} to this repository"),
             selected_device: String::new(),
             device_selection_required: false,
             devices: Vec::new(),
@@ -365,7 +362,6 @@ pub fn build_plan(
         Err(error) => {
             return TestPlan {
                 available: false,
-                legacy: false,
                 definition_path: path.to_string_lossy().into_owned(),
                 results_path: results_path.to_string_lossy().into_owned(),
                 error,
@@ -452,7 +448,6 @@ pub fn build_plan(
         .collect();
     TestPlan {
         available: true,
-        legacy: false,
         definition_path: path.to_string_lossy().into_owned(),
         results_path: results_path.to_string_lossy().into_owned(),
         error: String::new(),
@@ -708,6 +703,55 @@ fn write_results(path: &Path, results: &TestRunResults) -> Result<(), String> {
     fs::rename(&temporary, path).map_err(|error| error.to_string())
 }
 
+/// Records a finished run under `<run-dir>/test-runs/<started_at>.json` and
+/// prunes the oldest entries beyond `HISTORY_LIMIT`. Per-suite command output
+/// is dropped from the archived copy so the history stays small; the live
+/// `test-results.json` keeps the full output for the most recent run.
+fn append_history(run_dir: &Path, results: &TestRunResults) {
+    let dir = run_dir.join(HISTORY_DIR);
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let mut archived = results.clone();
+    for suite in &mut archived.suites {
+        suite.output.clear();
+    }
+    let Ok(bytes) = serde_json::to_vec_pretty(&archived) else {
+        return;
+    };
+    let path = dir.join(format!("{}.json", results.started_at));
+    if fs::write(&path, bytes).is_err() {
+        return;
+    }
+    let mut files: Vec<PathBuf> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect();
+    if files.len() > HISTORY_LIMIT {
+        files.sort();
+        for stale in files.iter().take(files.len() - HISTORY_LIMIT) {
+            let _ = fs::remove_file(stale);
+        }
+    }
+}
+
+/// Every archived run for `run_dir`, newest first, capped at `HISTORY_LIMIT`.
+pub fn list_runs(run_dir: &Path) -> Vec<TestRunResults> {
+    let dir = run_dir.join(HISTORY_DIR);
+    let mut runs: Vec<TestRunResults> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .filter_map(|path| serde_json::from_slice(&fs::read(path).ok()?).ok())
+        .collect();
+    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.truncate(HISTORY_LIMIT);
+    runs
+}
+
 pub fn run_once(
     workspace: &Path,
     run_dir: &Path,
@@ -715,6 +759,7 @@ pub fn run_once(
     saved_inputs: &HashMap<String, String>,
     allow_disruptive: bool,
     triage_enabled: bool,
+    trigger: &str,
 ) -> Result<i32, String> {
     let definition = load_definition(workspace)?;
     let resolved_inputs = load_inputs(run_dir, saved_inputs);
@@ -729,6 +774,7 @@ pub fn run_once(
         definition_path: definition_path(workspace).to_string_lossy().into_owned(),
         started_at: unix_timestamp(),
         finished_at: None,
+        trigger: trigger.to_string(),
         suites: plan
             .suites
             .iter()
@@ -785,6 +831,7 @@ pub fn run_once(
     }
     results.finished_at = Some(unix_timestamp());
     write_results(&results_path, &results)?;
+    append_history(run_dir, &results);
     if let Some(reporting) = definition.reporting.filter(|item| !item.command.is_empty()) {
         let _ = run_auxiliary_command(
             workspace,
@@ -959,6 +1006,7 @@ pub fn run_cli(arguments: &[String]) -> Option<i32> {
     } else {
         HashMap::from([("fireTvSerial".into(), selected)])
     };
+    let trigger = if once { "manual" } else { "scheduled" };
     loop {
         let inputs_before_run = input_signature(&run_dir);
         match run_once(
@@ -968,6 +1016,7 @@ pub fn run_cli(arguments: &[String]) -> Option<i32> {
             &inputs,
             allow_disruptive,
             triage_enabled,
+            trigger,
         ) {
             Ok(code) if once => return Some(code),
             Err(error) if once => {
@@ -1068,6 +1117,7 @@ mod tests {
                 &HashMap::new(),
                 false,
                 false,
+                "manual",
             )
             .unwrap(),
             1
@@ -1075,6 +1125,10 @@ mod tests {
         let results = read_results(&run_dir.join("test-results.json")).unwrap();
         assert_eq!(results.suites[0].state, "Failed");
         assert_eq!(results.suites[1].state, "Passed");
+        let history = list_runs(&run_dir);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].trigger, "manual");
+        assert_eq!(history[0].suites[1].state, "Passed");
     }
 
     #[test]
@@ -1118,6 +1172,7 @@ mod tests {
                 &HashMap::new(),
                 false,
                 false,
+                "scheduled",
             )
             .unwrap(),
             1

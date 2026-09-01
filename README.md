@@ -20,7 +20,7 @@ The application can:
   the one that did the previous pass; include/exclude each provider with a
   switch on its card, and pick which one wins ties;
 - monitor multiple GitHub repositories in one scheduler, with an independent
-  managed clone, assignee, branch policy, bot identities, and UAT process for
+  managed clone, assignee, branch policy, bot identities, and test scheduler for
   each repository;
 - work the repositories one at a time with a single shared worker (the
   default), or turn on **One worker per repository** to run a worker for every
@@ -37,11 +37,11 @@ The application can:
   optionally approve and squash issue pull requests into the AI-integration
   branch (a per-repository policy), delete their branches once the linked
   issue is closed, and expose the explicit human promotion gate;
-- discover and run a target repository's suites from `.swarm/tests.json`,
-  resolving tools, files, services, mounts, credentials, and Fire TV devices
-  independently for each suite without using AI credits;
-- supervise a target repository's existing `scripts/tests/full_uat_cron.sh`
-  as a compatibility fallback when no test definition exists;
+- discover and run every suite a target repository declares in
+  `.swarm/tests.json` — not just UAT — resolving tools, files, services, mounts,
+  credentials, and Fire TV devices independently for each suite without using
+  AI credits, and keeping a per-run history with per-suite pass / fail /
+  skipped outcomes;
 - explain any control in place through a click-to-open help modal, and carry a
   **Help** tab with a "how to get started" walkthrough; and
 - stream child output to the UI and a local log.
@@ -119,9 +119,9 @@ npm run build
 
 The packaged application includes the vendored Python issue-worker
 implementation, so a selected repository does not need to contain any
-automation scripts of its own. Test controls are repository-specific. The app
-prefers `.swarm/tests.json` and falls back to
-`scripts/tests/full_uat_cron.sh` without modifying its test logic.
+automation scripts of its own. Test controls are repository-specific and driven
+entirely by the repository's `.swarm/tests.json`; environment gates belong to
+each suite's own `requirements`, not to this tool.
 
 ## Repository test definitions
 
@@ -186,6 +186,9 @@ commands as `SWARM_FIRE_TV_SERIAL`.
 Results are updated atomically after each state change in
 `<run-dir>/test-results.json`. States are Ready, Running, Passed, Failed,
 Skipped, and Waiting for input. Suite logs are retained beside the result file.
+Each completed cycle is also archived under `<run-dir>/test-runs/` (newest 50)
+and shown in the **Test runs** history in Test Scheduler, where opening a run
+lists every suite it executed with its pass / fail / skipped outcome.
 An optional deterministic reporting command runs after the cycle and receives
 the result path in `SWARM_TEST_RESULTS`, allowing an existing GitHub issue
 reporter to remain in place. Reporting and triage commands default to a
@@ -193,8 +196,7 @@ reporter to remain in place. Reporting and triage commands default to a
 execution, or structured reporting. `failureTriage.command` is invoked only
 after a real failure and only when **Read-only AI triage on failure** is enabled;
 it receives the same results environment variable and must not change the
-checkout. Disable triage for an entirely zero-credit workflow. The legacy
-runner continues to receive its existing triage setting.
+checkout. Disable triage for an entirely zero-credit workflow.
 
 The initial release targets macOS. Most backend supervision is Unix-compatible,
 but interactive provider sign-in, Keychain integration, and packaging need

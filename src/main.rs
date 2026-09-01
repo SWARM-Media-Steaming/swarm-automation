@@ -711,59 +711,42 @@ fn start_uat_scheduler(
 ) -> Result<ProcessStatus, String> {
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?;
-    if !repo.uat_enabled {
-        return Err(format!("Test scheduling is disabled for {}.", repo.label()));
-    }
     let workspace = prepared_workspace(&app, &config, repo)?;
-    let definition = testing::definition_path(&workspace);
-    let legacy = testing::legacy_runner_path(&workspace);
-    let (program, mut arguments, environment) = if definition.is_file() {
-        // Validate before spawning so malformed repository definitions are a
-        // clear configuration error, never an opaque failed test process.
-        testing::load_definition(&workspace)?;
-        let program = std::env::current_exe()
-            .map_err(|error| format!("Could not locate the test runner: {error}"))?;
-        let mut arguments = vec![
-            "--swarm-test-runner".into(),
-            "--workspace".into(),
-            workspace.to_string_lossy().into_owned(),
-            "--run-dir".into(),
-            repo.effective_run_dir(&workspace)
-                .to_string_lossy()
-                .into_owned(),
-            "--repository".into(),
-            repo.github_repository.clone(),
-            "--device".into(),
-            repo.test_inputs
-                .get("fireTvSerial")
-                .cloned()
-                .unwrap_or_default(),
-            "--hour".into(),
-            repo.uat_hour.to_string(),
-        ];
-        if repo.allow_disruptive_tests {
-            arguments.push("--allow-disruptive".into());
-        }
-        if repo.uat_triage_enabled {
-            arguments.push("--triage".into());
-        }
-        (
-            program,
-            arguments,
-            vec![("PATH".into(), tools::enhanced_path())],
-        )
-    } else if legacy.is_file() {
-        (
-            PathBuf::from("/bin/bash"),
-            vec![legacy.to_string_lossy().into_owned()],
-            uat_environment(&config, repo, &workspace),
-        )
-    } else {
+    if !testing::definition_path(&workspace).is_file() {
         return Err(format!(
-            "This repository contains neither {} nor scripts/tests/full_uat_cron.sh.",
+            "Add {} to this repository to describe the tests to run.",
             testing::TEST_DEFINITION_PATH
         ));
-    };
+    }
+    // Validate before spawning so a malformed repository definition is a clear
+    // configuration error, never an opaque failed test process.
+    testing::load_definition(&workspace)?;
+    let program = std::env::current_exe()
+        .map_err(|error| format!("Could not locate the test runner: {error}"))?;
+    let mut arguments = vec![
+        "--swarm-test-runner".into(),
+        "--workspace".into(),
+        workspace.to_string_lossy().into_owned(),
+        "--run-dir".into(),
+        repo.effective_run_dir(&workspace)
+            .to_string_lossy()
+            .into_owned(),
+        "--repository".into(),
+        repo.github_repository.clone(),
+        "--device".into(),
+        repo.test_inputs
+            .get("fireTvSerial")
+            .cloned()
+            .unwrap_or_default(),
+        "--hour".into(),
+        repo.uat_hour.to_string(),
+    ];
+    if repo.allow_disruptive_tests {
+        arguments.push("--allow-disruptive".into());
+    }
+    if repo.uat_triage_enabled {
+        arguments.push("--triage".into());
+    }
     if run_once {
         arguments.push("--once".into());
     }
@@ -773,7 +756,7 @@ fn start_uat_scheduler(
         &format!("Test scheduler · {}", repo.label()),
         &program,
         &arguments,
-        &environment,
+        &[("PATH".to_string(), tools::enhanced_path())],
         &workspace,
         automation_log_path(&app)?,
     )
@@ -810,6 +793,31 @@ async fn get_test_plan_background(
 }
 
 #[tauri::command]
+fn get_test_runs<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<Vec<testing::TestRunResults>, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = resolve_workspace(&app, &config, repo)?;
+    Ok(testing::list_runs(&repo.effective_run_dir(&workspace)))
+}
+
+#[tauri::command]
+async fn get_test_runs_background(
+    app: tauri::AppHandle,
+    repo_id: String,
+) -> Result<Vec<testing::TestRunResults>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_test_runs(app.clone(), state, repo_id)
+    })
+    .await
+    .map_err(|error| format!("Test run history lookup failed: {error}"))?
+}
+
+#[tauri::command]
 fn save_test_device<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
@@ -843,51 +851,6 @@ fn save_test_device<R: tauri::Runtime>(
         .lock()
         .map_err(|_| "Configuration state lock was poisoned".to_string())? = config.clone();
     Ok(config)
-}
-
-fn uat_environment(
-    config: &AppConfig,
-    repo: &RepoConfig,
-    workspace: &Path,
-) -> Vec<(String, String)> {
-    let mut environment = vec![
-        ("PATH".into(), tools::enhanced_path()),
-        ("SWARM_FULL_UAT_CRON_HOUR".into(), repo.uat_hour.to_string()),
-        (
-            "SWARM_GITHUB_REPOSITORY".into(),
-            repo.github_repository.clone(),
-        ),
-        ("SWARM_E2E_ISSUE_LABEL".into(), repo.uat_issue_label.clone()),
-        (
-            "SWARM_RUN_DIR".into(),
-            repo.effective_run_dir(workspace)
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        (
-            "SWARM_UAT_BATOCERA_HOST".into(),
-            repo.uat_batocera_host.clone(),
-        ),
-        (
-            "SWARM_UAT_TRIAGE_ENABLED".into(),
-            if repo.uat_triage_enabled { "1" } else { "0" }.into(),
-        ),
-        (
-            "SWARM_MIN_REMAINING_PERCENT".into(),
-            config.minimum_remaining_percent.to_string(),
-        ),
-    ];
-    // Per-enabled-provider model / effort / executable for the frozen UAT
-    // runner (it reads SWARM_<ID>_MODEL / SWARM_<ID>_EFFORT / <ID>_BIN).
-    for provider in config.enabled_providers() {
-        let upper = provider.id.to_uppercase();
-        environment.push((format!("SWARM_{upper}_MODEL"), provider.model.clone()));
-        environment.push((format!("SWARM_{upper}_EFFORT"), provider.effort.clone()));
-        if let Some(path) = tools::find_executable(&provider.id, &provider.bin) {
-            environment.push((format!("{upper}_BIN"), path.to_string_lossy().into_owned()));
-        }
-    }
-    environment
 }
 
 #[tauri::command]
@@ -2177,6 +2140,8 @@ fn main() {
             start_uat_scheduler,
             get_test_plan,
             get_test_plan_background,
+            get_test_runs,
+            get_test_runs_background,
             save_test_device,
             pause_process,
             resume_process,
