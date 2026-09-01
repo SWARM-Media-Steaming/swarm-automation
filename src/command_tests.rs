@@ -1,5 +1,6 @@
 use super::{
-    detect_tools, get_config, get_test_plan, inspect_repository, issue_branch_pr_is_visible,
+    detect_tools, get_config, get_test_plan, get_test_runs, inspect_repository,
+    issue_branch_pr_is_visible,
     repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
     validate_worker_script_dir, AppState, ResolvedProvider,
 };
@@ -241,10 +242,10 @@ fn inspect_repository_detects_a_target_repos_own_script_bundles() {
         "#!/usr/bin/env python3\n",
     )
     .unwrap();
-    std::fs::create_dir_all(repo.path().join("scripts/tests")).unwrap();
+    std::fs::create_dir_all(repo.path().join(".swarm")).unwrap();
     std::fs::write(
-        repo.path().join("scripts/tests/full_uat_cron.sh"),
-        "#!/usr/bin/env bash\n",
+        repo.path().join(".swarm/tests.json"),
+        r#"{"version":1,"suites":[{"id":"unit","name":"Unit","command":["/usr/bin/true"]}]}"#,
     )
     .unwrap();
 
@@ -266,15 +267,17 @@ fn repository_test_definition_is_discovered_through_the_command_layer() {
     )
     .unwrap();
     std::fs::write(repo_dir.path().join("Cargo.toml"), "[package]\n").unwrap();
-    let mut config = valid_config(repo_dir.path());
-    config.repositories[0].uat_enabled = true;
+    let config = valid_config(repo_dir.path());
     save_config(app.clone(), app.state(), config).unwrap();
 
     let plan = get_test_plan(app.clone(), app.state(), "octocat__example".into()).unwrap();
     assert!(plan.available);
-    assert!(!plan.legacy);
     assert_eq!(plan.suites.len(), 1);
     assert_eq!(plan.suites[0].result.state, "Ready");
+
+    // History starts empty and `get_test_runs` is a safe read.
+    let runs = get_test_runs(app.clone(), app.state(), "octocat__example".into()).unwrap();
+    assert!(runs.is_empty());
 }
 
 #[test]
