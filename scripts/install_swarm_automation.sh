@@ -33,14 +33,30 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="SWARM Automation"
+# The macOS bundle executable is the Cargo bin name, not the product name.
+BUNDLE_BIN="swarm-automation"
 BUNDLE_ID="app.swarm.automation"
 LABEL="$BUNDLE_ID"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-APP_DIR="${SWARM_APP_DIR:-$HOME/Applications}"
+# Install to ~/Applications by default; adopt an existing install wherever it
+# already lives (e.g. a manual drag to /Applications).
+if [ -d "/Applications/$APP_NAME.app" ] && [ -z "${SWARM_APP_DIR:-}" ]; then
+    APP_DIR="/Applications"
+else
+    APP_DIR="${SWARM_APP_DIR:-$HOME/Applications}"
+fi
 APP_PATH="$APP_DIR/$APP_NAME.app"
-EXECUTABLE="$APP_PATH/Contents/MacOS/$APP_NAME"
 BUILT_APP="$REPO_ROOT/target/release/bundle/macos/$APP_NAME.app"
 DEBUG_BIN="$REPO_ROOT/target/debug/swarm-automation"
+
+# Resolve the bundle executable from Info.plist (falls back to the bin name).
+resolve_executable() {
+    local app="$1" name
+    name="$(defaults read "$app/Contents/Info.plist" CFBundleExecutable 2>/dev/null || true)"
+    [ -n "$name" ] || name="$BUNDLE_BIN"
+    printf '%s/Contents/MacOS/%s' "$app" "$name"
+}
+EXECUTABLE="$(resolve_executable "$APP_PATH")"
 OUT_LOG="$HOME/Library/Logs/swarm-automation.out.log"
 ERR_LOG="$HOME/Library/Logs/swarm-automation.err.log"
 DATA_DIR="$HOME/Library/Application Support/$BUNDLE_ID"
@@ -207,6 +223,11 @@ do_install() {
     rm -rf "$APP_PATH"
     cp -R "$BUILT_APP" "$APP_PATH"
     xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
+    EXECUTABLE="$(resolve_executable "$APP_PATH")"
+    if [ ! -x "$EXECUTABLE" ]; then
+        echo "Installed bundle has no executable at $EXECUTABLE" >&2
+        exit 1
+    fi
 
     echo "==> Writing the LaunchAgent ($PLIST) ..."
     mkdir -p "$(dirname "$PLIST")" "$HOME/Library/Logs"
