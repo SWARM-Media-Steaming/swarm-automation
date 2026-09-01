@@ -1177,6 +1177,24 @@
     if (/no enabled provider|an issue is queued.*no enabled ai provider|queued issue work is waiting for ai capacity/i.test(message)) {
       return makeActivity(log, "Queued work is waiting for AI capacity", "The issue was found, but none of the enabled AI providers can start it yet. The worker will retry on schedule.", "waiting", "work");
     }
+    // The scheduler skips a whole cycle (no GitHub polling, no AI) when the
+    // machine is busy streaming media, or when the managed workspace is not in a
+    // safe state to touch. Every skip should be visible here, not silent.
+    if (/transcode is active; deferring/i.test(message)) {
+      return makeActivity(log, "Issue work paused while media is streaming", "A SWARM transcode is running on this machine, so the worker skipped this cycle to keep playback smooth. It resumes automatically once streaming stops.", "waiting", "work");
+    }
+    if (/could not fetch .*; deferring/i.test(message)) {
+      return makeActivity(log, "Could not reach GitHub; cycle skipped", "The worker could not fetch the latest branches this cycle and will retry on the next one. Open Info & Debug for the exact error.", "waiting", "work");
+    }
+    if (/; deferring (?:the worker|this run|synchronization)/i.test(message)) {
+      return makeActivity(log, "Issue work skipped this cycle", "The managed workspace was not in a safe state to start (uncommitted work, missing checkout, or Git unavailable). The worker will retry on the next cycle — see Info & Debug for the reason.", "waiting", "work");
+    }
+    if (/Another foreground SWARM issue runner is already active/i.test(message)) {
+      return makeActivity(log, "Another issue worker is already running", "This start was ignored so two workers never run against the same repositories at once.", "waiting", "work");
+    }
+    if (/cargo target exceeds .*cleanup deferred/i.test(message)) {
+      return makeActivity(log, "Build cache cleanup postponed", "The Rust build cache is over its size limit, but a build is in progress so cleanup was deferred to a later cycle.", "waiting", "work");
+    }
     if (/traceback|permission denied|authentication failed|\berror:|\bfailed\b|\bcould not\b/i.test(message)) {
       return makeActivity(log, `${source} needs attention`, "Something prevented this step from finishing. Open Info & Debug for the exact error and command output.", "error", category);
     }
