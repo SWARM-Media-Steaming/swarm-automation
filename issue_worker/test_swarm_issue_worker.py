@@ -826,6 +826,45 @@ class WorkerTestCase(unittest.TestCase):
             worker.git_ok("merge-base", "--is-ancestor", "main", "ai/claude/issue-410")
         )
 
+    def test_followup_reworks_after_branch_was_merged_into_integration(self) -> None:
+        # First pass creates + pushes the branch, then it is merged into
+        # ai-main (a real merge commit, as `gh pr merge --merge` produces) and
+        # the follow-up records that *merge commit* as previous_commit_sha.
+        first = self.pr_worker()
+        first.issue = IssueContext(415, "Merged then reworked", "", [], "https://example.invalid/415")
+        first.choice = ProviderChoice("Claude", "test", "high", "session")
+        run_start, _, _, _ = first.prepare_repository()
+        (self.repo / "one.txt").write_text("first pass\n", encoding="utf-8")
+        branch_tip = first.commit_completed_work(run_start)
+        branch = first.expected_branch()
+        self.git("push", "-q", "origin", branch)
+        self.git("switch", "-q", "ai-main")
+        self.git("merge", "-q", "--no-ff", "-m", f"Merge {branch}", branch)
+        merge_commit = self.git("rev-parse", "HEAD")
+        self.git("push", "-q", "origin", "ai-main")
+        first.in_progress_file.unlink()
+
+        second = self.pr_worker()
+        second.issue = IssueContext(415, "Merged then reworked", "", [], "https://example.invalid/415")
+        second.issue.work_type = "followup"
+        second.issue.trigger_comment_id = 99
+        # The bug: previous_commit_sha is the PR merge commit, which is a
+        # descendant of the resumed branch tip, never an ancestor.
+        second.issue.previous_commit_sha = merge_commit
+        second.choice = ProviderChoice("Codex", "test", "high", "")
+        second.prepare_repository()
+
+        self.assertEqual(second.expected_branch(), branch)
+        self.assertEqual(self.git("branch", "--show-current"), branch)
+        # The resumed branch was fast-forwarded to the integration branch, so
+        # the previous work (and the merge commit) is now present.
+        self.assertTrue(
+            second.git_ok("merge-base", "--is-ancestor", merge_commit, "HEAD")
+        )
+        self.assertTrue(
+            second.git_ok("merge-base", "--is-ancestor", branch_tip, "HEAD")
+        )
+
     def test_a_second_provider_follow_up_reuses_the_same_branch(self) -> None:
         # First pass by Claude creates the branch and pushes it.
         first = self.pr_worker()

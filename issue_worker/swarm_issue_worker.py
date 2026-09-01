@@ -2128,6 +2128,19 @@ class Worker:
                         self.git("merge", "--ff-only", "FETCH_HEAD", check=False)
                     else:
                         self.git("switch", "-c", expected, "FETCH_HEAD")
+                    # Rework on top of current integration-branch code, not the
+                    # stale tip from when this issue was last merged. When the
+                    # branch is fully merged (the common case) this simply
+                    # fast-forwards it to the integration branch.
+                    if not self.git_ok("merge", "--ff-only", integ):
+                        if self.git_ok("merge", "--no-edit", integ):
+                            log(f"Merged {integ} into {expected} before reworking.")
+                        else:
+                            self.git("merge", "--abort", check=False)
+                            log(
+                                f"WARNING: {expected} conflicts with {integ}; "
+                                f"reworking from the branch tip without the latest integration changes."
+                            )
                     log(f"Continuing issue #{self.issue.number} on its existing branch {expected}.")
                 else:
                     self.git("switch", "-c", expected, integ)
@@ -2166,13 +2179,29 @@ class Worker:
         candidate = ""
         recovery_dirty = False
         if self.issue.work_type == "followup":
-            if not self.git_ok("cat-file", "-e", f"{self.issue.previous_commit_sha}^{{commit}}"):
+            prev = self.issue.previous_commit_sha
+            if not self.git_ok("cat-file", "-e", f"{prev}^{{commit}}"):
                 raise WorkerError(
-                    f"Previous completion commit is unavailable locally: {self.issue.previous_commit_sha}"
+                    f"Previous completion commit is unavailable locally: {prev}"
                 )
-            if not self.git_ok("merge-base", "--is-ancestor", self.issue.previous_commit_sha, run_start):
+            # The prior completion is safe as long as it is reachable from
+            # either the resumed issue branch (still un-merged) or the
+            # integration branch (already merged). `previous_commit_sha` is
+            # sometimes the PR *merge* commit rather than the branch work tip
+            # — that merge commit is a descendant of the branch, so it is only
+            # ever reachable via the integration branch, which is exactly the
+            # case this second check covers.
+            on_branch = self.git_ok("merge-base", "--is-ancestor", prev, run_start)
+            merged = self.git_ok("merge-base", "--is-ancestor", prev, integ)
+            if not on_branch and not merged:
                 raise WorkerError(
-                    f"Current branch does not contain previous issue completion {self.issue.previous_commit_sha}"
+                    f"Previous issue completion {prev} is not reachable from the issue "
+                    f"branch or {integ}; refusing to rework on top of lost work"
+                )
+            if merged and not on_branch:
+                log(
+                    f"Previous completion {prev} is already merged into {integ}; "
+                    f"reworking issue #{self.issue.number} from the current branch tip."
                 )
         if state_exists:
             state = self.normalize_recovery_commits(self.in_progress_file, run_start)
@@ -2627,8 +2656,13 @@ class Worker:
         output = self.ai_output_file.read_text(encoding="utf-8", errors="replace")
         spec = self.config.spec(self.choice.key)
         if spec is not None and not spec.streams_output:
-            print(f"\n--- {self.choice.name} completion summary ---")
-            print(output, end="" if output.endswith("\n") else "\n")
+            # The full completion summary is posted to the GitHub issue (see
+            # render_pending_comment); keep it out of the operator log — only
+            # note that it arrived and where the raw text lives on disk.
+            log(
+                f"{self.choice.name} returned a completion summary "
+                f"({len(output)} chars); see {self.ai_output_file}."
+            )
         if self.git("branch", "--show-current") != self.expected_branch():
             raise WorkerError(
                 f"{self.choice.name} changed branches; refusing to commit outside {self.expected_branch()}"
