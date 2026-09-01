@@ -5,10 +5,11 @@ This is the Python implementation of the SWARM unattended issue worker. The
 state files and exit codes intentionally remain compatible with the former
 shell worker so an upgrade can resume existing active and quota-paused runs.
 
-Providers are an open set (see ``KNOWN_PROVIDERS`` / ``ProviderSpec``): the
-worker rotates over whichever providers are enabled for the flow, preferring a
-*different* provider for a follow-up review pass while still falling back to the
-same one when it is the only one with capacity.
+Providers are an open set (see ``KNOWN_PROVIDERS`` / ``ProviderSpec``): among
+whichever providers are enabled for the flow, a new issue goes to the one with
+the most usage remaining (so no account is drained before the others), while a
+follow-up review pass prefers a *different* provider than the previous one,
+falling back to the same one only when it is the only one with capacity.
 
 All AI work happens on an integration branch (``--integration-branch``, default
 ``ai-main``) that is kept in parity with ``--base-branch`` but is never merged
@@ -402,6 +403,25 @@ class ProviderChoice:
         return self.name.lower()
 
 
+@dataclasses.dataclass(frozen=True)
+class ProviderUsage:
+    """Result of probing one provider's remaining usage.
+
+    status: 0 = usable, 1 = below the configured minimum, 2 = unavailable
+            (not installed, not signed in, or the probe itself failed).
+    remaining_percent: headroom left in the provider's most constrained usage
+            window (Grok, which has no cap, reports 100). None when it could
+            not be determined.
+    """
+
+    status: int
+    remaining_percent: float | None = None
+
+    @property
+    def usable(self) -> bool:
+        return self.status == 0
+
+
 def is_worker_comment(comment: dict[str, Any]) -> bool:
     return "<!-- swarm-issue-worker:" in str(comment.get("body") or "")
 
@@ -550,11 +570,11 @@ class Worker:
         spec = self.config.spec(key)
         return spec.bin if spec else None
 
-    def claude_capacity(self) -> int:
+    def claude_usage(self) -> ProviderUsage:
         claude_bin = self.provider_bin("claude")
         if not command_available(claude_bin):
             log("Claude remaining quota — unavailable (claude was not found in PATH).")
-            return 2
+            return ProviderUsage(2)
         result = run_command(
             [
                 claude_bin,
@@ -570,7 +590,7 @@ class Worker:
         )
         if result.returncode != 0:
             log("Claude quota unavailable: Claude Code's /usage command failed. Run 'claude auth login' if this persists.")
-            return 2
+            return ProviderUsage(2)
         try:
             usage = str(json.loads(result.stdout).get("result") or "")
         except json.JSONDecodeError:
@@ -579,22 +599,22 @@ class Worker:
         week = re.search(r"^Current week(?: \([^)]*\))?:\s*([0-9.]+)% used", usage, re.MULTILINE)
         if not session or not week:
             log("Claude quota unavailable: Claude Code returned an unrecognized /usage format.")
-            return 2
+            return ProviderUsage(2)
         session_remaining = 100 - float(session.group(1))
         week_remaining = 100 - float(week.group(1))
         log(f"Claude remaining quota — session: {session_remaining:g}%; week: {week_remaining:g}%.")
-        return int(
-            not (
-                session_remaining >= self.config.minimum_remaining_percent
-                and week_remaining >= self.config.minimum_remaining_percent
-            )
-        )
+        remaining = min(session_remaining, week_remaining)
+        below_minimum = remaining < self.config.minimum_remaining_percent
+        return ProviderUsage(1 if below_minimum else 0, remaining)
 
-    def codex_capacity(self) -> int:
+    def claude_capacity(self) -> int:
+        return self.claude_usage().status
+
+    def codex_usage(self) -> ProviderUsage:
         codex_bin = self.provider_bin("codex")
         if not command_available(codex_bin):
             log("Codex quota unavailable: codex was not found in PATH.")
-            return 2
+            return ProviderUsage(2)
         result: subprocess.CompletedProcess[str] | None = None
         for attempt in range(2):
             result = run_command(
@@ -618,87 +638,123 @@ class Worker:
             detail = (result.stderr or result.stdout or "").strip().splitlines()
             reason = f" Details: {detail[-1]}" if detail else ""
             log(f"Codex quota unavailable after two attempts.{reason}")
-            return 2
+            return ProviderUsage(2)
         try:
             limits = json.loads(result.stdout)
             windows = [limits.get(key) for key in ("primary", "secondary") if limits.get(key) is not None]
             used = [float(window["usedPercent"]) for window in windows]
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             log("Codex quota unavailable: the local rate-limit response was invalid.")
-            return 2
+            return ProviderUsage(2)
         if not used:
             log("Codex quota unavailable: the local rate-limit response had no active windows.")
-            return 2
+            return ProviderUsage(2)
         summary = "; ".join(
             f"{key}: {100 - float(limits[key]['usedPercent']):g}%"
             for key in ("primary", "secondary")
             if limits.get(key) is not None
         )
         log(f"Codex remaining quota — {summary}.")
+        remaining = min(100 - amount for amount in used)
         available = (
             limits.get("rateLimitReachedType") is None
             and not bool(limits.get("spendControlReached", False))
-            and all(100 - amount >= self.config.minimum_remaining_percent for amount in used)
+            and remaining >= self.config.minimum_remaining_percent
         )
-        return 0 if available else 1
+        return ProviderUsage(0 if available else 1, remaining)
 
-    def grok_capacity(self) -> int:
+    def codex_capacity(self) -> int:
+        return self.codex_usage().status
+
+    def grok_usage(self) -> ProviderUsage:
         grok_bin = self.provider_bin("grok")
         if not command_available(grok_bin):
             log("Grok quota unavailable: grok was not found in PATH.")
-            return 2
+            return ProviderUsage(2)
         home = Path(os.environ.get("HOME", "~")).expanduser()
         if not (home / ".grok" / "auth.json").is_file() and not os.environ.get("XAI_API_KEY"):
             log("Grok quota unavailable: not signed in (run 'grok login').")
-            return 2
+            return ProviderUsage(2)
         # Grok Build carries no per-session/weekly usage cap for signed-in
         # accounts (open-sourced mid-2026), so a real rate limit only ever
         # surfaces at run time and is handled like any other provider failure.
+        # A full 100% headroom keeps the unlimited provider ahead of the
+        # metered ones when choose_provider ranks by remaining usage.
         log("Grok remaining quota — no usage limits apply to Grok Build.")
-        return 0
+        return ProviderUsage(0, 100.0)
 
-    def provider_capacity(self, provider: str) -> int:
+    def grok_capacity(self) -> int:
+        return self.grok_usage().status
+
+    def provider_usage(self, provider: str) -> ProviderUsage:
         key = str(provider).lower()
         if key == "claude":
-            return self.claude_capacity()
+            return self.claude_usage()
         if key == "codex":
-            return self.codex_capacity()
+            return self.codex_usage()
         if key == "grok":
-            return self.grok_capacity()
+            return self.grok_usage()
         raise WorkerError(f"Invalid AI provider in saved state: {provider}")
+
+    def provider_capacity(self, provider: str) -> int:
+        return self.provider_usage(provider).status
 
     def new_session_id(self, spec: ProviderSpec) -> str:
         # Claude and Grok take a caller-supplied UUID up front; Codex mints its
         # own thread id which run_ai captures from the first JSON event.
         return str(uuid.uuid4()) if spec.key in ("claude", "grok") else ""
 
-    def choose_provider(self, previous_ai: str, available: dict[str, bool]) -> ProviderChoice | None:
-        """Pick a provider for this pass. Order: the preferred provider first,
-        then the rest in config order; a provider that completed the previous
-        pass is pushed to the back so a follow-up gets an independent reviewer,
-        but is still used as a last resort when nothing else has capacity."""
+    def choose_provider(
+        self, previous_ai: str, remaining: dict[str, float | None]
+    ) -> ProviderChoice | None:
+        """Pick a provider for this pass.
+
+        `remaining` maps each enabled provider that currently has at least
+        ``minimum_remaining_percent`` headroom to its most constrained usage
+        window's remaining percentage (Grok, which has no cap, reports 100).
+        Providers below the minimum or whose usage could not be read are absent.
+
+        New issue: the provider with the most usage remaining is chosen, so no
+        single account is drained before the others.
+
+        Follow-up (``previous_ai`` set): the provider that completed the previous
+        pass is pushed to the back so the follow-up gets an independent
+        reviewer; the rest keep their most-usage-first order. The previous
+        provider is only reused when nothing else has capacity.
+        """
         specs = {spec.name: spec for spec in self.config.enabled_specs}
-        order = [self.config.preferred_provider.capitalize()]
-        order += [name for name in specs if name not in order]
-        previous = (previous_ai or "").capitalize()
-        if previous in order and len(order) > 1:
-            order = [name for name in order if name != previous] + [previous]
-        order = [name for name in order if name in specs]
-        for name in order:
-            if not available.get(name, False):
-                continue
-            if previous and name != previous:
-                log(f"Follow-up review prefers {name} because {previous} completed the previous pass.")
-            elif previous:
-                log(f"No other enabled provider has capacity; falling back to {name} for this follow-up.")
-            spec = specs[name]
-            return ProviderChoice(
-                name=spec.name,
-                model=spec.model,
-                effort=spec.effort,
-                session_id=self.new_session_id(spec),
+        order_index = {spec.name: index for index, spec in enumerate(self.config.enabled_specs)}
+        preferred = self.config.preferred_provider.capitalize()
+        candidates = [name for name in specs if name in remaining]
+        candidates.sort(
+            key=lambda name: (
+                -(remaining[name] if remaining[name] is not None else float("-inf")),
+                name != preferred,
+                order_index[name],
             )
-        return None
+        )
+        previous = (previous_ai or "").capitalize()
+        if previous in candidates and len(candidates) > 1:
+            candidates = [name for name in candidates if name != previous] + [previous]
+        if not candidates:
+            return None
+        name = candidates[0]
+        if previous and name != previous:
+            log(
+                f"Follow-up review prefers {name} (most usage remaining of the other "
+                f"providers) because {previous} completed the previous pass."
+            )
+        elif previous:
+            log(f"No other enabled provider has capacity; falling back to {name} for this follow-up.")
+        else:
+            log(f"Selected {name}: most usage remaining among enabled providers with capacity.")
+        spec = specs[name]
+        return ProviderChoice(
+            name=spec.name,
+            model=spec.model,
+            effort=spec.effort,
+            session_id=self.new_session_id(spec),
+        )
 
     def choose_handoff_provider(self, previous_choice: ProviderChoice, reason: str) -> ProviderChoice | None:
         """Pick a different enabled provider for an already-owned issue branch.
@@ -2683,11 +2739,16 @@ class Worker:
                         self.suspend_paused()
                         return QUOTA_PAUSED_EXIT_CODE
         else:
-            availability = {
-                spec.name: self.provider_capacity(spec.key) == 0
+            usages = {
+                spec.name: self.provider_usage(spec.key)
                 for spec in self.config.enabled_specs
             }
-            self.choice = self.choose_provider(self.issue.previous_ai, availability)
+            remaining = {
+                name: usage.remaining_percent
+                for name, usage in usages.items()
+                if usage.usable
+            }
+            self.choice = self.choose_provider(self.issue.previous_ai, remaining)
             if not self.choice:
                 enabled = ", ".join(spec.name for spec in self.config.enabled_specs) or "no provider"
                 log(

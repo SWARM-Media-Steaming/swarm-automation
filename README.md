@@ -15,9 +15,10 @@ The application can:
 - run issue pickup continuously, daily, on weekdays, on selected days, or only
   when **Run now** is clicked;
 - drive up to three AI coding agents — **Claude Code**, **Codex CLI**, and
-  **Grok Build** — rotating over whichever ones you include in the flow;
-  include/exclude each provider with a switch on its card, and pick which one
-  is tried first;
+  **Grok Build** — giving each new issue to whichever included provider has the
+  most usage remaining, and handing follow-up comments to a different agent than
+  the one that did the previous pass; include/exclude each provider with a
+  switch on its card, and pick which one wins ties;
 - monitor multiple GitHub repositories in one scheduler, with an independent
   managed clone, assignee, branch policy, bot identities, and UAT process for
   each repository;

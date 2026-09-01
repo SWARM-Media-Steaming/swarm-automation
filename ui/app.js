@@ -86,7 +86,7 @@
     },
     "provider-rotation": {
       title: "Provider rotation",
-      html: "<p>This box controls which AI gets the first chance to take an issue.</p><ul><li><strong>Preferred first provider</strong> — tried first for new issues. Another enabled provider is used when it is unavailable.</li><li><strong>Minimum quota remaining</strong> — stops new work before a provider’s usage allowance gets too low.</li></ul><p>Follow-up work prefers a different provider when one is available.</p>",
+      html: "<p>This box controls how the worker picks an AI for each issue.</p><ul><li><strong>New issues</strong> — go to the enabled provider with the most usage remaining, so no single account is drained before the others.</li><li><strong>Follow-up comments</strong> — go to a different provider than the one that did the previous pass (when another has capacity), for an independent second look.</li><li><strong>Preferred provider (tie-breaker)</strong> — chosen when two providers have the same usage headroom.</li><li><strong>Minimum quota remaining</strong> — stops new work before a provider’s usage allowance gets too low.</li></ul>",
       links: [],
     },
     "provider-include-exclude": {
