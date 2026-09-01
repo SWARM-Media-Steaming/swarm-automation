@@ -727,6 +727,70 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(run_start, state["base_sha"])
         self.assertEqual(self.git("branch", "--show-current"), "ai/codex/issue-401")
 
+    def test_linked_issue_branch_uses_github_graphql_mutation(self) -> None:
+        self.worker.issue = IssueContext(419, "Linked branch", "", [], "https://example.invalid/419")
+        self.worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        issue_id = "I_kwDOExample"
+        with mock.patch.object(
+            self.worker.github,
+            "gh",
+            side_effect=[
+                json.dumps({"node_id": issue_id}),
+                json.dumps(
+                    {"data": {"createLinkedBranch": {"issue": {"id": issue_id}}}}
+                ),
+            ],
+        ) as github:
+            self.worker.create_linked_issue_branch(
+                "ai/codex/issue-419", "1" * 40
+            )
+
+        self.assertEqual(
+            github.call_args_list[0].args,
+            (["api", "--method", "GET", "repos/DotNetRockStar/swarm/issues/419"], "codex"),
+        )
+        mutation_args = github.call_args_list[1].args[0]
+        self.assertEqual(mutation_args[:2], ["api", "graphql"])
+        self.assertIn(f"issueId={issue_id}", mutation_args)
+        self.assertIn("oid=" + "1" * 40, mutation_args)
+        self.assertIn("name=ai/codex/issue-419", mutation_args)
+
+    def test_fresh_github_branch_is_created_from_the_issue(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(420, "Linked branch", "", [], "https://example.invalid/420")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+        with (
+            mock.patch.object(worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(worker, "create_linked_issue_branch") as create_linked,
+        ):
+            run_start, recovery, _, _ = worker.prepare_repository()
+
+        self.assertFalse(recovery)
+        create_linked.assert_called_once_with("ai/claude/issue-420", run_start)
+        self.assertTrue(worker.read_state()["branch_linked"])
+        self.assertEqual(self.git("branch", "--show-current"), "ai/claude/issue-420")
+
+    def test_followup_recreated_github_branch_is_linked_to_the_issue(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(
+            421,
+            "Recreated linked branch",
+            "",
+            [],
+            "https://example.invalid/421",
+            work_type="followup",
+            previous_commit_sha=self.base_sha,
+        )
+        worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        with (
+            mock.patch.object(worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(worker, "create_linked_issue_branch") as create_linked,
+        ):
+            run_start, _, _, _ = worker.prepare_repository()
+
+        create_linked.assert_called_once_with("ai/codex/issue-421", run_start)
+        self.assertTrue(worker.read_state()["branch_linked"])
+
     def test_fresh_pr_branch_fast_forwards_main_before_branching(self) -> None:
         updater = self.root / "updater"
         subprocess.run(
