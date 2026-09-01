@@ -20,6 +20,7 @@
     activeRepoId: "",
     branchOverview: null,
     testPlan: null,
+    testRuns: null,
   };
 
   const pageTitles = {
@@ -126,7 +127,12 @@
     },
     "uat-suite": {
       title: "Test scheduler",
-      html: "<p>Discovers suites from <code>.swarm/tests.json</code>, checks each suite’s requirements independently, and runs every eligible suite without AI. A legacy <code>scripts/tests/full_uat_cron.sh</code> runner remains supported.</p>",
+      html: "<p>Runs the tests a repository declares in <code>.swarm/tests.json</code> — every suite in that file, not just UAT. It checks each suite’s requirements independently, runs every eligible suite with no AI credits, and records each run in the history below with per-suite pass / fail / skipped.</p><p><strong>Start</strong> keeps a daily cycle running at the chosen hour; <strong>Run now</strong> executes one cycle immediately. There is no separate enable switch — nothing runs until you press one of those.</p>",
+      links: [],
+    },
+    "test-runs": {
+      title: "Test run history",
+      html: "<p>Each completed cycle is listed newest first with when it ran, how it was triggered, its duration, and a pass / fail / skipped tally. Open a run to see every suite it executed and that suite’s outcome.</p>",
       links: [],
     },
     "test-requirements": {
@@ -166,7 +172,7 @@
     },
     "advanced-paths": {
       title: "Local path overrides",
-      html: "<p>Leave these values alone unless the defaults do not fit your Mac.</p><ul><li><strong>Workspace folder</strong> — parent folder for app-managed repository copies.</li><li><strong>Working-copy override</strong> — uses a specific existing copy instead of an app-managed one.</li><li><strong>Worker state directory</strong> — stores progress needed to resume work.</li><li><strong>UAT run data directory</strong> — stores test-run state and results.</li><li><strong>GitHub Apps configuration</strong> — uses a specific bot-settings file.</li><li><strong>GitHub CLI / Python 3 binary</strong> — uses a specific program file when automatic detection fails.</li></ul>",
+      html: "<p>Leave these values alone unless the defaults do not fit your Mac.</p><ul><li><strong>Workspace folder</strong> — parent folder for app-managed repository copies.</li><li><strong>Working-copy override</strong> — uses a specific existing copy instead of an app-managed one.</li><li><strong>Worker state directory</strong> — stores progress needed to resume work.</li><li><strong>Test run data directory</strong> — stores test-run state, results, and run history.</li><li><strong>GitHub Apps configuration</strong> — uses a specific bot-settings file.</li><li><strong>GitHub CLI / Python 3 binary</strong> — uses a specific program file when automatic detection fails.</li></ul>",
       links: [],
     },
     "provider-bins": {
@@ -184,6 +190,7 @@
     ["One worker per repository", "parallel-repo-workers"],
     ["Minimum quota remaining", "quota-threshold"],
     ["Test scheduler", "uat-suite"],
+    ["Test run history", "test-runs"],
     ["Where your data lives", "data-location"],
   ];
 
@@ -285,10 +292,7 @@
       require_issue_tests: false,
       allow_environment_only_summary: false,
       repo_dir: "",
-      uat_enabled: false,
       uat_hour: 3,
-      uat_issue_label: "Testing",
-      uat_batocera_host: "batocera.local",
       uat_triage_enabled: true,
       test_inputs: {},
       allow_disruptive_tests: false,
@@ -694,7 +698,7 @@
       const processState = isIssue ? (state.status?.issue?.state || "stopped") : (currentRepoStatus()?.uat?.state || "stopped");
       const busy = state.busy.has(action);
       if (action.startsWith("start-") || action.startsWith("run-")) {
-        button.disabled = busy || processState !== "stopped" || (!isIssue && (!currentRepoStatus()?.uatAvailable || !currentRepo()?.uat_enabled));
+        button.disabled = busy || processState !== "stopped" || (!isIssue && !currentRepoStatus()?.uatAvailable);
       } else {
         button.disabled = busy || processState === "stopped";
       }
@@ -735,7 +739,7 @@
     addFact(container, "GitHub remote", repo?.githubRepository || "Not inferred");
     if (repo?.error) addFact(container, "Problem", repo.error);
     const availability = byId("uat-availability");
-    availability.textContent = repo?.uatAvailable ? "Test definition or legacy runner found" : "Test definition not present";
+    availability.textContent = repo?.uatAvailable ? "Test definition found" : "Test definition not present";
     availability.classList.toggle("ready", Boolean(repo?.uatAvailable));
   }
 
@@ -753,11 +757,9 @@
       return;
     }
     const availability = byId("uat-availability");
-    availability.textContent = plan.available ? (plan.legacy ? "Legacy runner found" : "Definition loaded") : "Definition needed";
+    availability.textContent = plan.available ? "Definition loaded" : "Definition needed";
     availability.classList.toggle("ready", Boolean(plan.available));
-    summary.textContent = plan.error || (plan.legacy
-      ? "Compatibility mode uses scripts/tests/full_uat_cron.sh. Add .swarm/tests.json for suite-level status and requirements."
-      : `.swarm/tests.json · structured results: ${plan.resultsPath}`);
+    summary.textContent = plan.error || `.swarm/tests.json · structured results: ${plan.resultsPath}`;
 
     const allRequirements = [];
     const seen = new Set();
@@ -769,7 +771,7 @@
       }
     }));
     if (!allRequirements.length) {
-      requirementsBox.appendChild(Object.assign(document.createElement("span"), { className: "fine-print", textContent: plan.legacy ? "Requirements are managed by the legacy runner." : "No external requirements declared." }));
+      requirementsBox.appendChild(Object.assign(document.createElement("span"), { className: "fine-print", textContent: "No external requirements declared." }));
     } else {
       allRequirements.forEach((requirement) => {
         const row = document.createElement("div");
@@ -819,7 +821,7 @@
 
     byId("test-suite-count").textContent = `${(plan.suites || []).length} suite${plan.suites?.length === 1 ? "" : "s"}`;
     if (!(plan.suites || []).length) {
-      suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: plan.legacy ? "Suite-level status is unavailable in compatibility mode." : "No suites discovered." }));
+      suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No suites discovered." }));
       return;
     }
     plan.suites.forEach((suite) => {
@@ -858,11 +860,108 @@
     try {
       state.testPlan = await invoke("get_test_plan_background", { repoId: repo.id });
       if (repo.id === state.activeRepoId) renderTestPlan();
+      try {
+        state.testRuns = await invoke("get_test_runs_background", { repoId: repo.id });
+        if (repo.id === state.activeRepoId) renderTestRuns();
+      } catch (_) {
+        /* history is best-effort; the plan is the important part */
+      }
     } catch (error) {
       if (!quiet) showToast(errorText(error), "error");
     } finally {
       state.refreshing.tests = false;
     }
+  }
+
+  function formatTimestamp(seconds) {
+    if (!seconds) return "—";
+    return new Date(seconds * 1000).toLocaleString();
+  }
+
+  function formatDuration(startSeconds, endSeconds) {
+    if (!startSeconds || !endSeconds || endSeconds < startSeconds) return "—";
+    const total = endSeconds - startSeconds;
+    if (total < 60) return `${total}s`;
+    const minutes = Math.floor(total / 60);
+    const rest = total % 60;
+    return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  }
+
+  const RUN_OUTCOMES = [
+    ["Passed", "passed"],
+    ["Failed", "failed"],
+    ["Skipped", "skipped"],
+  ];
+
+  function renderTestRuns() {
+    const box = byId("test-run-list");
+    if (!box) return;
+    box.replaceChildren();
+    const runs = Array.isArray(state.testRuns) ? state.testRuns : [];
+    byId("test-run-count").textContent = `${runs.length} run${runs.length === 1 ? "" : "s"}`;
+    if (!runs.length) {
+      box.appendChild(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: "No test runs recorded yet. Press Run now, or Start for the daily cycle.",
+      }));
+      return;
+    }
+    runs.forEach((run) => {
+      const suites = run.suites || [];
+      const tally = suites.reduce((counts, suite) => {
+        const key = String(suite.state || "").toLowerCase();
+        if (key === "passed") counts.passed += 1;
+        else if (key === "failed") counts.failed += 1;
+        else counts.skipped += 1;
+        return counts;
+      }, { passed: 0, failed: 0, skipped: 0 });
+
+      const item = document.createElement("details");
+      item.className = "test-run";
+      const summary = document.createElement("summary");
+      const head = document.createElement("div");
+      head.className = "test-run-head";
+      const when = document.createElement("strong");
+      when.textContent = formatTimestamp(run.finishedAt || run.startedAt);
+      const meta = document.createElement("small");
+      const trigger = run.trigger === "manual" ? "Run now" : run.trigger === "scheduled" ? "Scheduled" : "—";
+      meta.textContent = `${trigger} · ${formatDuration(run.startedAt, run.finishedAt)} · ${suites.length} suite${suites.length === 1 ? "" : "s"}`;
+      head.append(when, meta);
+      const badges = document.createElement("div");
+      badges.className = "test-run-tally";
+      RUN_OUTCOMES.forEach(([label, cls]) => {
+        const badge = document.createElement("span");
+        badge.className = `suite-state ${cls}`;
+        badge.textContent = `${tally[cls]} ${label.toLowerCase()}`;
+        badges.appendChild(badge);
+      });
+      summary.append(head, badges);
+      item.appendChild(summary);
+
+      const list = document.createElement("div");
+      list.className = "test-run-suites";
+      if (!suites.length) {
+        list.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No suites were recorded for this run." }));
+      }
+      suites.forEach((suite) => {
+        const row = document.createElement("div");
+        const stateClass = String(suite.state || "").toLowerCase().replaceAll(" ", "-");
+        row.className = `test-run-suite ${stateClass}`;
+        const words = document.createElement("div");
+        const name = document.createElement("strong");
+        name.textContent = suite.name || suite.id;
+        const detail = document.createElement("small");
+        detail.textContent = suite.detail || `${suite.id}${suite.durationMs ? ` · ${Math.round(suite.durationMs / 1000)}s` : ""}`;
+        words.append(name, detail);
+        const badge = document.createElement("span");
+        badge.className = `suite-state ${stateClass}`;
+        badge.textContent = suite.state || "Unknown";
+        row.append(words, badge);
+        list.appendChild(row);
+      });
+      item.appendChild(list);
+      box.appendChild(item);
+    });
   }
 
   async function selectTestDevice(event) {
@@ -873,14 +972,7 @@
       state.config = await invoke("save_test_device", { repoId: currentRepo().id, serial });
       bindConfig(state.config);
       await refreshTestPlan();
-      const repo = currentRepo();
-      const process = currentRepoStatus()?.uat;
-      if (repo?.uat_enabled && process?.state === "stopped") {
-        await invoke("start_uat_scheduler", { repoId: repo.id, runOnce: true });
-        showToast("Device saved; blocked suites are retrying.", "success");
-      } else {
-        showToast("Device selection saved for this repository.", "success");
-      }
+      showToast("Device selection saved for this repository. Press Run now to retry blocked suites.", "success");
     });
   }
 
@@ -1488,6 +1580,7 @@
     state.activeRepoId = repoId;
     state.branchOverview = null;
     state.testPlan = null;
+    state.testRuns = null;
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
