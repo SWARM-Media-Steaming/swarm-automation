@@ -32,7 +32,7 @@ fn default_reporting_timeout() -> u64 {
     300
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestDefinition {
     #[serde(default = "default_version")]
@@ -45,7 +45,7 @@ pub struct TestDefinition {
     pub failure_triage: Option<ReportingDefinition>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestSuiteDefinition {
     pub id: String,
@@ -61,7 +61,7 @@ pub struct TestSuiteDefinition {
     pub requirements: Requirements,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Requirements {
     #[serde(default)]
@@ -78,7 +78,7 @@ pub struct Requirements {
     pub devices: Vec<DeviceRequirement>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerRequirement {
     pub name: String,
@@ -88,7 +88,7 @@ pub struct ServerRequirement {
     pub timeout_seconds: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MountRequirement {
     pub name: String,
@@ -97,7 +97,7 @@ pub struct MountRequirement {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialRequirement {
     pub name: String,
@@ -107,7 +107,7 @@ pub struct CredentialRequirement {
     pub file: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRequirement {
     #[serde(rename = "type")]
@@ -120,7 +120,7 @@ fn default_device_input() -> String {
     "fireTvSerial".into()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportingDefinition {
     /// Deterministic repository command that receives SWARM_TEST_RESULTS.
@@ -192,6 +192,14 @@ pub struct TestPlan {
     pub suites: Vec<SuitePlan>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestDefinitionDraft {
+    pub definition: String,
+    pub detected_suites: usize,
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestRunResults {
@@ -212,6 +220,308 @@ pub fn definition_path(workspace: &Path) -> PathBuf {
 
 pub fn available(workspace: &Path) -> bool {
     definition_path(workspace).is_file()
+}
+
+fn boilerplate_suite(
+    id: &str,
+    name: &str,
+    command: &[&str],
+    executables: &[&str],
+    files: &[&str],
+) -> TestSuiteDefinition {
+    TestSuiteDefinition {
+        id: id.into(),
+        name: name.into(),
+        command: command.iter().map(|value| (*value).into()).collect(),
+        timeout_seconds: default_timeout(),
+        disruptive: false,
+        enabled: true,
+        requirements: Requirements {
+            executables: executables.iter().map(|value| (*value).into()).collect(),
+            files: files.iter().map(|value| (*value).into()).collect(),
+            ..Requirements::default()
+        },
+    }
+}
+
+fn suite_id(value: &str) -> String {
+    let mut id = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while id.contains("--") {
+        id = id.replace("--", "-");
+    }
+    id.trim_matches('-').to_string()
+}
+
+fn suite_name(value: &str) -> String {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut characters = part.chars();
+            characters
+                .next()
+                .map(|first| first.to_ascii_uppercase().to_string() + characters.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Build a reviewable definition from conventional, repository-owned test
+/// entry points. Detection reads manifests and filenames only; it never runs
+/// a discovered command.
+pub fn detect_definition(workspace: &Path) -> Result<TestDefinitionDraft, String> {
+    if !workspace.is_dir() {
+        return Err(format!(
+            "The repository workspace does not exist at {}. Clone or choose it first.",
+            workspace.display()
+        ));
+    }
+
+    let mut suites = Vec::new();
+    let mut notes = Vec::new();
+    let cargo_manifest = workspace.join("Cargo.toml");
+    if cargo_manifest.is_file() {
+        let manifest = fs::read_to_string(&cargo_manifest).unwrap_or_default();
+        let (id, name, command): (&str, &str, &[&str]) = if manifest.contains("[workspace]") {
+            (
+                "rust-workspace",
+                "Rust workspace tests",
+                &["cargo", "test", "--workspace"],
+            )
+        } else {
+            ("rust", "Rust tests", &["cargo", "test"])
+        };
+        suites.push(boilerplate_suite(
+            id,
+            name,
+            command,
+            &["cargo"],
+            &["Cargo.toml"],
+        ));
+    }
+
+    let package_json = workspace.join("package.json");
+    if package_json.is_file() {
+        let has_test_script = fs::read_to_string(&package_json)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| {
+                value
+                    .pointer("/scripts/test")
+                    .and_then(|test| test.as_str())
+                    .map(str::to_string)
+            })
+            .is_some_and(|script| {
+                let normalized = script.to_ascii_lowercase();
+                !script.trim().is_empty() && !normalized.contains("no test specified")
+            });
+        if has_test_script {
+            let (executable, command): (&str, &[&str]) =
+                if workspace.join("pnpm-lock.yaml").is_file() {
+                    ("pnpm", &["pnpm", "test"])
+                } else if workspace.join("yarn.lock").is_file() {
+                    ("yarn", &["yarn", "test"])
+                } else {
+                    ("npm", &["npm", "test"])
+                };
+            suites.push(boilerplate_suite(
+                "javascript",
+                "JavaScript tests",
+                command,
+                &[executable],
+                &["package.json"],
+            ));
+        }
+    }
+
+    if ["pyproject.toml", "pytest.ini", "tox.ini"]
+        .iter()
+        .any(|name| workspace.join(name).is_file())
+    {
+        let manifest = ["pyproject.toml", "pytest.ini", "tox.ini"]
+            .iter()
+            .find(|name| workspace.join(name).is_file())
+            .copied()
+            .unwrap_or("pyproject.toml");
+        suites.push(boilerplate_suite(
+            "python",
+            "Python tests",
+            &["python3", "-m", "pytest"],
+            &["python3"],
+            &[manifest],
+        ));
+    }
+
+    if workspace.join("go.mod").is_file() {
+        suites.push(boilerplate_suite(
+            "go",
+            "Go tests",
+            &["go", "test", "./..."],
+            &["go"],
+            &["go.mod"],
+        ));
+    }
+
+    let gradle_wrappers = ["gradlew", "clients/tv-android/gradlew"];
+    for wrapper in gradle_wrappers {
+        if !workspace.join(wrapper).is_file() {
+            continue;
+        }
+        let mut suite = if wrapper == "gradlew" {
+            boilerplate_suite(
+                "gradle",
+                "Gradle tests",
+                &["./gradlew", "test"],
+                &["java"],
+                &["gradlew"],
+            )
+        } else {
+            boilerplate_suite(
+                "android",
+                "Android tests",
+                &[
+                    "./clients/tv-android/gradlew",
+                    "-p",
+                    "clients/tv-android",
+                    "test",
+                ],
+                &["java"],
+                &["clients/tv-android/gradlew"],
+            )
+        };
+        suite.timeout_seconds = 3600;
+        suites.push(suite);
+    }
+
+    let scripts_dir = workspace.join("scripts/tests");
+    if scripts_dir.is_dir() {
+        let mut scripts = fs::read_dir(&scripts_dir)
+            .map_err(|error| format!("Could not inspect {}: {error}", scripts_dir.display()))?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_file())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".sh"))
+            .filter(|name| {
+                let stem = name.trim_end_matches(".sh");
+                (stem.starts_with("test_")
+                    || stem.ends_with("_tests")
+                    || matches!(
+                        stem,
+                        "tv_e2e_suite" | "tv_uat_suite" | "tv_uat_resilience_suite"
+                    ))
+                    && !stem.contains("cron")
+                    && !stem.starts_with("full_")
+            })
+            .collect::<Vec<_>>();
+        scripts.sort();
+        for filename in scripts {
+            let stem = filename.trim_end_matches(".sh");
+            let relative = format!("scripts/tests/{filename}");
+            let mut suite = boilerplate_suite(
+                &suite_id(stem),
+                &suite_name(stem),
+                &["bash", &relative],
+                &["bash"],
+                &[&relative],
+            );
+            if stem.starts_with("tv_") {
+                suite.requirements.executables.push("adb".into());
+                suite.requirements.devices.push(DeviceRequirement {
+                    device_type: "fireTv".into(),
+                    input: default_device_input(),
+                });
+                suite.timeout_seconds = 7200;
+            }
+            if stem.contains("resilience") || stem.contains("disruptive") {
+                suite.disruptive = true;
+            }
+            suites.push(suite);
+        }
+    }
+
+    let detected_suites = suites.len();
+    if suites.is_empty() {
+        notes.push("No conventional test entry points were found. Replace the disabled placeholder command before enabling it.".into());
+        let mut placeholder = boilerplate_suite(
+            "project-tests",
+            "Project tests",
+            &["replace-with-test-command"],
+            &[],
+            &[],
+        );
+        placeholder.enabled = false;
+        suites.push(placeholder);
+    } else {
+        notes.push("Review commands and requirements before saving; detection never executes discovered files.".into());
+    }
+    if suites
+        .iter()
+        .any(|suite| !suite.requirements.devices.is_empty())
+    {
+        notes.push("Fire TV suites were marked as device-dependent; disruptive resilience suites require the repository opt-in.".into());
+    }
+
+    let definition = TestDefinition {
+        version: 1,
+        suites,
+        reporting: None,
+        failure_triage: None,
+    };
+    validate_definition(&definition)?;
+    let definition = serde_json::to_string_pretty(&definition)
+        .map_err(|error| format!("Could not create the test definition draft: {error}"))?;
+    Ok(TestDefinitionDraft {
+        definition: format!("{definition}\n"),
+        detected_suites,
+        notes,
+    })
+}
+
+/// Validate and atomically create a repository-owned test definition. Existing
+/// definitions are never overwritten by the onboarding flow.
+pub fn create_definition(workspace: &Path, raw: &str) -> Result<PathBuf, String> {
+    let path = definition_path(workspace);
+    if path.exists() {
+        return Err(format!(
+            "{} already exists. Edit the repository file directly to avoid overwriting it.",
+            path.display()
+        ));
+    }
+    let definition: TestDefinition = serde_json::from_str(raw)
+        .map_err(|error| format!("The draft is not valid JSON: {error}"))?;
+    validate_definition(&definition)?;
+    let normalized = serde_json::to_string_pretty(&definition)
+        .map_err(|error| format!("Could not format the test definition: {error}"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "The test definition has no parent directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    let temporary = parent.join(format!(".tests.json.tmp-{}", std::process::id()));
+    fs::write(&temporary, format!("{normalized}\n"))
+        .map_err(|error| format!("Could not write {}: {error}", temporary.display()))?;
+    if path.exists() {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "{} was created by another process; nothing was overwritten.",
+            path.display()
+        ));
+    }
+    fs::rename(&temporary, &path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("Could not install {}: {error}", path.display())
+    })?;
+    Ok(path)
 }
 
 /// Subdirectory of the run directory that keeps one JSON file per completed
@@ -1062,6 +1372,73 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn detects_conventional_manifests_and_classifies_hardware_scripts() {
+        let workspace = tempdir().unwrap();
+        fs::write(
+            workspace.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.path().join("clients/tv-android")).unwrap();
+        fs::write(
+            workspace.path().join("clients/tv-android/gradlew"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.path().join("scripts/tests")).unwrap();
+        fs::write(
+            workspace
+                .path()
+                .join("scripts/tests/tv_uat_resilience_suite.sh"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+
+        let draft = detect_definition(workspace.path()).unwrap();
+        let definition: TestDefinition = serde_json::from_str(&draft.definition).unwrap();
+        assert_eq!(draft.detected_suites, 3);
+        assert_eq!(
+            definition.suites[0].command,
+            ["cargo", "test", "--workspace"]
+        );
+        assert!(definition.suites.iter().any(|suite| suite.id == "android"));
+        let tv = definition
+            .suites
+            .iter()
+            .find(|suite| suite.id == "tv-uat-resilience-suite")
+            .unwrap();
+        assert!(tv.disruptive);
+        assert_eq!(tv.requirements.devices[0].device_type, "fireTv");
+        assert!(tv.requirements.executables.contains(&"adb".to_string()));
+    }
+
+    #[test]
+    fn detection_returns_an_editable_disabled_placeholder_when_no_tests_are_found() {
+        let workspace = tempdir().unwrap();
+        let draft = detect_definition(workspace.path()).unwrap();
+        let definition: TestDefinition = serde_json::from_str(&draft.definition).unwrap();
+        assert_eq!(draft.detected_suites, 0);
+        assert_eq!(definition.suites.len(), 1);
+        assert!(!definition.suites[0].enabled);
+    }
+
+    #[test]
+    fn create_definition_validates_and_never_overwrites_an_existing_file() {
+        let workspace = tempdir().unwrap();
+        let raw = r#"{"version":1,"suites":[{"id":"unit","name":"Unit","command":["true"]}]}"#;
+        let path = create_definition(workspace.path(), raw).unwrap();
+        assert_eq!(path, definition_path(workspace.path()));
+        assert!(load_definition(workspace.path()).is_ok());
+
+        let error = create_definition(workspace.path(), raw).unwrap_err();
+        assert!(error.contains("already exists"));
+        let invalid_workspace = tempdir().unwrap();
+        let error = create_definition(invalid_workspace.path(), "not json").unwrap_err();
+        assert!(error.contains("not valid JSON"));
+        assert!(!definition_path(invalid_workspace.path()).exists());
+    }
+
+    #[test]
     fn parses_adb_devices_and_marks_only_authorized_devices_eligible() {
         let devices = parse_adb_devices(
             "List of devices attached\n192.0.2.1:5555 device product:b device:c\nABC unauthorized usb:1\n\n",
@@ -1085,7 +1462,7 @@ mod tests {
         fs::create_dir(workspace.path().join(".swarm")).unwrap();
         fs::write(
             definition_path(workspace.path()),
-            r#"{"version":1,"suites":[{"id":"unit","name":"Unit","command":["true"]},{"id":"tv","name":"TV","command":["true"],"requirements":{"devices":[{"type":"fireTv"}]}}]}"#,
+            r#"{"version":1,"suites":[{"id":"unit","name":"Unit","command":["true"]},{"id":"tv","name":"TV","command":["true"],"requirements":{"files":["connected-fire-tv.marker"],"devices":[{"type":"fireTv"}]}}]}"#,
         )
         .unwrap();
         let plan = build_plan(

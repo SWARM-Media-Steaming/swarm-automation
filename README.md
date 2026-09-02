@@ -127,6 +127,13 @@ each suite's own `requirements`, not to this tool.
 
 Add `.swarm/tests.json` to a repository to make its test inventory explicit and
 portable. The checked-in definition in this repository is a working example.
+When the selected repository does not have one yet, open **Test Scheduler** and
+choose **Detect tests & create draft**. The app recognizes conventional Rust,
+JavaScript, Python, Go, Gradle/Android, and `scripts/tests` entry points, then
+shows an editable JSON preview. Detection never executes a discovered command.
+After validation, **Save definition** creates `.swarm/tests.json` in the
+repository and enables the scheduler immediately; commit the new file to keep
+it with the project.
 The current schema version is `1`:
 
 ```json

@@ -780,6 +780,38 @@ fn get_test_plan<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+fn detect_test_definition<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<testing::TestDefinitionDraft, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = prepared_workspace(&app, &config, repo)?;
+    if testing::definition_path(&workspace).exists() {
+        return Err(format!(
+            "{} already exists. Refresh requirements to load it.",
+            testing::definition_path(&workspace).display()
+        ));
+    }
+    testing::detect_definition(&workspace)
+}
+
+#[tauri::command]
+fn create_test_definition<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+    definition: String,
+) -> Result<String, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = prepared_workspace(&app, &config, repo)?;
+    testing::create_definition(&workspace, &definition)
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 async fn get_test_plan_background(
     app: tauri::AppHandle,
     repo_id: String,
@@ -993,6 +1025,130 @@ fn verify_github_bots(
                 configured: true,
                 valid,
                 message: message.trim().to_string(),
+            }
+        })
+        .collect())
+}
+
+/// Per-provider readiness of the GitHub bot app for one repository, phrased for
+/// a non-expert: which concrete GitHub step (if any) is still outstanding and
+/// the URL that completes it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BotReadiness {
+    provider: String,
+    provider_label: String,
+    /// `ready` | `not_installed_on_owner` | `no_repo_access` | `unconfigured` | `error`
+    state: String,
+    ready: bool,
+    owner: String,
+    message: String,
+    /// GitHub page that resolves this step (install / grant). Empty for
+    /// `unconfigured`, where the manifest setup flow is the next step instead.
+    action_url: String,
+    action_label: String,
+    needs_setup_flow: bool,
+}
+
+#[tauri::command]
+fn check_repo_bot_readiness<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<Vec<BotReadiness>, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let script = worker_script_dir(&app)?.join("github_app_auth.py");
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let apps_config = repo.effective_apps_config();
+    let apps_config_exists = Path::new(&apps_config).is_file();
+    let providers: Vec<String> = config
+        .enabled_providers()
+        .map(|provider| provider.id.clone())
+        .collect();
+    Ok(providers
+        .into_iter()
+        .map(|id| {
+            let label = config::provider_label(&id).to_string();
+            let default_url =
+                format!("https://github.com/apps/swarm-{id}-bot/installations/new");
+            if !apps_config_exists {
+                return BotReadiness {
+                    provider: id.clone(),
+                    provider_label: label,
+                    state: "unconfigured".into(),
+                    ready: false,
+                    owner: String::new(),
+                    message: format!(
+                        "The {id} bot app has not been created yet. Run “Set up GitHub Apps”."
+                    ),
+                    action_url: String::new(),
+                    action_label: String::new(),
+                    needs_setup_flow: true,
+                };
+            }
+            let (_ok, raw) = run_capture_owned(
+                &python,
+                &[
+                    script.to_string_lossy().into_owned(),
+                    "--config".into(),
+                    apps_config.clone(),
+                    "--repository".into(),
+                    repo.github_repository.clone(),
+                    "repo-status".into(),
+                    "--provider".into(),
+                    id.clone(),
+                ],
+            );
+            let parsed: serde_json::Value =
+                serde_json::from_str(raw.trim()).unwrap_or_default();
+            let field = |key: &str| {
+                parsed
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let state_name = match parsed.get("state").and_then(|v| v.as_str()) {
+                Some(value) => value.to_string(),
+                None => "error".to_string(),
+            };
+            let message = {
+                let candidate = field("message");
+                if candidate.is_empty() {
+                    raw.trim().to_string()
+                } else {
+                    candidate
+                }
+            };
+            let action_url = {
+                let candidate = field("installUrl");
+                if candidate.is_empty() {
+                    default_url.clone()
+                } else {
+                    candidate
+                }
+            };
+            let (action_label, needs_setup_flow) = match state_name.as_str() {
+                "ready" => (String::new(), false),
+                "unconfigured" => (String::new(), true),
+                "no_repo_access" => ("Open GitHub to grant access".into(), false),
+                _ => ("Open GitHub to install".into(), false),
+            };
+            BotReadiness {
+                provider: id.clone(),
+                provider_label: label,
+                ready: state_name == "ready",
+                owner: field("owner"),
+                message,
+                action_url: if state_name == "ready" || needs_setup_flow {
+                    String::new()
+                } else {
+                    action_url
+                },
+                action_label,
+                needs_setup_flow,
+                state: state_name,
             }
         })
         .collect())
@@ -2140,6 +2296,8 @@ fn main() {
             start_uat_scheduler,
             get_test_plan,
             get_test_plan_background,
+            detect_test_definition,
+            create_test_definition,
             get_test_runs,
             get_test_runs_background,
             save_test_device,
@@ -2149,6 +2307,7 @@ fn main() {
             install_ai_cli,
             launch_bot_setup,
             verify_github_bots,
+            check_repo_bot_readiness,
             git_overview,
             git_overview_background,
             refresh_repo,

@@ -1529,6 +1529,131 @@ class GitHubAppAuthTestCase(unittest.TestCase):
                 self.assertEqual(urlopen.call_count, 2)
             self.assertNotIn("installation-token", config.read_text(encoding="utf-8"))
 
+    def _apps_config(self, root: Path, **claude_overrides: object) -> Path:
+        key = root / "bot.pem"
+        key.write_text("not used", encoding="utf-8")
+        key.chmod(0o600)
+        entry: dict[str, object] = {
+            "app_id": 1,
+            "private_key_path": str(key),
+            "bot_login": "swarm-claude-bot[bot]",
+            "bot_name": "Swarm Claude Bot",
+            "bot_email": "bot@example.com",
+        }
+        entry.update(claude_overrides)
+        config = root / "apps.json"
+        config.write_text(json.dumps({"claude": entry}), encoding="utf-8")
+        return config
+
+    def test_installation_resolves_from_the_repository_owner_without_discovery(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-owner-test.") as temporary:
+            root = Path(temporary)
+            config = self._apps_config(
+                root,
+                installation_id=111,
+                installations={"batocera-fleet-federation": 222},
+            )
+            with mock.patch.object(auth_module.GitHubAppAuth, "_jwt", return_value="jwt"):
+                with mock.patch.object(
+                    auth_module.urllib.request,
+                    "urlopen",
+                    side_effect=[io.BytesIO(json.dumps({"token": "owner-token"}).encode())],
+                ) as urlopen:
+                    auth = auth_module.GitHubAppAuth(
+                        config, repository="Batocera-Fleet-Federation/batocera.drone"
+                    )
+                    self.assertEqual(auth.token("claude"), "owner-token")
+            self.assertIn("installations/222/access_tokens", urlopen.call_args_list[0].args[0].full_url)
+
+    def test_missing_owner_installation_raises_actionable_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-missing-test.") as temporary:
+            root = Path(temporary)
+            config = self._apps_config(root, installation_id=111)
+            listing = io.BytesIO(
+                json.dumps([{"id": 111, "account": {"login": "SWARM-Media-Steaming"}}]).encode()
+            )
+            with mock.patch.object(auth_module.GitHubAppAuth, "_jwt", return_value="jwt"):
+                with mock.patch.object(
+                    auth_module.urllib.request, "urlopen", side_effect=[listing]
+                ):
+                    auth = auth_module.GitHubAppAuth(
+                        config, repository="Batocera-Fleet-Federation/batocera.drone"
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        r"not installed on 'Batocera-Fleet-Federation'.*installations/new",
+                    ):
+                        auth.verify_installation("claude")
+
+    def test_discovered_owner_installation_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-persist-test.") as temporary:
+            root = Path(temporary)
+            config = self._apps_config(root, installation_id=111)
+            responses = [
+                io.BytesIO(
+                    json.dumps(
+                        [{"id": 333, "account": {"login": "Batocera-Fleet-Federation"}}]
+                    ).encode()
+                ),
+                io.BytesIO(json.dumps({"token": "discovered-token"}).encode()),
+            ]
+            with mock.patch.object(auth_module.GitHubAppAuth, "_jwt", return_value="jwt"):
+                with mock.patch.object(
+                    auth_module.urllib.request, "urlopen", side_effect=responses
+                ):
+                    auth = auth_module.GitHubAppAuth(
+                        config, repository="Batocera-Fleet-Federation/batocera.drone"
+                    )
+                    self.assertEqual(auth.token("claude"), "discovered-token")
+            persisted = json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(
+                persisted["claude"]["installations"]["Batocera-Fleet-Federation"], 333
+            )
+            self.assertEqual(persisted["claude"]["installation_id"], 111)
+
+    def test_repository_status_reports_ready_and_missing_states(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-status-test.") as temporary:
+            root = Path(temporary)
+            config = self._apps_config(
+                root,
+                installation_id=111,
+                installations={"my-org": 222},
+            )
+            with mock.patch.object(auth_module.GitHubAppAuth, "_jwt", return_value="jwt"):
+                # Ready: installation known, "all repositories" selection.
+                with mock.patch.object(
+                    auth_module.urllib.request,
+                    "urlopen",
+                    side_effect=[
+                        io.BytesIO(json.dumps({"repository_selection": "all"}).encode())
+                    ],
+                ):
+                    ready = auth_module.GitHubAppAuth(
+                        config, repository="My-Org/widget"
+                    ).repository_status("claude")
+                self.assertEqual(ready["state"], "ready")
+                self.assertEqual(ready["installationId"], 222)
+
+                # Not installed on a different owner (discovery finds nothing).
+                with mock.patch.object(
+                    auth_module.urllib.request,
+                    "urlopen",
+                    side_effect=[io.BytesIO(json.dumps([]).encode())],
+                ):
+                    missing = auth_module.GitHubAppAuth(
+                        config, repository="Other-Org/widget"
+                    ).repository_status("claude")
+                self.assertEqual(missing["state"], "not_installed_on_owner")
+                self.assertEqual(
+                    missing["installUrl"],
+                    "https://github.com/apps/swarm-claude-bot/installations/new",
+                )
+
+            unconfigured = auth_module.GitHubAppAuth(
+                root / "absent.json", repository="My-Org/widget"
+            ).repository_status("claude")
+            self.assertEqual(unconfigured["state"], "unconfigured")
+
     def test_private_key_must_not_be_group_readable(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-app-key-test.") as temporary:
             root = Path(temporary)
@@ -1552,13 +1677,14 @@ class GitHubAppAuthTestCase(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "permissions are too broad"):
                 auth_module.GitHubAppAuth(config).definition("claude")
 
-    def test_setup_manifest_is_private_and_minimally_scoped(self) -> None:
+    def test_setup_manifest_is_public_and_minimally_scoped(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-app-manifest-test.") as temporary:
             state = setup_module.SetupState(
                 "DotNetRockStar/swarm", Path(temporary) / "apps.json", 8765
             )
             manifest = state.manifest("codex")
-            self.assertFalse(manifest["public"])
+            # Public so one app installs on every org the operator uses.
+            self.assertTrue(manifest["public"])
             self.assertNotIn("hook_attributes", manifest)
             self.assertNotIn("setup_url", manifest)
             self.assertNotIn("setup_on_update", manifest)
@@ -1572,7 +1698,7 @@ class GitHubAppAuthTestCase(unittest.TestCase):
                 },
             )
 
-    def test_setup_registers_private_apps_with_the_repository_owner(self) -> None:
+    def test_setup_registration_url_is_org_scoped(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-app-owner-test.") as temporary:
             state = setup_module.SetupState(
                 "SWARM-Media-Steaming/swarm",
@@ -1586,8 +1712,8 @@ class GitHubAppAuthTestCase(unittest.TestCase):
             )
             self.assertLessEqual(len(state.app_name("claude")), 34)
 
-    def test_setup_replaces_a_private_app_owned_by_the_wrong_account(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="swarm-app-owner-mismatch-test.") as temporary:
+    def test_setup_accepts_a_public_app_owned_by_another_account(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-app-owner-any-test.") as temporary:
             root = Path(temporary)
             key = root / "claude.pem"
             key.write_text("not used", encoding="utf-8")
@@ -1600,25 +1726,25 @@ class GitHubAppAuthTestCase(unittest.TestCase):
                             "app_id": 1,
                             "installation_id": 2,
                             "private_key_path": str(key),
-                            "bot_login": "swarm-claude[bot]",
+                            "bot_login": "swarm-claude-bot[bot]",
                         }
                     }
                 ),
                 encoding="utf-8",
             )
             state = setup_module.SetupState(
-                "SWARM-Media-Steaming/swarm", config, 8765, ("claude",)
+                "Some-Other-Org/thing", config, 8765, ("claude",)
             )
             with mock.patch.object(state, "detect_repository_owner"):
                 with mock.patch.object(setup_module, "GitHubAppAuth") as auth_type:
                     auth_type.return_value.app_profile.return_value = {
-                        "owner": {"login": "DotNetRockStar"}
+                        "owner": {"login": "SWARM-Media-Steaming"}
                     }
+                    auth_type.return_value.find_installation_for_repository.return_value = 77
                     state.validate_existing()
-                    self.assertEqual(
-                        state.owner_mismatches, {"claude": "DotNetRockStar"}
-                    )
-                    auth_type.return_value.find_installation_for_repository.assert_not_called()
+                    self.assertFalse(hasattr(state, "owner_mismatches"))
+                    self.assertIn("claude", state.valid_installations)
+                    self.assertEqual(state.config["claude"]["installation_id"], 77)
 
     def test_setup_only_waits_for_enabled_providers(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-app-provider-test.") as temporary:
