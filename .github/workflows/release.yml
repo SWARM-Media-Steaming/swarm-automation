@@ -3,12 +3,15 @@ name: Release
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
-# One release at a time; never cancel an in-flight publish.
+# One release at a time; never cancel an in-flight publish. PR test runs are
+# keyed per ref so a new push supersedes the previous one.
 concurrency:
-  group: release
-  cancel-in-progress: false
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: write
@@ -31,6 +34,7 @@ jobs:
 
   release:
     needs: test
+    if: github.event_name != 'pull_request'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
