@@ -24,6 +24,7 @@
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
     botReadiness: {},
     botReadinessPoll: null,
+    pendingUpdate: null,
   };
 
   const pageTitles = {
@@ -96,6 +97,11 @@
     "provider-include-exclude": {
       title: "Enabled AI tools",
       html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work.</p><p>At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
+      links: [],
+    },
+    "software-update": {
+      title: "Software updates",
+      html: "<p>New versions are published automatically after each change passes tests. Updates install in place and restart the app — your configuration and running work are untouched.</p><ul><li><strong>Don't check</strong> — stay on the current version until you update by hand.</li><li><strong>Notify me</strong> — a banner appears when a new version is available; you choose when to install.</li><li><strong>Install automatically on quit</strong> — the next version is downloaded in the background and applied the next time you quit.</li></ul><p><strong>Check now</strong> works in any mode.</p>",
       links: [],
     },
     "bot-identities": {
@@ -1733,6 +1739,57 @@
     });
   }
 
+  // ----- Software update ---------------------------------------------------
+
+  async function refreshAppVersion() {
+    try {
+      const version = await window.__TAURI__.app.getVersion();
+      byId("update-version-pill").textContent = `v${version}`;
+    } catch (_) { /* getVersion is unavailable outside a Tauri window */ }
+  }
+
+  function renderUpdateDetail(summary) {
+    const detail = byId("update-detail");
+    detail.replaceChildren();
+    if (!summary) return;
+    const row = document.createElement("div");
+    row.className = "verification-result";
+    row.textContent = summary.notes ? summary.notes.trim().split("\n")[0] : `Version ${summary.version} is ready to install.`;
+    detail.appendChild(row);
+    detail.appendChild(button("Install & restart", "primary-button compact", applyUpdate));
+  }
+
+  async function checkForUpdate({ quiet = false } = {}) {
+    await withBusy("check-update", async () => {
+      byId("update-status").textContent = "Checking for updates…";
+      const summary = await invoke("check_for_update");
+      state.pendingUpdate = summary;
+      if (summary) {
+        byId("update-status").textContent = `Version ${summary.version} is available (you have ${summary.currentVersion}).`;
+        renderUpdateDetail(summary);
+        showUpdateBanner(summary);
+      } else {
+        byId("update-status").textContent = "You're on the latest version.";
+        renderUpdateDetail(null);
+        if (!quiet) showToast("SWARM Automation is up to date.", "success");
+      }
+    });
+  }
+
+  async function applyUpdate() {
+    await withBusy("apply-update", async () => {
+      showToast("Downloading update… the app will restart when it's ready.", "success");
+      await invoke("install_update"); // the process restarts on success
+    });
+  }
+
+  function showUpdateBanner(summary) {
+    if (!summary) return;
+    state.pendingUpdate = summary;
+    byId("update-banner-text").textContent = `SWARM Automation ${summary.version} is available.`;
+    byId("update-banner").classList.remove("hidden");
+  }
+
   function addRepository() {
     stashRepositoryForm();
     const repo = defaultRepository();
@@ -2079,6 +2136,9 @@
       setDirty();
     });
     byId("save-password").addEventListener("click", savePassword);
+    byId("check-update").addEventListener("click", () => checkForUpdate());
+    byId("update-banner-install").addEventListener("click", applyUpdate);
+    byId("update-banner-later").addEventListener("click", () => byId("update-banner").classList.add("hidden"));
     byId("setup-bots").addEventListener("click", setupBots);
     byId("recheck-bots").addEventListener("click", recheckBots);
     byId("verify-bots").addEventListener("click", verifyBots);
@@ -2109,6 +2169,8 @@
         if (state.logs.length > 1000) state.logs.splice(0, state.logs.length - 1000);
         renderLogs();
       });
+      await listen("update-available", (event) => showUpdateBanner(event.payload));
+      void refreshAppVersion();
       // Tool detection and repository inspection run independently. Keeping
       // them out of the startup await path prevents slow CLIs or network-backed
       // Git checks from freezing navigation and configuration editing.

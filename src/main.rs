@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -1070,8 +1070,7 @@ fn check_repo_bot_readiness<R: tauri::Runtime>(
         .into_iter()
         .map(|id| {
             let label = config::provider_label(&id).to_string();
-            let default_url =
-                format!("https://github.com/apps/swarm-{id}-bot/installations/new");
+            let default_url = format!("https://github.com/apps/swarm-{id}-bot/installations/new");
             if !apps_config_exists {
                 return BotReadiness {
                     provider: id.clone(),
@@ -1100,8 +1099,7 @@ fn check_repo_bot_readiness<R: tauri::Runtime>(
                     id.clone(),
                 ],
             );
-            let parsed: serde_json::Value =
-                serde_json::from_str(raw.trim()).unwrap_or_default();
+            let parsed: serde_json::Value = serde_json::from_str(raw.trim()).unwrap_or_default();
             let field = |key: &str| {
                 parsed
                     .get(key)
@@ -1152,6 +1150,110 @@ fn check_repo_bot_readiness<R: tauri::Runtime>(
             }
         })
         .collect())
+}
+
+// ----- Software update ----------------------------------------------------
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UpdateSummary {
+    current_version: String,
+    version: String,
+    notes: String,
+    pub_date: String,
+}
+
+/// Best-effort: a bundle updated from a downloaded archive can inherit the
+/// `com.apple.quarantine` xattr, which makes Gatekeeper re-evaluate on the
+/// next launch. Strip it from the running `.app` before we relaunch.
+#[cfg(target_os = "macos")]
+fn strip_quarantine() {
+    if let Ok(exe) = std::env::current_exe() {
+        // <App>.app/Contents/MacOS/<bin> -> <App>.app
+        if let Some(bundle) = exe.ancestors().nth(3) {
+            let _ = Command::new("/usr/bin/xattr")
+                .args(["-dr", "com.apple.quarantine"])
+                .arg(bundle)
+                .status();
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn strip_quarantine() {}
+
+async fn pending_update<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    app.updater()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn check_for_update<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Option<UpdateSummary>, String> {
+    Ok(pending_update(&app).await?.map(|update| UpdateSummary {
+        current_version: update.current_version.clone(),
+        version: update.version.clone(),
+        notes: update.body.clone().unwrap_or_default(),
+        pub_date: update.date.map(|date| date.to_string()).unwrap_or_default(),
+    }))
+}
+
+#[tauri::command]
+async fn install_update<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let Some(update) = pending_update(&app).await? else {
+        return Err("No update is available.".into());
+    };
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|error| error.to_string())?;
+    strip_quarantine();
+    app.restart()
+}
+
+/// Honour `auto_update` once at startup, off the UI thread. `"auto"` installs
+/// and relaunches; `"notify"` emits `update-available` for the banner; `"off"`
+/// does nothing.
+fn spawn_startup_update_check(app: &tauri::AppHandle) {
+    let mode = {
+        let state = app.state::<AppState>();
+        let Ok(config) = state.config.lock() else {
+            return;
+        };
+        config.auto_update.clone()
+    };
+    if mode == "off" {
+        return;
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(Some(update)) = pending_update(&handle).await else {
+            return;
+        };
+        if mode == "auto" {
+            if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+                strip_quarantine();
+                handle.restart();
+            }
+        } else {
+            let _ = handle.emit(
+                "update-available",
+                UpdateSummary {
+                    current_version: update.current_version.clone(),
+                    version: update.version.clone(),
+                    notes: update.body.clone().unwrap_or_default(),
+                    pub_date: update.date.map(|date| date.to_string()).unwrap_or_default(),
+                },
+            );
+        }
+    });
 }
 
 // ----- Branch tree + manual merge -----------------------------------------
@@ -2262,6 +2364,8 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .setup(|app| {
             let loaded =
@@ -2271,6 +2375,7 @@ fn main() {
                 .lock()
                 .map_err(|_| std::io::Error::other("Configuration lock was poisoned"))? = loaded;
             install_tray(app)?;
+            spawn_startup_update_check(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -2320,6 +2425,8 @@ fn main() {
             open_automation_folder,
             get_recent_logs,
             hide_to_tray,
+            check_for_update,
+            install_update,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build SWARM Automation");

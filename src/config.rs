@@ -12,6 +12,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_auto_update() -> String {
+    "notify".into()
+}
+
 /// Human label for a provider id (`"claude"` -> `"Claude"`).
 pub fn provider_label(id: &str) -> &'static str {
     match id {
@@ -328,6 +332,11 @@ pub struct AppConfig {
     pub schedule_time: String,
     pub schedule_days: Vec<String>,
     pub poll_interval_seconds: u64,
+    /// How the app applies new releases from GitHub: `"off"` (never check),
+    /// `"notify"` (check and surface a banner; the user installs), or `"auto"`
+    /// (download and install on the next quit). Defaults to `"notify"`.
+    #[serde(default = "default_auto_update")]
+    pub auto_update: String,
     pub email_enabled: bool,
     pub email_to: String,
     pub smtp_credentials_file: String,
@@ -410,6 +419,7 @@ impl Default for AppConfig {
                 .map(str::to_string)
                 .collect(),
             poll_interval_seconds: 600,
+            auto_update: default_auto_update(),
             email_enabled: false,
             email_to: String::new(),
             smtp_credentials_file: String::new(),
@@ -482,6 +492,9 @@ impl AppConfig {
             "continuous" | "daily" | "weekdays" | "custom" | "manual"
         ) {
             return Err("Unknown issue-worker schedule mode.".into());
+        }
+        if !matches!(self.auto_update.as_str(), "off" | "notify" | "auto") {
+            return Err("Unknown software-update mode.".into());
         }
         validate_time(&self.schedule_time)?;
         if self.schedule_mode == "custom" && self.schedule_days.is_empty() {
@@ -574,6 +587,9 @@ impl AppConfig {
     pub fn normalize(&mut self) {
         self.normalize_providers();
         self.normalize_repositories();
+        if self.auto_update.trim().is_empty() {
+            self.auto_update = default_auto_update();
+        }
     }
 
     fn normalize_providers(&mut self) {
@@ -871,6 +887,28 @@ mod tests {
             .validate()
             .unwrap_err()
             .contains("not an enabled provider"));
+    }
+
+    #[test]
+    fn auto_update_defaults_to_notify_and_rejects_unknown_modes() {
+        // A config file written before the field existed.
+        let older: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(older.auto_update, "notify");
+
+        let mut config = config_with_one_repo();
+        for mode in ["off", "notify", "auto"] {
+            config.auto_update = mode.into();
+            assert!(config.validate().is_ok(), "{mode} should be accepted");
+        }
+        config.auto_update = "sometimes".into();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("software-update mode"));
+
+        config.auto_update = String::new();
+        config.normalize();
+        assert_eq!(config.auto_update, "notify");
     }
 
     #[test]
