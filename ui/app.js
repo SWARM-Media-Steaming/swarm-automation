@@ -239,7 +239,7 @@
     if (view === "repository") void refreshBranches({ quiet: true });
     if (view === "debug") void refreshTools({ quiet: true });
     if (view === "scheduler") void refreshTestPlan({ quiet: true });
-    if (view === "ai") void refreshBotReadiness({ quiet: true });
+    if (view === "repository") void refreshBotReadiness({ quiet: true });
   }
 
   function populateHours() {
@@ -1833,7 +1833,7 @@
     renderStatus();
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
-    if (document.querySelector("#view-ai.active")) void refreshBotReadiness({ quiet: true });
+    if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
   }
 
   function branchNode(label, name, tip, meta = "", links = {}) {
@@ -2143,7 +2143,7 @@
     byId("recheck-bots").addEventListener("click", recheckBots);
     byId("verify-bots").addEventListener("click", verifyBots);
     window.addEventListener("focus", () => {
-      if (document.querySelector("#view-ai.active")) void refreshBotReadiness({ quiet: true });
+      if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
     });
     byId("open-log-folder").addEventListener("click", () => invoke("open_automation_folder").catch((error) => showToast(errorText(error), "error")));
     byId("clear-log").addEventListener("click", () => {
@@ -2183,7 +2183,7 @@
         if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
       }, 4000);
       window.setInterval(() => {
-        if (state.busy.size === 0 && !state.botReadinessPoll && document.querySelector("#view-ai.active")) {
+        if (state.busy.size === 0 && !state.botReadinessPoll && document.querySelector("#view-repository.active")) {
           void refreshBotReadiness({ quiet: true });
         }
       }, 20000);
