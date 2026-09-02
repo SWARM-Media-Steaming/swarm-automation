@@ -62,7 +62,6 @@ class SetupState:
         if config_path.exists():
             self.config = json.loads(config_path.read_text(encoding="utf-8"))
         self.valid_installations: set[str] = set()
-        self.owner_mismatches: dict[str, str] = {}
         self.complete = threading.Event()
 
     def detect_repository_owner(self) -> None:
@@ -127,19 +126,10 @@ class SetupState:
             if not self.app_exists(provider):
                 continue
             try:
-                profile = auth.app_profile(provider)
+                auth.app_profile(provider)
             except (OSError, RuntimeError, ValueError) as error:
                 print(
                     f"{PROVIDERS[provider]['name']} registration could not be authenticated: {error}",
-                    file=sys.stderr,
-                )
-                continue
-            app_owner = str(profile.get("owner", {}).get("login", ""))
-            if app_owner.casefold() != self.repository_owner.casefold():
-                self.owner_mismatches[provider] = app_owner or "another account"
-                print(
-                    f"{PROVIDERS[provider]['name']} is owned by {app_owner or 'another account'}, "
-                    f"but this private app must be owned by {self.repository_owner}.",
                     file=sys.stderr,
                 )
                 continue
@@ -170,11 +160,7 @@ class SetupState:
         auth = GitHubAppAuth(self.config_path)
         changed = False
         for provider in self.providers:
-            if (
-                provider in self.valid_installations
-                or provider in self.owner_mismatches
-                or not self.app_exists(provider)
-            ):
+            if provider in self.valid_installations or not self.app_exists(provider):
                 continue
             try:
                 installation_id = auth.find_installation_for_repository(provider, self.repository)
@@ -204,7 +190,10 @@ class SetupState:
             "url": f"https://github.com/{self.repository}",
             "description": definition["description"],
             "redirect_url": f"{self.base_url}/callback?provider={provider}",
-            "public": False,
+            # Public so one app can be installed on every organization the
+            # operator points SWARM at, not just the account that created it.
+            # Permissions are still granted per installation.
+            "public": True,
             "request_oauth_on_install": False,
             "default_events": [],
             "default_permissions": {
@@ -227,7 +216,6 @@ class SetupState:
             "bot_name": PROVIDERS[provider]["name"],
         }
         self.valid_installations.discard(provider)
-        self.owner_mismatches.pop(provider, None)
         self.save_config()
 
     def save_installation(self, provider: str, installation_id: int) -> None:
@@ -278,38 +266,30 @@ class Handler(BaseHTTPRequestHandler):
                 definition = PROVIDERS[provider]
                 configured = provider in self.server.state.valid_installations
                 app_exists = self.server.state.app_exists(provider)
-                mismatched_owner = self.server.state.owner_mismatches.get(provider)
                 status = (
                     "Configured"
                     if configured
-                    else (
-                        f"Existing private app belongs to {html.escape(mismatched_owner)}; "
-                        f"a {html.escape(self.server.state.repository_owner)} app is required"
-                    )
-                    if mismatched_owner
-                    else "App exists; repository installation required"
+                    else "App exists; needs installing on this repository's owner"
                     if app_exists
-                    else "Not configured"
+                    else "Not created yet"
                 )
                 action = ""
-                if not configured and app_exists and not mismatched_owner:
+                if not configured and app_exists:
                     login = str(self.server.state.config[provider].get("bot_login", ""))
                     slug = login.removesuffix("[bot]")
                     action = (
                         f"<a class='button' target='_blank' rel='noopener' "
                         f"href='https://github.com/apps/{urllib.parse.quote(slug)}/installations/new'>"
-                        f"Install existing {html.escape(definition['name'])}</a>"
+                        f"Install {html.escape(definition['name'])}</a>"
                     )
                 elif not configured:
                     manifest = html.escape(json.dumps(self.server.state.manifest(provider)))
                     state = urllib.parse.quote(self.server.state.csrf[provider])
                     registration_url = html.escape(self.server.state.registration_url())
-                    label = "Create replacement" if mismatched_owner else "Create"
                     action = (
                         f"<form action='{registration_url}?state={state}' method='post'>"
                         f"<input type='hidden' name='manifest' value='{manifest}'>"
-                        f"<button type='submit'>{label} {html.escape(definition['name'])} "
-                        f"for {html.escape(self.server.state.repository_owner)}</button></form>"
+                        f"<button type='submit'>Create {html.escape(definition['name'])}</button></form>"
                     )
                 items.append(
                     f"<li><strong>{html.escape(definition['name'])}</strong> — {status}<br>"
@@ -317,12 +297,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
             self.send_html(
                 "<meta http-equiv='refresh' content='4'>"
-                "<h1>Set up SWARM GitHub bots</h1><p>Create and install each missing private app. "
-                f"The apps must belong to <strong>{html.escape(self.server.state.repository_owner)}</strong>, "
-                "the account that owns this repository. On each installation screen choose "
-                "<strong>Only select repositories</strong> and select "
-                f"<code>{html.escape(self.server.state.repository)}</code>. This page checks for repaired "
-                f"installations automatically.</p><ol>{''.join(items)}</ol>"
+                "<h1>Set up SWARM GitHub bots</h1><p>Create each bot app once, then install it on "
+                f"<strong>{html.escape(self.server.state.repository_owner)}</strong> — the account that owns "
+                f"<code>{html.escape(self.server.state.repository)}</code>. On the install screen choose "
+                "<strong>All repositories</strong> so you never have to repeat this for another repo in the "
+                "same account. This page rechecks automatically.</p><ol>{}</ol>".format("".join(items))
             )
             return
         if parsed.path == "/callback":
@@ -346,12 +325,6 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 with urllib.request.urlopen(request, timeout=30) as response:
                     app = json.load(response)
-                owner = str(app.get("owner", {}).get("login", ""))
-                if owner.casefold() != self.server.state.repository_owner.casefold():
-                    raise ValueError(
-                        f"GitHub created the app under {owner or 'another account'}, but it must be "
-                        f"owned by {self.server.state.repository_owner}"
-                    )
                 self.server.state.save_app(provider, app)
             except (OSError, KeyError, ValueError, urllib.error.HTTPError) as error:
                 self.send_html(f"<h1>App creation failed</h1><pre>{html.escape(str(error))}</pre>", HTTPStatus.BAD_GATEWAY)
@@ -359,7 +332,9 @@ class Handler(BaseHTTPRequestHandler):
             slug = str(app["slug"])
             self.send_html(
                 f"<h1>{html.escape(PROVIDERS[provider]['name'])} created</h1>"
-                "<p>The private key was stored locally with mode 0600. Now install the app only on the SWARM repository.</p>"
+                "<p>The private key was stored locally with mode 0600. Now install the app on "
+                f"<strong>{html.escape(self.server.state.repository_owner)}</strong> and choose "
+                "<strong>All repositories</strong>.</p>"
                 f"<a class='button' target='_blank' rel='noopener' "
                 f"href='https://github.com/apps/{html.escape(slug)}/installations/new'>Install app</a> "
                 "<a class='button' href='/'>Return to setup status</a>"

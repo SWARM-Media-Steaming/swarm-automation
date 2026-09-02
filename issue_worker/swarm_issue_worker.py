@@ -509,7 +509,9 @@ class Worker:
         self.ai_output_file = self.state / "last-ai-output.log"
         self.ai_diagnostic_file = self.state / "last-ai-diagnostic.log"
         self.ai_prompt_file = self.state / "last-ai-prompt.txt"
-        self.apps = GitHubAppAuth(config.github_apps_config, config.openssl_bin)
+        self.apps = GitHubAppAuth(
+            config.github_apps_config, config.openssl_bin, repository=config.github_repository
+        )
         self.github = GitHubClient(config, self.apps)
         self.choice: ProviderChoice | None = None
         self.issue: IssueContext | None = None
@@ -2850,10 +2852,22 @@ class Worker:
             )
         else:
             log(f"Selected {self.choice.name} model {self.choice.model} with effort {self.choice.effort} for this run.")
-        if self.config.require_bot_auth and not self.apps.configured(self.choice.key):
-            raise WorkerError(
-                f"Bot auth is required, but {self.choice.name} has no entry in {self.config.github_apps_config}"
-            )
+        if self.config.require_bot_auth:
+            if not self.apps.configured(self.choice.key):
+                raise WorkerError(
+                    f"Bot auth is required, but {self.choice.name} has no entry in {self.config.github_apps_config}"
+                )
+            # Resolve the installation for this repository's owner now, so a
+            # missing install fails here with a clear message instead of an
+            # opaque GraphQL permissions error partway through branch setup.
+            try:
+                self.apps.verify_installation(self.choice.key)
+            except RuntimeError as error:
+                log(
+                    f"ERROR: GitHub App for {self.choice.name} cannot act on "
+                    f"{self.config.github_repository}: {error}"
+                )
+                raise WorkerError(str(error)) from error
         if self.config.dry_run:
             log(f"Dry run complete: would run {self.choice.name} for {self.issue.url}.")
             return 0

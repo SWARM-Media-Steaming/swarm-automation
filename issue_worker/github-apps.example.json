@@ -4,7 +4,11 @@
     "installation_id": 23456789,
     "private_key_path": "/Users/your-name/.config/swarm/swarm-claude-bot.pem",
     "bot_login": "swarm-claude-bot[bot]",
-    "bot_name": "Swarm Claude Bot"
+    "bot_name": "Swarm Claude Bot",
+    "installations": {
+      "My-Org": 23456789,
+      "Another-Org": 34567890
+    }
   },
   "codex": {
     "app_id": 345678,

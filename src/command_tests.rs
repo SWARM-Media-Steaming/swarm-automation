@@ -1,7 +1,7 @@
 use super::{
-    detect_tools, get_config, get_test_plan, get_test_runs, inspect_repository,
-    issue_branch_pr_is_visible,
-    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
+    create_test_definition, detect_test_definition, detect_tools, get_config, get_test_plan,
+    get_test_runs, inspect_repository, issue_branch_pr_is_visible, repo_worker_args,
+    require_closed_issue, save_config, save_test_device, scheduler_arguments,
     validate_worker_script_dir, AppState, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
@@ -278,6 +278,35 @@ fn repository_test_definition_is_discovered_through_the_command_layer() {
     // History starts empty and `get_test_runs` is a safe read.
     let runs = get_test_runs(app.clone(), app.state(), "octocat__example".into()).unwrap();
     assert!(runs.is_empty());
+}
+
+#[test]
+fn test_definition_onboarding_detects_saves_and_enables_the_plan() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    std::fs::write(
+        repo_dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = []\n",
+    )
+    .unwrap();
+    save_config(app.clone(), app.state(), valid_config(repo_dir.path())).unwrap();
+
+    let draft =
+        detect_test_definition(app.clone(), app.state(), "octocat__example".into()).unwrap();
+    assert_eq!(draft.detected_suites, 1);
+    let path = create_test_definition(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        draft.definition,
+    )
+    .unwrap();
+    assert!(path.ends_with(".swarm/tests.json"));
+
+    let plan = get_test_plan(app.clone(), app.state(), "octocat__example".into()).unwrap();
+    assert!(plan.available);
+    assert_eq!(plan.suites[0].command, "cargo test --workspace");
 }
 
 #[test]

@@ -16,11 +16,14 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false, tests: false },
+    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false },
     activeRepoId: "",
     branchOverview: null,
     testPlan: null,
     testRuns: null,
+    // repoId -> array of BotReadiness from check_repo_bot_readiness.
+    botReadiness: {},
+    botReadinessPoll: null,
   };
 
   const pageTitles = {
@@ -97,7 +100,7 @@
     },
     "bot-identities": {
       title: "GitHub App bot identities",
-      html: "<p>Each AI provider gets its own GitHub identity, making it clear which one wrote, reviewed, or merged work.</p><ul><li><strong>Set up GitHub Apps</strong> — starts GitHub’s approval process for identities that are missing.</li><li><strong>Verify bots</strong> — checks that each enabled provider can use its identity.</li><li><strong>Status</strong> — shows whether local bot settings were found.</li></ul>",
+      html: "<p>Each AI provider gets its own GitHub identity, making it clear which one wrote, reviewed, or merged work. This also lets one provider approve another's pull request, which GitHub blocks when the author and approver are the same account.</p><p>The checklist shows, per provider, whether its bot app is <strong>created</strong> and <strong>installed on this repository's GitHub account</strong>. A provider that is not ready has a button that opens the exact GitHub page to fix it.</p><ul><li><strong>Set up GitHub Apps</strong> — creates any missing bot apps (a one-time browser approval).</li><li><strong>Re-check</strong> — asks GitHub again after you finish an install.</li><li><strong>Verify sign-in</strong> — confirms each app can mint a working token.</li></ul><p>On every install screen choose <strong>All repositories</strong>. Then adding another repo in the same GitHub account needs no further setup.</p>",
       links: [{ label: "About GitHub Apps", url: "https://docs.github.com/apps" }],
     },
     "quota-threshold": {
@@ -127,7 +130,7 @@
     },
     "uat-suite": {
       title: "Test scheduler",
-      html: "<p>Runs the tests a repository declares in <code>.swarm/tests.json</code> — every suite in that file, not just UAT. It checks each suite’s requirements independently, runs every eligible suite with no AI credits, and records each run in the history below with per-suite pass / fail / skipped.</p><p><strong>Start</strong> keeps a daily cycle running at the chosen hour; <strong>Run now</strong> executes one cycle immediately. There is no separate enable switch — nothing runs until you press one of those.</p>",
+      html: "<p>Runs the tests a repository declares in <code>.swarm/tests.json</code> — every suite in that file, not just UAT. When that file is missing, <strong>Detect tests &amp; create draft</strong> finds conventional test entry points and lets you review the JSON before saving it to the repository.</p><p>Each suite’s requirements are checked independently. <strong>Start</strong> keeps a daily cycle running at the chosen hour; <strong>Run now</strong> executes one cycle immediately.</p>",
       links: [],
     },
     "test-runs": {
@@ -230,6 +233,7 @@
     if (view === "repository") void refreshBranches({ quiet: true });
     if (view === "debug") void refreshTools({ quiet: true });
     if (view === "scheduler") void refreshTestPlan({ quiet: true });
+    if (view === "ai") void refreshBotReadiness({ quiet: true });
   }
 
   function populateHours() {
@@ -324,6 +328,10 @@
       option.value = repo.id;
       option.textContent = repo.github_repository || `New repository ${index + 1}`;
       if (!repo.enabled) option.textContent += " · paused";
+      const bots = state.botReadiness[repo.id];
+      if (repo.enabled && bots && bots.length && !bots.every((row) => row.ready)) {
+        option.textContent += " · ⚠ bots";
+      }
       select.appendChild(option);
     });
     select.value = state.activeRepoId;
@@ -708,6 +716,10 @@
         button.title = processState === "paused" ? "Resume" : "Pause";
       }
     });
+    const detectDefinition = byId("detect-test-definition");
+    const saveDefinition = byId("save-test-definition");
+    if (detectDefinition) detectDefinition.disabled = state.busy.has("detect-test-definition");
+    if (saveDefinition) saveDefinition.disabled = state.busy.has("save-test-definition");
   }
 
   function addFact(container, label, value) {
@@ -760,6 +772,10 @@
     availability.textContent = plan.available ? "Definition loaded" : "Definition needed";
     availability.classList.toggle("ready", Boolean(plan.available));
     summary.textContent = plan.error || `.swarm/tests.json · structured results: ${plan.resultsPath}`;
+    const onboarding = byId("test-definition-onboarding");
+    const definitionMissing = !plan.available && !plan.definitionPath;
+    onboarding.classList.toggle("hidden", !definitionMissing);
+    if (!definitionMissing) byId("test-definition-draft").classList.add("hidden");
 
     const allRequirements = [];
     const seen = new Set();
@@ -871,6 +887,48 @@
     } finally {
       state.refreshing.tests = false;
     }
+  }
+
+  async function detectTestDefinition() {
+    const repo = currentRepo();
+    if (!repo) return;
+    await withBusy("detect-test-definition", async () => {
+      const draft = await invoke("detect_test_definition", { repoId: repo.id });
+      byId("test-definition-editor").value = draft.definition;
+      byId("test-detection-summary").textContent = draft.detectedSuites
+        ? `Detected ${draft.detectedSuites} test suite${draft.detectedSuites === 1 ? "" : "s"}. Review the draft before saving.`
+        : "No conventional tests were detected. Edit the disabled placeholder before saving.";
+      const notes = byId("test-detection-notes");
+      notes.replaceChildren();
+      (draft.notes || []).forEach((note) => {
+        const item = document.createElement("span");
+        item.textContent = `• ${note}`;
+        notes.appendChild(item);
+      });
+      byId("test-definition-draft").classList.remove("hidden");
+      byId("test-definition-editor").focus();
+    });
+  }
+
+  function cancelTestDefinition() {
+    byId("test-definition-draft").classList.add("hidden");
+    byId("test-definition-editor").value = "";
+  }
+
+  async function saveTestDefinition() {
+    const repo = currentRepo();
+    if (!repo) return;
+    const definition = byId("test-definition-editor").value;
+    await withBusy("save-test-definition", async () => {
+      const path = await invoke("create_test_definition", { repoId: repo.id, definition });
+      cancelTestDefinition();
+      const repoStatus = currentRepoStatus();
+      if (repoStatus) repoStatus.uatAvailable = true;
+      renderControls();
+      await refreshStatus();
+      await refreshTestPlan();
+      showToast(`Test definition created at ${path}. Commit it to keep it with the repository.`, "success");
+    });
   }
 
   function formatTimestamp(seconds) {
@@ -1091,6 +1149,121 @@
     try { await invoke("open_external_url", { url }); } catch (error) { showToast(errorText(error), "error"); }
   }
 
+  // ----- GitHub bot readiness -------------------------------------------------
+
+  function botReadinessFor(repoId) {
+    return state.botReadiness[repoId || state.activeRepoId] || null;
+  }
+
+  function botReadinessSummary(list) {
+    if (!list || !list.length) return { text: "Not checked", ok: false };
+    if (list.every((row) => row.ready)) return { text: "All bots ready", ok: true };
+    const pending = list.filter((row) => !row.ready).length;
+    return { text: `${pending} bot${pending === 1 ? "" : "s"} need setup`, ok: false };
+  }
+
+  async function refreshBotReadiness({ quiet = true } = {}) {
+    const repo = currentRepo();
+    if (!repo || !String(repo.github_repository || "").includes("/")) return;
+    if (state.refreshing.botReadiness) return;
+    state.refreshing.botReadiness = true;
+    const repoId = repo.id;
+    try {
+      const results = await invoke("check_repo_bot_readiness", { repoId });
+      state.botReadiness[repoId] = results;
+      renderBotPanel();
+      renderStatus();
+    } catch (error) {
+      if (!quiet) showToast(errorText(error), "error");
+    } finally {
+      state.refreshing.botReadiness = false;
+    }
+  }
+
+  // After a browser hand-off GitHub takes a few seconds to expose a new
+  // installation. Poll briefly so the checklist flips to ✓ on its own.
+  function pollBotReadiness() {
+    if (state.botReadinessPoll) window.clearInterval(state.botReadinessPoll);
+    let ticks = 0;
+    state.botReadinessPoll = window.setInterval(async () => {
+      ticks += 1;
+      await refreshBotReadiness({ quiet: true });
+      const list = botReadinessFor();
+      if (ticks >= 12 || (list && list.length && list.every((row) => row.ready))) {
+        window.clearInterval(state.botReadinessPoll);
+        state.botReadinessPoll = null;
+      }
+    }, 5000);
+  }
+
+  async function botAction(row) {
+    if (row.needsSetupFlow) {
+      await setupBots();
+      return;
+    }
+    if (row.actionUrl) {
+      await openUrl(row.actionUrl);
+      showToast("Finish the install on GitHub — choose “All repositories” — then return here.", "success");
+      pollBotReadiness();
+    }
+  }
+
+  const BOT_STATE_HINT = {
+    ready: "Ready",
+    not_installed_on_owner: "Not installed on this account",
+    no_repo_access: "Installed, but this repository is not granted",
+    unconfigured: "App not created yet",
+    error: "Could not check",
+  };
+
+  function renderBotPanel() {
+    const list = botReadinessFor();
+    const pill = byId("bot-config-pill");
+    const summary = botReadinessSummary(list);
+    if (pill) {
+      pill.textContent = summary.text;
+      pill.className = `status-pill ${summary.ok ? "running" : list && list.length ? "stopped" : ""}`;
+    }
+    const container = byId("bot-checklist");
+    if (!container) return;
+    container.replaceChildren();
+    const repo = currentRepo();
+    if (!repo || !String(repo.github_repository || "").includes("/")) {
+      const hint = document.createElement("p");
+      hint.className = "fine-print";
+      hint.textContent = "Enter this repository's owner/name to check its bots.";
+      container.appendChild(hint);
+      return;
+    }
+    if (!list) {
+      const hint = document.createElement("p");
+      hint.className = "fine-print";
+      hint.textContent = state.refreshing.botReadiness ? "Checking GitHub…" : "Press Re-check to inspect the bots for this repository.";
+      container.appendChild(hint);
+      return;
+    }
+    list.forEach((row) => {
+      const item = document.createElement("div");
+      item.className = `check-item ${row.ready ? "ready" : "attention"}`;
+      const dot = document.createElement("span");
+      dot.className = "check-dot";
+      dot.textContent = row.ready ? "✓" : "!";
+      const text = document.createElement("div");
+      text.className = "check-item-text";
+      const title = document.createElement("strong");
+      title.textContent = `${row.providerLabel} bot`;
+      const detail = document.createElement("span");
+      detail.textContent = row.message || BOT_STATE_HINT[row.state] || row.state;
+      text.append(title, detail);
+      item.append(dot, text);
+      if (!row.ready) {
+        const label = row.needsSetupFlow ? "Set up GitHub Apps" : (row.actionLabel || "Open GitHub");
+        item.appendChild(button(label, "secondary-button compact", () => botAction(row)));
+      }
+      container.appendChild(item);
+    });
+  }
+
   function renderReadiness() {
     if (!state.status) return;
     const gh = state.tools.find((tool) => tool.id === "gh");
@@ -1099,10 +1272,20 @@
     );
     const ais = state.tools.filter((tool) => enabledIds.has(tool.id));
     const repoStatus = currentRepoStatus();
+    const botList = botReadinessFor();
+    const botSummary = botReadinessSummary(botList);
+    const botsRequired = Boolean(currentRepo()?.require_bot_auth);
+    const botsReady = !botsRequired
+      || (botList && botList.length ? botSummary.ok : Boolean(repoStatus?.botConfigExists));
+    const botsDetail = !botsRequired
+      ? "Optional"
+      : botList && botList.length
+        ? botSummary.text
+        : repoStatus?.botConfigExists ? "Credentials found" : "Setup needed";
     const checks = [
       ["GitHub CLI", Boolean(gh && toolReady(gh)), gh?.status || "Not detected"],
       ["AI provider", ais.some(toolReady), ais.some(toolReady) ? "Signed in" : "Sign in required"],
-      ["Bot identities", !currentRepo()?.require_bot_auth || repoStatus?.botConfigExists, currentRepo()?.require_bot_auth ? (repoStatus?.botConfigExists ? "Configured" : "Setup needed") : "Optional"],
+      ["Bot identities", botsReady, botsDetail],
       ["Worker runtime", repoStatus?.workerAvailable, repoStatus?.workerAvailable ? "Available" : "Unavailable"],
     ];
     const list = byId("readiness-list");
@@ -1136,8 +1319,7 @@
       warning.appendChild(button("Open Repository →", "text-button", () => navigate("repository")));
     }
     warning.classList.toggle("hidden", !state.status.configError);
-    byId("bot-config-pill").textContent = repoStatus?.botConfigExists ? "Configuration found" : "Not configured";
-    byId("bot-config-pill").className = `status-pill ${repoStatus?.botConfigExists ? "running" : "stopped"}`;
+    renderBotPanel();
     renderControls();
     renderReadiness();
   }
@@ -1517,8 +1699,15 @@
     await withBusy("bots", async () => {
       await saveBeforeAction();
       await invoke("launch_bot_setup", { repoId: currentRepo().id });
-      showToast("Bot setup checked. A browser opens only for enabled bots that still need local credentials or installation.", "success");
-      navigate("debug");
+      showToast("A browser opened for any bot that still needs creating or installing. Choose “All repositories” on the install screen.", "success");
+      pollBotReadiness();
+    });
+  }
+
+  async function recheckBots() {
+    await withBusy("recheck-bots", async () => {
+      await saveBeforeAction();
+      await refreshBotReadiness({ quiet: false });
     });
   }
 
@@ -1587,6 +1776,7 @@
     renderStatus();
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
+    if (document.querySelector("#view-ai.active")) void refreshBotReadiness({ quiet: true });
   }
 
   function branchNode(label, name, tip, meta = "", links = {}) {
@@ -1871,6 +2061,9 @@
     byId("refresh-tools").addEventListener("click", () => refreshTools());
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
     byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
+    byId("detect-test-definition").addEventListener("click", detectTestDefinition);
+    byId("save-test-definition").addEventListener("click", saveTestDefinition);
+    byId("cancel-test-definition").addEventListener("click", cancelTestDefinition);
     byId("test-device-select").addEventListener("change", selectTestDevice);
     byId("active-repo-select").addEventListener("change", (event) => selectRepository(event.target.value));
     byId("add-repo").addEventListener("click", addRepository);
@@ -1887,7 +2080,11 @@
     });
     byId("save-password").addEventListener("click", savePassword);
     byId("setup-bots").addEventListener("click", setupBots);
+    byId("recheck-bots").addEventListener("click", recheckBots);
     byId("verify-bots").addEventListener("click", verifyBots);
+    window.addEventListener("focus", () => {
+      if (document.querySelector("#view-ai.active")) void refreshBotReadiness({ quiet: true });
+    });
     byId("open-log-folder").addEventListener("click", () => invoke("open_automation_folder").catch((error) => showToast(errorText(error), "error")));
     byId("clear-log").addEventListener("click", () => {
       state.logs = [];
@@ -1918,10 +2115,16 @@
       void refreshStatus();
       void refreshTools();
       void refreshTestPlan({ quiet: true });
+      void refreshBotReadiness({ quiet: true });
       window.setInterval(() => void refreshStatus({ quiet: true }), 2000);
       window.setInterval(() => {
         if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
       }, 4000);
+      window.setInterval(() => {
+        if (state.busy.size === 0 && !state.botReadinessPoll && document.querySelector("#view-ai.active")) {
+          void refreshBotReadiness({ quiet: true });
+        }
+      }, 20000);
       window.setInterval(() => {
         if (state.busy.size === 0) void refreshTools({ quiet: true });
       }, 30000);
