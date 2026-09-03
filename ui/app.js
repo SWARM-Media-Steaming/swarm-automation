@@ -16,9 +16,10 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false },
+    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false },
     activeRepoId: "",
     branchOverview: null,
+    promotions: [],
     testPlan: null,
     testRuns: null,
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
@@ -164,6 +165,11 @@
       html: "<p>The tree shows the protected human branch, the shared AI branch, and each active issue branch.</p><ul><li><strong>Refresh</strong> — reloads branch and pull-request information from GitHub.</li><li><strong>Squash into AI integration</strong> — combines a closed issue’s work into one commit and removes its issue branch.</li><li><strong>Create or open promotion PR</strong> — prepares the final move from the AI branch to the human branch.</li><li><strong>Raw Git graph</strong> — shows the same history in Git’s compact text format.</li></ul>",
       links: [],
     },
+    "promotion-queue": {
+      title: "Repositories ready to promote",
+      html: "<p>This list appears on the Overview page whenever one or more repositories have finished AI work waiting to reach the human-owned branch.</p><ul><li>A repository shows up here when its AI integration branch (usually <code>ai-main</code>) is <strong>ahead</strong> of the human-owned branch — there are reviewed commits that have not been promoted yet.</li><li><strong>Select a repository</strong> to open its promotion pull request in the browser, creating one if it does not exist. This is the same action as <em>Create or open promotion PR</em> in the Repository branch tree.</li><li><strong>Refresh</strong> re-checks every configured repository against GitHub.</li></ul><p>A repository leaves the list once its integration branch is merged into the human-owned branch. That merge always stays a manual step on GitHub.</p>",
+      links: [],
+    },
     "data-location": {
       title: "Where your data lives",
       html: "<p>Settings are stored in a private local file. Email passwords use macOS Keychain. GitHub and AI sign-in details stay with their own tools and are not copied into logs.</p>",
@@ -195,6 +201,7 @@
     ["Including / excluding a provider", "provider-include-exclude"],
     ["GitHub App bot identities", "bot-identities"],
     ["Protected branch flow", "delivery-mode"],
+    ["Repositories ready to promote", "promotion-queue"],
     ["Pull request automation", "auto-approve-merge"],
     ["One worker per repository", "parallel-repo-workers"],
     ["Minimum quota remaining", "quota-threshold"],
@@ -236,6 +243,7 @@
       section.classList.toggle("active", section.id === `view-${view}`);
     });
     byId("page-title").textContent = pageTitles[view] || pageTitles.overview;
+    if (view === "overview") void refreshPromotions({ quiet: true });
     if (view === "repository") void refreshBranches({ quiet: true });
     if (view === "debug") void refreshTools({ quiet: true });
     if (view === "scheduler") void refreshTestPlan({ quiet: true });
@@ -619,6 +627,7 @@
     setDirty(false);
     if (!quiet) showToast("Configuration saved.", "success");
     void refreshStatus({ quiet: true });
+    void refreshPromotions({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     return saved;
   }
@@ -2012,6 +2021,7 @@
       const url = await invoke("open_integration_pr", { repoId: currentRepo().id });
       showToast(`Promotion pull request ready: ${url}`, "success");
       await refreshBranches({ quiet: true });
+      void refreshPromotions({ quiet: true });
     });
   }
 
@@ -2022,6 +2032,65 @@
       state.branchOverview = await invoke("merge_integration_branch", { repoId: repo.id, prNumber });
       renderBranchOverview(state.branchOverview);
       showToast(`${repo.integration_branch} was merged into ${repo.base_branch}.`, "success");
+      void refreshPromotions({ quiet: true });
+    });
+  }
+
+  // ----- Overview promotion queue --------------------------------------------
+
+  function renderPromotions() {
+    const panel = byId("promotion-panel");
+    const list = byId("promotion-list");
+    if (!panel || !list) return;
+    const promotions = state.promotions || [];
+    panel.classList.toggle("hidden", promotions.length === 0);
+    list.replaceChildren();
+    promotions.forEach((promotion) => {
+      const row = button("", "promotion-row", () => openPromotionPr(promotion));
+      const name = document.createElement("strong");
+      name.textContent = promotion.label || promotion.githubRepository || promotion.repoId;
+      const action = document.createElement("span");
+      action.className = "promotion-action";
+      action.textContent = promotion.integrationPrUrl ? "Open promotion PR →" : "Create promotion PR →";
+      const commits = `${promotion.integrationBranch} is ${promotion.ahead} commit${promotion.ahead === 1 ? "" : "s"} ahead of ${promotion.baseBranch}`
+        + (promotion.behind > 0 ? ` · ${promotion.behind} behind` : "");
+      const meta = document.createElement("span");
+      meta.className = "promotion-meta";
+      meta.textContent = promotion.integrationPrNumber
+        ? `${commits} · PR #${promotion.integrationPrNumber} open`
+        : commits;
+      row.append(name, action, meta);
+      if (promotion.error) {
+        const alert = document.createElement("span");
+        alert.className = "branch-alert";
+        alert.textContent = promotion.error;
+        row.appendChild(alert);
+      }
+      list.appendChild(row);
+    });
+  }
+
+  async function refreshPromotions({ quiet = true } = {}) {
+    if (state.refreshing.promotions) return;
+    state.refreshing.promotions = true;
+    try {
+      state.promotions = await invoke("promotion_overview_background");
+      renderPromotions();
+    } catch (error) {
+      if (!quiet) showToast(errorText(error), "error");
+    } finally {
+      state.refreshing.promotions = false;
+    }
+  }
+
+  async function openPromotionPr(promotion) {
+    await withBusy(`promotion-${promotion.repoId}`, async () => {
+      const url = await invoke("open_integration_pr", { repoId: promotion.repoId });
+      showToast(`Promotion pull request ready: ${url}`, "success");
+      void refreshPromotions({ quiet: true });
+      if (currentRepo()?.id === promotion.repoId && document.querySelector("#view-repository.active")) {
+        void refreshBranches({ quiet: true });
+      }
     });
   }
 
@@ -2117,6 +2186,7 @@
     byId("hide-button").addEventListener("click", () => invoke("hide_to_tray").catch((error) => showToast(errorText(error), "error")));
     byId("refresh-tools").addEventListener("click", () => refreshTools());
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
+    byId("refresh-promotions").addEventListener("click", () => refreshPromotions({ quiet: false }));
     byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
     byId("detect-test-definition").addEventListener("click", detectTestDefinition);
     byId("save-test-definition").addEventListener("click", saveTestDefinition);
@@ -2178,7 +2248,13 @@
       void refreshTools();
       void refreshTestPlan({ quiet: true });
       void refreshBotReadiness({ quiet: true });
+      void refreshPromotions({ quiet: true });
       window.setInterval(() => void refreshStatus({ quiet: true }), 2000);
+      window.setInterval(() => {
+        if (state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+          void refreshPromotions({ quiet: true });
+        }
+      }, 60000);
       window.setInterval(() => {
         if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
       }, 4000);

@@ -93,6 +93,12 @@
             </article>
           </div>
 
+          <article class="panel promotion-panel hidden" id="promotion-panel">
+            <div class="panel-header"><div><p class="eyebrow">PROMOTION QUEUE</p><h3>Repositories ready to promote <button class="help-dot" data-help="promotion-queue" aria-label="About the promotion queue">?</button></h3></div><button class="text-button" id="refresh-promotions">Refresh</button></div>
+            <p class="panel-copy">These repositories have AI integration work ahead of the human-owned branch, waiting for review and promotion. Select one to open its promotion pull request — the same action as the Repository branch tree.</p>
+            <div id="promotion-list" class="promotion-list"></div>
+          </article>
+
           <div class="two-column">
             <article class="panel"><div class="panel-header"><div><p class="eyebrow">READINESS</p><h3>Before the first run</h3></div><span id="readiness-score" class="score">0 / 4</span></div><div id="readiness-list" class="checklist"></div></article>
             <article class="panel activity-panel">

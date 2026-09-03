@@ -1898,27 +1898,8 @@ fn open_integration_pr(
     let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
 
     // Reuse an open PR if there is one.
-    let (list_ok, list_out) = run_capture_owned(
-        &gh,
-        &[
-            "pr".into(),
-            "list".into(),
-            "--repo".into(),
-            repo.github_repository.clone(),
-            "--base".into(),
-            repo.base_branch.clone(),
-            "--head".into(),
-            repo.integration_branch.clone(),
-            "--state".into(),
-            "open".into(),
-            "--json".into(),
-            "url".into(),
-            "--jq".into(),
-            ".[0].url // \"\"".into(),
-        ],
-    );
-    let url = if list_ok && list_out.starts_with("https://") {
-        list_out
+    let url = if let Some((_, url)) = open_integration_pr_ref(&gh, &repo) {
+        url
     } else {
         let (create_ok, create_out) = run_capture_owned(
             &gh,
@@ -1956,6 +1937,141 @@ fn open_integration_pr(
     };
     let _ = app.opener().open_url(url.clone(), None::<&str>);
     Ok(url)
+}
+
+/// Parse the `"<number>\t<url>"` line that `gh pr list --jq` emits for the open
+/// promotion PR, rejecting anything that is not a real pull-request URL.
+fn parse_pr_ref(raw: &str) -> Option<(u64, String)> {
+    let (number, url) = raw.trim().split_once('\t')?;
+    let url = url.trim();
+    if !url.starts_with("https://") {
+        return None;
+    }
+    Some((number.trim().parse().ok()?, url.to_string()))
+}
+
+/// The open `integration -> base` promotion pull request for `repo`, as
+/// `(number, url)`, or `None` when GitHub has no such PR (or `gh` fails).
+fn open_integration_pr_ref(gh: &Path, repo: &RepoConfig) -> Option<(u64, String)> {
+    let (ok, out) = run_capture_owned(
+        gh,
+        &[
+            "pr".into(),
+            "list".into(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--base".into(),
+            repo.base_branch.clone(),
+            "--head".into(),
+            repo.integration_branch.clone(),
+            "--state".into(),
+            "open".into(),
+            "--json".into(),
+            "number,url".into(),
+            "--jq".into(),
+            r#".[0] | select(.url != null) | "\(.number)\t\(.url)""#.into(),
+        ],
+    );
+    ok.then(|| parse_pr_ref(&out)).flatten()
+}
+
+/// A configured repository belongs in the promotion panel when its AI
+/// integration branch exists and carries commits the human-owned branch lacks.
+fn needs_promotion(integration_exists: bool, vs_base: &BranchAheadBehind) -> bool {
+    integration_exists && vs_base.ahead > 0
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoPromotion {
+    repo_id: String,
+    label: String,
+    github_repository: String,
+    base_branch: String,
+    integration_branch: String,
+    /// Commits on `origin/<integration>` that `origin/<base>` does not have.
+    ahead: u32,
+    /// Commits on `origin/<base>` that `origin/<integration>` does not have.
+    behind: u32,
+    integration_pr_url: String,
+    integration_pr_number: Option<u64>,
+    /// Non-empty when the branch counts shown could not be refreshed.
+    error: String,
+}
+
+/// Every configured repository whose AI integration branch is ahead of its
+/// human-owned branch and waiting to be promoted. Backs the Overview page's
+/// "Repositories ready to promote" panel; selecting a row runs the same
+/// `open_integration_pr` flow as the Repository branch tree button.
+#[tauri::command]
+fn promotion_overview<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<Vec<RepoPromotion>, String> {
+    let config = current_config(&state)?;
+    let git = tools::configured_or_detected("", "git")?;
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh").ok();
+    let mut promotions = Vec::new();
+    for repo in config.repositories() {
+        let Ok(workspace) = resolve_workspace(&app, &config, repo) else {
+            continue;
+        };
+        if !workspace.join(".git").is_dir() {
+            continue;
+        }
+        let ws = workspace.to_string_lossy().into_owned();
+        let fetch_failed = !git_c(&git, &ws, &["fetch", "--prune", &repo.remote_name]).0;
+        let base_ref = format!("{}/{}", repo.remote_name, repo.base_branch);
+        let integ_ref = format!("{}/{}", repo.remote_name, repo.integration_branch);
+        let integration_exists =
+            git_c(&git, &ws, &["rev-parse", "--verify", "--quiet", &integ_ref]).0;
+        let vs_base = if integration_exists {
+            ahead_behind(&git, &ws, &base_ref, &integ_ref)
+        } else {
+            BranchAheadBehind::default()
+        };
+        if !needs_promotion(integration_exists, &vs_base) {
+            continue;
+        }
+        let pull_request = gh
+            .as_deref()
+            .and_then(|gh| open_integration_pr_ref(gh, repo));
+        promotions.push(RepoPromotion {
+            repo_id: repo.id.clone(),
+            label: repo.label(),
+            github_repository: repo.github_repository.clone(),
+            base_branch: repo.base_branch.clone(),
+            integration_branch: repo.integration_branch.clone(),
+            ahead: vs_base.ahead,
+            behind: vs_base.behind,
+            integration_pr_url: pull_request
+                .as_ref()
+                .map(|(_, url)| url.clone())
+                .unwrap_or_default(),
+            integration_pr_number: pull_request.as_ref().map(|(number, _)| *number),
+            error: if fetch_failed {
+                format!(
+                    "Could not refresh {} — showing the last known branch state.",
+                    repo.remote_name
+                )
+            } else {
+                String::new()
+            },
+        });
+    }
+    Ok(promotions)
+}
+
+#[tauri::command]
+async fn promotion_overview_background(
+    app: tauri::AppHandle,
+) -> Result<Vec<RepoPromotion>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        promotion_overview(app.clone(), state)
+    })
+    .await
+    .map_err(|error| format!("Promotion overview background task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -2419,6 +2535,8 @@ fn main() {
             merge_issue_branch,
             merge_integration_branch,
             open_integration_pr,
+            promotion_overview,
+            promotion_overview_background,
             open_provider_login,
             set_smtp_password,
             open_external_url,

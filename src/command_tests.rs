@@ -1,8 +1,8 @@
 use super::{
     create_test_definition, detect_test_definition, detect_tools, get_config, get_test_plan,
-    get_test_runs, inspect_repository, issue_branch_pr_is_visible, repo_worker_args,
-    require_closed_issue, save_config, save_test_device, scheduler_arguments,
-    validate_worker_script_dir, AppState, ResolvedProvider,
+    get_test_runs, inspect_repository, issue_branch_pr_is_visible, needs_promotion, parse_pr_ref,
+    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
+    validate_worker_script_dir, AppState, BranchAheadBehind, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -583,6 +583,57 @@ fn issue_branch_tree_only_shows_open_pull_requests() {
     assert!(issue_branch_pr_is_visible(Some("OPEN")));
     assert!(!issue_branch_pr_is_visible(Some("CLOSED")));
     assert!(!issue_branch_pr_is_visible(Some("MERGED")));
+}
+
+#[test]
+fn promotion_panel_only_lists_integration_branches_ahead_of_base() {
+    // Integration branch exists and carries unmerged commits -> show it, even
+    // when it also trails the base branch.
+    assert!(needs_promotion(
+        true,
+        &BranchAheadBehind {
+            ahead: 3,
+            behind: 0
+        }
+    ));
+    assert!(needs_promotion(
+        true,
+        &BranchAheadBehind {
+            ahead: 1,
+            behind: 5
+        }
+    ));
+    // Nothing to promote, or the branch does not exist yet -> hide it.
+    assert!(!needs_promotion(
+        true,
+        &BranchAheadBehind {
+            ahead: 0,
+            behind: 4
+        }
+    ));
+    assert!(!needs_promotion(
+        false,
+        &BranchAheadBehind {
+            ahead: 2,
+            behind: 0
+        }
+    ));
+}
+
+#[test]
+fn promotion_pr_reference_parses_number_and_url() {
+    assert_eq!(
+        parse_pr_ref("42\thttps://github.com/octocat/example/pull/42"),
+        Some((42, "https://github.com/octocat/example/pull/42".to_string())),
+    );
+    assert_eq!(
+        parse_pr_ref("  7 \t  https://github.com/o/r/pull/7  "),
+        Some((7, "https://github.com/o/r/pull/7".to_string())),
+    );
+    // `gh` printed nothing (no open PR) or a value that is not a PR URL.
+    assert_eq!(parse_pr_ref(""), None);
+    assert_eq!(parse_pr_ref("42\tnot-a-url"), None);
+    assert_eq!(parse_pr_ref("https://github.com/o/r/pull/9"), None);
 }
 
 // ----- provider round-trips (unchanged behaviour) ----------------------
