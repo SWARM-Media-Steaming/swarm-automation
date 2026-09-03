@@ -167,7 +167,7 @@
     },
     "promotion-queue": {
       title: "Repositories ready to promote",
-      html: "<p>This list appears on the Overview page whenever one or more repositories have finished AI work waiting to reach the human-owned branch.</p><ul><li>A repository shows up here when its AI integration branch (usually <code>ai-main</code>) is <strong>ahead</strong> of the human-owned branch — there are reviewed commits that have not been promoted yet.</li><li><strong>Select a repository</strong> to open its promotion pull request in the browser, creating one if it does not exist. This is the same action as <em>Create or open promotion PR</em> in the Repository branch tree.</li><li><strong>Refresh</strong> re-checks every configured repository against GitHub.</li></ul><p>A repository leaves the list once its integration branch is merged into the human-owned branch. That merge always stays a manual step on GitHub.</p>",
+      html: "<p>This list appears on the Overview page whenever one or more repositories have finished AI work waiting to reach the human-owned branch. It refreshes automatically while the Overview is visible.</p><ul><li>A repository shows up when its AI integration branch (usually <code>ai-main</code>) is <strong>ahead</strong> of the human-owned branch.</li><li><strong>Create PR</strong> creates or opens the promotion pull request in your browser.</li><li><strong>Merge to Main</strong> first merges the latest human-owned branch into the AI branch, favoring human-owned changes if the same lines conflict. It then creates the PR, approves it with a configured bot, and merges it.</li></ul><p>The issue worker must be stopped during an automatic promotion so it cannot update the same branch concurrently.</p>",
       links: [],
     },
     "data-location": {
@@ -2046,12 +2046,22 @@
     panel.classList.toggle("hidden", promotions.length === 0);
     list.replaceChildren();
     promotions.forEach((promotion) => {
-      const row = button("", "promotion-row", () => openPromotionPr(promotion));
+      const row = document.createElement("div");
+      row.className = "promotion-row";
       const name = document.createElement("strong");
       name.textContent = promotion.label || promotion.githubRepository || promotion.repoId;
-      const action = document.createElement("span");
-      action.className = "promotion-action";
-      action.textContent = promotion.integrationPrUrl ? "Open promotion PR →" : "Create promotion PR →";
+      const actions = document.createElement("div");
+      actions.className = "promotion-actions";
+      actions.appendChild(button(
+        promotion.integrationPrUrl ? "Open PR" : "Create PR",
+        "secondary-button compact",
+        () => openPromotionPr(promotion),
+      ));
+      actions.appendChild(button(
+        "Merge to Main",
+        "primary-button compact",
+        () => mergePromotion(promotion),
+      ));
       const commits = `${promotion.integrationBranch} is ${promotion.ahead} commit${promotion.ahead === 1 ? "" : "s"} ahead of ${promotion.baseBranch}`
         + (promotion.behind > 0 ? ` · ${promotion.behind} behind` : "");
       const meta = document.createElement("span");
@@ -2059,7 +2069,7 @@
       meta.textContent = promotion.integrationPrNumber
         ? `${commits} · PR #${promotion.integrationPrNumber} open`
         : commits;
-      row.append(name, action, meta);
+      row.append(name, actions, meta);
       if (promotion.error) {
         const alert = document.createElement("span");
         alert.className = "branch-alert";
@@ -2088,6 +2098,19 @@
       const url = await invoke("open_integration_pr", { repoId: promotion.repoId });
       showToast(`Promotion pull request ready: ${url}`, "success");
       void refreshPromotions({ quiet: true });
+      if (currentRepo()?.id === promotion.repoId && document.querySelector("#view-repository.active")) {
+        void refreshBranches({ quiet: true });
+      }
+    });
+  }
+
+  async function mergePromotion(promotion) {
+    const name = promotion.label || promotion.githubRepository || promotion.repoId;
+    if (!window.confirm(`Merge ${promotion.baseBranch} into ${promotion.integrationBranch}, approve the promotion PR, and merge ${promotion.integrationBranch} into ${promotion.baseBranch} for ${name}?`)) return;
+    await withBusy(`promotion-merge-${promotion.repoId}`, async () => {
+      await invoke("promote_integration_branch_background", { repoId: promotion.repoId });
+      showToast(`${name} was promoted to ${promotion.baseBranch}.`, "success");
+      await refreshPromotions({ quiet: true });
       if (currentRepo()?.id === promotion.repoId && document.querySelector("#view-repository.active")) {
         void refreshBranches({ quiet: true });
       }
@@ -2186,7 +2209,6 @@
     byId("hide-button").addEventListener("click", () => invoke("hide_to_tray").catch((error) => showToast(errorText(error), "error")));
     byId("refresh-tools").addEventListener("click", () => refreshTools());
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
-    byId("refresh-promotions").addEventListener("click", () => refreshPromotions({ quiet: false }));
     byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
     byId("detect-test-definition").addEventListener("click", detectTestDefinition);
     byId("save-test-definition").addEventListener("click", saveTestDefinition);
@@ -2254,7 +2276,17 @@
         if (state.busy.size === 0 && document.querySelector("#view-overview.active")) {
           void refreshPromotions({ quiet: true });
         }
-      }, 60000);
+      }, 15000);
+      window.addEventListener("focus", () => {
+        if (state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+          void refreshPromotions({ quiet: true });
+        }
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+          void refreshPromotions({ quiet: true });
+        }
+      });
       window.setInterval(() => {
         if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
       }, 4000);

@@ -70,9 +70,11 @@ off by default. An issue
 branch cannot merge while its linked GitHub issue is open. After a person closes
 the issue, the Repository view can squash-merge its PR and delete the branch; an
 auto-merge profile performs the same reconciliation on a later cycle. Nothing
-in the worker commits or pushes to `main`. A person can create, review, and
-explicitly merge the `ai-main` → `main` promotion pull request from the Repository
-view.
+in the worker commits or pushes to `main`. A person can create or merge the
+`ai-main` → `main` promotion pull request from the Overview or Repository view.
+The Overview's explicit **Merge to Main** action first reconciles `main` into
+`ai-main`, obtains a configured bot approval, and completes the promotion
+through GitHub's pull-request protections.
 
 ## Repository layout
 
