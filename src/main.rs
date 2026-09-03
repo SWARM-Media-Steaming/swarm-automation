@@ -1093,9 +1093,12 @@ fn check_repo_bot_readiness<R: tauri::Runtime>(
                     script.to_string_lossy().into_owned(),
                     "--config".into(),
                     apps_config.clone(),
+                    // `--repository` is an argument of the `repo-status`
+                    // subcommand, not a global one -- it must follow the
+                    // subcommand name or argparse rejects the whole call.
+                    "repo-status".into(),
                     "--repository".into(),
                     repo.github_repository.clone(),
-                    "repo-status".into(),
                     "--provider".into(),
                     id.clone(),
                 ],
