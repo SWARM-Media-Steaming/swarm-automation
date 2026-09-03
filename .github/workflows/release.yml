@@ -56,6 +56,12 @@ jobs:
           jq --arg v "$V" '.version = $v' tauri.conf.json > "$tmp" && mv "$tmp" tauri.conf.json
           sed -i '' -E "s/^version = \"[0-9.]+\"/version = \"$V\"/" Cargo.toml
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
