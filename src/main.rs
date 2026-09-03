@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State};
@@ -1887,6 +1888,234 @@ fn merge_integration_branch(
     git_overview(app, state, repo_id)
 }
 
+/// Bring the human-owned branch into the AI integration branch in an isolated
+/// worktree. When both branches changed the same lines, the human-owned branch
+/// wins; non-overlapping AI work remains intact. The caller can then create a
+/// conflict-free promotion PR without disturbing the user's active checkout.
+fn reconcile_integration_for_promotion(
+    git: &Path,
+    workspace: &Path,
+    repo: &RepoConfig,
+) -> Result<(), String> {
+    let ws = workspace.to_string_lossy().into_owned();
+    let (fetched, fetch_message) = git_c(git, &ws, &["fetch", "--prune", &repo.remote_name]);
+    if !fetched {
+        return Err(format!(
+            "Could not fetch branches before promotion: {fetch_message}"
+        ));
+    }
+    let base_ref = format!("{}/{}", repo.remote_name, repo.base_branch);
+    let integration_ref = format!("{}/{}", repo.remote_name, repo.integration_branch);
+    for branch in [&base_ref, &integration_ref] {
+        if !git_c(git, &ws, &["rev-parse", "--verify", "--quiet", branch]).0 {
+            return Err(format!("Remote branch {branch} does not exist."));
+        }
+    }
+    let relation = ahead_behind(git, &ws, &base_ref, &integration_ref);
+    if relation.behind == 0 {
+        return Ok(());
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let worktree =
+        std::env::temp_dir().join(format!("swarm-promotion-{}-{nonce}", std::process::id()));
+    let worktree_string = worktree.to_string_lossy().into_owned();
+    let (added, add_message) = git_c(
+        git,
+        &ws,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &worktree_string,
+            &integration_ref,
+        ],
+    );
+    if !added {
+        return Err(format!(
+            "Could not prepare the promotion worktree: {add_message}"
+        ));
+    }
+
+    let merge_args = vec![
+        "-C".to_string(),
+        worktree_string.clone(),
+        "-c".into(),
+        "user.name=SWARM Automation".into(),
+        "-c".into(),
+        "user.email=swarm-automation@users.noreply.github.com".into(),
+        "merge".into(),
+        "--no-edit".into(),
+        "-X".into(),
+        "theirs".into(),
+        "-m".into(),
+        format!("[{}] sync {}", repo.integration_branch, repo.base_branch),
+        base_ref,
+    ];
+    let (merged, merge_message) = run_capture_owned(git, &merge_args);
+    let result = if !merged {
+        let _ = git_c(git, &worktree_string, &["merge", "--abort"]);
+        Err(format!(
+            "Could not reconcile {} with {}: {merge_message}",
+            repo.integration_branch, repo.base_branch
+        ))
+    } else {
+        let refspec = format!("HEAD:refs/heads/{}", repo.integration_branch);
+        let (pushed, push_message) = git_c(
+            git,
+            &worktree_string,
+            &["push", &repo.remote_name, &refspec],
+        );
+        if pushed {
+            Ok(())
+        } else {
+            Err(format!(
+                "Reconciled the branches locally but could not push {}: {push_message}",
+                repo.integration_branch
+            ))
+        }
+    };
+    let _ = git_c(
+        git,
+        &ws,
+        &["worktree", "remove", "--force", &worktree_string],
+    );
+    result
+}
+
+fn ensure_integration_pr_ref(gh: &Path, repo: &RepoConfig) -> Result<(u64, String), String> {
+    if let Some(reference) = open_integration_pr_ref(gh, repo) {
+        return Ok(reference);
+    }
+    let (create_ok, create_out) = run_capture_owned(
+        gh,
+        &[
+            "pr".into(),
+            "create".into(),
+            "--repo".into(),
+            repo.github_repository.clone(),
+            "--base".into(),
+            repo.base_branch.clone(),
+            "--head".into(),
+            repo.integration_branch.clone(),
+            "--title".into(),
+            format!("Merge {} into {}", repo.integration_branch, repo.base_branch),
+            "--body".into(),
+            format!(
+                "Promote AI-integration work from `{}` to `{}` through the protected pull-request workflow.",
+                repo.integration_branch, repo.base_branch
+            ),
+        ],
+    );
+    if !create_ok {
+        return Err(format!("Could not create the integration PR: {create_out}"));
+    }
+    open_integration_pr_ref(gh, repo).ok_or_else(|| {
+        format!("GitHub created the promotion PR but it could not be found: {create_out}")
+    })
+}
+
+fn promotion_approval_args(
+    script: &Path,
+    repo: &RepoConfig,
+    provider: &str,
+    gh: &Path,
+    pr_url: &str,
+) -> Vec<String> {
+    vec![
+        script.to_string_lossy().into_owned(),
+        "--config".into(),
+        repo.effective_apps_config(),
+        "exec".into(),
+        "--provider".into(),
+        provider.into(),
+        "--repository".into(),
+        repo.github_repository.clone(),
+        "--".into(),
+        gh.to_string_lossy().into_owned(),
+        "pr".into(),
+        "review".into(),
+        pr_url.into(),
+        "--repo".into(),
+        repo.github_repository.clone(),
+        "--approve".into(),
+        "--body".into(),
+        "Automated approval after synchronizing the human-owned branch into the AI integration branch.".into(),
+    ]
+}
+
+fn approve_promotion_pr<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    repo: &RepoConfig,
+    gh: &Path,
+    pr_url: &str,
+) -> Result<(), String> {
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let script = worker_script_dir(app)?.join("github_app_auth.py");
+    let mut failures = Vec::new();
+    for provider in config.enabled_providers() {
+        let (approved, message) = run_capture_owned(
+            &python,
+            &promotion_approval_args(&script, repo, &provider.id, gh, pr_url),
+        );
+        if approved {
+            return Ok(());
+        }
+        failures.push(format!("{}: {message}", provider.id));
+    }
+    if failures.is_empty() {
+        Err("Enable at least one AI provider to approve the promotion PR.".into())
+    } else {
+        Err(format!(
+            "No configured bot could approve the promotion PR. {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+#[tauri::command]
+fn promote_integration_branch(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<RepoGitOverview, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?.clone();
+    let worker = state.processes.status(
+        &app,
+        "issue",
+        "Issue worker scheduler",
+        &automation_log_path(&app)?,
+    )?;
+    if worker.state != "stopped" {
+        return Err("Stop the issue worker before promoting an integration branch.".into());
+    }
+    let git = tools::configured_or_detected("", "git")?;
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    let workspace = prepared_workspace(&app, &config, &repo)?;
+    reconcile_integration_for_promotion(&git, &workspace, &repo)?;
+    let (pr_number, pr_url) = ensure_integration_pr_ref(&gh, &repo)?;
+    approve_promotion_pr(&app, &config, &repo, &gh, &pr_url)?;
+    merge_integration_branch(app, state, repo_id, pr_number)
+}
+
+#[tauri::command]
+async fn promote_integration_branch_background(
+    app: tauri::AppHandle,
+    repo_id: String,
+) -> Result<RepoGitOverview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        promote_integration_branch(app.clone(), state, repo_id)
+    })
+    .await
+    .map_err(|error| format!("Promotion task failed: {error}"))?
+}
+
 #[tauri::command]
 fn open_integration_pr(
     app: tauri::AppHandle,
@@ -1897,44 +2126,7 @@ fn open_integration_pr(
     let repo = resolve_repo(&config, &repo_id)?.clone();
     let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
 
-    // Reuse an open PR if there is one.
-    let url = if let Some((_, url)) = open_integration_pr_ref(&gh, &repo) {
-        url
-    } else {
-        let (create_ok, create_out) = run_capture_owned(
-            &gh,
-            &[
-                "pr".into(),
-                "create".into(),
-                "--repo".into(),
-                repo.github_repository.clone(),
-                "--base".into(),
-                repo.base_branch.clone(),
-                "--head".into(),
-                repo.integration_branch.clone(),
-                "--title".into(),
-                format!(
-                    "Merge {} into {}",
-                    repo.integration_branch, repo.base_branch
-                ),
-                "--body".into(),
-                format!(
-                    "Human review gate: promote AI-integration work from `{}` to `{}`. \
-                     Review the checks and merge on GitHub.",
-                    repo.integration_branch, repo.base_branch
-                ),
-            ],
-        );
-        if !create_ok {
-            return Err(format!("Could not open the integration PR: {create_out}"));
-        }
-        create_out
-            .lines()
-            .rev()
-            .find(|line| line.starts_with("https://"))
-            .unwrap_or(&create_out)
-            .to_string()
-    };
+    let (_, url) = ensure_integration_pr_ref(&gh, &repo)?;
     let _ = app.opener().open_url(url.clone(), None::<&str>);
     Ok(url)
 }
@@ -2534,6 +2726,8 @@ fn main() {
             refresh_repo,
             merge_issue_branch,
             merge_integration_branch,
+            promote_integration_branch,
+            promote_integration_branch_background,
             open_integration_pr,
             promotion_overview,
             promotion_overview_background,

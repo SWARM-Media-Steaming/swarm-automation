@@ -1,7 +1,8 @@
 use super::{
     create_test_definition, detect_test_definition, detect_tools, get_config, get_test_plan,
     get_test_runs, inspect_repository, issue_branch_pr_is_visible, needs_promotion, parse_pr_ref,
-    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
+    promotion_approval_args, reconcile_integration_for_promotion, repo_worker_args,
+    require_closed_issue, save_config, save_test_device, scheduler_arguments,
     validate_worker_script_dir, AppState, BranchAheadBehind, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
@@ -634,6 +635,109 @@ fn promotion_pr_reference_parses_number_and_url() {
     assert_eq!(parse_pr_ref(""), None);
     assert_eq!(parse_pr_ref("42\tnot-a-url"), None);
     assert_eq!(parse_pr_ref("https://github.com/o/r/pull/9"), None);
+}
+
+#[test]
+fn promotion_approval_uses_repository_scoped_bot_auth() {
+    let mut repository = repo("octocat/example");
+    repository.github_apps_config = "/private/apps.json".into();
+    let args = promotion_approval_args(
+        Path::new("/app/github_app_auth.py"),
+        &repository,
+        "codex",
+        Path::new("/usr/bin/gh"),
+        "https://github.com/octocat/example/pull/42",
+    );
+    assert!(args.windows(2).any(|pair| pair == ["--provider", "codex"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--repository", "octocat/example"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--config", "/private/apps.json"]));
+    assert!(args.iter().any(|value| value == "--approve"));
+}
+
+#[test]
+fn promotion_reconciliation_preserves_checkout_and_favors_human_conflicts() {
+    let root = tempfile::tempdir().expect("temporary git repository");
+    let remote = root.path().join("remote.git");
+    let workspace = root.path().join("workspace");
+    let run = |directory: &Path, arguments: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    run(
+        root.path(),
+        &[
+            "init",
+            "--bare",
+            "--initial-branch=main",
+            remote.to_str().unwrap(),
+        ],
+    );
+    run(
+        root.path(),
+        &[
+            "clone",
+            remote.to_str().unwrap(),
+            workspace.to_str().unwrap(),
+        ],
+    );
+    run(&workspace, &["config", "user.name", "Test User"]);
+    run(&workspace, &["config", "user.email", "test@example.com"]);
+    std::fs::write(workspace.join("shared.txt"), "initial\n").unwrap();
+    run(&workspace, &["add", "shared.txt"]);
+    run(&workspace, &["commit", "-m", "initial"]);
+    run(&workspace, &["push", "origin", "main"]);
+    run(&workspace, &["switch", "-c", "ai-main"]);
+    std::fs::write(workspace.join("shared.txt"), "ai change\n").unwrap();
+    std::fs::write(workspace.join("ai-only.txt"), "keep me\n").unwrap();
+    run(&workspace, &["add", "."]);
+    run(&workspace, &["commit", "-m", "ai work"]);
+    run(&workspace, &["push", "origin", "ai-main"]);
+    run(&workspace, &["switch", "main"]);
+    std::fs::write(workspace.join("shared.txt"), "human change\n").unwrap();
+    run(&workspace, &["add", "shared.txt"]);
+    run(&workspace, &["commit", "-m", "human work"]);
+    run(&workspace, &["push", "origin", "main"]);
+
+    let repository = RepoConfig {
+        repo_dir: workspace.to_string_lossy().into_owned(),
+        ..repo("octocat/example")
+    };
+    reconcile_integration_for_promotion(Path::new("git"), &workspace, &repository)
+        .expect("reconcile promotion branches");
+
+    assert_eq!(run(&workspace, &["branch", "--show-current"]), "main");
+    run(&workspace, &["fetch", "origin"]);
+    assert_eq!(
+        run(&workspace, &["show", "origin/ai-main:shared.txt"]),
+        "human change"
+    );
+    assert_eq!(
+        run(&workspace, &["show", "origin/ai-main:ai-only.txt"]),
+        "keep me"
+    );
+    run(
+        &workspace,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            "origin/main",
+            "origin/ai-main",
+        ],
+    );
 }
 
 // ----- provider round-trips (unchanged behaviour) ----------------------

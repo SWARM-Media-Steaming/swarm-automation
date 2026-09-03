@@ -478,6 +478,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     execute = subparsers.add_parser("exec", help="Run a command as the selected bot")
     execute.add_argument("--provider", required=True, choices=("claude", "codex", "grok"))
+    execute.add_argument(
+        "--repository", default=os.getenv("SWARM_GITHUB_REPOSITORY", ""), help="owner/name"
+    )
     execute.add_argument("command_args", nargs=argparse.REMAINDER)
     return parser
 
