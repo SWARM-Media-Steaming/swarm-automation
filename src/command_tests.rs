@@ -490,8 +490,10 @@ fn repo_worker_args_defaults_authors_to_the_assignee() {
 
 #[test]
 fn repo_worker_args_uses_the_global_preferred_provider_when_unset() {
-    let mut config = AppConfig::default();
-    config.preferred_provider = "codex".into();
+    let mut config = AppConfig {
+        preferred_provider: "codex".into(),
+        ..AppConfig::default()
+    };
     let repo = repo("octocat/example");
     config.repositories.push(repo.clone());
     let args = repo_worker_args(
@@ -518,8 +520,10 @@ fn repo_worker_args_carries_advanced_issue_policy() {
 
 #[test]
 fn scheduler_arguments_degrade_manual_to_continuous_and_pass_the_repos_file() {
-    let mut config = AppConfig::default();
-    config.schedule_mode = "manual".into();
+    let config = AppConfig {
+        schedule_mode: "manual".into(),
+        ..AppConfig::default()
+    };
     let args = scheduler_arguments(
         &config,
         &PathBuf::from("/bin/runner.py"),

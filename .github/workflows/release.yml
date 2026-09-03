@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One release at a time; never cancel an in-flight publish. PR test runs are
+# keyed per ref so a new push supersedes the previous one.
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Issue-worker Python tests
+        working-directory: issue_worker
+        run: python3 -m unittest test_swarm_issue_worker
+
+  release:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: version
+        run: |
+          V="0.1.$(git rev-list --count HEAD)"
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+          echo "Building version $V"
+
+      - name: Stamp version into manifests
+        run: |
+          V="${{ steps.version.outputs.value }}"
+          tmp="$(mktemp)"
+          jq --arg v "$V" '.version = $v' tauri.conf.json > "$tmp" && mv "$tmp" tauri.conf.json
+          sed -i '' -E "s/^version = \"[0-9.]+\"/version = \"$V\"/" Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Release notes
+        id: notes
+        run: |
+          {
+            echo "body<<EOF"
+            git log --pretty='- %s' "$(git describe --tags --match 'automation-v*' --abbrev=0 2>/dev/null || echo HEAD~20)"..HEAD | head -40
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign, and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        with:
+          tagName: automation-v${{ steps.version.outputs.value }}
+          releaseName: SWARM Automation ${{ steps.version.outputs.value }}
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+
+      - name: Prune old releases (keep newest 20)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+            --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[20:] | .[].tagName' \
+          | while read -r tag; do
+              [ -n "$tag" ] || continue
+              echo "Deleting old release $tag"
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            done
+
+  # File a tracked issue when the pipeline breaks on main, so SWARM Automation
+  # picks it up (assigned to the worker's configured assignee, labelled
+  # ci-failure). PR failures are the author's to fix and are skipped.
+  report-failure:
+    needs: [test, release]
+    if: failure() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: File or update the CI-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ASSIGNEE: ${{ vars.SWARM_ISSUE_ASSIGNEE || 'DotNetRockStar' }}
+        run: |
+          set -euo pipefail
+          short_sha="$(git rev-parse --short HEAD)"
+          subject="$(git log -1 --pretty=%s)"
+          failed_jobs="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")')"
+          [ -n "$failed_jobs" ] || failed_jobs="unknown"
+
+          gh label create ci-failure --repo "$REPO" --color B60205 \
+            --description "Release pipeline failure filed by CI" --force >/dev/null 2>&1 || true
+
+          body_file="$RUNNER_TEMP/ci-failure.md"
+          {
+            printf 'The release pipeline failed on `main`.\n\n'
+            printf '| | |\n|---|---|\n'
+            printf '| Run | %s |\n' "$RUN_URL"
+            printf '| Commit | `%s` — %s |\n' "$short_sha" "$subject"
+            printf '| Failed jobs | **%s** |\n\n' "$failed_jobs"
+            printf '## Task\n\n'
+            printf 'Open the run above, read the failed job log, and fix the root cause on a branch.\n\n'
+            printf -- '- A test/build regression from the triggering commit -> fix the code.\n'
+            printf -- '- A signing/secret problem in the release job -> operator setup, not a code bug: comment saying so and stop.\n\n'
+            printf 'Close this issue once the pipeline is green again.\n'
+          } > "$body_file"
+
+          existing="$(gh issue list --repo "$REPO" --state open --label ci-failure \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file "$body_file"
+            echo "Updated existing issue #$existing"
+          else
+            gh issue create --repo "$REPO" \
+              --title "CI: release pipeline failed ($failed_jobs) at $short_sha" \
+              --body-file "$body_file" \
+              --label ci-failure \
+              --assignee "$ASSIGNEE"
+          fi
