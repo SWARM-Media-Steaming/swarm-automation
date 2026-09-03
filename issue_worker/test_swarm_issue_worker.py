@@ -1510,6 +1510,16 @@ class RunnerTestCase(unittest.TestCase):
 
 
 class GitHubAppAuthTestCase(unittest.TestCase):
+    def test_exec_parser_accepts_repository_scope(self) -> None:
+        args = auth_module._build_parser().parse_args(
+            [
+                "exec", "--provider", "codex", "--repository", "octocat/example",
+                "--", "gh", "pr", "review", "42", "--approve",
+            ]
+        )
+        self.assertEqual(args.repository, "octocat/example")
+        self.assertEqual(args.command_args, ["--", "gh", "pr", "review", "42", "--approve"])
+
     def test_token_and_bot_identity_are_short_lived_and_not_persisted(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-app-auth-test.") as temporary:
             root = Path(temporary)
