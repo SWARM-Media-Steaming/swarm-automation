@@ -429,15 +429,31 @@ def is_worker_comment(comment: dict[str, Any]) -> bool:
     return "<!-- swarm-issue-worker:" in str(comment.get("body") or "")
 
 
+def normalize_author(login: str) -> str:
+    """Fold a GitHub login for trusted/completion author matching.
+
+    The API reports bot accounts with a ``[bot]`` suffix (``github-actions[bot]``,
+    ``swarm-codex-bot[bot]``) while operators routinely list them without it
+    (``github-actions``). Comparing case-insensitively and with the suffix
+    stripped lets either form match.
+    """
+    return login.strip().lower().removesuffix("[bot]")
+
+
+def author_matches(login: str, allowed: Iterable[str]) -> bool:
+    return normalize_author(login) in {normalize_author(name) for name in allowed}
+
+
 def extract_completion_metadata(
     comments: Iterable[dict[str, Any]], completion_authors: set[str]
 ) -> dict[str, Any] | None:
+    allowed_completion = {normalize_author(name) for name in completion_authors}
     matches = []
     for comment in sorted(comments, key=lambda item: int(item.get("id", 0))):
         body = str(comment.get("body") or "")
         author = str((comment.get("user") or {}).get("login") or "")
         marker = COMMIT_MARKER_RE.search(body)
-        if marker and author in completion_authors:
+        if marker and normalize_author(author) in allowed_completion:
             matches.append({"commit_sha": marker.group(1), "comment_id": int(comment["id"]), "author": author})
     return matches[-1] if matches else None
 
@@ -447,12 +463,14 @@ def extract_followup_metadata(
     trusted_followup_authors: set[str],
     completion_authors: set[str],
 ) -> dict[str, Any] | None:
+    allowed_trusted = {normalize_author(name) for name in trusted_followup_authors}
+    allowed_completion = {normalize_author(name) for name in completion_authors}
     ordered = sorted(comments, key=lambda item: int(item.get("id", 0)))
     completion_comments = []
     for comment in ordered:
         body = str(comment.get("body") or "")
         author = str((comment.get("user") or {}).get("login") or "")
-        if COMMIT_MARKER_RE.search(body) and author in completion_authors:
+        if COMMIT_MARKER_RE.search(body) and normalize_author(author) in allowed_completion:
             completion_comments.append(comment)
     if not completion_comments:
         return None
@@ -468,7 +486,7 @@ def extract_followup_metadata(
         if (
             int(comment.get("id", 0)) > processed_through
             and not is_worker_comment(comment)
-            and author in trusted_followup_authors
+            and normalize_author(author) in allowed_trusted
         ):
             followups.append(
                 {
@@ -1295,7 +1313,9 @@ class Worker:
             for comment in sorted(self.comments(issue_number), key=lambda item: int(item["id"]))
             if int(comment["id"]) > after_id
             and not is_worker_comment(comment)
-            and str((comment.get("user") or {}).get("login") or "") in self.trusted_followup_authors
+            and author_matches(
+                str((comment.get("user") or {}).get("login") or ""), self.trusted_followup_authors
+            )
         ]
 
     def save_new_state(self, issue: IssueContext, choice: ProviderChoice, base_sha: str) -> None:

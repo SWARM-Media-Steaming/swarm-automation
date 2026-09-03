@@ -119,6 +119,23 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(completion["commit_sha"], "1" * 40)
         self.assertIsNone(extract_completion_metadata(comments, {"someone-else"}))
 
+    def test_followup_author_matches_bot_login_without_suffix(self) -> None:
+        # Operators list the CI bot as ``github-actions`` but the API reports it
+        # as ``github-actions[bot]`` (and casing may differ) -- either form is
+        # honored as a trusted follow-up author.
+        comments = [
+            {"id": 200, "created_at": "2026-08-25T10:00:00Z", "user": {"login": "swarm-codex-bot[bot]"},
+             "body": "<!-- swarm-issue-worker:commit:" + "2" * 40 + " -->\nCompleted by **Codex**."},
+            {"id": 201, "created_at": "2026-08-25T10:05:00Z", "user": {"login": "github-actions[bot]"},
+             "body": "CI/CD failed on the latest commit; see the workflow run."},
+        ]
+        followup = extract_followup_metadata(
+            comments, {"GitHub-Actions", "DotNetRockStar"}, {"swarm-codex-bot"}
+        )
+        assert followup is not None
+        self.assertEqual(followup["trigger_comment_id"], 201)
+        self.assertEqual(followup["followup_comments"][0]["author"], "github-actions[bot]")
+
     def test_new_issue_prefers_the_provider_with_most_usage_remaining(self) -> None:
         # Fresh issue: the least-drained provider goes first regardless of the
         # preferred-provider setting, so no account is exhausted before the rest.
