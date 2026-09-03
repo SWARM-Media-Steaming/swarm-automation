@@ -165,6 +165,7 @@ impl ProcessManager {
     /// Python scheduler owns a PID lock and process group, so a live PID is
     /// enough to restore status plus pause/resume/stop controls even though
     /// Rust can no longer recover the original `Child` handle.
+    #[allow(clippy::too_many_arguments)]
     pub fn adopt_external<R: Runtime>(
         &self,
         app: &AppHandle<R>,

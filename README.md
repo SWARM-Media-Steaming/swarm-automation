@@ -123,6 +123,41 @@ automation scripts of its own. Test controls are repository-specific and driven
 entirely by the repository's `.swarm/tests.json`; environment gates belong to
 each suite's own `requirements`, not to this tool.
 
+## Releases and self-update
+
+Every push to `main` runs `.github/workflows/release.yml`: it runs the Rust and
+Python test suites and, when they pass, builds a signed `.app` and publishes it
+to GitHub Releases as `automation-v0.1.<n>` (the patch number is the commit
+count). The app reads that feed and can update itself in place — **AI
+Configuration is unrelated; the control is under Advanced → Software update**
+with three modes:
+
+- **Don't check** — stay put until you update by hand.
+- **Notify me** (default) — a banner appears; you choose when to install.
+- **Install automatically on quit** — downloaded in the background, applied on
+  the next quit.
+
+**Check now** works in any mode. Updates install in place and restart the app;
+configuration and running issue workers are untouched.
+
+macOS builds are signed with a **self-signed** certificate (no Apple Developer
+ID, not notarized). Its only job is a stable designated requirement so an
+in-place update keeps the file-access grants you already gave. A *fresh DMG*
+install still needs one right-click → Open the first time.
+
+### One-time signing setup
+
+```bash
+scripts/generate-signing-material.sh
+```
+
+Generates the macOS signing certificate and the Tauri updater keypair, writes
+the updater public key into `tauri.conf.json` (commit that), and offers to set
+the repository secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY`, `TAURI_SIGNING_PRIVATE_KEY`,
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`). Re-running rotates both — see the script
+header for the consequences.
+
 ## Repository test definitions
 
 Add `.swarm/tests.json` to a repository to make its test inventory explicit and

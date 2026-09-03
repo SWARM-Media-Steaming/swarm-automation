@@ -26,6 +26,7 @@
     "active": true,
     "category": "DeveloperTool",
     "shortDescription": "Run AI issue workers and closed-loop UAT checks from a native desktop control center.",
+    "createUpdaterArtifacts": true,
     "resources": {
       "issue_worker/*.py": "issue_worker/"
     },
@@ -36,5 +37,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/SWARM-Media-Steaming/swarm-automation/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVBRTJFRDAzQ0NBMkYxOEIKUldTTDhhTE1BKzNpNnJhelZJbWJxMEdJZ2VVL2tjQkZ1UVFudmVqcEQ0eThjNHQrTVd3bmlBQTgK",
+      "windows": { "installMode": "passive" }
+    }
   }
 }

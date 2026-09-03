@@ -1057,7 +1057,7 @@ pub fn list_runs(run_dir: &Path) -> Vec<TestRunResults> {
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
         .filter_map(|path| serde_json::from_slice(&fs::read(path).ok()?).ok())
         .collect();
-    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.sort_by_key(|run| std::cmp::Reverse(run.started_at));
     runs.truncate(HISTORY_LIMIT);
     runs
 }
