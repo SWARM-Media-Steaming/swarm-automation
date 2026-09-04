@@ -205,9 +205,6 @@ class ProviderSpec:
     effort: str
     bin: str | None
     enabled: bool       # in the rotation for new work
-    # Claude streams human-readable output to the terminal; Codex and Grok run
-    # headless-JSON, so their final summary is printed after the fact instead.
-    streams_output: bool
 
     @classmethod
     def from_args(cls, args: argparse.Namespace, key: str, name: str) -> "ProviderSpec":
@@ -218,7 +215,6 @@ class ProviderSpec:
             effort=getattr(args, f"{key}_effort"),
             bin=getattr(args, f"{key}_bin") or None,
             enabled=key in set(args.enabled_provider or KNOWN_PROVIDER_KEYS),
-            streams_output=(key == "claude"),
         )
 
 
@@ -235,10 +231,6 @@ class Config:
     minimum_remaining_percent: float
     providers: tuple[ProviderSpec, ...]
     preferred_provider: str
-    email_to: str
-    smtp_credentials_file: Path | None
-    smtp_password: str
-    no_email: bool
     dry_run: bool
     gh_bin: str
     git_bin: str
@@ -259,7 +251,6 @@ class Config:
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
         script_dir = SCRIPT_HOME
-        smtp_file = Path(args.smtp_credentials_file).expanduser() if args.smtp_credentials_file else None
         return cls(
             script_dir=script_dir,
             repo_dir=Path(args.repo_dir).expanduser().resolve(),
@@ -274,10 +265,6 @@ class Config:
                 ProviderSpec.from_args(args, key, name) for key, name in KNOWN_PROVIDERS
             ),
             preferred_provider=args.preferred_provider,
-            email_to=args.email_to,
-            smtp_credentials_file=smtp_file,
-            smtp_password=os.environ.pop("SWARM_SMTP_PASSWORD", ""),
-            no_email=args.no_email,
             dry_run=args.dry_run,
             gh_bin=args.gh_bin,
             git_bin=args.git_bin,
@@ -538,7 +525,7 @@ class Worker:
         self.state.mkdir(parents=True, exist_ok=True)
         self.lock_dir = self.state / "worker.lock"
         self.completed_file = self.state / "completed-issues"
-        self.pending_file = self.state / "pending-email.json"
+        self.pending_file = self.state / "pending-delivery.json"
         self.in_progress_file = self.state / "in-progress-issue.json"
         self.paused_dir = self.state / "quota-paused-issues"
         self.closed_paused_dir = self.state / "closed-paused-issues"
@@ -1169,7 +1156,6 @@ class Worker:
                 "quota_paused_at": iso_timestamp(),
                 "quota_pause_count": int(state.get("quota_pause_count", 0)) + 1,
                 "quota_comment_posted": False,
-                "quota_email_sent": False,
             }
         )
         self.write_state(state)
@@ -1214,63 +1200,6 @@ class Worker:
                 body,
             )
         self.update_state(quota_comment_posted=True)
-
-    def send_notification(self, state: dict[str, Any], notification_type: str = "completed") -> None:
-        if self.config.no_email:
-            log(f"Email notification disabled for issue #{state['issue_number']}.")
-            return
-        if not self.config.smtp_credentials_file:
-            raise WorkerError("Set --smtp-credentials-file (or SWARM_SMTP_CREDENTIALS_FILE) to send notifications")
-        if not self.config.smtp_credentials_file.is_file():
-            raise WorkerError(f"SMTP settings file was not found: {self.config.smtp_credentials_file}")
-        if not self.config.smtp_password:
-            raise WorkerError("SMTP password must be supplied by the foreground runner")
-        command: list[str | Path] = [
-            self.config.python_bin,
-            self.config.script_dir / "send_issue_notification.py",
-            "--credentials",
-            self.config.smtp_credentials_file,
-            "--password-stdin",
-            "--to",
-            self.config.email_to,
-            "--issue-number",
-            str(state["issue_number"]),
-            "--issue-title",
-            str(state["issue_title"]),
-            "--issue-url",
-            str(state["issue_url"]),
-            "--ai",
-            str(state.get("ai_tool") or state.get("ai")),
-        ]
-        if notification_type == "quota-paused":
-            command.extend(
-                [
-                    "--notification-type",
-                    "quota-paused",
-                    "--model",
-                    str(state["model"]),
-                    "--session-id",
-                    str(state["session_id"]),
-                ]
-            )
-        else:
-            command.extend(
-                [
-                    "--commit-sha",
-                    str(state["commit_sha"]),
-                    "--commit-message",
-                    str(state["commit_message"]),
-                ]
-            )
-        run_command(command, input_text=f"{self.config.smtp_password}\n")
-
-    def deliver_quota_notifications(self) -> None:
-        self.post_quota_comment()
-        state = self.read_state()
-        if not state.get("quota_email_sent"):
-            log(f"Sending the one-time quota pause notification for issue #{state['issue_number']}.")
-            self.send_notification(state, "quota-paused")
-            self.update_state(quota_email_sent=True)
 
     def started_comment_marker(self) -> str:
         assert self.issue and self.choice
@@ -1580,7 +1509,7 @@ class Worker:
                         if self.config.dry_run:
                             log(f"Dry run: issue #{self.issue.number} remains quota-paused on {self.choice.name}.")
                             return True
-                        self.deliver_quota_notifications()
+                        self.post_quota_comment()
                         self.suspend_paused()
                         raise SystemExit(QUOTA_PAUSED_EXIT_CODE)
                     if self.config.dry_run:
@@ -1749,18 +1678,16 @@ class Worker:
         if not self.pending_file.exists():
             return
         if self.config.dry_run:
-            log("Dry run: a pending notification exists; no email or AI work was performed.")
+            log("Dry run: pending GitHub delivery exists; no delivery or AI work was performed.")
             raise SystemExit(0)
         pending = read_json(self.pending_file)
         pending = self.post_pending_comment(pending)
         pending = self.add_pending_label(pending)
         issue_number = int(pending["issue_number"])
-        log(f"Sending notification for issue #{issue_number}.")
-        self.send_notification(pending)
         self.record_completed(issue_number)
         self.pending_file.unlink()
         self.clear_in_progress(issue_number)
-        log(f"Notification sent; issue #{issue_number} is marked completed locally.")
+        log(f"GitHub delivery finished; issue #{issue_number} is marked completed locally.")
 
     def build_prompt(
         self,
@@ -2014,8 +1941,6 @@ class Worker:
     def provider_environment(self) -> dict[str, str]:
         assert self.choice
         environment = self.github.environment(self.choice.key)
-        # SMTP secrets must never be inherited by an AI provider process.
-        environment["SWARM_SMTP_PASSWORD"] = ""
         return environment
 
     def run_ai(self, prompt: str) -> int:
@@ -2024,7 +1949,6 @@ class Worker:
         self.ai_diagnostic_file.write_text("", encoding="utf-8")
         env = os.environ.copy()
         env.update(self.provider_environment())
-        env.pop("SWARM_SMTP_PASSWORD", None)
         runner = {
             "claude": self._run_claude,
             "codex": self._run_codex,
@@ -2039,6 +1963,7 @@ class Worker:
         claude_bin = self.provider_bin("claude")
         if not claude_bin:
             raise WorkerError("Claude executable is unavailable")
+        log("Claude is working. Detailed implementation output is hidden; its final summary will appear when finished.")
         command = [
             claude_bin,
             "--model",
@@ -2072,7 +1997,6 @@ class Worker:
         process.stdin.close()
         with self.ai_output_file.open("w", encoding="utf-8") as output:
             for line in process.stdout:
-                print(line, end="", flush=True)
                 output.write(line)
         return process.wait()
 
@@ -2779,8 +2703,6 @@ class Worker:
         atomic_write_json(self.pending_file, pending)
         pending = self.post_pending_comment(pending)
         pending = self.add_pending_label(pending)
-        log(f"Sending notification for issue #{self.issue.number}.")
-        self.send_notification(pending)
         self.record_completed(self.issue.number)
         self.pending_file.unlink()
         self.clear_in_progress(self.issue.number)
@@ -2871,7 +2793,7 @@ class Worker:
                         if not self.choice.session_id:
                             raise WorkerError(f"Pinned {self.choice.name} attempt has no resumable session ID")
                         self.mark_quota_paused()
-                        self.deliver_quota_notifications()
+                        self.post_quota_comment()
                         self.suspend_paused()
                         return QUOTA_PAUSED_EXIT_CODE
         else:
@@ -2935,7 +2857,7 @@ class Worker:
                         "worktree preserved but automatic resume is unavailable"
                     )
                 self.mark_quota_paused()
-                self.deliver_quota_notifications()
+                self.post_quota_comment()
                 self.suspend_paused()
                 return QUOTA_PAUSED_EXIT_CODE
             if ai_status != 0:
@@ -2948,15 +2870,15 @@ class Worker:
             )
 
         output = self.ai_output_file.read_text(encoding="utf-8", errors="replace")
-        spec = self.config.spec(self.choice.key)
-        if spec is not None and not spec.streams_output:
-            # The full completion summary is posted to the GitHub issue (see
-            # render_pending_comment); keep it out of the operator log — only
-            # note that it arrived and where the raw text lives on disk.
-            log(
-                f"{self.choice.name} returned a completion summary "
-                f"({len(output)} chars); see {self.ai_output_file}."
-            )
+        # None of the three providers streams its raw output to the operator
+        # log any more (Claude's per-line echo was removed alongside it) —
+        # the full completion summary is posted to the GitHub issue instead
+        # (see render_pending_comment). Only note that it arrived and where
+        # the raw text lives on disk.
+        log(
+            f"{self.choice.name} returned a completion summary "
+            f"({len(output)} chars); see {self.ai_output_file}."
+        )
         if self.git("branch", "--show-current") != self.expected_branch():
             raise WorkerError(
                 f"{self.choice.name} changed branches; refusing to commit outside {self.expected_branch()}"
@@ -3084,9 +3006,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=KNOWN_PROVIDER_KEYS,
         default=env_value("SWARM_PREFERRED_PROVIDER", "claude").lower(),
     )
-    parser.add_argument("--email-to", default=env_value("SWARM_EMAIL_TO", "mr_jerrodh@hotmail.com"))
-    parser.add_argument("--smtp-credentials-file", default=env_value("SWARM_SMTP_CREDENTIALS_FILE", ""))
-    parser.add_argument("--no-email", action="store_true", default=env_bool("SWARM_NO_EMAIL", False))
     parser.add_argument("--dry-run", action="store_true", default=env_bool("SWARM_ISSUE_WORKER_DRY_RUN"))
     parser.add_argument("--gh-bin", default=env_value("GH_BIN", executable_default("gh")))
     parser.add_argument("--git-bin", default=env_value("GIT_BIN", executable_default("git")))

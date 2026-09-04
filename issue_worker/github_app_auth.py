@@ -511,7 +511,6 @@ def main(argv: list[str] | None = None) -> int:
         if not command:
             raise ValueError("exec requires a command after --")
         environment = os.environ.copy()
-        environment.pop("SWARM_SMTP_PASSWORD", None)
         environment.update(auth.bot_environment(args.provider))
         if Path(command[0]).name == "git":
             # Make HTTPS git operations use the installation token without

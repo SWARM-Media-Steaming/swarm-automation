@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import atexit
 import datetime as dt
-import getpass
 import json
 import os
 import shutil
@@ -281,7 +280,7 @@ class Runner:
             return False
         return True
 
-    def run_worker(self, repo: dict[str, object], smtp_password: str, prefix: str = "") -> int:
+    def run_worker(self, repo: dict[str, object], prefix: str = "") -> int:
         # Each repo gets its own snapshot so parallel workers never race on a
         # half-written file.
         snapshot = Path(str(repo["state_dir"])) / "swarm_issue_worker.snapshot.py"
@@ -289,7 +288,6 @@ class Runner:
         shutil.copy2(self.worker, snapshot)
         workspace = str(repo["workspace_dir"])
         environment = os.environ.copy()
-        environment["SWARM_SMTP_PASSWORD"] = smtp_password
         environment["SWARM_REPO_DIR"] = workspace
         environment["SWARM_ISSUE_WORKER_STATE_DIR"] = str(repo["state_dir"])
         environment["SWARM_ISSUE_WORKER_SCRIPT_DIR"] = str(self.script_dir)
@@ -379,7 +377,7 @@ class Runner:
             time.sleep(min(1, remaining))
         return False
 
-    def work_repo(self, repo: dict[str, object], smtp_password: str) -> int | None:
+    def work_repo(self, repo: dict[str, object]) -> int | None:
         """One repo's turn in a cycle. Returns the worker exit status, or None
         when the pre-flight deferred the repo this run."""
         if self.stop_requested:
@@ -389,7 +387,7 @@ class Runner:
         self.log(f"=== repo: {label} ===")
         if not self.synchronize_repository(repo):
             return None
-        status = self.run_worker(repo, smtp_password, prefix)
+        status = self.run_worker(repo, prefix)
         self.prune_cargo_target(repo)
         if status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE):
             self.log(f"{label}: made progress; will re-check on the next cycle.")
@@ -427,7 +425,7 @@ class Runner:
                 return code
         return 0
 
-    def run_cycle(self, smtp_password: str) -> list[int | None]:
+    def run_cycle(self) -> list[int | None]:
         """Work every configured repo once. Sequentially by default; with
         --parallel-repos, one worker per repository runs at the same time."""
         if self.parallel_repos:
@@ -437,13 +435,13 @@ class Runner:
             )
             with ThreadPoolExecutor(max_workers=len(self.repos)) as executor:
                 return list(
-                    executor.map(lambda repo: self.work_repo(repo, smtp_password), self.repos)
+                    executor.map(self.work_repo, self.repos)
                 )
         results: list[int | None] = []
         for repo in self.repos:
             if self.stop_requested:
                 break
-            results.append(self.work_repo(repo, smtp_password))
+            results.append(self.work_repo(repo))
         return results
 
     def run(self) -> int:
@@ -465,16 +463,6 @@ class Runner:
 
         signal.signal(signal.SIGINT, stop)
         signal.signal(signal.SIGTERM, stop)
-        smtp_password = os.environ.pop("SWARM_SMTP_PASSWORD", "")
-        if not self.args.no_email and not smtp_password:
-            if not sys.stdin.isatty():
-                raise RuntimeError("Run in a terminal so the SMTP password can be entered securely, or use --no-email")
-            smtp_password = getpass.getpass("SMTP password: ")
-        if not self.args.no_email and not smtp_password:
-            raise RuntimeError("An SMTP password is required unless --no-email is used")
-        if self.args.no_email and "--no-email" not in self.worker_arguments:
-            self.worker_arguments.append("--no-email")
-
         self.log(
             "Running the SWARM issue worker in this terminal. Queued issues run back to back; "
             + (
@@ -502,7 +490,7 @@ class Runner:
                     self.sleep()
                     continue
 
-                statuses = self.run_cycle(smtp_password)
+                statuses = self.run_cycle()
                 progressed = any(
                     status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE)
                     for status in statuses
@@ -548,7 +536,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remove", action="store_true")
     parser.add_argument("--check-transcode-active", action="store_true")
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--no-email", action="store_true")
     parser.add_argument(
         "--interval-seconds",
         type=positive_integer,

@@ -96,6 +96,7 @@ button:disabled { opacity: .34; cursor: not-allowed; transform: none !important;
 .activity-words strong, .activity-words span { display: block; }
 .activity-words strong { color: #dce1eb; font-size: 10px; line-height: 1.35; }
 .activity-words span { margin-top: 3px; color: var(--muted-2); font-size: 8px; }
+.activity-quick-link { display: inline-block; margin-top: 4px; }
 .activity-expand { color: var(--muted-2); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
 .activity-item[open] .activity-expand { color: var(--violet); }
 .activity-item p { margin: 0 13px 12px 48px; color: var(--muted); font-size: 10px; line-height: 1.55; }
@@ -227,6 +228,8 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .provider-card.excluded .provider-badge { color: var(--muted-2); }
 .provider-fields { display: grid; gap: 10px; }
 .provider-fields label { font-size: 9px; }
+.provider-choice { display: flex; align-items: center; gap: 7px; }
+.provider-choice .provider-preferred { width: auto; margin: 0; accent-color: var(--violet-2); cursor: pointer; }
 .provider-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: auto; }
 .provider-actions button { padding: 7px 11px; font-size: 9px; }
 

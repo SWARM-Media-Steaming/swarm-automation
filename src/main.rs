@@ -17,24 +17,17 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const SMTP_KEYRING_SERVICE: &str = "app.swarm.automation";
-const SMTP_KEYRING_ACCOUNT: &str = "smtp-password";
-const REQUIRED_WORKER_RESOURCES: [&str; 6] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 5] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
     "setup_github_bots.py",
     "codex_rate_limits.py",
-    "send_issue_notification.py",
 ];
 
 struct AppState {
     config: Mutex<AppConfig>,
     processes: ProcessManager,
-    /// Cached presence of the optional SMTP password. Checking Keychain can
-    /// trigger a macOS access prompt, so status polling must not probe it every
-    /// two seconds.
-    smtp_password_configured: Mutex<Option<bool>>,
     /// Test-only override for `app_config_path`/`automation_log_path`.
     /// `mock_context()`'s identifier defaults to empty, so every test would
     /// otherwise resolve to the same shared OS path; this gives each test's
@@ -49,7 +42,6 @@ impl Default for AppState {
         Self {
             config: Mutex::new(AppConfig::default()),
             processes: ProcessManager::default(),
-            smtp_password_configured: Mutex::new(None),
             test_data_dir: None,
         }
     }
@@ -102,7 +94,6 @@ struct AutomationStatus {
     scheduler_repo_count: usize,
     repos: Vec<RepoStatus>,
     bot_config_exists: bool,
-    smtp_password_configured: bool,
     /// Global (non-repo) validation error, if any.
     config_error: String,
     log_path: String,
@@ -147,33 +138,6 @@ fn current_config(state: &State<'_, AppState>) -> Result<AppConfig, String> {
         .lock()
         .map(|config| config.clone())
         .map_err(|_| "Configuration state lock was poisoned".into())
-}
-
-fn cached_smtp_password_configured(
-    state: &AppState,
-    probe: impl FnOnce() -> bool,
-) -> Result<bool, String> {
-    if let Some(configured) = *state
-        .smtp_password_configured
-        .lock()
-        .map_err(|_| "SMTP password state lock was poisoned".to_string())?
-    {
-        return Ok(configured);
-    }
-    let configured = probe();
-    *state
-        .smtp_password_configured
-        .lock()
-        .map_err(|_| "SMTP password state lock was poisoned".to_string())? = Some(configured);
-    Ok(configured)
-}
-
-fn set_cached_smtp_password_configured(state: &AppState, configured: bool) -> Result<(), String> {
-    *state
-        .smtp_password_configured
-        .lock()
-        .map_err(|_| "SMTP password state lock was poisoned".to_string())? = Some(configured);
-    Ok(())
 }
 
 fn reconnect_issue_scheduler<R: tauri::Runtime>(
@@ -383,9 +347,6 @@ fn get_automation_status<R: tauri::Runtime>(
             .iter()
             .all(|repo| Path::new(&repo.effective_apps_config()).is_file()),
         repos,
-        smtp_password_configured: cached_smtp_password_configured(state.inner(), || {
-            smtp_password().is_ok()
-        })?,
         config_error: config.validate().err().unwrap_or_default(),
         log_path: log_path.to_string_lossy().into_owned(),
     })
@@ -509,27 +470,13 @@ fn start_issue_worker(
         "--gh-bin".into(),
         gh.to_string_lossy().into_owned(),
     ]);
-    let mut environment = vec![
+    let environment = vec![
         ("PATH".into(), tools::enhanced_path()),
         (
             "SWARM_ISSUE_WORKER_SCRIPT_DIR".into(),
             script_dir.to_string_lossy().into_owned(),
         ),
     ];
-    if config.email_enabled {
-        let password = smtp_password()?;
-        set_cached_smtp_password_configured(state.inner(), true)?;
-        environment.push(("SWARM_SMTP_PASSWORD".into(), password));
-        arguments.extend([
-            "--smtp-credentials-file".into(),
-            config.smtp_credentials_file.clone(),
-            "--email-to".into(),
-            config.email_to.clone(),
-        ]);
-    } else {
-        arguments.push("--no-email".into());
-    }
-
     state.processes.spawn(
         &app,
         "issue",
@@ -570,7 +517,7 @@ fn resolve_providers(config: &AppConfig) -> Vec<ResolvedProvider> {
 }
 
 /// Global scheduler flags for `install_swarm_issue_cron.py`. Per-repo detail
-/// lives in the `--repos-file`; unknown provider/email flags added by the
+/// lives in the `--repos-file`; unknown provider flags added by the
 /// caller are forwarded to every repo's worker invocation.
 fn scheduler_arguments(
     config: &AppConfig,
@@ -2316,32 +2263,6 @@ fn open_provider_login(state: State<'_, AppState>, provider: String) -> Result<(
 }
 
 #[tauri::command]
-fn set_smtp_password(state: State<'_, AppState>, password: String) -> Result<bool, String> {
-    let entry = keyring::Entry::new(SMTP_KEYRING_SERVICE, SMTP_KEYRING_ACCOUNT)
-        .map_err(|error| error.to_string())?;
-    let configured = if password.is_empty() {
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => false,
-            Err(error) => return Err(error.to_string()),
-        }
-    } else {
-        entry
-            .set_password(&password)
-            .map_err(|error| error.to_string())?;
-        true
-    };
-    set_cached_smtp_password_configured(state.inner(), configured)?;
-    Ok(configured)
-}
-
-fn smtp_password() -> Result<String, String> {
-    keyring::Entry::new(SMTP_KEYRING_SERVICE, SMTP_KEYRING_ACCOUNT)
-        .map_err(|error| error.to_string())?
-        .get_password()
-        .map_err(|_| "No SMTP password is stored in macOS Keychain.".into())
-}
-
-#[tauri::command]
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     if !url.starts_with("https://") {
         return Err("Only HTTPS links may be opened.".into());
@@ -2746,7 +2667,6 @@ fn main() {
             promotion_overview,
             promotion_overview_background,
             open_provider_login,
-            set_smtp_password,
             open_external_url,
             open_automation_folder,
             get_recent_logs,

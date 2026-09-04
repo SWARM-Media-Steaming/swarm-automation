@@ -337,9 +337,6 @@ pub struct AppConfig {
     /// (download and install on the next quit). Defaults to `"notify"`.
     #[serde(default = "default_auto_update")]
     pub auto_update: String,
-    pub email_enabled: bool,
-    pub email_to: String,
-    pub smtp_credentials_file: String,
     pub worker_state_dir: String,
     pub gh_bin: String,
     pub python_bin: String,
@@ -420,9 +417,6 @@ impl Default for AppConfig {
                 .collect(),
             poll_interval_seconds: 600,
             auto_update: default_auto_update(),
-            email_enabled: false,
-            email_to: String::new(),
-            smtp_credentials_file: String::new(),
             worker_state_dir: home
                 .join(".local/state/swarm-issue-worker")
                 .to_string_lossy()
@@ -513,14 +507,6 @@ impl AppConfig {
         }
         if self.minimum_remaining_percent > 100 {
             return Err("Minimum remaining quota must be between 0 and 100 percent.".into());
-        }
-        if self.email_enabled {
-            if self.email_to.trim().is_empty() {
-                return Err("Email notifications need a recipient address.".into());
-            }
-            if self.smtp_credentials_file.trim().is_empty() {
-                return Err("Email notifications need an SMTP credentials file.".into());
-            }
         }
         Ok(())
     }

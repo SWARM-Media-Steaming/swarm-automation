@@ -61,7 +61,7 @@ class WorkerTestCase(unittest.TestCase):
 
     def _worker_argv(self, auto: bool) -> list[str]:
         return [
-            "--repo-dir", str(self.repo), "--state-dir", str(self.state), "--no-email",
+            "--repo-dir", str(self.repo), "--state-dir", str(self.state),
             "--gh-bin", "/usr/bin/false", "--claude-bin", "", "--codex-bin", "", "--grok-bin", "",
             "--branch-prefix", "ai", "--integration-branch", "ai-main", "--base-branch", "main",
             # Isolate from any real ~/.config/swarm/github-apps.json on the host
@@ -558,12 +558,12 @@ class WorkerTestCase(unittest.TestCase):
 
         with (
             mock.patch.object(worker, "issue_is_closed", return_value=True),
-            mock.patch.object(worker, "deliver_quota_notifications") as notifications,
+            mock.patch.object(worker, "post_quota_comment") as quota_comment,
             mock.patch.object(worker, "provider_capacity") as capacity,
         ):
             self.assertFalse(worker.prepare_paused_resume())
 
-        notifications.assert_not_called()
+        quota_comment.assert_not_called()
         capacity.assert_not_called()
         self.assertEqual(self.git("branch", "--show-current"), "ai-main")
         self.assertEqual(self.git("status", "--porcelain"), "")
@@ -1123,7 +1123,7 @@ class WorkerTestCase(unittest.TestCase):
     def test_dry_run_does_not_post_start_comment(self) -> None:
         args = build_parser().parse_args(
             [
-                "--repo-dir", str(self.repo), "--state-dir", str(self.state), "--no-email",
+                "--repo-dir", str(self.repo), "--state-dir", str(self.state),
                 "--dry-run", "--no-require-bot-auth", "--gh-bin", "/usr/bin/false",
                 "--claude-bin", "", "--codex-bin", "", "--grok-bin", "",
             ]
@@ -1284,7 +1284,6 @@ class RunnerTestCase(unittest.TestCase):
                 "--schedule-mode", "custom",
                 "--schedule-time", "14:30",
                 "--schedule-days", "mon,wed,fri",
-                "--no-email",
             ]
         )
         runner = runner_module.Runner(args, [])
@@ -1308,7 +1307,7 @@ class RunnerTestCase(unittest.TestCase):
             args = runner_module.build_parser().parse_args(
                 [
                     "--repo-dir", str(root), "--state-dir", str(root / "state"),
-                    "--worker", str(worker), "--once", "--no-email",
+                    "--worker", str(worker), "--once",
                     "--crontab-bin", "", "--pgrep-bin", "",
                 ]
             )
@@ -1378,7 +1377,7 @@ class RunnerTestCase(unittest.TestCase):
             args = runner_module.build_parser().parse_args(
                 [
                     "--repo-dir", str(repo), "--state-dir", str(state), "--worker", str(worker),
-                    "--once", "--no-email", "--pgrep-bin", "",
+                    "--once", "--pgrep-bin", "",
                 ]
             )
             with mock.patch.dict(os.environ, {"FAKE_RESULT_FILE": str(result_file)}):
@@ -1386,7 +1385,7 @@ class RunnerTestCase(unittest.TestCase):
             result = json.loads(result_file.read_text(encoding="utf-8"))
             self.assertEqual(result["repo"], str(repo.resolve()))
             self.assertEqual(result["state"], str(state.resolve()))
-            self.assertEqual(result["args"], ["--github-repository", "example/repo", "--no-email"])
+            self.assertEqual(result["args"], ["--github-repository", "example/repo"])
 
     def test_scheduler_preflight_fetches_and_runs_the_worker_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-sync-test.") as temporary:
@@ -1430,7 +1429,7 @@ class RunnerTestCase(unittest.TestCase):
             args = runner_module.build_parser().parse_args(
                 [
                     "--repo-dir", str(repo), "--state-dir", str(state), "--worker", str(worker),
-                    "--once", "--no-email", "--pgrep-bin", "",
+                    "--once", "--pgrep-bin", "",
                 ]
             )
             with mock.patch.dict(os.environ, {"FAKE_RESULT_FILE": str(result_file)}):
@@ -1461,7 +1460,7 @@ class RunnerTestCase(unittest.TestCase):
             (state / "in-progress-issue.json").write_text("{}\n", encoding="utf-8")
             (repo / "dirty.txt").write_text("active work\n", encoding="utf-8")
             args = runner_module.build_parser().parse_args(
-                ["--repo-dir", str(repo), "--state-dir", str(state), "--no-email"]
+                ["--repo-dir", str(repo), "--state-dir", str(state)]
             )
             runner = runner_module.Runner(args, [])
 
@@ -1496,7 +1495,7 @@ class RunnerTestCase(unittest.TestCase):
 
     def test_parallel_repos_flag_is_ignored_for_a_single_repository(self) -> None:
         args = runner_module.build_parser().parse_args(
-            ["--repo-dir", "/tmp/repo", "--state-dir", "/tmp/state", "--no-email", "--parallel-repos"]
+            ["--repo-dir", "/tmp/repo", "--state-dir", "/tmp/state", "--parallel-repos"]
         )
         self.assertTrue(args.parallel_repos)
         # One synthesized repo -> nothing to parallelize.
@@ -1509,7 +1508,7 @@ class RunnerTestCase(unittest.TestCase):
             args = runner_module.build_parser().parse_args(
                 [
                     "--repos-file", str(repos_file), "--state-dir", str(root / "state"),
-                    "--once", "--no-email", "--parallel-repos", "--pgrep-bin", "",
+                    "--once", "--parallel-repos", "--pgrep-bin", "",
                 ]
             )
             runner = runner_module.Runner(args, [])
@@ -1547,7 +1546,7 @@ class RunnerTestCase(unittest.TestCase):
             args = runner_module.build_parser().parse_args(
                 [
                     "--repos-file", str(repos_file), "--state-dir", str(root / "state"),
-                    "--once", "--no-email", "--pgrep-bin", "",
+                    "--once", "--pgrep-bin", "",
                 ]
             )
             runner = runner_module.Runner(args, [])

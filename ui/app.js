@@ -90,14 +90,9 @@
       html: "<p>Grok can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Grok from new work.</li><li><strong>Model</strong> — choose the Grok model that should handle work.</li><li><strong>Effort</strong> — choose how hard Grok should think before acting. The choices update for the selected model.</li><li><strong>Install / Sign in</strong> — prepares Grok on this Mac.</li></ul>",
       links: [{ label: "Grok Build docs", url: "https://docs.x.ai/build/overview" }],
     },
-    "provider-rotation": {
-      title: "Provider rotation",
-      html: "<p>This box controls how the worker picks an AI for each issue.</p><ul><li><strong>New issues</strong> — go to the enabled provider with the most usage remaining, so no single account is drained before the others.</li><li><strong>Follow-up comments</strong> — go to a different provider than the one that did the previous pass (when another has capacity), for an independent second look.</li><li><strong>Preferred provider (tie-breaker)</strong> — chosen when two providers have the same usage headroom.</li><li><strong>Minimum quota remaining</strong> — stops new work before a provider’s usage allowance gets too low.</li></ul>",
-      links: [],
-    },
     "provider-include-exclude": {
       title: "Enabled AI tools",
-      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work.</p><p>At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
+      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, choose the preferred tie-breaker, and set the shared minimum quota reserve.</p><p>At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
       links: [],
     },
     "software-update": {
@@ -172,22 +167,12 @@
     },
     "data-location": {
       title: "Where your data lives",
-      html: "<p>Settings are stored in a private local file. Email passwords use macOS Keychain. GitHub and AI sign-in details stay with their own tools and are not copied into logs.</p>",
-      links: [],
-    },
-    "email-notifications": {
-      title: "Email completion notices",
-      html: "<p>This box can send an email when issue work finishes.</p><ul><li><strong>Send email notifications</strong> — turns completion email on or off.</li><li><strong>Recipient</strong> — the address that receives the message.</li><li><strong>SMTP credentials file</strong> — a local file containing the mail server settings and username.</li><li><strong>SMTP password</strong> — the mail account password.</li><li><strong>Save password to Keychain</strong> — stores that password securely in macOS.</li></ul>",
+      html: "<p>Settings are stored in a private local file. GitHub and AI sign-in details stay with their own tools and are not copied into logs.</p>",
       links: [],
     },
     "work-policy": {
       title: "Issue instructions",
       html: "<p>These switches add instructions to each AI issue prompt.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>Both start off and apply only to this repository.</p>",
-      links: [],
-    },
-    "advanced-paths": {
-      title: "Local path overrides",
-      html: "<p>Leave these values alone unless the defaults do not fit your Mac.</p><ul><li><strong>Workspace folder</strong> — parent folder for app-managed repository copies.</li><li><strong>Working-copy override</strong> — uses a specific existing copy instead of an app-managed one.</li><li><strong>Worker state directory</strong> — stores progress needed to resume work.</li><li><strong>Test run data directory</strong> — stores test-run state, results, and run history.</li><li><strong>GitHub Apps configuration</strong> — uses a specific bot-settings file.</li><li><strong>GitHub CLI / Python 3 binary</strong> — uses a specific program file when automatic detection fails.</li></ul>",
       links: [],
     },
     "provider-bins": {
@@ -197,7 +182,6 @@
     },
   };
   const HELP_CONCEPTS = [
-    ["Providers & rotation", "provider-rotation"],
     ["Including / excluding a provider", "provider-include-exclude"],
     ["GitHub App bot identities", "bot-identities"],
     ["Protected branch flow", "delivery-mode"],
@@ -273,14 +257,11 @@
   }
 
   function bindConfig(config) {
-    // Provider cards + the preferred-provider <option>s must exist before the
-    // generic [data-config] pass sets #preferred-provider-select's value.
     renderProviderCards(config);
     providerList(config).forEach((provider) => {
       const input = document.querySelector(`[data-provider-bin="${provider.id}"]`);
       if (input) input.value = provider.bin;
     });
-    renderPreferredOptions(config);
     ensureRepository(config);
     renderRepositorySelector();
     document.querySelectorAll("[data-config]").forEach((input) => {
@@ -369,7 +350,7 @@
       const value = repo[input.dataset.repoConfig];
       if (input.type === "checkbox") input.checked = Boolean(value);
       else if (input.dataset.list !== undefined) input.value = Array.isArray(value) ? value.join(", ") : "";
-      else input.value = value ?? "";
+      else input.value = input.dataset.repoConfig === "github_repository" && value ? githubUrl(value) : (value ?? "");
     });
     byId("profile-kicker").textContent = (repo.github_repository || "NEW REPOSITORY").toUpperCase();
   }
@@ -382,7 +363,7 @@
       if (input.type === "checkbox") repo[key] = input.checked;
       else if (input.dataset.list !== undefined) repo[key] = input.value.split(",").map((value) => value.trim()).filter(Boolean);
       else if (input.type === "number" || key === "uat_hour") repo[key] = Number(input.value);
-      else repo[key] = input.value.trim();
+      else repo[key] = key === "github_repository" ? normalizeRepoRef(input.value) : input.value.trim();
     });
     // Approval and squash-merging are intentionally one repository setting.
     repo.auto_merge = repo.auto_approve;
@@ -525,7 +506,36 @@
       });
       effortSelect.addEventListener("change", setDirty);
       effortLabel.appendChild(effortSelect);
-      fields.append(modelLabel, effortLabel);
+      const preferredLabel = document.createElement("label");
+      preferredLabel.className = "provider-choice";
+      const preferredInput = document.createElement("input");
+      preferredInput.type = "radio";
+      preferredInput.name = "preferred-provider";
+      preferredInput.className = "provider-preferred";
+      preferredInput.checked = provider.id === config.preferred_provider;
+      preferredInput.addEventListener("change", setDirty);
+      preferredLabel.append(preferredInput, "Preferred provider (tie-breaker)");
+      const quotaLabel = document.createElement("label");
+      quotaLabel.append("Minimum quota remaining ");
+      const quotaWrap = document.createElement("div");
+      quotaWrap.className = "input-with-suffix";
+      const quotaInput = document.createElement("input");
+      quotaInput.type = "number";
+      quotaInput.min = "0";
+      quotaInput.max = "100";
+      quotaInput.className = "provider-minimum-quota";
+      quotaInput.value = String(config.minimum_remaining_percent ?? 10);
+      quotaInput.addEventListener("input", () => {
+        document.querySelectorAll(".provider-minimum-quota").forEach((input) => {
+          if (input !== quotaInput) input.value = quotaInput.value;
+        });
+        setDirty();
+      });
+      const suffix = document.createElement("span");
+      suffix.textContent = "%";
+      quotaWrap.append(quotaInput, suffix);
+      quotaLabel.appendChild(quotaWrap);
+      fields.append(modelLabel, effortLabel, preferredLabel, quotaLabel);
 
       const actions = document.createElement("div");
       actions.className = "provider-actions";
@@ -550,22 +560,6 @@
       effort: card.querySelector(".provider-effort").value,
       bin: document.querySelector(`[data-provider-bin="${card.dataset.provider}"]`)?.value.trim() || "",
     }));
-  }
-
-  function renderPreferredOptions(config) {
-    const select = document.getElementById("preferred-provider-select");
-    if (!select) return;
-    const current = select.value || config.preferred_provider;
-    const enabled = providerList(config).filter((p) => p.enabled);
-    select.replaceChildren();
-    (enabled.length ? enabled : providerList(config)).forEach((provider) => {
-      const option = document.createElement("option");
-      option.value = provider.id;
-      option.textContent = providerLabel(provider.id);
-      select.appendChild(option);
-    });
-    const ids = Array.from(select.options, (option) => option.value);
-    select.value = ids.includes(current) ? current : ids[0] || "claude";
   }
 
   function renderWorkerProviderSummary() {
@@ -601,6 +595,10 @@
     next.schedule_days = Array.from(document.querySelectorAll("#days-field input:checked"), (input) => input.value);
     const providers = collectProviders();
     if (providers.length) next.providers = providers;
+    next.preferred_provider = document.querySelector(".provider-preferred:checked")?.closest(".provider-card")?.dataset.provider
+      || next.preferred_provider;
+    const minimumQuota = document.querySelector(".provider-minimum-quota")?.value;
+    if (minimumQuota !== undefined) next.minimum_remaining_percent = Number(minimumQuota);
     return next;
   }
 
@@ -1589,9 +1587,6 @@
     if (category === "tests" && /(?:starting|running).*(?:test|uat|backend|fire tv)/i.test(message)) {
       return makeActivity(log, "Test run started", "The app is running the repository’s configured checks.", "info", "tests");
     }
-    if (/notification|email/i.test(message) && /sent|delivered/i.test(message)) {
-      return makeActivity(log, "Completion email sent", "The configured recipient was notified.", "success", category);
-    }
     return null;
   }
 
@@ -1616,6 +1611,9 @@
       if (!event.repository && configuredRepositories.length === 1) {
         [event.repository] = configuredRepositories;
       }
+      if (/^Picked up issue #/i.test(event.summary) && event.repository) {
+        event.summary += ` · ${event.repository}`;
+      }
       const previous = events[events.length - 1];
       if (previous && previous.summary === event.summary && previous.category === event.category) {
         events[events.length - 1] = event;
@@ -1627,7 +1625,7 @@
       if (state.activityFilter === "all") return true;
       if (state.activityFilter === "problems") return event.tone === "error";
       return event.category === state.activityFilter;
-    }).slice(-12).reverse();
+    }).slice(-24).reverse();
 
     feed.replaceChildren();
     if (!filtered.length) {
@@ -1654,8 +1652,17 @@
       const title = document.createElement("strong");
       title.textContent = event.summary;
       const meta = document.createElement("span");
-      meta.textContent = `${event.time} · ${event.sourceLabel}`;
+      meta.textContent = `${event.time} · ${event.sourceLabel}${event.repository ? ` · ${event.repository}` : ""}`;
       words.append(title, meta);
+      const issueUrl = event.issueNumber
+        ? githubUrl(event.repository, "issues", event.issueNumber)
+        : "";
+      if (/^Picked up issue #/i.test(event.summary) && issueUrl) {
+        // Appended inside `words`, not as a fourth child of `summary` — the
+        // summary row is a fixed 3-column grid (icon/words/expand); a link
+        // living there directly would shove "Details" onto its own row.
+        words.appendChild(externalLink("Open issue ↗", issueUrl, "activity-reference activity-quick-link"));
+      }
       const expand = document.createElement("span");
       expand.className = "activity-expand";
       expand.textContent = "Details";
@@ -1665,9 +1672,6 @@
       item.append(summary, description);
       const references = document.createElement("div");
       references.className = "activity-links";
-      const issueUrl = event.issueNumber
-        ? githubUrl(event.repository, "issues", event.issueNumber)
-        : "";
       const branchUrl = event.branchName
         ? githubUrl(event.repository, "tree", event.branchName)
         : "";
@@ -1690,9 +1694,25 @@
     byId("toggle-activity-live").textContent = state.activityPaused ? "Resume updates" : "Pause updates";
   }
 
+  function meaningfulLogLines(lines) {
+    const suppressing = new Set();
+    return lines.filter((raw) => {
+      const match = String(raw).match(/^\[[^\]]+\] \[(.*)\/([^/\]]+)\] (.*)$/);
+      if (!match) return true;
+      const key = `${match[1]}/${match[2]}`;
+      const payload = match[3];
+      if (/^\[\d{4}-\d{2}-\d{2}[ T]/.test(payload)) suppressing.delete(key);
+      if (/^##\s+(?:Changes|Verification|Operational notes)\s*$/i.test(payload.trim())) {
+        suppressing.add(key);
+        return false;
+      }
+      return !suppressing.has(key);
+    });
+  }
+
   function renderLogs() {
     const search = state.logSearch.trim().toLowerCase();
-    const filtered = state.logs.filter((line) => {
+    const filtered = meaningfulLogLines(state.logs).filter((line) => {
       if (state.logFilter !== "all" && !line.includes(`[${state.logFilter}/`)) return false;
       if (search && !line.toLowerCase().includes(search)) return false;
       return true;
@@ -1720,16 +1740,6 @@
       setDirty();
       renderReadiness();
     }, { progress: "Opening the repository picker…" });
-  }
-
-  async function savePassword() {
-    const password = byId("smtp-password").value;
-    try {
-      const configured = await invoke("set_smtp_password", { password });
-      byId("smtp-password").value = "";
-      showToast(configured ? "SMTP password saved to macOS Keychain." : "Stored SMTP password removed.", "success");
-      await refreshStatus();
-    } catch (error) { showToast(errorText(error), "error"); }
   }
 
   async function setupBots() {
@@ -2178,7 +2188,8 @@
 
   function onProvidersChanged() {
     setDirty();
-    renderPreferredOptions(collectConfig());
+    const enabledPreferred = document.querySelector(".provider-card:not(.excluded) .provider-preferred:checked");
+    if (!enabledPreferred) document.querySelector(".provider-card:not(.excluded) .provider-preferred")?.click();
     renderWorkerProviderSummary();
     renderReadiness();
   }
@@ -2238,17 +2249,15 @@
     byId("active-repo-select").addEventListener("change", (event) => selectRepository(event.target.value));
     byId("add-repo").addEventListener("click", addRepository);
     byId("remove-repo").addEventListener("click", removeRepository);
-    byId("browse-repo").addEventListener("click", chooseRepository);
     byId("prepare-workspace").addEventListener("click", prepareWorkspace);
     byId("reveal-workspace").addEventListener("click", revealWorkspace);
     byId("github-repository-input").addEventListener("blur", (event) => {
       const normalized = normalizeRepoRef(event.target.value);
-      if (normalized !== event.target.value) event.target.value = normalized;
+      event.target.value = normalized ? githubUrl(normalized) : "";
       stashRepositoryForm();
       renderRepositorySelector();
       setDirty();
     });
-    byId("save-password").addEventListener("click", savePassword);
     byId("check-update").addEventListener("click", () => checkForUpdate());
     byId("update-banner-install").addEventListener("click", applyUpdate);
     byId("update-banner-later").addEventListener("click", () => byId("update-banner").classList.add("hidden"));

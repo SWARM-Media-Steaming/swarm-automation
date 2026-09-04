@@ -49,8 +49,7 @@ The application can:
 Configuration is stored as mode `0600` JSON in the application's macOS config
 directory; managed clones live under
 `~/Library/Application Support/app.swarm.automation/checkouts/` unless a
-workspace folder is set. The optional SMTP password is stored separately in
-macOS Keychain.
+workspace folder is set.
 Provider and GitHub credentials remain owned by their CLIs and are never copied
 into the app configuration or automation log.
 
