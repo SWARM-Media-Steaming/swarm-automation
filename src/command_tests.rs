@@ -1,8 +1,8 @@
 use super::{
     create_test_definition, detect_test_definition, detect_tools, get_config, get_test_plan,
     get_test_runs, inspect_repository, issue_branch_pr_is_visible, needs_promotion, parse_pr_ref,
-    promotion_approval_args, reconcile_integration_for_promotion, repo_worker_args,
-    require_closed_issue, save_config, save_test_device, scheduler_arguments,
+    promotion_approval_args, reconcile_integration_for_promotion, repo_status_args,
+    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
     validate_worker_script_dir, AppState, BranchAheadBehind, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
@@ -656,6 +656,87 @@ fn promotion_approval_uses_repository_scoped_bot_auth() {
         .windows(2)
         .any(|pair| pair == ["--config", "/private/apps.json"]));
     assert!(args.iter().any(|value| value == "--approve"));
+}
+
+#[test]
+fn repo_status_args_place_the_subcommand_before_its_flags() {
+    let args = repo_status_args(
+        Path::new("/app/github_app_auth.py"),
+        "/private/apps.json",
+        "octocat/example",
+        "claude",
+    );
+    let subcommand = args
+        .iter()
+        .position(|value| value == "repo-status")
+        .expect("repo-status subcommand present");
+    let repository = args
+        .iter()
+        .position(|value| value == "--repository")
+        .expect("--repository present");
+    let provider = args
+        .iter()
+        .position(|value| value == "--provider")
+        .expect("--provider present");
+    // argparse rejects the whole call unless `repo-status` precedes the
+    // arguments that belong to that subcommand (#48).
+    assert!(subcommand < repository, "repo-status must precede --repository");
+    assert!(subcommand < provider, "repo-status must precede --provider");
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--repository", "octocat/example"]));
+    assert!(args.windows(2).any(|pair| pair == ["--provider", "claude"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--config", "/private/apps.json"]));
+}
+
+#[test]
+fn repo_status_args_are_accepted_by_the_vendored_worker_script() {
+    let python = match which_python() {
+        Some(python) => python,
+        None => return,
+    };
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("issue_worker/github_app_auth.py");
+    let scratch = tempfile::tempdir().expect("temp dir");
+    // A config path that does not exist: repository_status returns the
+    // "unconfigured" state without any network call, so this stays hermetic
+    // while still exercising the real argument parser end to end.
+    let missing_config = scratch.path().join("github-apps.json");
+    let output = std::process::Command::new(&python)
+        .args(repo_status_args(
+            &script,
+            &missing_config.to_string_lossy(),
+            "octocat/example",
+            "claude",
+        ))
+        .output()
+        .expect("run github_app_auth.py");
+    assert!(
+        output.status.success(),
+        "repo-status exited with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("repo-status prints JSON");
+    assert_eq!(parsed["state"], "unconfigured");
+}
+
+fn which_python() -> Option<PathBuf> {
+    for candidate in ["python3", "/usr/bin/python3", "/opt/homebrew/bin/python3"] {
+        let found = std::process::Command::new(candidate)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if found {
+            return Some(PathBuf::from(candidate));
+        }
+    }
+    None
 }
 
 #[test]
