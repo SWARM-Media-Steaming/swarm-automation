@@ -1051,6 +1051,29 @@ struct BotReadiness {
     needs_setup_flow: bool,
 }
 
+/// Argv for one `github_app_auth.py repo-status` call. `--repository` and
+/// `--provider` belong to the `repo-status` subcommand, not to the top-level
+/// parser, so the subcommand name has to come first -- argparse rejects the
+/// whole invocation otherwise, and the desktop UI then renders that failure as
+/// "this bot needs setup" even when the GitHub App is fully installed (#48).
+fn repo_status_args(
+    script: &Path,
+    apps_config: &str,
+    repository: &str,
+    provider: &str,
+) -> Vec<String> {
+    vec![
+        script.to_string_lossy().into_owned(),
+        "--config".into(),
+        apps_config.to_string(),
+        "repo-status".into(),
+        "--repository".into(),
+        repository.to_string(),
+        "--provider".into(),
+        provider.to_string(),
+    ]
+}
+
 #[tauri::command]
 fn check_repo_bot_readiness<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -1089,19 +1112,7 @@ fn check_repo_bot_readiness<R: tauri::Runtime>(
             }
             let (_ok, raw) = run_capture_owned(
                 &python,
-                &[
-                    script.to_string_lossy().into_owned(),
-                    "--config".into(),
-                    apps_config.clone(),
-                    // `--repository` is an argument of the `repo-status`
-                    // subcommand, not a global one -- it must follow the
-                    // subcommand name or argparse rejects the whole call.
-                    "repo-status".into(),
-                    "--repository".into(),
-                    repo.github_repository.clone(),
-                    "--provider".into(),
-                    id.clone(),
-                ],
+                &repo_status_args(&script, &apps_config, &repo.github_repository, &id),
             );
             let parsed: serde_json::Value = serde_json::from_str(raw.trim()).unwrap_or_default();
             let field = |key: &str| {
