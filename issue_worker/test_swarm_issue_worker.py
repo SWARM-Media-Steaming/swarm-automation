@@ -119,6 +119,29 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(completion["commit_sha"], "1" * 40)
         self.assertIsNone(extract_completion_metadata(comments, {"someone-else"}))
 
+    def test_environment_only_summary_advances_followup_cursor(self) -> None:
+        comments = [
+            {"id": 100, "user": {"login": "swarm-claude-bot[bot]"},
+             "body": "<!-- swarm-issue-worker:commit:" + "1" * 40 + " -->\nCompleted by **Claude**."},
+            {"id": 101, "created_at": "2026-09-04T12:08:47Z",
+             "user": {"login": "github-actions[bot]"}, "body": "CI failed."},
+            {"id": 102, "user": {"login": "swarm-claude-bot[bot]"},
+             "body": "<!-- swarm-issue-worker:environment-only:issue:226;provider:claude;through-comment:101 -->\nReviewed by **Claude** with no code changes."},
+        ]
+        completion_authors = {"swarm-claude-bot"}
+        self.assertIsNone(
+            extract_followup_metadata(comments, {"github-actions"}, completion_authors)
+        )
+
+        comments.append(
+            {"id": 103, "created_at": "2026-09-04T13:00:00Z",
+             "user": {"login": "github-actions[bot]"}, "body": "A different CI failure."}
+        )
+        followup = extract_followup_metadata(comments, {"github-actions"}, completion_authors)
+        assert followup is not None
+        self.assertEqual(followup["trigger_comment_id"], 103)
+        self.assertEqual([item["id"] for item in followup["followup_comments"]], [103])
+
     def test_followup_author_matches_bot_login_without_suffix(self) -> None:
         # Operators list the CI bot as ``github-actions`` but the API reports it
         # as ``github-actions[bot]`` (and casing may differ) -- either form is
@@ -244,6 +267,42 @@ class WorkerTestCase(unittest.TestCase):
         body = github.call_args.args[2]
         self.assertIn("environment-only", body)
         self.assertNotIn("SWARM_ENVIRONMENT_ONLY", body)
+
+    def test_environment_only_followup_marker_records_trigger_comment(self) -> None:
+        self.worker.issue = IssueContext(
+            226, "Environment follow-up", "Body", [], "https://example.invalid/226",
+            work_type="followup", trigger_comment_id=5540212567,
+        )
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-226")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with (
+            mock.patch.object(self.worker, "usage_snapshot", return_value=None),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.worker.finalize_environment_only("## Summary\nNo code change.")
+
+        body = github.call_args.args[2]
+        self.assertIn("through-comment:5540212567", body)
+
+    def test_quota_notice_is_deduplicated_across_pause_counts(self) -> None:
+        self.worker.issue = IssueContext(226, "Paused", "", [], "https://example.invalid/226")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-226")
+        state = self.paused_state(226)
+        state.update({"quota_pause_count": 2, "quota_comment_posted": False})
+        self.worker.write_state(state)
+        existing = [{
+            "body": "<!-- swarm-issue-worker:quota-paused:issue:226;pause:1;session:session-226 -->\nWork paused."
+        }]
+        with (
+            mock.patch.object(self.worker, "comments", return_value=existing),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_quota_comment()
+
+        github.assert_not_called()
+        self.assertTrue(self.worker.read_state()["quota_comment_posted"])
 
     def test_saved_issue_can_handoff_to_another_provider(self) -> None:
         self.worker.issue = IssueContext(143, "Handoff", "Body", [], "https://example.invalid/143")

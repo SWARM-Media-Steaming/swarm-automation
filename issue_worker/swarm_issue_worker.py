@@ -55,6 +55,9 @@ QUOTA_RE = re.compile(
 )
 COMMIT_MARKER_RE = re.compile(r"swarm-issue-worker:commit:([0-9a-f]{40})")
 THROUGH_COMMENT_RE = re.compile(r"through-comment:([0-9]+)")
+ENVIRONMENT_ONLY_MARKER_RE = re.compile(
+    r"swarm-issue-worker:environment-only:issue:[0-9]+;provider:[a-z0-9_-]+"
+)
 
 # The full set of providers this worker knows how to drive, in default
 # rotation order. `key` is the lowercase id used for GitHub App lookups and CLI
@@ -480,6 +483,21 @@ def extract_followup_metadata(
     ai_match = PREVIOUS_AI_RE.search(body)
     through_match = THROUGH_COMMENT_RE.search(body)
     processed_through = int(through_match.group(1)) if through_match else int(completion["id"])
+    # A no-code/environment-only follow-up has no commit marker of its own,
+    # but it still consumes every trusted comment through the trigger that
+    # caused the review. Treat its authenticated marker as a durable cursor;
+    # otherwise the next worker cycle sees the same CI/operator comment after
+    # the older commit marker and runs the AI again forever.
+    for comment in ordered:
+        comment_body = str(comment.get("body") or "")
+        author = str((comment.get("user") or {}).get("login") or "")
+        if (
+            ENVIRONMENT_ONLY_MARKER_RE.search(comment_body)
+            and normalize_author(author) in allowed_completion
+        ):
+            environment_through = THROUGH_COMMENT_RE.search(comment_body)
+            if environment_through:
+                processed_through = max(processed_through, int(environment_through.group(1)))
     followups = []
     for comment in ordered:
         author = str((comment.get("user") or {}).get("login") or "")
@@ -1165,12 +1183,22 @@ class Worker:
         state = self.read_state()
         if state.get("quota_comment_posted"):
             return
-        pause_count = int(state.get("quota_pause_count", 1))
         marker = (
             f"<!-- swarm-issue-worker:quota-paused:issue:{self.issue.number};"
-            f"pause:{pause_count};session:{self.choice.session_id} -->"
+            f"session:{self.choice.session_id} -->"
         )
-        existing = any(marker in str(comment.get("body") or "") for comment in self.comments(self.issue.number))
+        # One notice per preserved AI session, even if an external supervisor
+        # repeatedly invokes the worker while capacity is unavailable. Also
+        # recognize the older marker shape containing ``pause:<n>`` so an
+        # upgrade does not add another notice to an already-paused issue.
+        legacy_or_current_marker = re.compile(
+            rf"swarm-issue-worker:quota-paused:issue:{self.issue.number};"
+            rf"(?:pause:[0-9]+;)?session:{re.escape(self.choice.session_id)}(?:\s|-->)"
+        )
+        existing = any(
+            legacy_or_current_marker.search(str(comment.get("body") or ""))
+            for comment in self.comments(self.issue.number)
+        )
         if not existing:
             body = (
                 f"{marker}\nWork paused because **{self.choice.name}** no longer has sufficient usage available.\n\n"
@@ -2763,10 +2791,13 @@ class Worker:
 
     def finalize_environment_only(self, ai_output: str) -> None:
         assert self.issue and self.choice
-        marker = (
-            f"<!-- swarm-issue-worker:environment-only:issue:{self.issue.number};"
-            f"provider:{self.choice.key} -->"
+        marker_fields = (
+            f"swarm-issue-worker:environment-only:issue:{self.issue.number};"
+            f"provider:{self.choice.key}"
         )
+        if self.issue.trigger_comment_id:
+            marker_fields += f";through-comment:{self.issue.trigger_comment_id}"
+        marker = f"<!-- {marker_fields} -->"
         usage_lines = self.render_usage_report(
             self.choice.name,
             self.read_state().get("usage_at_start"),
