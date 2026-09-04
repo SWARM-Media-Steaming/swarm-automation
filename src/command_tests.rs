@@ -680,7 +680,10 @@ fn repo_status_args_place_the_subcommand_before_its_flags() {
         .expect("--provider present");
     // argparse rejects the whole call unless `repo-status` precedes the
     // arguments that belong to that subcommand (#48).
-    assert!(subcommand < repository, "repo-status must precede --repository");
+    assert!(
+        subcommand < repository,
+        "repo-status must precede --repository"
+    );
     assert!(subcommand < provider, "repo-status must precede --provider");
     assert!(args
         .windows(2)
@@ -697,8 +700,7 @@ fn repo_status_args_are_accepted_by_the_vendored_worker_script() {
         Some(python) => python,
         None => return,
     };
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("issue_worker/github_app_auth.py");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("issue_worker/github_app_auth.py");
     let scratch = tempfile::tempdir().expect("temp dir");
     // A config path that does not exist: repository_status returns the
     // "unconfigured" state without any network call, so this stays hermetic
