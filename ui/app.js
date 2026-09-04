@@ -217,9 +217,20 @@
   function showToast(message, kind = "") {
     const toast = document.createElement("div");
     toast.className = `toast ${kind}`.trim();
-    toast.textContent = String(message || "Unknown error");
+    if (kind === "progress") {
+      // Persistent "something is happening" toast — the caller removes it.
+      const spinner = document.createElement("span");
+      spinner.className = "toast-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      const label = document.createElement("span");
+      label.textContent = String(message || "Working…");
+      toast.append(spinner, label);
+    } else {
+      toast.textContent = String(message || "Unknown error");
+    }
     byId("toast-stack").appendChild(toast);
-    window.setTimeout(() => toast.remove(), 5000);
+    if (kind !== "progress") window.setTimeout(() => toast.remove(), 5000);
+    return toast;
   }
 
   function errorText(error) {
@@ -636,9 +647,15 @@
     if (state.dirty) await saveConfig({ quiet: true });
   }
 
-  async function withBusy(key, callback) {
+  async function withBusy(key, callback, { progress = "Working…" } = {}) {
     if (state.busy.has(key)) return;
     state.busy.add(key);
+    // Disable the button that triggered the action (dynamically-built merge /
+    // promote buttons aren't [data-action], so renderControls can't reach them).
+    const trigger = document.activeElement;
+    const lockedTrigger = trigger instanceof HTMLButtonElement && !trigger.disabled ? trigger : null;
+    if (lockedTrigger) lockedTrigger.disabled = true;
+    const progressToast = progress ? showToast(progress, "progress") : null;
     renderControls();
     try {
       await callback();
@@ -646,11 +663,16 @@
       showToast(errorText(error), "error");
     } finally {
       state.busy.delete(key);
+      if (progressToast) progressToast.remove();
+      if (lockedTrigger) lockedTrigger.disabled = false;
       renderControls();
     }
   }
 
   async function runAction(action) {
+    const verb = action.startsWith("start-") ? "Starting" : action.startsWith("run-") ? "Running"
+      : action.startsWith("pause-") ? "Updating" : "Stopping";
+    const subject = action.endsWith("issue") ? "issue worker" : "test scheduler";
     await withBusy(action, async () => {
       const isIssue = action.endsWith("issue");
       const repo = currentRepo();
@@ -674,7 +696,7 @@
       }
       await refreshStatus();
       if (!isIssue) await refreshTestPlan({ quiet: true });
-    });
+    }, { progress: `${verb} the ${subject}…` });
   }
 
   function processLabel(status, kind) {
@@ -922,7 +944,7 @@
       });
       byId("test-definition-draft").classList.remove("hidden");
       byId("test-definition-editor").focus();
-    });
+    }, { progress: "Detecting tests…" });
   }
 
   function cancelTestDefinition() {
@@ -943,7 +965,7 @@
       await refreshStatus();
       await refreshTestPlan();
       showToast(`Test definition created at ${path}. Commit it to keep it with the repository.`, "success");
-    });
+    }, { progress: "Saving the test definition…" });
   }
 
   function formatTimestamp(seconds) {
@@ -1046,7 +1068,7 @@
       bindConfig(state.config);
       await refreshTestPlan();
       showToast("Device selection saved for this repository. Press Run now to retry blocked suites.", "success");
-    });
+    }, { progress: "Saving the device selection…" });
   }
 
   // Accepts "owner/name", a full github.com URL, or an SSH remote; returns
@@ -1062,12 +1084,11 @@
   async function prepareWorkspace() {
     await withBusy("prepare-workspace", async () => {
       await saveBeforeAction();
-      showToast("Cloning / updating the workspace… watch Info & Debug if it's a large repo.", "success");
       const inspection = await invoke("prepare_workspace", { repoId: currentRepo().id });
       renderRepository(inspection);
       await refreshStatus();
       showToast("Workspace ready.", "success");
-    });
+    }, { progress: "Cloning / updating the workspace… watch Info & Debug if it's a large repo." });
   }
 
   function revealWorkspace() {
@@ -1140,6 +1161,7 @@
   }
 
   async function installProvider(provider) {
+    const cliName = PROVIDER_META[provider]?.cli || provider;
     await withBusy(`install-${provider}`, async () => {
       await invoke("install_ai_cli", { provider });
       const cli = PROVIDER_META[provider]?.cli || provider;
@@ -1150,7 +1172,7 @@
         "success",
       );
       if (provider !== "grok") navigate("debug");
-    });
+    }, { progress: `Starting the ${cliName} install…` });
   }
 
   async function signIn(provider) {
@@ -1697,7 +1719,7 @@
       renderRepository(inspection);
       setDirty();
       renderReadiness();
-    });
+    }, { progress: "Opening the repository picker…" });
   }
 
   async function savePassword() {
@@ -1716,14 +1738,14 @@
       await invoke("launch_bot_setup", { repoId: currentRepo().id });
       showToast("A browser opened for any bot that still needs creating or installing. Choose “All repositories” on the install screen.", "success");
       pollBotReadiness();
-    });
+    }, { progress: "Opening GitHub for bot setup…" });
   }
 
   async function recheckBots() {
     await withBusy("recheck-bots", async () => {
       await saveBeforeAction();
       await refreshBotReadiness({ quiet: false });
-    });
+    }, { progress: "Re-checking bot readiness…" });
   }
 
   async function verifyBots() {
@@ -1745,7 +1767,7 @@
         container.appendChild(row);
       });
       await refreshStatus();
-    });
+    }, { progress: "Verifying bot sign-in…" });
   }
 
   // ----- Software update ---------------------------------------------------
@@ -1782,14 +1804,13 @@
         renderUpdateDetail(null);
         if (!quiet) showToast("SWARM Automation is up to date.", "success");
       }
-    });
+    }, { progress: "Checking for updates…" });
   }
 
   async function applyUpdate() {
     await withBusy("apply-update", async () => {
-      showToast("Downloading update… the app will restart when it's ready.", "success");
       await invoke("install_update"); // the process restarts on success
-    });
+    }, { progress: "Downloading update… the app will restart when it's ready." });
   }
 
   function showUpdateBanner(summary) {
@@ -2013,7 +2034,7 @@
       });
       renderBranchOverview(state.branchOverview);
       showToast(`Closed issue #${branch.issueNumber}'s PR was squash-merged.`, "success");
-    });
+    }, { progress: `Squash-merging PR #${branch.prNumber}…` });
   }
 
   async function openIntegrationPullRequest() {
@@ -2022,7 +2043,7 @@
       showToast(`Promotion pull request ready: ${url}`, "success");
       await refreshBranches({ quiet: true });
       void refreshPromotions({ quiet: true });
-    });
+    }, { progress: "Preparing the promotion pull request…" });
   }
 
   async function mergeIntegrationPullRequest(prNumber) {
@@ -2033,7 +2054,7 @@
       renderBranchOverview(state.branchOverview);
       showToast(`${repo.integration_branch} was merged into ${repo.base_branch}.`, "success");
       void refreshPromotions({ quiet: true });
-    });
+    }, { progress: `Merging promotion PR #${prNumber}…` });
   }
 
   // ----- Overview promotion queue --------------------------------------------
@@ -2101,7 +2122,7 @@
       if (currentRepo()?.id === promotion.repoId && document.querySelector("#view-repository.active")) {
         void refreshBranches({ quiet: true });
       }
-    });
+    }, { progress: "Preparing the promotion pull request…" });
   }
 
   async function mergePromotion(promotion) {
@@ -2114,7 +2135,7 @@
       if (currentRepo()?.id === promotion.repoId && document.querySelector("#view-repository.active")) {
         void refreshBranches({ quiet: true });
       }
-    });
+    }, { progress: `Promoting ${name} to ${promotion.baseBranch}…` });
   }
 
   // ----- Interactive help modal -------------------------------------------
@@ -2205,7 +2226,7 @@
       state.activitySnapshot = state.activityPaused ? [...state.logs] : null;
       renderActivity();
     });
-    byId("save-button").addEventListener("click", () => withBusy("save", () => saveConfig()));
+    byId("save-button").addEventListener("click", () => withBusy("save", () => saveConfig(), { progress: "Saving the configuration…" }));
     byId("hide-button").addEventListener("click", () => invoke("hide_to_tray").catch((error) => showToast(errorText(error), "error")));
     byId("refresh-tools").addEventListener("click", () => refreshTools());
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
