@@ -1276,6 +1276,75 @@ class Worker:
             log(f"Issue #{self.issue.number} already has this work-round start notice.")
         self.update_state(started_comment_posted=True, usage_at_start=usage_at_start)
 
+    def resumed_comment_marker(self, resume_token: str) -> str:
+        assert self.issue and self.choice
+        return (
+            f"<!-- swarm-issue-worker:resumed:issue:{self.issue.number};"
+            f"provider:{self.choice.key};session:{self.choice.session_id};at:{resume_token} -->"
+        )
+
+    def post_resumed_comment(self) -> None:
+        """Announce that a preserved session is being picked back up.
+
+        The start notice (post_started_comment) only fires on the first round
+        of work; when the worker later reclaims a quota-paused attempt —
+        either with the same provider or a hand-off provider continuing on the
+        existing branch — nothing on the issue shows that work has restarted.
+        This posts that notice once per resume, keyed on ``quota_resumed_at``
+        so repeated scheduler ticks within the same resumed run do not repeat
+        it, and calls out any trusted comments left while the work was paused.
+        """
+        assert self.issue and self.choice
+        if not self.quota_resume_ready:
+            return
+        state = self.read_state()
+        resume_token = str(state.get("quota_resumed_at") or "")
+        if not resume_token or state.get("resumed_comment_token") == resume_token:
+            return
+        marker = self.resumed_comment_marker(resume_token)
+        comments = self.comments(self.issue.number)
+        already_posted = any(
+            marker in str(comment.get("body") or "") for comment in comments
+        )
+        if not already_posted:
+            new_comments = self.load_resume_comments(
+                self.issue.number, int(state.get("session_comment_id", 0)), comments
+            )
+            usage = self.usage_snapshot(self.choice.key)
+            lines = [
+                marker,
+                f"🤖 **{self.choice.name} Bot** is resuming work on this issue.",
+                "",
+                f"- Model: `{self.choice.model}`",
+                f"- Branch: `{self.expected_branch()}`",
+                f"- Session: `{self.choice.session_id}`",
+                f"- {self.choice.name} usage remaining: {self.format_usage_snapshot(usage)}",
+            ]
+            if new_comments:
+                count = len(new_comments)
+                noun = "comment" if count == 1 else "comments"
+                lines.append(
+                    f"- Picking up {count} new trusted {noun} left while the work was paused."
+                )
+            body = "\n".join(lines) + "\n"
+            self.github.gh(
+                [
+                    "issue",
+                    "comment",
+                    str(self.issue.number),
+                    "--repo",
+                    self.config.github_repository,
+                    "--body-file",
+                    "-",
+                ],
+                self.choice.key,
+                body,
+            )
+            log(f"Posted {self.choice.name} Bot resume notice to issue #{self.issue.number}.")
+        else:
+            log(f"Issue #{self.issue.number} already has this resume notice.")
+        self.update_state(resumed_comment_token=resume_token)
+
     def ai_failure_is_quota(self) -> bool:
         combined = ""
         for path in (self.ai_output_file, self.ai_diagnostic_file):
@@ -1286,7 +1355,13 @@ class Worker:
         assert self.choice
         return self.provider_capacity(self.choice.name) == 1
 
-    def load_resume_comments(self, issue_number: int, after_id: int) -> list[dict[str, Any]]:
+    def load_resume_comments(
+        self,
+        issue_number: int,
+        after_id: int,
+        comments: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        source = comments if comments is not None else self.comments(issue_number)
         return [
             {
                 "id": int(comment["id"]),
@@ -1294,7 +1369,7 @@ class Worker:
                 "created_at": str(comment.get("created_at") or ""),
                 "body": str(comment.get("body") or ""),
             }
-            for comment in sorted(self.comments(issue_number), key=lambda item: int(item["id"]))
+            for comment in sorted(source, key=lambda item: int(item["id"]))
             if int(comment["id"]) > after_id
             and not is_worker_comment(comment)
             and author_matches(
@@ -2883,6 +2958,7 @@ class Worker:
 
         run_start, recovery_mode, candidate, recovery_dirty = self.prepare_repository()
         self.post_started_comment()
+        self.post_resumed_comment()
         prompt = self.build_prompt(recovery_mode, candidate, recovery_dirty)
         ai_status = self.run_ai(prompt)
         if ai_status != 0 or not self.ai_output_file.exists() or self.ai_output_file.stat().st_size == 0:
