@@ -1172,6 +1172,75 @@ class WorkerTestCase(unittest.TestCase):
         github.assert_not_called()
         self.assertTrue(self.worker.read_state()["started_comment_posted"])
 
+    def _prime_resumed_worker(self) -> None:
+        self.worker.issue = IssueContext(420, "Resume notice", "", [], "https://example.invalid/420")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "session-420", resume=True)
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.update_state(
+            started_comment_posted=True,
+            session_started=True,
+            session_comment_id=0,
+            quota_resumed_at="2026-09-05T09:00:00-05:00",
+        )
+        self.worker.quota_resume_ready = True
+
+    def test_resume_comment_is_posted_once_when_a_paused_session_resumes(self) -> None:
+        self._prime_resumed_worker()
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_resumed_comment()
+            self.worker.post_resumed_comment()
+        github.assert_called_once()
+        arguments, provider, body = github.call_args.args
+        self.assertEqual(provider, "codex")
+        self.assertIn("issue", arguments)
+        self.assertIn("**Codex Bot** is resuming work on this issue", body)
+        self.assertIn("- Branch: `ai/codex/issue-420`", body)
+        self.assertTrue(is_worker_comment({"body": body}))
+        self.assertEqual(
+            self.worker.read_state()["resumed_comment_token"], "2026-09-05T09:00:00-05:00"
+        )
+
+    def test_resume_comment_calls_out_comments_left_while_paused(self) -> None:
+        self._prime_resumed_worker()
+        left_while_paused = [
+            {"id": 7, "author": "DotNetRockStar", "created_at": "", "body": "One more thing."},
+            {"id": 8, "author": "DotNetRockStar", "created_at": "", "body": "And another."},
+        ]
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(
+                self.worker, "load_resume_comments", return_value=left_while_paused
+            ),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_resumed_comment()
+        body = github.call_args.args[2]
+        self.assertIn("Picking up 2 new trusted comments left while the work was paused", body)
+
+    def test_resume_comment_is_skipped_for_a_fresh_first_round(self) -> None:
+        self.worker.issue = IssueContext(421, "Fresh start", "", [], "https://example.invalid/421")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "session-421")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with mock.patch.object(self.worker.github, "gh", return_value="") as github:
+            self.worker.post_resumed_comment()
+        github.assert_not_called()
+
+    def test_existing_resume_marker_repairs_state_without_duplicate_comment(self) -> None:
+        self._prime_resumed_worker()
+        marker = self.worker.resumed_comment_marker("2026-09-05T09:00:00-05:00")
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[{"body": marker}]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_resumed_comment()
+        github.assert_not_called()
+        self.assertEqual(
+            self.worker.read_state()["resumed_comment_token"], "2026-09-05T09:00:00-05:00"
+        )
+
     def test_dry_run_does_not_post_start_comment(self) -> None:
         args = build_parser().parse_args(
             [
