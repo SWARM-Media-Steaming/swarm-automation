@@ -59,6 +59,33 @@ ENVIRONMENT_ONLY_MARKER_RE = re.compile(
     r"swarm-issue-worker:environment-only:issue:[0-9]+;provider:[a-z0-9_-]+"
 )
 
+# Issue priority, honored when choosing which assigned issue to work next.
+# Lower rank sorts first (Urgent before High before Medium before Low). An issue
+# with no recognized priority label is treated as Low.
+PRIORITY_RANKS: dict[str, int] = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
+DEFAULT_PRIORITY_RANK: int = PRIORITY_RANKS["low"]
+# Matches labels like "urgent", "priority: high", "priority/medium", "P2".
+PRIORITY_LABEL_RE = re.compile(
+    r"^(?:priority\s*[:/_-]?\s*)?(urgent|high|medium|low)$|^p([0-3])$"
+)
+_PN_RANKS: tuple[str, ...] = ("urgent", "high", "medium", "low")
+
+
+def priority_rank(labels: Iterable[str]) -> int:
+    """Return the strongest priority rank named by an issue's labels."""
+    best = DEFAULT_PRIORITY_RANK
+    for label in labels:
+        match = PRIORITY_LABEL_RE.match(str(label).strip().lower())
+        if not match:
+            continue
+        word = match.group(1) or _PN_RANKS[int(match.group(2))]
+        best = min(best, PRIORITY_RANKS[word])
+    return best
+
+
+def issue_labels(remote_issue: dict[str, Any]) -> list[str]:
+    return [str(label["name"]) for label in remote_issue.get("labels", [])]
+
 # The full set of providers this worker knows how to drive, in default
 # rotation order. `key` is the lowercase id used for GitHub App lookups and CLI
 # flags; branch/commit attribution maps Grok's provider id to the vendor name
@@ -1305,7 +1332,7 @@ class Worker:
             number=int(state["issue_number"]),
             title=str(remote_issue["title"]),
             body=str(remote_issue.get("body") or ""),
-            labels=[str(label["name"]) for label in remote_issue.get("labels", [])],
+            labels=issue_labels(remote_issue),
             url=str(remote_issue["html_url"]),
             work_type=str(state.get("work_type") or "initial"),
             previous_commit_sha=str(state.get("previous_commit_sha") or ""),
@@ -1372,6 +1399,9 @@ class Worker:
         return True
 
     def select_issue(self) -> IssueContext | None:
+        # A resumable in-progress issue always wins; otherwise the next issue is
+        # the highest-priority ready one (see ``priority_rank``), breaking ties by
+        # lowest issue number so equal-priority work keeps first-opened order.
         issues = self.assigned_issues()
         completed = self.completed_numbers()
         paused = {int(path.stem) for path in self.paused_files()}
@@ -1426,13 +1456,19 @@ class Worker:
             ready.append((number, "followup", candidate, metadata))
 
         if ready:
-            _, work_type, remote, metadata = min(ready, key=lambda item: item[0])
+            # Honor issue priority first (Urgent > High > Medium > Low; no
+            # priority label counts as Low), then fall back to lowest issue
+            # number so ties stay in the historical first-opened order.
+            _, work_type, remote, metadata = min(
+                ready,
+                key=lambda item: (priority_rank(issue_labels(item[2])), item[0]),
+            )
             if work_type == "initial":
                 return IssueContext(
                     number=int(remote["number"]),
                     title=str(remote["title"]),
                     body=str(remote.get("body") or ""),
-                    labels=[str(label["name"]) for label in remote.get("labels", [])],
+                    labels=issue_labels(remote),
                     url=str(remote["html_url"]),
                 )
             assert metadata is not None
@@ -1440,7 +1476,7 @@ class Worker:
                 number=int(remote["number"]),
                 title=str(remote["title"]),
                 body=str(remote.get("body") or ""),
-                labels=[str(label["name"]) for label in remote.get("labels", [])],
+                labels=issue_labels(remote),
                 url=str(remote["html_url"]),
                 work_type="followup",
                 previous_commit_sha=str(metadata["previous_commit_sha"]),
