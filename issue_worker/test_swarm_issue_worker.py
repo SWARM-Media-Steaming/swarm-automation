@@ -31,6 +31,7 @@ from swarm_issue_worker import (
     extract_completion_metadata,
     extract_followup_metadata,
     is_worker_comment,
+    priority_rank,
 )
 
 
@@ -423,12 +424,12 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(choice.resume)
 
     @staticmethod
-    def issue_payload(number: int) -> dict[str, object]:
+    def issue_payload(number: int, labels: tuple[str, ...] = ()) -> dict[str, object]:
         return {
             "number": number,
             "title": f"Issue {number}",
             "body": "",
-            "labels": [],
+            "labels": [{"name": name} for name in labels],
             "assignees": [{"login": "DotNetRockStar"}],
             "html_url": f"https://example.invalid/{number}",
             "created_at": f"2026-08-{number % 28 + 1:02d}T00:00:00Z",
@@ -439,6 +440,57 @@ class WorkerTestCase(unittest.TestCase):
         with mock.patch.object(self.worker.github, "api_list", return_value=issues):
             selected = self.worker.assigned_issues()
         self.assertEqual([int(issue["number"]) for issue in selected], [50, 53, 55])
+
+    def test_priority_rank_reads_common_label_spellings(self) -> None:
+        self.assertEqual(priority_rank(["priority: urgent"]), 0)
+        self.assertEqual(priority_rank(["Priority/High"]), 1)
+        self.assertEqual(priority_rank(["medium"]), 2)
+        self.assertEqual(priority_rank(["P3"]), 3)
+        # No recognized priority label -> treated as Low.
+        self.assertEqual(priority_rank(["bug", "enhancement"]), 3)
+        self.assertEqual(priority_rank([]), 3)
+        # Strongest label wins when several are present.
+        self.assertEqual(priority_rank(["low", "priority: high", "medium"]), 1)
+
+    def test_higher_priority_issue_is_selected_before_lower_numbered_one(self) -> None:
+        issues = [
+            self.issue_payload(20, labels=("priority: medium",)),
+            self.issue_payload(90, labels=("priority: urgent",)),
+            self.issue_payload(100, labels=("priority: high",)),
+        ]
+        with (
+            mock.patch.object(self.worker, "assigned_issues", return_value=issues),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+        ):
+            selected = self.worker.select_issue()
+        assert selected is not None
+        self.assertEqual(selected.number, 90)
+
+    def test_unprioritized_issue_loses_to_prioritized_higher_number(self) -> None:
+        issues = [
+            self.issue_payload(10),
+            self.issue_payload(200, labels=("priority: high",)),
+        ]
+        with (
+            mock.patch.object(self.worker, "assigned_issues", return_value=issues),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+        ):
+            selected = self.worker.select_issue()
+        assert selected is not None
+        self.assertEqual(selected.number, 200)
+
+    def test_equal_priority_issues_keep_lowest_number_first(self) -> None:
+        issues = [
+            self.issue_payload(75, labels=("priority: low",)),
+            self.issue_payload(40, labels=("priority: low",)),
+        ]
+        with (
+            mock.patch.object(self.worker, "assigned_issues", return_value=issues),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+        ):
+            selected = self.worker.select_issue()
+        assert selected is not None
+        self.assertEqual(selected.number, 40)
 
     def test_lower_fresh_issue_beats_higher_followup_issue(self) -> None:
         self.worker.completed_file.write_text("55\n", encoding="utf-8")
@@ -1119,6 +1171,75 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         github.assert_not_called()
         self.assertTrue(self.worker.read_state()["started_comment_posted"])
+
+    def _prime_resumed_worker(self) -> None:
+        self.worker.issue = IssueContext(420, "Resume notice", "", [], "https://example.invalid/420")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "session-420", resume=True)
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.update_state(
+            started_comment_posted=True,
+            session_started=True,
+            session_comment_id=0,
+            quota_resumed_at="2026-09-05T09:00:00-05:00",
+        )
+        self.worker.quota_resume_ready = True
+
+    def test_resume_comment_is_posted_once_when_a_paused_session_resumes(self) -> None:
+        self._prime_resumed_worker()
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_resumed_comment()
+            self.worker.post_resumed_comment()
+        github.assert_called_once()
+        arguments, provider, body = github.call_args.args
+        self.assertEqual(provider, "codex")
+        self.assertIn("issue", arguments)
+        self.assertIn("**Codex Bot** is resuming work on this issue", body)
+        self.assertIn("- Branch: `ai/codex/issue-420`", body)
+        self.assertTrue(is_worker_comment({"body": body}))
+        self.assertEqual(
+            self.worker.read_state()["resumed_comment_token"], "2026-09-05T09:00:00-05:00"
+        )
+
+    def test_resume_comment_calls_out_comments_left_while_paused(self) -> None:
+        self._prime_resumed_worker()
+        left_while_paused = [
+            {"id": 7, "author": "DotNetRockStar", "created_at": "", "body": "One more thing."},
+            {"id": 8, "author": "DotNetRockStar", "created_at": "", "body": "And another."},
+        ]
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(
+                self.worker, "load_resume_comments", return_value=left_while_paused
+            ),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_resumed_comment()
+        body = github.call_args.args[2]
+        self.assertIn("Picking up 2 new trusted comments left while the work was paused", body)
+
+    def test_resume_comment_is_skipped_for_a_fresh_first_round(self) -> None:
+        self.worker.issue = IssueContext(421, "Fresh start", "", [], "https://example.invalid/421")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "session-421")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with mock.patch.object(self.worker.github, "gh", return_value="") as github:
+            self.worker.post_resumed_comment()
+        github.assert_not_called()
+
+    def test_existing_resume_marker_repairs_state_without_duplicate_comment(self) -> None:
+        self._prime_resumed_worker()
+        marker = self.worker.resumed_comment_marker("2026-09-05T09:00:00-05:00")
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[{"body": marker}]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_resumed_comment()
+        github.assert_not_called()
+        self.assertEqual(
+            self.worker.read_state()["resumed_comment_token"], "2026-09-05T09:00:00-05:00"
+        )
 
     def test_dry_run_does_not_post_start_comment(self) -> None:
         args = build_parser().parse_args(

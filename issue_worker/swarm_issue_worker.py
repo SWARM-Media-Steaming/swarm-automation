@@ -59,6 +59,33 @@ ENVIRONMENT_ONLY_MARKER_RE = re.compile(
     r"swarm-issue-worker:environment-only:issue:[0-9]+;provider:[a-z0-9_-]+"
 )
 
+# Issue priority, honored when choosing which assigned issue to work next.
+# Lower rank sorts first (Urgent before High before Medium before Low). An issue
+# with no recognized priority label is treated as Low.
+PRIORITY_RANKS: dict[str, int] = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
+DEFAULT_PRIORITY_RANK: int = PRIORITY_RANKS["low"]
+# Matches labels like "urgent", "priority: high", "priority/medium", "P2".
+PRIORITY_LABEL_RE = re.compile(
+    r"^(?:priority\s*[:/_-]?\s*)?(urgent|high|medium|low)$|^p([0-3])$"
+)
+_PN_RANKS: tuple[str, ...] = ("urgent", "high", "medium", "low")
+
+
+def priority_rank(labels: Iterable[str]) -> int:
+    """Return the strongest priority rank named by an issue's labels."""
+    best = DEFAULT_PRIORITY_RANK
+    for label in labels:
+        match = PRIORITY_LABEL_RE.match(str(label).strip().lower())
+        if not match:
+            continue
+        word = match.group(1) or _PN_RANKS[int(match.group(2))]
+        best = min(best, PRIORITY_RANKS[word])
+    return best
+
+
+def issue_labels(remote_issue: dict[str, Any]) -> list[str]:
+    return [str(label["name"]) for label in remote_issue.get("labels", [])]
+
 # The full set of providers this worker knows how to drive, in default
 # rotation order. `key` is the lowercase id used for GitHub App lookups and CLI
 # flags; branch/commit attribution maps Grok's provider id to the vendor name
@@ -1249,6 +1276,75 @@ class Worker:
             log(f"Issue #{self.issue.number} already has this work-round start notice.")
         self.update_state(started_comment_posted=True, usage_at_start=usage_at_start)
 
+    def resumed_comment_marker(self, resume_token: str) -> str:
+        assert self.issue and self.choice
+        return (
+            f"<!-- swarm-issue-worker:resumed:issue:{self.issue.number};"
+            f"provider:{self.choice.key};session:{self.choice.session_id};at:{resume_token} -->"
+        )
+
+    def post_resumed_comment(self) -> None:
+        """Announce that a preserved session is being picked back up.
+
+        The start notice (post_started_comment) only fires on the first round
+        of work; when the worker later reclaims a quota-paused attempt —
+        either with the same provider or a hand-off provider continuing on the
+        existing branch — nothing on the issue shows that work has restarted.
+        This posts that notice once per resume, keyed on ``quota_resumed_at``
+        so repeated scheduler ticks within the same resumed run do not repeat
+        it, and calls out any trusted comments left while the work was paused.
+        """
+        assert self.issue and self.choice
+        if not self.quota_resume_ready:
+            return
+        state = self.read_state()
+        resume_token = str(state.get("quota_resumed_at") or "")
+        if not resume_token or state.get("resumed_comment_token") == resume_token:
+            return
+        marker = self.resumed_comment_marker(resume_token)
+        comments = self.comments(self.issue.number)
+        already_posted = any(
+            marker in str(comment.get("body") or "") for comment in comments
+        )
+        if not already_posted:
+            new_comments = self.load_resume_comments(
+                self.issue.number, int(state.get("session_comment_id", 0)), comments
+            )
+            usage = self.usage_snapshot(self.choice.key)
+            lines = [
+                marker,
+                f"🤖 **{self.choice.name} Bot** is resuming work on this issue.",
+                "",
+                f"- Model: `{self.choice.model}`",
+                f"- Branch: `{self.expected_branch()}`",
+                f"- Session: `{self.choice.session_id}`",
+                f"- {self.choice.name} usage remaining: {self.format_usage_snapshot(usage)}",
+            ]
+            if new_comments:
+                count = len(new_comments)
+                noun = "comment" if count == 1 else "comments"
+                lines.append(
+                    f"- Picking up {count} new trusted {noun} left while the work was paused."
+                )
+            body = "\n".join(lines) + "\n"
+            self.github.gh(
+                [
+                    "issue",
+                    "comment",
+                    str(self.issue.number),
+                    "--repo",
+                    self.config.github_repository,
+                    "--body-file",
+                    "-",
+                ],
+                self.choice.key,
+                body,
+            )
+            log(f"Posted {self.choice.name} Bot resume notice to issue #{self.issue.number}.")
+        else:
+            log(f"Issue #{self.issue.number} already has this resume notice.")
+        self.update_state(resumed_comment_token=resume_token)
+
     def ai_failure_is_quota(self) -> bool:
         combined = ""
         for path in (self.ai_output_file, self.ai_diagnostic_file):
@@ -1259,7 +1355,13 @@ class Worker:
         assert self.choice
         return self.provider_capacity(self.choice.name) == 1
 
-    def load_resume_comments(self, issue_number: int, after_id: int) -> list[dict[str, Any]]:
+    def load_resume_comments(
+        self,
+        issue_number: int,
+        after_id: int,
+        comments: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        source = comments if comments is not None else self.comments(issue_number)
         return [
             {
                 "id": int(comment["id"]),
@@ -1267,7 +1369,7 @@ class Worker:
                 "created_at": str(comment.get("created_at") or ""),
                 "body": str(comment.get("body") or ""),
             }
-            for comment in sorted(self.comments(issue_number), key=lambda item: int(item["id"]))
+            for comment in sorted(source, key=lambda item: int(item["id"]))
             if int(comment["id"]) > after_id
             and not is_worker_comment(comment)
             and author_matches(
@@ -1305,7 +1407,7 @@ class Worker:
             number=int(state["issue_number"]),
             title=str(remote_issue["title"]),
             body=str(remote_issue.get("body") or ""),
-            labels=[str(label["name"]) for label in remote_issue.get("labels", [])],
+            labels=issue_labels(remote_issue),
             url=str(remote_issue["html_url"]),
             work_type=str(state.get("work_type") or "initial"),
             previous_commit_sha=str(state.get("previous_commit_sha") or ""),
@@ -1372,6 +1474,9 @@ class Worker:
         return True
 
     def select_issue(self) -> IssueContext | None:
+        # A resumable in-progress issue always wins; otherwise the next issue is
+        # the highest-priority ready one (see ``priority_rank``), breaking ties by
+        # lowest issue number so equal-priority work keeps first-opened order.
         issues = self.assigned_issues()
         completed = self.completed_numbers()
         paused = {int(path.stem) for path in self.paused_files()}
@@ -1426,13 +1531,19 @@ class Worker:
             ready.append((number, "followup", candidate, metadata))
 
         if ready:
-            _, work_type, remote, metadata = min(ready, key=lambda item: item[0])
+            # Honor issue priority first (Urgent > High > Medium > Low; no
+            # priority label counts as Low), then fall back to lowest issue
+            # number so ties stay in the historical first-opened order.
+            _, work_type, remote, metadata = min(
+                ready,
+                key=lambda item: (priority_rank(issue_labels(item[2])), item[0]),
+            )
             if work_type == "initial":
                 return IssueContext(
                     number=int(remote["number"]),
                     title=str(remote["title"]),
                     body=str(remote.get("body") or ""),
-                    labels=[str(label["name"]) for label in remote.get("labels", [])],
+                    labels=issue_labels(remote),
                     url=str(remote["html_url"]),
                 )
             assert metadata is not None
@@ -1440,7 +1551,7 @@ class Worker:
                 number=int(remote["number"]),
                 title=str(remote["title"]),
                 body=str(remote.get("body") or ""),
-                labels=[str(label["name"]) for label in remote.get("labels", [])],
+                labels=issue_labels(remote),
                 url=str(remote["html_url"]),
                 work_type="followup",
                 previous_commit_sha=str(metadata["previous_commit_sha"]),
@@ -2847,6 +2958,7 @@ class Worker:
 
         run_start, recovery_mode, candidate, recovery_dirty = self.prepare_repository()
         self.post_started_comment()
+        self.post_resumed_comment()
         prompt = self.build_prompt(recovery_mode, candidate, recovery_dirty)
         ai_status = self.run_ai(prompt)
         if ai_status != 0 or not self.ai_output_file.exists() or self.ai_output_file.stat().st_size == 0:

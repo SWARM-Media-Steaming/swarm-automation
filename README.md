@@ -13,7 +13,9 @@ The application can:
 
 - start, pause, resume, and stop the issue worker and its entire process tree;
 - run issue pickup continuously, daily, on weekdays, on selected days, or only
-  when **Run now** is clicked;
+  when **Run now** is clicked, working assigned issues highest-priority first
+  (an `urgent`/`high`/`medium`/`low` label, with or without a `priority:`
+  prefix; no label counts as low) and breaking ties by lowest issue number;
 - drive up to three AI coding agents — **Claude Code**, **Codex CLI**, and
   **Grok Build** — giving each new issue to whichever included provider has the
   most usage remaining, and handing follow-up comments to a different agent than
