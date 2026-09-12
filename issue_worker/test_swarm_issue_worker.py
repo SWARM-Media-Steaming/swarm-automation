@@ -18,6 +18,12 @@ from unittest import mock
 import github_app_auth as auth_module
 import install_swarm_issue_cron as runner_module
 import setup_github_bots as setup_module
+from ai_execution_history import (
+    ExecutionHistoryRepository,
+    ExecutionHistoryService,
+    ExecutionStart,
+    sanitize_text,
+)
 from swarm_issue_worker import (
     Config,
     ISSUE_COMPLETED_EXIT_CODE,
@@ -218,6 +224,89 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("add or update UAT and integration tests", prompt)
         self.assertIn("SWARM_ENVIRONMENT_ONLY", prompt)
         self.assertIn("do not write code", prompt)
+
+    def test_execution_history_configuration_is_independent(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--ai-execution-history-enabled", "--no-prompt-feedback-upload-enabled"]
+        )
+        config = Config.from_args(args)
+        self.assertTrue(config.ai_execution_history_enabled)
+        self.assertFalse(config.prompt_feedback_upload_enabled)
+
+    def test_execution_history_stores_exact_effective_prompt_and_lifecycle(self) -> None:
+        database_path = self.state / "history.sqlite3"
+        service = ExecutionHistoryService(True, database_path)
+        execution_id = service.start(
+            ExecutionStart(
+                repository="octocat/example",
+                issue_number=63,
+                issue_url="https://github.com/octocat/example/issues/63",
+                issue_title="Store prompt",
+                issue_body="Original body",
+                provider="Codex",
+                model="test-model",
+                effort="high",
+                branch_name="ai/codex/issue-63",
+                application_version="1.2.3",
+            ),
+            "2026-09-11T10:00:00-05:00",
+        )
+        prompt = "Issue description:\nOriginal body\n\nWrapped instruction exactly.\n"
+        service.update(
+            "2026-09-11T10:00:01-05:00",
+            effective_prompt=prompt,
+            final_status="running",
+        )
+        service.note("Tests began", "2026-09-11T10:00:02-05:00")
+        service.update(
+            "2026-09-11T10:00:03-05:00",
+            completed_at="2026-09-11T10:00:03-05:00",
+            duration_seconds=3.0,
+            files_changed=["worker.py"],
+            commit_shas=["a" * 40],
+            final_status="completed",
+        )
+
+        repository = ExecutionHistoryRepository(database_path)
+        with repository.connect() as database:
+            row = database.execute(
+                "SELECT * FROM ai_executions WHERE execution_id = ?", (execution_id,)
+            ).fetchone()
+        assert row is not None
+        self.assertEqual(row["original_issue_body"], "Original body")
+        self.assertEqual(row["effective_prompt"], prompt)
+        self.assertEqual(row["final_status"], "completed")
+        self.assertEqual(json.loads(row["files_changed"]), ["worker.py"])
+        self.assertEqual(row["attempt_number"], 1)
+        retry = service.start(
+            ExecutionStart(
+                repository="octocat/example",
+                issue_number=63,
+                issue_url="",
+                issue_title="Store prompt",
+                issue_body="Original body",
+                provider="Claude",
+                model="retry-model",
+                effort="medium",
+                branch_name="ai/codex/issue-63",
+                application_version="1.2.3",
+            ),
+            "2026-09-11T10:01:00-05:00",
+        )
+        with repository.connect() as database:
+            retry_row = database.execute(
+                "SELECT * FROM ai_executions WHERE execution_id = ?", (retry,)
+            ).fetchone()
+        assert retry_row is not None
+        self.assertEqual(retry_row["attempt_number"], 2)
+        self.assertEqual(len(repository.pending_upload()), 2)
+
+    def test_execution_history_sanitizes_credentials(self) -> None:
+        token = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+        cleaned = sanitize_text(f"Authorization: Bearer {token}\napi_key={token}")
+        self.assertNotIn(token, cleaned)
+        self.assertEqual(cleaned.count("[REDACTED]"), 2)
 
     def test_missing_ready_label_is_created_and_retried(self) -> None:
         pending = {

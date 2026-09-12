@@ -17,12 +17,13 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 5] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 6] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
     "setup_github_bots.py",
     "codex_rate_limits.py",
+    "ai_execution_history.py",
 ];
 
 struct AppState {
@@ -628,6 +629,25 @@ fn repo_worker_args(
             "--no-allow-environment-only-summary"
         }
         .into(),
+        if config.ai_execution_history_enabled {
+            "--ai-execution-history-enabled"
+        } else {
+            "--no-ai-execution-history-enabled"
+        }
+        .into(),
+        if config.prompt_feedback_upload_enabled {
+            "--prompt-feedback-upload-enabled"
+        } else {
+            "--no-prompt-feedback-upload-enabled"
+        }
+        .into(),
+        "--application-version".into(),
+        env!("CARGO_PKG_VERSION").into(),
+        "--execution-history-db".into(),
+        PathBuf::from(&config.worker_state_dir)
+            .join("swarm-automation.sqlite3")
+            .to_string_lossy()
+            .into_owned(),
     ];
     // A blank list is a genuine "trust no one" — fall back to the assignee so
     // a first run works without filling in two more fields.
