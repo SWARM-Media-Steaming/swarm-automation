@@ -459,6 +459,33 @@ fn repo_worker_args_carries_advanced_issue_policy() {
 }
 
 #[test]
+fn repo_worker_args_carries_independent_history_settings() {
+    let mut config = AppConfig {
+        ai_execution_history_enabled: true,
+        prompt_feedback_upload_enabled: false,
+        ..AppConfig::default()
+    };
+    let repo = repo("octocat/example");
+    config.repositories.push(repo.clone());
+    let args = repo_worker_args(
+        &config,
+        &repo,
+        &PathBuf::from("/tmp/ws"),
+        &PathBuf::from("/usr/bin/git"),
+        &PathBuf::from("/usr/bin/gh"),
+    );
+    assert!(args.contains(&"--ai-execution-history-enabled".to_string()));
+    assert!(args.contains(&"--no-prompt-feedback-upload-enabled".to_string()));
+    assert_eq!(
+        pair(&args, "--application-version"),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+    assert!(pair(&args, "--execution-history-db")
+        .expect("history database path")
+        .ends_with("swarm-automation.sqlite3"));
+}
+
+#[test]
 fn scheduler_arguments_degrade_manual_to_continuous_and_pass_the_repos_file() {
     let config = AppConfig {
         schedule_mode: "manual".into(),

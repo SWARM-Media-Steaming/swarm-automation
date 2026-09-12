@@ -55,6 +55,14 @@ workspace folder is set.
 Provider and GitHub credentials remain owned by their CLIs and are never copied
 into the app configuration or automation log.
 
+Optional AI execution history can be enabled under Work Policy. It stores the
+original issue, sanitized effective prompt, provider settings, lifecycle,
+changes, delivery metadata, and failures in `swarm-automation.sqlite3` beneath
+the configured worker state directory. Prompt-feedback upload is a separate
+switch and is disabled by default; enabling local history never enables remote
+upload. The database includes upload and reviewer-feedback state for a future
+review-platform integration, but this release does not transmit records.
+
 ## Branch safety model
 
 The default AI integration branch is `ai-main` (the recommended name). Before
