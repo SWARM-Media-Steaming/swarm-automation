@@ -1,11 +1,4 @@
-# CLAUDE.md
-
-Repository-specific conventions for AI agents working on this project. For
-the Cargo/`issue_worker` vendoring and test-suite conventions, see the
-`swarm-automation-dev` skill under `.claude/skills/`. This file covers the
-desktop UI.
-
-## UI Design System Rules
+# UI Design System Rules
 
 Everything under `ui/` (`index.html`, `style.css`, `app.js`) is one
 continuously-developed product surface. Any change to it — a new setting, a
