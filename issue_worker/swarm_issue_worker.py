@@ -42,6 +42,7 @@ if str(SCRIPT_HOME) not in sys.path:
     sys.path.insert(0, str(SCRIPT_HOME))
 
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
+from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
 
 
 ISSUE_COMPLETED_EXIT_CODE = 10
@@ -274,14 +275,24 @@ class Config:
     integration_branch: str
     remote_name: str
     github_host: str
+    ai_execution_history_enabled: bool
+    prompt_feedback_upload_enabled: bool
+    application_version: str
+    execution_history_db: Path
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
         script_dir = SCRIPT_HOME
+        state_dir = Path(args.state_dir).expanduser().resolve()
+        history_db = (
+            Path(args.execution_history_db).expanduser().resolve()
+            if args.execution_history_db
+            else state_dir / "swarm-automation.sqlite3"
+        )
         return cls(
             script_dir=script_dir,
             repo_dir=Path(args.repo_dir).expanduser().resolve(),
-            state_dir=Path(args.state_dir).expanduser().resolve(),
+            state_dir=state_dir,
             github_repository=args.github_repository,
             github_assignee=args.assignee,
             trusted_followup_authors=tuple(args.trusted_followup_author),
@@ -308,6 +319,10 @@ class Config:
             integration_branch=args.integration_branch,
             remote_name=args.remote_name,
             github_host=args.github_host,
+            ai_execution_history_enabled=args.ai_execution_history_enabled,
+            prompt_feedback_upload_enabled=args.prompt_feedback_upload_enabled,
+            application_version=args.application_version,
+            execution_history_db=history_db,
         )
 
     def spec(self, provider: str) -> ProviderSpec | None:
@@ -570,6 +585,12 @@ class Worker:
         # it for a fresh run, reused by post_started_comment so the start notice
         # doesn't probe /usage a second time.
         self.start_usage: ProviderUsage | None = None
+        self.history = ExecutionHistoryService(
+            config.ai_execution_history_enabled,
+            config.execution_history_db,
+        )
+        if self.history.error:
+            log(f"WARNING: AI execution history is unavailable: {self.history.error}")
 
     def git(self, *arguments: str, env: dict[str, str] | None = None, check: bool = True) -> str:
         return run_command(
@@ -1399,8 +1420,83 @@ class Worker:
                 "status": "active",
                 "quota_pause_count": 0,
                 "started_at": iso_timestamp(),
+                "execution_id": self.history.execution_id,
             }
         )
+
+    def start_execution_history(self) -> None:
+        assert self.issue and self.choice
+        persisted_branch = ""
+        if self.in_progress_file.exists():
+            persisted_branch = str(self.read_state().get("branch_name") or "")
+        branch = persisted_branch or (
+            f"{self.config.branch_prefix}/{ai_tool_key(self.choice.key)}/issue-{self.issue.number}"
+        )
+        execution_id = self.history.start(
+            ExecutionStart(
+                repository=self.config.github_repository,
+                issue_number=self.issue.number,
+                issue_url=self.issue.url,
+                issue_title=self.issue.title,
+                issue_body=self.issue.body,
+                provider=self.choice.name,
+                model=self.choice.model,
+                effort=self.choice.effort,
+                branch_name=branch,
+                application_version=self.config.application_version,
+                prompt_template_version=PROMPT_TEMPLATE_VERSION,
+            ),
+            iso_timestamp(),
+        )
+        if execution_id and self.in_progress_file.exists():
+            self.update_state(execution_id=execution_id)
+
+    @staticmethod
+    def summary_section(output: str, heading: str) -> str:
+        match = re.search(
+            rf"(?ims)^##\s+{re.escape(heading)}\s*$\n(.*?)(?=^##\s+|\Z)", output
+        )
+        return match.group(1).strip() if match else ""
+
+    def finish_execution_history(
+        self,
+        status: str,
+        output: str = "",
+        *,
+        commit_shas: Sequence[str] = (),
+        files_changed: Sequence[str] = (),
+        pull_request_url: str = "",
+    ) -> None:
+        if not self.history.execution_id:
+            return
+        completed = iso_timestamp()
+        started_text = (
+            str(self.read_state().get("started_at") or completed)
+            if self.in_progress_file.exists()
+            else completed
+        )
+        try:
+            started = dt.datetime.fromisoformat(started_text)
+            ended = dt.datetime.fromisoformat(completed)
+            duration = max(0.0, (ended - started).total_seconds())
+        except ValueError:
+            duration = None
+        pr_match = re.search(r"/pull/(\d+)(?:$|[/?#])", pull_request_url)
+        fields: dict[str, Any] = {
+            "completed_at": completed,
+            "duration_seconds": duration,
+            "files_changed": files_changed,
+            "commit_shas": commit_shas,
+            "pull_request_number": int(pr_match.group(1)) if pr_match else None,
+            "pull_request_url": pull_request_url,
+            "final_status": status,
+        }
+        if output:
+            fields.update(
+                requested_work_summary=self.summary_section(output, "Summary"),
+                changes_summary=self.summary_section(output, "Changes"),
+            )
+        self.history.update(completed, **fields)
 
     def issue_from_state(self, state: dict[str, Any], remote_issue: dict[str, Any]) -> IssueContext:
         return IssueContext(
@@ -1796,6 +1892,16 @@ class Worker:
         pending = self.add_pending_label(pending)
         issue_number = int(pending["issue_number"])
         self.record_completed(issue_number)
+        execution_id = str(pending.get("execution_id") or "")
+        if execution_id and self.history.repository:
+            self.history.execution_id = execution_id
+            self.finish_execution_history(
+                "completed",
+                str(pending.get("ai_output") or ""),
+                commit_shas=list(pending.get("commit_shas") or [pending["commit_sha"]]),
+                files_changed=list(pending.get("files_changed") or []),
+                pull_request_url=str(pending.get("pull_request_url") or ""),
+            )
         self.pending_file.unlink()
         self.clear_in_progress(issue_number)
         log(f"GitHub delivery finished; issue #{issue_number} is marked completed locally.")
@@ -2419,6 +2525,10 @@ class Worker:
                             log(f"Merged {integ} into {expected} before reworking.")
                         else:
                             self.git("merge", "--abort", check=False)
+                            self.history.warning(
+                                f"{expected} conflicts with {integ}; continuing from the branch tip",
+                                iso_timestamp(),
+                            )
                             log(
                                 f"WARNING: {expected} conflicts with {integ}; "
                                 f"reworking from the branch tip without the latest integration changes."
@@ -2789,7 +2899,13 @@ class Worker:
 
     def finalize_issue(self, commit_sha: str, ai_output: str) -> None:
         assert self.issue and self.choice
+        base_sha = str(self.read_state().get("base_sha") or "")
+        commits = list(reversed(self.git("rev-list", f"{base_sha}..{commit_sha}").splitlines()))
+        files = self.git("diff", "--name-only", base_sha, commit_sha).splitlines()
         pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha)
+        if commit_sha not in commits:
+            commits.append(commit_sha)
+        self.history.note("Commit and pull request delivery completed", iso_timestamp())
         usage_at_start = self.read_state().get("usage_at_start")
         pending = {
             "issue_number": self.issue.number,
@@ -2810,11 +2926,21 @@ class Worker:
             "branch_name": branch,
             "usage_at_start": usage_at_start,
             "usage_at_completion": self.usage_snapshot(self.choice.key),
+            "execution_id": self.history.execution_id,
+            "commit_shas": commits,
+            "files_changed": files,
         }
         atomic_write_json(self.pending_file, pending)
         pending = self.post_pending_comment(pending)
         pending = self.add_pending_label(pending)
         self.record_completed(self.issue.number)
+        self.finish_execution_history(
+            "completed",
+            ai_output,
+            commit_shas=commits,
+            files_changed=files,
+            pull_request_url=pr_url,
+        )
         self.pending_file.unlink()
         self.clear_in_progress(self.issue.number)
         log(
@@ -2861,6 +2987,8 @@ class Worker:
                 body,
             )
         self.record_completed(self.issue.number)
+        self.history.note("Execution completed without repository changes", iso_timestamp())
+        self.finish_execution_history("environment_only", ai_output)
         self.clear_in_progress(self.issue.number)
         log(f"Finished issue #{self.issue.number} with {self.choice.name}: environment-only summary posted.")
 
@@ -2956,10 +3084,21 @@ class Worker:
             log(f"Dry run complete: would run {self.choice.name} for {self.issue.url}.")
             return 0
 
+        self.start_execution_history()
+        self.history.update(iso_timestamp(), final_status="preparing_repository")
         run_start, recovery_mode, candidate, recovery_dirty = self.prepare_repository()
+        # save_new_state may have created/replaced state after history started.
+        if self.history.execution_id and self.read_state().get("execution_id") != self.history.execution_id:
+            self.update_state(execution_id=self.history.execution_id)
+        self.history.note("Repository prepared", iso_timestamp())
         self.post_started_comment()
         self.post_resumed_comment()
         prompt = self.build_prompt(recovery_mode, candidate, recovery_dirty)
+        self.history.update(
+            iso_timestamp(), effective_prompt=prompt, final_status="prompt_generated"
+        )
+        self.history.note("AI execution began", iso_timestamp())
+        self.history.update(iso_timestamp(), final_status="running")
         ai_status = self.run_ai(prompt)
         if ai_status != 0 or not self.ai_output_file.exists() or self.ai_output_file.stat().st_size == 0:
             if self.ai_failure_is_quota():
@@ -2969,6 +3108,8 @@ class Worker:
                         "worktree preserved but automatic resume is unavailable"
                     )
                 self.mark_quota_paused()
+                self.history.warning("AI usage quota became unavailable", iso_timestamp())
+                self.finish_execution_history("quota_paused")
                 self.post_quota_comment()
                 self.suspend_paused()
                 return QUOTA_PAUSED_EXIT_CODE
@@ -2982,6 +3123,16 @@ class Worker:
             )
 
         output = self.ai_output_file.read_text(encoding="utf-8", errors="replace")
+        self.history.note("AI response received", iso_timestamp())
+        ai_operational_notes = self.summary_section(output, "Operational notes")
+        if ai_operational_notes and ai_operational_notes != "- None.":
+            self.history.note(f"AI operational notes: {ai_operational_notes}", iso_timestamp())
+        self.history.update(
+            iso_timestamp(),
+            requested_work_summary=self.summary_section(output, "Summary"),
+            changes_summary=self.summary_section(output, "Changes"),
+            final_status="ai_response_received",
+        )
         # None of the three providers streams its raw output to the operator
         # log any more (Claude's per-line echo was removed alongside it) —
         # the full completion summary is posted to the GitHub issue instead
@@ -3027,6 +3178,8 @@ class Worker:
             raise WorkerError(f"{self.choice.name} rewrote history instead of adding a descendant commit")
         completion = self.ensure_issue_reference(completion, recovered)
         self.validate_new_commit_messages(run_start, completion)
+        self.history.note("Repository changes and commit validation completed", iso_timestamp())
+        self.history.update(iso_timestamp(), final_status="validated")
         if self.git("status", "--porcelain"):
             raise WorkerError(
                 f"Issue #{self.issue.number} cannot be delivered with uncommitted changes"
@@ -3050,7 +3203,12 @@ class Worker:
             self.issue = self.select_issue()
             if not self.issue:
                 return 0
-            return self.run_selected_issue()
+            try:
+                return self.run_selected_issue()
+            except Exception as error:
+                self.history.warning(str(error), iso_timestamp())
+                self.finish_execution_history("failed")
+                raise
 
 
 def executable_default(name: str) -> str:
@@ -3160,6 +3318,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--remote-name", default=env_value("SWARM_GIT_REMOTE", "origin"))
     parser.add_argument("--github-host", default=env_value("SWARM_GITHUB_HOST", "github.com"))
+    parser.add_argument(
+        "--ai-execution-history-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_AI_EXECUTION_HISTORY_ENABLED", False),
+    )
+    parser.add_argument(
+        "--prompt-feedback-upload-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_PROMPT_FEEDBACK_UPLOAD_ENABLED", False),
+    )
+    parser.add_argument(
+        "--application-version",
+        default=env_value("SWARM_APPLICATION_VERSION", "development"),
+    )
+    parser.add_argument(
+        "--execution-history-db",
+        default=env_value("SWARM_AI_EXECUTION_HISTORY_DB", ""),
+        help="Shared application SQLite path; defaults beneath --state-dir.",
+    )
     return parser
 
 

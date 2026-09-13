@@ -328,6 +328,11 @@ pub struct AppConfig {
     /// repositories have ready issues, but AI credits are spent faster too.
     /// Off by default.
     pub parallel_repo_workers: bool,
+    /// Persist a sanitized lifecycle record for each AI issue execution.
+    pub ai_execution_history_enabled: bool,
+    /// Allow a future review-platform uploader to transmit eligible records.
+    /// Local persistence remains controlled independently above.
+    pub prompt_feedback_upload_enabled: bool,
     pub schedule_mode: String,
     pub schedule_time: String,
     pub schedule_days: Vec<String>,
@@ -409,6 +414,8 @@ impl Default for AppConfig {
             providers: default_providers(),
             minimum_remaining_percent: 10,
             parallel_repo_workers: false,
+            ai_execution_history_enabled: false,
+            prompt_feedback_upload_enabled: false,
             schedule_mode: "continuous".into(),
             schedule_time: "09:00".into(),
             schedule_days: vec!["mon", "tue", "wed", "thu", "fri"]
