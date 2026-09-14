@@ -16,12 +16,14 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false },
+    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false, executionHistory: false },
     activeRepoId: "",
     branchOverview: null,
     promotions: [],
     testPlan: null,
     testRuns: null,
+    executionHistory: null,
+    executionHistorySearch: "",
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
     botReadiness: {},
     botReadinessPoll: null,
@@ -33,6 +35,7 @@
     repository: "Repository",
     ai: "AI Configuration",
     scheduler: "Test Scheduler",
+    feedback: "Feedback",
     advanced: "Advanced",
     debug: "Info & Debug",
     help: "Help",
@@ -162,7 +165,7 @@
     },
     "promotion-queue": {
       title: "Repositories ready to promote",
-      html: "<p>This list appears on the Overview page whenever one or more repositories have finished AI work waiting to reach the human-owned branch. It refreshes automatically while the Overview is visible.</p><ul><li>A repository shows up when its AI integration branch (usually <code>ai-main</code>) is <strong>ahead</strong> of the human-owned branch.</li><li><strong>Create PR</strong> creates or opens the promotion pull request in your browser.</li><li><strong>Merge to Main</strong> first merges the latest human-owned branch into the AI branch, favoring human-owned changes if the same lines conflict. It then creates the PR, approves it with a configured bot, and merges it.</li></ul><p>The issue worker must be stopped during an automatic promotion so it cannot update the same branch concurrently.</p>",
+      html: "<p>This list appears on the Overview page whenever one or more repositories have finished AI work waiting to reach the human-owned branch. It refreshes automatically while the Overview is visible.</p><ul><li>A repository shows up when its AI integration branch (usually <code>ai-main</code>) is <strong>ahead</strong> of the human-owned branch.</li><li><strong>Create PR</strong> creates or opens the promotion pull request in your browser.</li><li><strong>Merge to Main</strong> first merges the latest human-owned branch into the AI branch, favoring human-owned changes if the same lines conflict. It then creates the PR, approves it with a configured bot, and merges it.</li></ul><p>Promotion reconciles and merges in its own isolated clone, so it is safe to run while the issue worker keeps working — it never touches the worker's checkout.</p>",
       links: [],
     },
     "data-location": {
@@ -173,6 +176,11 @@
     "work-policy": {
       title: "Issue instructions",
       html: "<p>These switches add instructions to each AI issue prompt.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>Both start off and apply only to this repository.</p>",
+      links: [],
+    },
+    "execution-history": {
+      title: "Execution history",
+      html: "<p>Every AI issue execution for the selected repository, newest first — grouped by issue, with every attempt. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p>",
       links: [],
     },
     "provider-bins": {
@@ -191,6 +199,7 @@
     ["Minimum quota remaining", "quota-threshold"],
     ["Test scheduler", "uat-suite"],
     ["Test run history", "test-runs"],
+    ["Execution history", "execution-history"],
     ["Where your data lives", "data-location"],
   ];
 
@@ -243,6 +252,7 @@
     if (view === "debug") void refreshTools({ quiet: true });
     if (view === "scheduler") void refreshTestPlan({ quiet: true });
     if (view === "repository") void refreshBotReadiness({ quiet: true });
+    if (view === "feedback") void refreshExecutionHistory({ quiet: true });
   }
 
   function populateHours() {
@@ -1057,6 +1067,208 @@
     });
   }
 
+  // ----- Feedback (AI execution history) ------------------------------
+
+  const EXECUTION_STATUS_META = {
+    accepted: { label: "Accepted", cls: "running" },
+    preparing_repository: { label: "Preparing repository", cls: "running" },
+    prompt_generated: { label: "Prompt generated", cls: "running" },
+    running: { label: "Running", cls: "running" },
+    ai_response_received: { label: "AI response received", cls: "running" },
+    validated: { label: "Validated", cls: "running" },
+    completed: { label: "Completed", cls: "passed" },
+    environment_only: { label: "Environment only", cls: "passed" },
+    quota_paused: { label: "Quota paused", cls: "waiting-for-input" },
+    failed: { label: "Failed", cls: "failed" },
+  };
+
+  function executionStatusMeta(status) {
+    return EXECUTION_STATUS_META[status] || { label: status || "Unknown", cls: "" };
+  }
+
+  function formatIsoTimestamp(iso) {
+    if (!iso) return "";
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+  }
+
+  function formatDurationSeconds(totalSeconds) {
+    const total = Math.round(totalSeconds);
+    if (total < 60) return `${total}s`;
+    const minutes = Math.floor(total / 60);
+    const rest = total % 60;
+    return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  }
+
+  function rawTextPanel(label, text) {
+    const details = document.createElement("details");
+    details.className = "raw-graph-panel";
+    const summary = document.createElement("summary");
+    summary.textContent = label;
+    const pre = document.createElement("pre");
+    pre.className = "full-log branch-graph";
+    pre.textContent = text || "Nothing recorded.";
+    details.append(summary, pre);
+    return details;
+  }
+
+  function executionNoteRow(kind, message, stateClass) {
+    const row = document.createElement("div");
+    row.className = "execution-note";
+    const strong = document.createElement("strong");
+    strong.textContent = message;
+    const badge = document.createElement("span");
+    badge.className = `suite-state ${stateClass}`.trim();
+    badge.textContent = kind;
+    row.append(strong, badge);
+    return row;
+  }
+
+  function executionRepoFacts(record) {
+    const facts = document.createElement("div");
+    facts.className = "repo-inspection";
+    const addFact = (label, value) => {
+      if (!value) return;
+      const fact = document.createElement("div");
+      fact.className = "repo-fact";
+      const span = document.createElement("span");
+      span.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = value;
+      fact.append(span, strong);
+      facts.appendChild(fact);
+    };
+    addFact("Branch", record.branchName);
+    addFact("Duration", record.durationSeconds != null ? formatDurationSeconds(record.durationSeconds) : "");
+    addFact("Files changed", (record.filesChanged || []).length ? String(record.filesChanged.length) : "");
+    addFact("Commits", (record.commitShas || []).length ? String(record.commitShas.length) : "");
+    addFact("Application version", record.applicationVersion);
+    addFact("Prompt template", record.promptTemplateVersion);
+    return facts;
+  }
+
+  function buildExecutionRecordItem(record) {
+    const item = document.createElement("details");
+    item.className = "execution-record";
+
+    const summary = document.createElement("summary");
+    const head = document.createElement("div");
+    head.className = "execution-head";
+    const title = document.createElement("strong");
+    title.textContent = `#${record.issueNumber} ${record.issueTitle || ""}`.trim();
+    const meta = document.createElement("small");
+    meta.textContent = [
+      record.aiProvider,
+      record.model,
+      record.effort,
+      record.attemptNumber ? `Attempt ${record.attemptNumber}` : "",
+      record.startedAt ? `Started ${formatIsoTimestamp(record.startedAt)}` : "",
+    ].filter(Boolean).join(" · ");
+    head.append(title, meta);
+    const tally = document.createElement("div");
+    tally.className = "execution-tally";
+    const statusMeta = executionStatusMeta(record.finalStatus);
+    const badge = document.createElement("span");
+    badge.className = `suite-state ${statusMeta.cls}`.trim();
+    badge.textContent = statusMeta.label;
+    tally.appendChild(badge);
+    summary.append(head, tally);
+    item.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "execution-body";
+
+    const facts = executionRepoFacts(record);
+    if (facts.children.length) body.appendChild(facts);
+
+    const links = document.createElement("div");
+    links.className = "control-row";
+    if (record.issueUrl) links.appendChild(externalLink(`Open issue #${record.issueNumber} ↗`, record.issueUrl, "text-button"));
+    if (record.pullRequestUrl) links.appendChild(externalLink("Open pull request ↗", record.pullRequestUrl, "text-button"));
+    if (links.children.length) body.appendChild(links);
+
+    const addSummaryParagraph = (label, text) => {
+      if (!text) return;
+      const p = document.createElement("p");
+      p.className = "panel-copy";
+      const strong = document.createElement("strong");
+      strong.textContent = `${label}: `;
+      p.append(strong, document.createTextNode(text));
+      body.appendChild(p);
+    };
+    addSummaryParagraph("Requested work", record.requestedWorkSummary);
+    addSummaryParagraph("Changes made", record.changesSummary);
+
+    body.appendChild(rawTextPanel("Original GitHub issue", record.originalIssueBody));
+    body.appendChild(rawTextPanel("Effective AI prompt", record.effectivePrompt));
+
+    const notes = document.createElement("div");
+    notes.className = "execution-notes";
+    (record.operationalNotes || []).forEach((note) => notes.appendChild(executionNoteRow("Note", note, "")));
+    (record.warningsErrors || []).forEach((warning) => notes.appendChild(executionNoteRow("Warning", warning, "failed")));
+    if (notes.children.length) body.appendChild(notes);
+
+    if (record.reviewerFeedback) {
+      const banner = document.createElement("div");
+      banner.className = "banner policy";
+      const strong = document.createElement("strong");
+      strong.textContent = "Reviewer feedback.";
+      const span = document.createElement("span");
+      span.textContent = record.reviewerFeedback;
+      banner.append(strong, span);
+      body.appendChild(banner);
+    }
+
+    item.appendChild(body);
+    return item;
+  }
+
+  function executionMatchesSearch(record, term) {
+    if (!term) return true;
+    const haystack = [record.issueNumber, record.issueTitle, record.aiProvider, record.model, record.branchName, record.finalStatus]
+      .map((value) => String(value ?? "").toLowerCase());
+    return haystack.some((value) => value.includes(term));
+  }
+
+  function renderExecutionHistory() {
+    const box = byId("execution-history-list");
+    if (!box) return;
+    box.replaceChildren();
+    const all = Array.isArray(state.executionHistory) ? state.executionHistory : [];
+    byId("execution-history-count").textContent = `${all.length} execution${all.length === 1 ? "" : "s"}`;
+    const term = state.executionHistorySearch.trim().toLowerCase();
+    const records = all.filter((record) => executionMatchesSearch(record, term));
+    if (!records.length) {
+      box.appendChild(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: all.length
+          ? "No executions match this search."
+          : "No AI executions recorded yet. Turn on “Store AI execution history” in Advanced, then run an issue.",
+      }));
+      return;
+    }
+    records.forEach((record) => box.appendChild(buildExecutionRecordItem(record)));
+  }
+
+  async function refreshExecutionHistory({ quiet = false } = {}) {
+    const repo = currentRepo();
+    if (!repo) {
+      state.executionHistory = [];
+      renderExecutionHistory();
+      return;
+    }
+    if (state.refreshing.executionHistory) return;
+    state.refreshing.executionHistory = true;
+    try {
+      state.executionHistory = await invoke("get_execution_history_background", { repoId: repo.id });
+      if (repo.id === state.activeRepoId) renderExecutionHistory();
+    } catch (error) {
+      if (!quiet) showToast(errorText(error), "error");
+    } finally {
+      state.refreshing.executionHistory = false;
+    }
+  }
+
   async function selectTestDevice(event) {
     const serial = event.target.value;
     if (!serial || !currentRepo()) return;
@@ -1867,6 +2079,7 @@
     state.branchOverview = null;
     state.testPlan = null;
     state.testRuns = null;
+    state.executionHistory = null;
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
@@ -1874,6 +2087,7 @@
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
+    if (document.querySelector("#view-feedback.active")) void refreshExecutionHistory({ quiet: true });
   }
 
   function branchNode(label, name, tip, meta = "", links = {}) {
@@ -2242,6 +2456,11 @@
     byId("refresh-tools").addEventListener("click", () => refreshTools());
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
     byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
+    byId("refresh-execution-history").addEventListener("click", () => refreshExecutionHistory());
+    byId("execution-history-search").addEventListener("input", (event) => {
+      state.executionHistorySearch = event.target.value;
+      renderExecutionHistory();
+    });
     byId("detect-test-definition").addEventListener("click", detectTestDefinition);
     byId("save-test-definition").addEventListener("click", saveTestDefinition);
     byId("cancel-test-definition").addEventListener("click", cancelTestDefinition);

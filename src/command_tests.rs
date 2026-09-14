@@ -1,9 +1,10 @@
 use super::{
-    create_test_definition, detect_test_definition, detect_tools, get_config, get_test_plan,
-    get_test_runs, inspect_repository, issue_branch_pr_is_visible, needs_promotion, parse_pr_ref,
-    promotion_approval_args, reconcile_integration_for_promotion, repo_status_args,
-    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
-    validate_worker_script_dir, AppState, BranchAheadBehind, ResolvedProvider,
+    create_test_definition, detect_test_definition, detect_tools, get_config,
+    get_execution_history, get_test_plan, get_test_runs, inspect_repository,
+    issue_branch_pr_is_visible, needs_promotion, parse_pr_ref, promotion_approval_args,
+    reconcile_integration_for_promotion, repo_status_args, repo_worker_args, require_closed_issue,
+    save_config, save_test_device, scheduler_arguments, validate_worker_script_dir,
+    AiExecutionRecord, AppState, BranchAheadBehind, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -278,6 +279,79 @@ fn repository_test_definition_is_discovered_through_the_command_layer() {
     // History starts empty and `get_test_runs` is a safe read.
     let runs = get_test_runs(app.clone(), app.state(), "octocat__example".into()).unwrap();
     assert!(runs.is_empty());
+}
+
+#[test]
+fn execution_history_lookup_is_safe_before_any_execution_exists() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    // No `ai_executions.sqlite3` has ever been written at this path, so the
+    // command must return an empty list without needing python or the
+    // bundled issue-worker scripts (unavailable under the mock runtime).
+    config.worker_state_dir = test_app
+        ._data_dir
+        .path()
+        .join("worker-state")
+        .to_string_lossy()
+        .into_owned();
+    save_config(app.clone(), app.state(), config).unwrap();
+
+    let history =
+        get_execution_history(app.clone(), app.state(), "octocat__example".into()).unwrap();
+    assert!(history.is_empty());
+}
+
+#[test]
+fn ai_execution_record_deserializes_the_python_export_shape_into_camel_case() {
+    // Shape mirrors `ai_execution_history.row_to_dict`'s output for one row:
+    // snake_case keys from SQLite, JSON-text columns already decoded to arrays.
+    let json = r#"{
+        "execution_id": "11111111-1111-1111-1111-111111111111",
+        "repository": "octocat/example",
+        "issue_number": 63,
+        "issue_url": "https://github.com/octocat/example/issues/63",
+        "issue_title": "Store prompt",
+        "original_issue_body": "Original body",
+        "effective_prompt": "Final prompt",
+        "ai_provider": "Claude",
+        "model": "claude-sonnet-5",
+        "effort": "high",
+        "reasoning_config": {"effort": "high"},
+        "started_at": "2026-09-14T10:00:00-05:00",
+        "completed_at": "2026-09-14T10:05:00-05:00",
+        "duration_seconds": 300.0,
+        "requested_work_summary": "Do the thing",
+        "changes_summary": "Did the thing",
+        "files_changed": ["src/main.rs"],
+        "branch_name": "ai/claude/issue-63",
+        "commit_shas": ["deadbeef"],
+        "pull_request_number": 64,
+        "pull_request_url": "https://github.com/octocat/example/pull/64",
+        "operational_notes": ["Issue accepted"],
+        "warnings_errors": [],
+        "final_status": "completed",
+        "attempt_number": 1,
+        "application_version": "1.2.3",
+        "prompt_template_version": "issue-worker-v1",
+        "updated_at": "2026-09-14T10:05:00-05:00",
+        "uploaded_at": null,
+        "upload_status": "never_uploaded",
+        "upload_error": "",
+        "uploaded_record_updated_at": null,
+        "reviewer_feedback": "",
+        "reviewer_feedback_at": null
+    }"#;
+
+    let record: AiExecutionRecord = serde_json::from_str(json).expect("deserialize python row");
+    assert_eq!(record.repository, "octocat/example");
+    assert_eq!(record.files_changed, vec!["src/main.rs".to_string()]);
+
+    let camel = serde_json::to_value(&record).expect("serialize for the frontend");
+    assert!(camel.get("executionId").is_some(), "{camel}");
+    assert!(camel.get("filesChanged").is_some(), "{camel}");
+    assert!(camel.get("execution_id").is_none(), "{camel}");
 }
 
 #[test]
