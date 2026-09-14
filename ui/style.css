@@ -196,18 +196,19 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .definition-notes { display: grid; gap: 4px; color: var(--muted); font-size: 9px; line-height: 1.45; }
 .field-hint { display: block; margin-top: 6px; color: var(--muted-2); font-size: 9px; line-height: 1.45; }
 .service-timing .field-hint { grid-column: 1 / -1; margin-top: 0; }
-.test-run-list { display: grid; gap: 8px; margin-top: 15px; }
-.test-run { border: 1px solid var(--line-soft); border-radius: 9px; background: #0c111b; overflow: hidden; }
-.test-run > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; cursor: pointer; list-style: none; }
-.test-run > summary::-webkit-details-marker { display: none; }
-.test-run[open] > summary { border-bottom: 1px solid var(--line-soft); }
-.test-run-head strong { display: block; color: #dce1ed; font-size: 11px; }
-.test-run-head small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 9px; }
-.test-run-tally { display: flex; gap: 5px; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; }
-.test-run-suites { display: grid; gap: 6px; padding: 11px 13px; }
-.test-run-suite { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 7px; background: #0b0f18; }
-.test-run-suite strong { display: block; color: #cbd2df; font-size: 10px; }
-.test-run-suite small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 9px; overflow-wrap: anywhere; }
+.test-run-list, .execution-list { display: grid; gap: 8px; margin-top: 15px; }
+.test-run, .execution-record { border: 1px solid var(--line-soft); border-radius: 9px; background: #0c111b; overflow: hidden; }
+.test-run > summary, .execution-record > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; cursor: pointer; list-style: none; }
+.test-run > summary::-webkit-details-marker, .execution-record > summary::-webkit-details-marker { display: none; }
+.test-run[open] > summary, .execution-record[open] > summary { border-bottom: 1px solid var(--line-soft); }
+.test-run-head strong, .execution-head strong { display: block; color: #dce1ed; font-size: 11px; }
+.test-run-head small, .execution-head small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 9px; }
+.test-run-tally, .execution-tally { display: flex; gap: 5px; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; }
+.test-run-suites, .execution-body { display: grid; gap: 10px; padding: 13px; }
+.test-run-suite, .execution-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 7px; background: #0b0f18; }
+.test-run-suite strong, .execution-note strong { display: block; color: #cbd2df; font-size: 10px; }
+.test-run-suite small, .execution-note small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 9px; overflow-wrap: anywhere; }
+.execution-notes { display: grid; gap: 6px; }
 .workspace-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-top: 16px; padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 8px; background: #0c111b; }
 .workspace-label { display: block; color: var(--muted-2); font-size: 8px; text-transform: uppercase; letter-spacing: .1em; margin-bottom: 4px; }
 #workspace-path { font: 10px/1.4 ui-monospace, Menlo, monospace; color: #c4ccdb; overflow-wrap: anywhere; }

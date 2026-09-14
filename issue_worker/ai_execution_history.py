@@ -7,10 +7,12 @@ can also support a future prompt-feedback uploader.
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import re
 import sqlite3
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
@@ -18,6 +20,16 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = 1
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
+
+# Columns persisted as JSON-encoded text; the desktop UI wants them decoded
+# back into real arrays/objects rather than doubly-encoded strings.
+_JSON_COLUMNS = (
+    "reasoning_config",
+    "files_changed",
+    "commit_shas",
+    "operational_notes",
+    "warnings_errors",
+)
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(authorization\s*:\s*(?:bearer|token)\s+)[^\s]+"),
@@ -259,6 +271,30 @@ class ExecutionHistoryRepository:
                 )
             )
 
+    def for_repository(self, repository: str) -> list[sqlite3.Row]:
+        """Every execution for one repository, newest first — the desktop UI's feed."""
+        with self.connect() as database:
+            return list(
+                database.execute(
+                    "SELECT * FROM ai_executions WHERE repository = ? "
+                    "ORDER BY started_at DESC, attempt_number DESC",
+                    (repository,),
+                )
+            )
+
+
+def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """A `sqlite3.Row` as a plain, JSON-ready dict with JSON text columns decoded."""
+    record = dict(row)
+    for column in _JSON_COLUMNS:
+        raw = record.get(column)
+        if isinstance(raw, str) and raw:
+            try:
+                record[column] = json.loads(raw)
+            except ValueError:
+                pass
+    return record
+
 
 class ExecutionHistoryService:
     """Optional facade so disabled history cannot affect issue processing."""
@@ -307,3 +343,30 @@ class ExecutionHistoryService:
                 self.repository.append(self.execution_id, "warnings_errors", message, now)
             except sqlite3.Error as error:
                 self.error = sanitize_text(error)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python3 ai_execution_history.py --db PATH --repository OWNER/NAME`.
+
+    Prints the repository's executions as a JSON array on stdout — the
+    desktop app's Feedback view shells out to this the same way it already
+    shells out to the other worker scripts for one-off, read-only queries.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--db", required=True, help="Path to the SQLite database file.")
+    parser.add_argument("--repository", required=True, help="owner/name to filter by.")
+    args = parser.parse_args(argv)
+
+    database_path = Path(args.db).expanduser()
+    if not database_path.is_file():
+        print("[]")
+        return 0
+
+    repository = ExecutionHistoryRepository(database_path)
+    rows = repository.for_repository(sanitize_text(args.repository))
+    json.dump([row_to_dict(row) for row in rows], sys.stdout)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

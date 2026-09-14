@@ -5,7 +5,7 @@ mod tools;
 
 use config::{AppConfig, RepoConfig, CONFIG_FILE};
 use processes::{process_is_running, ProcessManager, ProcessStatus};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -560,6 +560,13 @@ fn scheduler_arguments(
     arguments
 }
 
+/// The single, app-wide SQLite database shared by every repository's AI
+/// execution history — deliberately not per-repo, so the Feedback view can
+/// query it without a workspace being prepared.
+fn execution_history_db_path(config: &AppConfig) -> PathBuf {
+    PathBuf::from(&config.worker_state_dir).join("swarm-automation.sqlite3")
+}
+
 /// `swarm_issue_worker.py` flag list for one repo, embedded in `repos.json`.
 fn repo_worker_args(
     config: &AppConfig,
@@ -644,8 +651,7 @@ fn repo_worker_args(
         "--application-version".into(),
         env!("CARGO_PKG_VERSION").into(),
         "--execution-history-db".into(),
-        PathBuf::from(&config.worker_state_dir)
-            .join("swarm-automation.sqlite3")
+        execution_history_db_path(config)
             .to_string_lossy()
             .into_owned(),
     ];
@@ -815,6 +821,117 @@ async fn get_test_runs_background(
     })
     .await
     .map_err(|error| format!("Test run history lookup failed: {error}"))?
+}
+
+/// One sanitized `ai_executions` row (see `ai_execution_history.py`). Field
+/// names deserialize from the Python CLI's snake_case JSON but serialize to
+/// the frontend as camelCase, matching every other struct in this file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+struct AiExecutionRecord {
+    execution_id: String,
+    repository: String,
+    issue_number: i64,
+    #[serde(default)]
+    issue_url: String,
+    issue_title: String,
+    #[serde(default)]
+    original_issue_body: String,
+    #[serde(default)]
+    effective_prompt: String,
+    ai_provider: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    effort: String,
+    #[serde(default)]
+    reasoning_config: serde_json::Value,
+    started_at: String,
+    #[serde(default)]
+    completed_at: Option<String>,
+    #[serde(default)]
+    duration_seconds: Option<f64>,
+    #[serde(default)]
+    requested_work_summary: String,
+    #[serde(default)]
+    changes_summary: String,
+    #[serde(default)]
+    files_changed: Vec<String>,
+    #[serde(default)]
+    branch_name: String,
+    #[serde(default)]
+    commit_shas: Vec<String>,
+    #[serde(default)]
+    pull_request_number: Option<i64>,
+    #[serde(default)]
+    pull_request_url: String,
+    #[serde(default)]
+    operational_notes: Vec<String>,
+    #[serde(default)]
+    warnings_errors: Vec<String>,
+    final_status: String,
+    attempt_number: i64,
+    #[serde(default)]
+    application_version: String,
+    #[serde(default)]
+    prompt_template_version: String,
+    updated_at: String,
+    #[serde(default)]
+    uploaded_at: Option<String>,
+    #[serde(default)]
+    upload_status: String,
+    #[serde(default)]
+    upload_error: String,
+    #[serde(default)]
+    uploaded_record_updated_at: Option<String>,
+    #[serde(default)]
+    reviewer_feedback: String,
+    #[serde(default)]
+    reviewer_feedback_at: Option<String>,
+}
+
+#[tauri::command]
+fn get_execution_history<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<Vec<AiExecutionRecord>, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let database_path = execution_history_db_path(&config);
+    if !database_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let script = worker_script_dir(&app)?.join("ai_execution_history.py");
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let (ok, raw) = run_capture_owned(
+        &python,
+        &[
+            script.to_string_lossy().into_owned(),
+            "--db".into(),
+            database_path.to_string_lossy().into_owned(),
+            "--repository".into(),
+            repo.github_repository.clone(),
+        ],
+    );
+    if !ok {
+        return Err(format!("Execution history lookup failed: {raw}"));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("Execution history response could not be parsed: {error}"))
+}
+
+#[tauri::command]
+async fn get_execution_history_background(
+    app: tauri::AppHandle,
+    repo_id: String,
+) -> Result<Vec<AiExecutionRecord>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_execution_history(app.clone(), state, repo_id)
+    })
+    .await
+    .map_err(|error| format!("Execution history lookup failed: {error}"))?
 }
 
 #[tauri::command]
@@ -2668,6 +2785,8 @@ fn main() {
             create_test_definition,
             get_test_runs,
             get_test_runs_background,
+            get_execution_history,
+            get_execution_history_background,
             save_test_device,
             pause_process,
             resume_process,

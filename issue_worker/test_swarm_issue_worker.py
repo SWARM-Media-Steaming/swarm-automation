@@ -22,6 +22,7 @@ from ai_execution_history import (
     ExecutionHistoryRepository,
     ExecutionHistoryService,
     ExecutionStart,
+    main as execution_history_main,
     sanitize_text,
 )
 from swarm_issue_worker import (
@@ -301,6 +302,71 @@ class WorkerTestCase(unittest.TestCase):
         assert retry_row is not None
         self.assertEqual(retry_row["attempt_number"], 2)
         self.assertEqual(len(repository.pending_upload()), 2)
+
+    def test_execution_history_for_repository_and_cli_export(self) -> None:
+        database_path = self.state / "history.sqlite3"
+        service = ExecutionHistoryService(True, database_path)
+        service.start(
+            ExecutionStart(
+                repository="octocat/example",
+                issue_number=63,
+                issue_url="https://github.com/octocat/example/issues/63",
+                issue_title="Store prompt",
+                issue_body="Original body",
+                provider="Codex",
+                model="test-model",
+                effort="high",
+                branch_name="ai/codex/issue-63",
+                application_version="1.2.3",
+            ),
+            "2026-09-11T10:00:00-05:00",
+        )
+        service.update(
+            "2026-09-11T10:00:01-05:00",
+            files_changed=["worker.py"],
+            commit_shas=["a" * 40],
+            final_status="completed",
+        )
+        service.start(
+            ExecutionStart(
+                repository="octocat/other",
+                issue_number=1,
+                issue_url="",
+                issue_title="Unrelated",
+                issue_body="",
+                provider="Claude",
+                model="m",
+                effort="high",
+                branch_name="ai/claude/issue-1",
+                application_version="1.2.3",
+            ),
+            "2026-09-11T09:00:00-05:00",
+        )
+
+        repository = ExecutionHistoryRepository(database_path)
+        rows = repository.for_repository("octocat/example")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["repository"], "octocat/example")
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = execution_history_main(
+                ["--db", str(database_path), "--repository", "octocat/example"]
+            )
+        self.assertEqual(exit_code, 0)
+        records = json.loads(buffer.getvalue())
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["files_changed"], ["worker.py"])
+        self.assertEqual(records[0]["commit_shas"], ["a" * 40])
+        self.assertNotIn("octocat/other", buffer.getvalue())
+
+    def test_execution_history_cli_missing_database_returns_empty_list(self) -> None:
+        missing = self.state / "does-not-exist.sqlite3"
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = execution_history_main(["--db", str(missing), "--repository", "octocat/example"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(buffer.getvalue()), [])
 
     def test_execution_history_sanitizes_credentials(self) -> None:
         token = "ghp_abcdefghijklmnopqrstuvwxyz123456"

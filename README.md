@@ -63,6 +63,14 @@ switch and is disabled by default; enabling local history never enables remote
 upload. The database includes upload and reviewer-feedback state for a future
 review-platform integration, but this release does not transmit records.
 
+The **Feedback** tab reads that same local database for the selected
+repository: every AI execution grouped by issue and attempt, expandable to the
+original GitHub issue, the exact prompt submitted, the AI's summary of the
+requested and completed work, files/branch/commits/pull request, lifecycle
+notes and warnings, and any reviewer feedback once a review platform has
+provided it. It is read-only and empty until "Store AI execution history" has
+recorded at least one execution.
+
 ## Branch safety model
 
 The default AI integration branch is `ai-main` (the recommended name). Before
