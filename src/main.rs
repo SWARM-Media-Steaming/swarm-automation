@@ -1986,61 +1986,87 @@ fn merge_integration_branch(
     git_overview(app, state, repo_id)
 }
 
-/// Bring the human-owned branch into the AI integration branch in an isolated
-/// worktree. When both branches changed the same lines, the human-owned branch
-/// wins; non-overlapping AI work remains intact. The caller can then create a
-/// conflict-free promotion PR without disturbing the user's active checkout.
+/// Bring the human-owned branch into the AI integration branch inside a
+/// throwaway clone of its own — never the shared workspace the issue worker
+/// may be actively switching branches and committing in — so promotion can
+/// run safely while the worker keeps running. When both branches changed the
+/// same lines, the human-owned branch wins; non-overlapping AI work remains
+/// intact. The caller can then create a conflict-free promotion PR without
+/// disturbing the worker's or the user's checkout.
 fn reconcile_integration_for_promotion(
     git: &Path,
     workspace: &Path,
     repo: &RepoConfig,
 ) -> Result<(), String> {
+    // Resolve the remote URL from the shared workspace (a plain config read,
+    // safe even while the issue worker is actively checking out and
+    // committing there) so the isolated clone below authenticates and
+    // targets the same remote, whatever it is — GitHub, a fork, or a local
+    // path used in tests.
     let ws = workspace.to_string_lossy().into_owned();
-    let (fetched, fetch_message) = git_c(git, &ws, &["fetch", "--prune", &repo.remote_name]);
-    if !fetched {
+    let (got_url, remote_url) = git_c(git, &ws, &["remote", "get-url", &repo.remote_name]);
+    let remote_url = remote_url.trim().to_string();
+    if !got_url || remote_url.is_empty() {
         return Err(format!(
-            "Could not fetch branches before promotion: {fetch_message}"
+            "Could not resolve the {} remote URL for promotion.",
+            repo.remote_name
         ));
-    }
-    let base_ref = format!("{}/{}", repo.remote_name, repo.base_branch);
-    let integration_ref = format!("{}/{}", repo.remote_name, repo.integration_branch);
-    for branch in [&base_ref, &integration_ref] {
-        if !git_c(git, &ws, &["rev-parse", "--verify", "--quiet", branch]).0 {
-            return Err(format!("Remote branch {branch} does not exist."));
-        }
-    }
-    let relation = ahead_behind(git, &ws, &base_ref, &integration_ref);
-    if relation.behind == 0 {
-        return Ok(());
     }
 
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let worktree =
+    let clone_dir =
         std::env::temp_dir().join(format!("swarm-promotion-{}-{nonce}", std::process::id()));
-    let worktree_string = worktree.to_string_lossy().into_owned();
-    let (added, add_message) = git_c(
+    let cleanup = || {
+        let _ = std::fs::remove_dir_all(&clone_dir);
+    };
+    let (cloned, clone_message) = run_capture(
         git,
-        &ws,
         &[
-            "worktree",
-            "add",
-            "--detach",
-            &worktree_string,
-            &integration_ref,
+            "clone",
+            "--origin",
+            &repo.remote_name,
+            "--",
+            &remote_url,
+            &clone_dir.to_string_lossy(),
         ],
     );
-    if !added {
+    if !cloned {
+        cleanup();
         return Err(format!(
-            "Could not prepare the promotion worktree: {add_message}"
+            "Could not prepare an isolated promotion clone: {clone_message}"
+        ));
+    }
+    let cd = clone_dir.to_string_lossy().into_owned();
+
+    let base_ref = format!("{}/{}", repo.remote_name, repo.base_branch);
+    let integration_ref = format!("{}/{}", repo.remote_name, repo.integration_branch);
+    for branch in [&base_ref, &integration_ref] {
+        if !git_c(git, &cd, &["rev-parse", "--verify", "--quiet", branch]).0 {
+            cleanup();
+            return Err(format!("Remote branch {branch} does not exist."));
+        }
+    }
+    let relation = ahead_behind(git, &cd, &base_ref, &integration_ref);
+    if relation.behind == 0 {
+        cleanup();
+        return Ok(());
+    }
+
+    let (switched, switch_message) = git_c(git, &cd, &["switch", &repo.integration_branch]);
+    if !switched {
+        cleanup();
+        return Err(format!(
+            "Could not check out {} in the promotion clone: {switch_message}",
+            repo.integration_branch
         ));
     }
 
     let merge_args = vec![
         "-C".to_string(),
-        worktree_string.clone(),
+        cd.clone(),
         "-c".into(),
         "user.name=SWARM Automation".into(),
         "-c".into(),
@@ -2055,17 +2081,16 @@ fn reconcile_integration_for_promotion(
     ];
     let (merged, merge_message) = run_capture_owned(git, &merge_args);
     let result = if !merged {
-        let _ = git_c(git, &worktree_string, &["merge", "--abort"]);
+        let _ = git_c(git, &cd, &["merge", "--abort"]);
         Err(format!(
             "Could not reconcile {} with {}: {merge_message}",
             repo.integration_branch, repo.base_branch
         ))
     } else {
-        let refspec = format!("HEAD:refs/heads/{}", repo.integration_branch);
         let (pushed, push_message) = git_c(
             git,
-            &worktree_string,
-            &["push", &repo.remote_name, &refspec],
+            &cd,
+            &["push", &repo.remote_name, &repo.integration_branch],
         );
         if pushed {
             Ok(())
@@ -2076,11 +2101,7 @@ fn reconcile_integration_for_promotion(
             ))
         }
     };
-    let _ = git_c(
-        git,
-        &ws,
-        &["worktree", "remove", "--force", &worktree_string],
-    );
+    cleanup();
     result
 }
 
@@ -2183,18 +2204,13 @@ fn promote_integration_branch(
 ) -> Result<RepoGitOverview, String> {
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?.clone();
-    let worker = state.processes.status(
-        &app,
-        "issue",
-        "Issue worker scheduler",
-        &automation_log_path(&app)?,
-    )?;
-    if worker.state != "stopped" {
-        return Err("Stop the issue worker before promoting an integration branch.".into());
-    }
     let git = tools::configured_or_detected("", "git")?;
     let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
     let workspace = prepared_workspace(&app, &config, &repo)?;
+    // Reconciliation and the merge itself only ever read the shared
+    // workspace's config/refs and operate inside their own throwaway clone
+    // (see reconcile_integration_for_promotion), so it is safe to run while
+    // the issue worker is actively checking out and committing there.
     reconcile_integration_for_promotion(&git, &workspace, &repo)?;
     let (pr_number, pr_url) = ensure_integration_pr_ref(&gh, &repo)?;
     approve_promotion_pr(&app, &config, &repo, &gh, &pr_url)?;
