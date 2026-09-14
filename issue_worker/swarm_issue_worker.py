@@ -2788,11 +2788,33 @@ class Worker:
             delivered_sha = str((existing[0].get("mergeCommit") or {}).get("oid") or "")
             if not SHA_RE.fullmatch(delivered_sha):
                 raise WorkerError(f"Merged PR did not report a valid merge commit: {pr_url}")
-            if self.issue_is_closed(self.issue.number):
-                self.delete_remote_issue_branch(branch, self.choice.key)
-            self.return_to_integration_branch(branch)
-            log(f"Recovered already-merged pull request {pr_url} for issue #{self.issue.number}.")
-            return pr_url, branch, delivered_sha
+            # A branch name is reused across every work-round on the same
+            # issue, so "there is a merged PR for this branch name" is not
+            # proof `commit_sha` — the commit *this* round just produced —
+            # is part of it: it can just as easily be a previous round's
+            # already-merged PR sitting under the same name, with the new
+            # commit still only local. Confirm the new commit is actually an
+            # ancestor of (or equal to) what was merged before trusting this
+            # as "nothing to deliver" — otherwise the new commit is silently
+            # never pushed while the work-round still reports success (see
+            # issue-branch-delivery.md).
+            # Fetch the integration branch itself rather than `delivered_sha`
+            # directly: GitHub generally refuses to fetch an arbitrary commit
+            # that isn't a ref tip, but `delivered_sha` is by definition on
+            # `integration_branch` (that's what "merged into it" means), so
+            # fetching the branch always brings it in.
+            self.git("fetch", self.config.remote_name, self.config.integration_branch, check=False)
+            if self.git_ok("merge-base", "--is-ancestor", commit_sha, delivered_sha):
+                if self.issue_is_closed(self.issue.number):
+                    self.delete_remote_issue_branch(branch, self.choice.key)
+                self.return_to_integration_branch(branch)
+                log(f"Recovered already-merged pull request {pr_url} for issue #{self.issue.number}.")
+                return pr_url, branch, delivered_sha
+            log(
+                f"PR {pr_url} for {branch} is merged, but commit {commit_sha} is not part of it "
+                "— this branch was reused for a new work-round; delivering it as new work instead "
+                "of treating it as already merged."
+            )
 
         push_result = self.push_ref(f"HEAD:refs/heads/{branch}")
         if push_result.returncode != 0:

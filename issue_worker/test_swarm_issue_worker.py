@@ -1485,6 +1485,84 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertNotIn(branch, self.git("branch", "--format=%(refname:short)").splitlines())
 
+    def test_deliver_pull_request_pushes_a_new_commit_on_a_reused_branch_instead_of_treating_it_as_already_merged(
+        self,
+    ) -> None:
+        """A branch name is reused across every work-round on the same
+        issue. If round one's PR under that name already merged (`merged_head`
+        below), a *new* commit from a later round on the same branch name
+        must still be delivered -- not silently dropped because a merged PR
+        with that head branch name already exists (see
+        issue-branch-delivery.md). Uses `self.worker` (--no-auto-approve/
+        --no-auto-merge) rather than `pr_worker()` so `deliver_pull_request`
+        stops once the PR itself is created/reused, without also exercising
+        the separate approve/merge machinery."""
+        worker = self.worker
+        worker.issue = IssueContext(500, "Reused branch", "", [], "https://example.invalid/500")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session-500")
+        run_start, _, _, _ = worker.prepare_repository()
+        (self.repo / "round-one.txt").write_text("round one\n", encoding="utf-8")
+        worker.commit_completed_work(run_start)
+        branch = worker.expected_branch()
+        self.git("push", "-q", "-u", "origin", branch)
+
+        # Simulate round one's PR merging into ai-main on the remote.
+        merger = self.root / "merger"
+        subprocess.run(
+            ["git", "clone", "-q", "--branch", "ai-main", str(self.remote), str(merger)], check=True
+        )
+        subprocess.run(["git", "-C", str(merger), "config", "user.name", "merger"], check=True)
+        subprocess.run(
+            ["git", "-C", str(merger), "config", "user.email", "merger@example.invalid"], check=True
+        )
+        subprocess.run(["git", "-C", str(merger), "fetch", "-q", "origin", branch], check=True)
+        subprocess.run(
+            ["git", "-C", str(merger), "merge", "-q", "--no-ff", "FETCH_HEAD", "-m", "merge round one"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(merger), "push", "-q", "origin", "ai-main"], check=True)
+        merged_head = subprocess.run(
+            ["git", "-C", str(merger), "rev-parse", "HEAD"], text=True,
+            stdout=subprocess.PIPE, check=True,
+        ).stdout.strip()
+        worker.return_to_integration_branch(branch)
+
+        # Round two: the same branch name is reused for a follow-up work
+        # round, with a genuinely new commit round one's (already-merged) PR
+        # knows nothing about.
+        self.git("switch", "-c", branch)
+        (self.repo / "round-two.txt").write_text("round two\n", encoding="utf-8")
+        self.git("add", "round-two.txt")
+        self.git("commit", "-q", "-m", "round two work")
+        second_commit = self.git("rev-parse", "HEAD")
+
+        stale_merged_pr = json.dumps(
+            [
+                {
+                    "url": "https://example.invalid/pull/900",
+                    "state": "MERGED",
+                    "baseRefName": "ai-main",
+                    "mergeCommit": {"oid": merged_head},
+                }
+            ]
+        )
+        with mock.patch.object(
+            worker.github, "gh", side_effect=[stale_merged_pr, "https://example.invalid/pull/901"]
+        ) as gh:
+            pr_url, delivered_branch, delivered_sha = worker.deliver_pull_request(second_commit)
+
+        self.assertEqual(pr_url, "https://example.invalid/pull/901")
+        self.assertEqual(delivered_branch, branch)
+        self.assertEqual(delivered_sha, second_commit)
+        self.assertEqual(gh.call_count, 2)
+        # The new commit must actually have reached the remote -- not just
+        # been reported as delivered.
+        remote_branch_head = subprocess.run(
+            ["git", "rev-parse", branch], cwd=str(self.remote), text=True,
+            stdout=subprocess.PIPE, check=True,
+        ).stdout.strip()
+        self.assertEqual(remote_branch_head, second_commit)
+
     def test_paused_pr_branch_returns_to_main_and_restores_its_own_branch(self) -> None:
         worker = self.pr_worker()
         worker.issue = IssueContext(406, "Paused PR", "", [], "https://example.invalid/406")
