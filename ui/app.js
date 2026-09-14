@@ -190,7 +190,7 @@
     },
     "execution-history": {
       title: "Execution history",
-      html: "<p>Every AI issue execution for the selected repository, newest first — grouped by issue, with every attempt. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p>",
+      html: "<p>Every AI issue execution for the selected repository, newest first — grouped by issue, with every attempt. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
       links: [],
     },
     "provider-bins": {
@@ -1108,6 +1108,7 @@
     environment_only: { label: "Environment only", cls: "passed" },
     quota_paused: { label: "Quota paused", cls: "waiting-for-input" },
     failed: { label: "Failed", cls: "failed" },
+    imported: { label: "Imported", cls: "" },
   };
 
   function executionStatusMeta(status) {
@@ -1295,6 +1296,21 @@
     } finally {
       state.refreshing.executionHistory = false;
     }
+  }
+
+  async function importExecutionHistory() {
+    const repo = currentRepo();
+    if (!repo) return;
+    await withBusy("import-execution-history", async () => {
+      const summary = await invoke("import_execution_history_background", { repoId: repo.id });
+      await refreshExecutionHistory();
+      showToast(
+        summary.imported
+          ? `Imported ${summary.imported} issue${summary.imported === 1 ? "" : "s"} from GitHub (${summary.skipped} already tracked).`
+          : `No new issues to import — all ${summary.totalIssues} are already tracked.`,
+        "success",
+      );
+    }, { progress: "Scanning the GitHub issue backlog…" });
   }
 
   async function selectTestDevice(event) {
@@ -2492,6 +2508,7 @@
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
     byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
     byId("refresh-execution-history").addEventListener("click", () => refreshExecutionHistory());
+    byId("import-execution-history").addEventListener("click", () => importExecutionHistory());
     byId("execution-history-search").addEventListener("input", (event) => {
       state.executionHistorySearch = event.target.value;
       renderExecutionHistory();

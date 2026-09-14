@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime as dt
 import json
 import re
 import sqlite3
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -190,6 +192,63 @@ class ExecutionHistoryRepository:
             )
         return execution_id
 
+    def existing_issue_numbers(self, repository: str) -> set[int]:
+        """Issue numbers this repository already has at least one row for.
+
+        Used to skip issues the worker (or a previous import) already
+        tracked, so importing never creates a second, misleadingly "real"
+        looking row alongside genuine execution history.
+        """
+        with self.connect() as database:
+            rows = database.execute(
+                "SELECT DISTINCT issue_number FROM ai_executions WHERE repository = ?",
+                (repository,),
+            )
+            return {int(row[0]) for row in rows}
+
+    def import_issue(self, repository: str, issue: dict[str, Any], imported_at: str) -> str:
+        """Record one pre-existing GitHub issue as a synthetic history row.
+
+        Distinct from ``create``: this never represents an actual AI run, so
+        it always lands as attempt 1 with ``final_status = 'imported'`` and no
+        provider/model/effort — those fields would otherwise misrepresent
+        work the automation never did.
+        """
+        execution_id = str(uuid.uuid4())
+        repository = sanitize_text(repository)
+        number = int(issue["number"])
+        state = str(issue.get("state") or "open").lower()
+        closed_at = issue.get("closedAt") or issue.get("closed_at")
+        completed_at = str(closed_at) if state == "closed" and closed_at else None
+        with self.connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            attempt = database.execute(
+                "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM ai_executions "
+                "WHERE repository = ? AND issue_number = ?",
+                (repository, number),
+            ).fetchone()[0]
+            database.execute(
+                """INSERT INTO ai_executions (
+                    execution_id, repository, issue_number, issue_url, issue_title,
+                    original_issue_body, ai_provider, started_at, completed_at,
+                    final_status, attempt_number, updated_at, operational_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, 'imported', ?, ?, ?)""",
+                (
+                    execution_id,
+                    repository,
+                    number,
+                    sanitize_text(issue.get("url") or issue.get("html_url") or ""),
+                    sanitize_text(issue.get("title") or ""),
+                    sanitize_text(issue.get("body") or ""),
+                    str(issue.get("createdAt") or issue.get("created_at") or imported_at),
+                    completed_at,
+                    attempt,
+                    imported_at,
+                    json.dumps([f"Imported from existing GitHub issue (state: {state})."]),
+                ),
+            )
+        return execution_id
+
     def update(self, execution_id: str, updated_at: str, **fields: Any) -> None:
         if not fields:
             return
@@ -296,6 +355,56 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return record
 
 
+def fetch_github_issues(gh_bin: str, repository: str) -> list[dict[str, Any]]:
+    """Every open and closed issue (never pull requests — `gh issue list`
+    already excludes those) for ``repository``, via the operator's own `gh`
+    login rather than a provider's GitHub App bot — the same plain-`gh`
+    pattern the desktop app already uses for other one-off, read-only GitHub
+    lookups.
+    """
+    result = subprocess.run(
+        [
+            gh_bin, "issue", "list",
+            "--repo", repository,
+            "--state", "all",
+            "--limit", "1000",
+            "--json", "number,title,url,body,state,createdAt,closedAt",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(sanitize_text((result.stderr or result.stdout).strip() or "gh issue list failed"))
+    return json.loads(result.stdout or "[]")
+
+
+def import_missing_issues(
+    repository: ExecutionHistoryRepository,
+    repository_name: str,
+    issues: list[dict[str, Any]],
+    imported_at: str | None = None,
+) -> dict[str, int]:
+    """Add a synthetic `imported` row for every issue with no existing row.
+
+    Issues already tracked (any attempt, any status) are left untouched —
+    importing must never shadow or duplicate genuine execution history.
+    """
+    imported_at = imported_at or dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    existing = repository.existing_issue_numbers(repository_name)
+    imported = 0
+    for issue in issues:
+        if int(issue["number"]) in existing:
+            continue
+        repository.import_issue(repository_name, issue, imported_at)
+        imported += 1
+    return {
+        "totalIssues": len(issues),
+        "imported": imported,
+        "skipped": len(issues) - imported,
+    }
+
+
 class ExecutionHistoryService:
     """Optional facade so disabled history cannot affect issue processing."""
 
@@ -351,19 +460,45 @@ def main(argv: list[str] | None = None) -> int:
     Prints the repository's executions as a JSON array on stdout — the
     desktop app's Feedback view shells out to this the same way it already
     shells out to the other worker scripts for one-off, read-only queries.
+
+    `--import-from-github` instead scans that repository's full GitHub issue
+    backlog (open and closed) and adds a synthetic `imported` row for any
+    issue with no existing execution history row, printing a JSON summary
+    object (`totalIssues`/`imported`/`skipped`) instead of the row array —
+    the Feedback view's "Import from GitHub" action.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True, help="Path to the SQLite database file.")
     parser.add_argument("--repository", required=True, help="owner/name to filter by.")
+    parser.add_argument(
+        "--import-from-github",
+        action="store_true",
+        help="Import open/closed GitHub issues with no existing history row, then exit.",
+    )
+    parser.add_argument(
+        "--gh-bin", default="gh", help="Path to the gh CLI (only used with --import-from-github)."
+    )
     args = parser.parse_args(argv)
 
     database_path = Path(args.db).expanduser()
+    repository_name = sanitize_text(args.repository)
+
+    if args.import_from_github:
+        repository = ExecutionHistoryRepository(database_path)
+        try:
+            issues = fetch_github_issues(args.gh_bin, repository_name)
+        except (RuntimeError, ValueError) as error:
+            print(json.dumps({"error": str(error)}))
+            return 1
+        json.dump(import_missing_issues(repository, repository_name, issues), sys.stdout)
+        return 0
+
     if not database_path.is_file():
         print("[]")
         return 0
 
     repository = ExecutionHistoryRepository(database_path)
-    rows = repository.for_repository(sanitize_text(args.repository))
+    rows = repository.for_repository(repository_name)
     json.dump([row_to_dict(row) for row in rows], sys.stdout)
     return 0
 
