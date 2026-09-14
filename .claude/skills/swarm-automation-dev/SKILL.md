@@ -1,15 +1,25 @@
 ---
 name: swarm-automation-dev
-description: Use when working on this repository (SWARM Automation, the Tauri desktop control center for AI issue workers and UAT schedulers) — its test conventions, its standalone (non-workspace) Cargo setup, and the vendored issue_worker/ directory's relationship to the SWARM monorepo it originated from.
+description: Use when working on this repository (SWARM Automation, the Tauri desktop control center for AI issue workers and UAT schedulers) — its test conventions, its standalone (non-workspace) Cargo setup, and the history/status of the bundled issue_worker/ directory.
 ---
 
 # Working in this repository
 
-This app was extracted from `apps/automation/` inside the
-[SWARM monorepo](https://github.com/DotNetRockStar/swarm) into its own
-repository so it can be built and distributed independently of any one
-target project — it's meant to run an issue worker and UAT scheduler
-against **any** local Git checkout, not just SWARM's own.
+The issue-worker automation used to live inside the
+[SWARM monorepo](https://github.com/DotNetRockStar/swarm) as
+`scripts/issue_worker/` (a Python script suite, originally added by "Migrate
+issue automation to Python with provider bots" (#90)). It was pulled out
+into this standalone repo/app so it could be built and distributed
+independently of any one target project — it's meant to run an issue worker
+and UAT scheduler against **any** local Git checkout, not just SWARM's own.
+Once the standalone app existed, SWARM's own copy was deleted from the
+monorepo as dead weight (issue #169, "Clean up old issue worker scripts":
+*"The issue worker was converted into the swarm automation project so we
+need to remove the old script files from here"*, closed 2026-09-01). There
+is no `apps/automation/` and no `scripts/issue_worker/` left in the SWARM
+monorepo today — this repo's `issue_worker/` is the only copy that exists
+anywhere, not a fork or vendored snapshot of something still maintained
+elsewhere.
 
 ## This is a standalone Cargo package, not a workspace member
 
@@ -21,43 +31,39 @@ SWARM's `apps/server/Cargo.toml` (a real workspace member) and are tempted
 to "fix" this to match that pattern, don't — that would break the build,
 since there's no `[workspace]` root above this directory to inherit from.
 
-## `issue_worker/` is vendored, not shared
+## `issue_worker/` is the canonical copy — there is nothing left to sync with
 
-`issue_worker/*.py` is a hand-copied snapshot of SWARM's
-`scripts/issue_worker/` at the time this repo was created. It is **not** a
-git submodule, symlink, or otherwise live-linked to the SWARM repo.
+`issue_worker/*.py` is not a git submodule, symlink, or otherwise
+live-linked to anything else, but it is also **not a fork of a still-
+maintained upstream** — see above, SWARM's own `scripts/issue_worker/` was
+deleted once this repo took over. A fix or feature made here is the only
+place it can be made; there is no other copy to port it to, and no
+"upstream" that could ever drift ahead of this one again. If you're
+tempted to go "sync this into SWARM's own copy too" — there is no such
+copy anymore; the request is already satisfied by fixing it here.
 
-**This copy has intentionally diverged from upstream.** The vendored worker
-is now **N-provider** (Claude / Codex / Grok — an open set defined by
-`KNOWN_PROVIDERS` and `ProviderSpec` in `swarm_issue_worker.py`), while
-upstream `scripts/issue_worker/` is still a two-provider Claude↔Codex
-rotation. Re-syncing is no longer a straight copy — port changes field by
-field and keep the provider registry intact: `ProviderSpec`, the
-`--enabled-provider` / `--<key>-model|effort|bin` flags, `choose_provider`'s
-rotation, `review_provider`, `grok_capacity` / `_run_grok`, and the dynamic
-`PREVIOUS_AI_RE` + branch-prune regex. Adding a fourth provider = one entry
-in `KNOWN_PROVIDERS`, a `<key>_capacity` method, a `_run_<key>` branch in
-`run_ai`, an entry in `PROVIDERS` (`setup_github_bots.py`) and the loader
-tuple (`github_app_auth.py`), plus `config.rs::KNOWN_PROVIDERS` and
+The worker is **N-provider** (Claude / Codex / Grok — an open set defined
+by `KNOWN_PROVIDERS` and `ProviderSpec` in `swarm_issue_worker.py`), unlike
+the old two-provider Claude↔Codex rotation the original SWARM script had —
+that divergence is now just this file's own history, not an open gap to
+close. Adding a fourth provider = one entry in `KNOWN_PROVIDERS`, a
+`<key>_capacity` method, a `_run_<key>` branch in `run_ai`, an entry in
+`PROVIDERS` (`setup_github_bots.py`) and the loader tuple
+(`github_app_auth.py`), plus `config.rs::KNOWN_PROVIDERS` and
 `PROVIDER_META` / `HELP_TOPICS` in `ui/app.js` on the app side.
 
-Other ways the two copies relate:
+Related, still-accurate mechanics:
 
-- Editing a file under `issue_worker/` here only affects this app's bundled
-  copy. It does not change SWARM's own live issue-worker automation, which
-  runs its own independent copy of the same source.
-- Conversely, a future improvement made in SWARM's `scripts/issue_worker/`
-  (e.g. a new scheduling mode, a new CLI flag) will **not** automatically
-  appear here. If `apps/automation`'s Rust code (in `src/main.rs`, notably
-  `issue_worker_arguments()`) starts passing a flag this vendored copy
-  doesn't understand yet, that's the signal to manually re-sync: diff
-  SWARM's current `scripts/issue_worker/` against this directory and pull
-  the relevant changes across by hand.
 - `tauri.conf.json`'s `bundle.resources` entry (`"issue_worker/*.py":
   "issue_worker/"`) is what actually ships these files inside a packaged
-  `.app` — see `worker_script_dir()` in `src/main.rs` for the runtime
-  lookup order (a target repository's own `scripts/issue_worker/` first,
-  falling back to this bundled copy).
+  `.app`. `worker_script_dir()` in `src/main.rs` resolves that bundled
+  `resource_dir()/issue_worker` path at runtime — there is no fallback to
+  a target repository's own script directory; every run, against whatever
+  repository is configured, uses this bundled copy. (`inspect_repository_
+  path`'s `worker_available` flag checking a target repo for a leftover
+  `scripts/issue_worker/install_swarm_issue_cron.py` is a legacy detection
+  heuristic for the UI, not something the worker's own execution path
+  branches on.)
 
 ## Test suite
 
@@ -88,3 +94,15 @@ verified by an actual `npm run dev`/`npm run build` + launch than by tests
 that would install real software or make real GitHub calls.
 
 Run with `cargo test`.
+
+`issue_worker/test_swarm_issue_worker.py` is the Python-side counterpart —
+`unittest.TestCase`-based, with a real local git remote/repo fixture per
+test (`WorkerTestCase.setUp`: a bare `remote.git` plus a working checkout
+with `main`/`ai-main`, so tests exercise real `git push`/`fetch`/branch
+operations rather than mocking git itself; only `gh` calls need mocking,
+via `mock.patch.object(worker.github, "gh", ...)`). **Run it with
+`python3 -m unittest test_swarm_issue_worker` from inside `issue_worker/`,
+not `pytest`** — pytest's module-level `setup_module` auto-detection
+collides with this file importing `setup_github_bots` under a name pytest
+mistakes for that hook, failing every test at collection with
+`AttributeError: module 'setup_github_bots' has no attribute '__code__'`.
