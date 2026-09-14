@@ -22,6 +22,7 @@ from ai_execution_history import (
     ExecutionHistoryRepository,
     ExecutionHistoryService,
     ExecutionStart,
+    import_missing_issues,
     main as execution_history_main,
     sanitize_text,
 )
@@ -359,6 +360,104 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(records[0]["files_changed"], ["worker.py"])
         self.assertEqual(records[0]["commit_shas"], ["a" * 40])
         self.assertNotIn("octocat/other", buffer.getvalue())
+
+    def test_import_missing_issues_skips_already_tracked_issue_numbers(self) -> None:
+        database_path = self.state / "history.sqlite3"
+        service = ExecutionHistoryService(True, database_path)
+        service.start(
+            ExecutionStart(
+                repository="octocat/example",
+                issue_number=63,
+                issue_url="https://github.com/octocat/example/issues/63",
+                issue_title="Already tracked",
+                issue_body="Original body",
+                provider="Codex",
+                model="test-model",
+                effort="high",
+                branch_name="ai/codex/issue-63",
+                application_version="1.2.3",
+            ),
+            "2026-09-11T10:00:00-05:00",
+        )
+        repository = ExecutionHistoryRepository(database_path)
+        issues = [
+            {
+                "number": 63,
+                "title": "Already tracked",
+                "url": "https://github.com/octocat/example/issues/63",
+                "body": "Original body",
+                "state": "open",
+                "createdAt": "2026-08-01T10:00:00Z",
+                "closedAt": None,
+            },
+            {
+                "number": 78,
+                "title": "Add ability to import existing or missed issues",
+                "url": "https://github.com/octocat/example/issues/78",
+                "body": "Import missed issues into Feedback.",
+                "state": "closed",
+                "createdAt": "2026-08-02T10:00:00Z",
+                "closedAt": "2026-08-03T12:00:00Z",
+            },
+        ]
+
+        summary = import_missing_issues(
+            repository, "octocat/example", issues, "2026-09-14T09:00:00-05:00"
+        )
+
+        self.assertEqual(summary, {"totalIssues": 2, "imported": 1, "skipped": 1})
+        rows = {row["issue_number"]: row for row in repository.for_repository("octocat/example")}
+        self.assertEqual(set(rows), {63, 78})
+        # The already-tracked issue keeps its real row untouched, not shadowed
+        # by a second "imported" one for the same issue number.
+        self.assertEqual(rows[63]["final_status"], "accepted")
+        self.assertEqual(rows[63]["attempt_number"], 1)
+        imported_row = rows[78]
+        self.assertEqual(imported_row["final_status"], "imported")
+        self.assertEqual(imported_row["ai_provider"], "")
+        self.assertEqual(imported_row["attempt_number"], 1)
+        self.assertEqual(imported_row["completed_at"], "2026-08-03T12:00:00Z")
+        self.assertIn("Imported from existing GitHub issue (state: closed)", imported_row["operational_notes"])
+
+        # Running the import again must not duplicate the already-imported issue.
+        again = import_missing_issues(
+            repository, "octocat/example", issues, "2026-09-14T09:05:00-05:00"
+        )
+        self.assertEqual(again, {"totalIssues": 2, "imported": 0, "skipped": 2})
+        self.assertEqual(len(repository.for_repository("octocat/example")), 2)
+
+    def test_execution_history_cli_import_from_github(self) -> None:
+        database_path = self.state / "history.sqlite3"
+        issues = [
+            {
+                "number": 5,
+                "title": "Missed issue",
+                "url": "https://github.com/octocat/example/issues/5",
+                "body": "",
+                "state": "open",
+                "createdAt": "2026-08-01T10:00:00Z",
+                "closedAt": None,
+            }
+        ]
+        buffer = io.StringIO()
+        with mock.patch("ai_execution_history.fetch_github_issues", return_value=issues) as fetch:
+            with contextlib.redirect_stdout(buffer):
+                exit_code = execution_history_main(
+                    [
+                        "--db", str(database_path),
+                        "--repository", "octocat/example",
+                        "--import-from-github",
+                        "--gh-bin", "/usr/bin/gh",
+                    ]
+                )
+        self.assertEqual(exit_code, 0)
+        fetch.assert_called_once_with("/usr/bin/gh", "octocat/example")
+        self.assertEqual(json.loads(buffer.getvalue()), {"totalIssues": 1, "imported": 1, "skipped": 0})
+        repository = ExecutionHistoryRepository(database_path)
+        rows = repository.for_repository("octocat/example")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["issue_number"], 5)
+        self.assertEqual(rows[0]["final_status"], "imported")
 
     def test_execution_history_cli_missing_database_returns_empty_list(self) -> None:
         missing = self.state / "does-not-exist.sqlite3"

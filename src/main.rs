@@ -995,6 +995,64 @@ async fn get_execution_history_background(
     .map_err(|error| format!("Execution history lookup failed: {error}"))?
 }
 
+/// Summary of `ai_execution_history.py --import-from-github`: every open and
+/// closed issue in the repo's GitHub backlog that had no existing execution
+/// history row got a synthetic `imported` one added.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionHistoryImportSummary {
+    total_issues: i64,
+    imported: i64,
+    skipped: i64,
+}
+
+#[tauri::command]
+fn import_execution_history<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<ExecutionHistoryImportSummary, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let database_path = execution_history_db_path(&config);
+    let script = worker_script_dir(&app)?.join("ai_execution_history.py");
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    let (ok, raw) = run_capture_owned(
+        &python,
+        &[
+            script.to_string_lossy().into_owned(),
+            "--db".into(),
+            database_path.to_string_lossy().into_owned(),
+            "--repository".into(),
+            repo.github_repository.clone(),
+            "--import-from-github".into(),
+            "--gh-bin".into(),
+            gh.to_string_lossy().into_owned(),
+        ],
+    );
+    if !ok {
+        return Err(format!(
+            "Importing GitHub issues into execution history failed: {raw}"
+        ));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("Import summary could not be parsed: {error}"))
+}
+
+#[tauri::command]
+async fn import_execution_history_background(
+    app: tauri::AppHandle,
+    repo_id: String,
+) -> Result<ExecutionHistoryImportSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        import_execution_history(app.clone(), state, repo_id)
+    })
+    .await
+    .map_err(|error| format!("Importing GitHub issues into execution history failed: {error}"))?
+}
+
 #[tauri::command]
 fn save_test_device<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -2870,6 +2928,8 @@ fn main() {
             get_test_runs_background,
             get_execution_history,
             get_execution_history_background,
+            import_execution_history,
+            import_execution_history_background,
             save_test_device,
             pause_process,
             resume_process,
