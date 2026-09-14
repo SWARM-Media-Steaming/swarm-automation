@@ -76,6 +76,23 @@ pub struct Requirements {
     pub credentials: Vec<CredentialRequirement>,
     #[serde(default)]
     pub devices: Vec<DeviceRequirement>,
+    /// Data this suite needs that isn't deterministic or fixed ahead of time.
+    /// When non-empty, the suite needs an enabled AI provider with usage
+    /// headroom before it can run; see `run_once` and `check_ai_capability`.
+    #[serde(default)]
+    pub ai_test_data: Vec<AiTestDataRequirement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTestDataRequirement {
+    /// Written to `<SWARM_AI_TEST_DATA_DIR>/<name>.txt` for the suite command
+    /// to read.
+    pub name: String,
+    /// Plain-language description of the data needed, sent to the AI
+    /// provider as-is. The suite should treat the result as best-effort,
+    /// unverified sample data — never as real or authoritative.
+    pub prompt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +183,22 @@ pub struct SuiteResult {
     pub duration_ms: Option<u64>,
     #[serde(default)]
     pub output: String,
+    /// What an AI provider generated for this suite's `ai_test_data`
+    /// requirements, if any — the run's own record of what was made up, per
+    /// the repository's test definition.
+    #[serde(default)]
+    pub ai_generated_data: Vec<AiGeneratedDataRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiGeneratedDataRecord {
+    pub name: String,
+    pub provider: String,
+    /// Truncated preview of the generated data, kept short so run history
+    /// stays small; the full text lives under `ai-data/<suite id>/` in the
+    /// run directory.
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -279,7 +312,10 @@ fn suite_name(value: &str) -> String {
 /// Build a reviewable definition from conventional, repository-owned test
 /// entry points. Detection reads manifests and filenames only; it never runs
 /// a discovered command.
-pub fn detect_definition(workspace: &Path) -> Result<TestDefinitionDraft, String> {
+pub fn detect_definition(
+    workspace: &Path,
+    ai: Option<&AiRunOptions>,
+) -> Result<TestDefinitionDraft, String> {
     if !workspace.is_dir() {
         return Err(format!(
             "The repository workspace does not exist at {}. Clone or choose it first.",
@@ -449,18 +485,57 @@ pub fn detect_definition(workspace: &Path) -> Result<TestDefinitionDraft, String
         }
     }
 
-    let detected_suites = suites.len();
+    let mut detected_suites = suites.len();
     if suites.is_empty() {
-        notes.push("No conventional test entry points were found. Replace the disabled placeholder command before enabling it.".into());
-        let mut placeholder = boilerplate_suite(
-            "project-tests",
-            "Project tests",
-            &["replace-with-test-command"],
-            &[],
-            &[],
-        );
-        placeholder.enabled = false;
-        suites.push(placeholder);
+        let ai_found = ai.filter(|options| options.enabled).and_then(|options| {
+            let capability = check_ai_capability(
+                &options.python_bin,
+                &options.script_dir,
+                &options.providers,
+                options.minimum_remaining_percent,
+            );
+            if !capability.available {
+                notes.push(format!(
+                    "AI-assisted discovery was skipped: {}",
+                    capability.detail
+                ));
+                return None;
+            }
+            match ai_discover_suites(workspace, options, &capability) {
+                Ok((found, ai_notes)) => {
+                    notes.extend(ai_notes);
+                    Some(found)
+                }
+                Err(error) => {
+                    notes.push(format!("AI-assisted discovery could not run: {error}"));
+                    None
+                }
+            }
+        });
+        match ai_found {
+            Some(found) if !found.is_empty() => {
+                notes.push(format!(
+                    "No conventional test entry points were found, so AI suggested {} possible one(s) \
+                     from the repository layout. Review the commands and requirements carefully — \
+                     they start disabled until you turn them on.",
+                    found.len()
+                ));
+                suites.extend(found);
+                detected_suites = suites.len();
+            }
+            _ => {
+                notes.push("No conventional test entry points were found. Replace the disabled placeholder command before enabling it.".into());
+                let mut placeholder = boilerplate_suite(
+                    "project-tests",
+                    "Project tests",
+                    &["replace-with-test-command"],
+                    &[],
+                    &[],
+                );
+                placeholder.enabled = false;
+                suites.push(placeholder);
+            }
+        }
     } else {
         notes.push("Review commands and requirements before saving; detection never executes discovered files.".into());
     }
@@ -724,6 +799,7 @@ pub fn build_plan(
                 finished_at: None,
                 duration_ms: None,
                 output: String::new(),
+                ai_generated_data: Vec::new(),
             });
             if !suite.enabled {
                 result.state = "Skipped".into();
@@ -905,6 +981,26 @@ fn evaluate_requirements(
             input_key: device.input.clone(),
         });
     }
+    if !suite.requirements.ai_test_data.is_empty() {
+        let names = suite
+            .requirements
+            .ai_test_data
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        statuses.push(RequirementStatus {
+            kind: "ai".into(),
+            label: "AI test data".into(),
+            state: "ready".into(),
+            detail: format!(
+                "Generates: {names}. Checked automatically right before this suite runs; needs an \
+                 enabled AI provider with usage available, or it runs as \"Not executed\"."
+            ),
+            action: String::new(),
+            input_key: String::new(),
+        });
+    }
     statuses
 }
 
@@ -1062,6 +1158,253 @@ pub fn list_runs(run_dir: &Path) -> Vec<TestRunResults> {
     runs
 }
 
+/// One AI provider as far as the test scheduler's AI helpers need to know:
+/// enough to probe its usage and, for Claude today, to run a one-shot
+/// read-only completion. Mirrors `ResolvedProvider` in `main.rs`.
+#[derive(Debug, Clone)]
+pub struct AiProviderOption {
+    pub id: String,
+    pub bin: String,
+    pub model: String,
+    pub enabled: bool,
+}
+
+/// Everything a test run needs to know to gate and use AI gap-filling.
+/// Built once per invocation in `main.rs`/`run_cli` from `AppConfig`.
+#[derive(Debug, Clone)]
+pub struct AiRunOptions {
+    /// The repository's own switch — off guarantees zero AI usage from tests
+    /// regardless of provider capacity.
+    pub enabled: bool,
+    pub python_bin: String,
+    pub script_dir: PathBuf,
+    pub providers: Vec<AiProviderOption>,
+    pub minimum_remaining_percent: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct AiCapability {
+    pub available: bool,
+    pub provider: String,
+    pub detail: String,
+}
+
+const AI_TEST_ASSIST_SCRIPT: &str = "ai_test_assist.py";
+
+fn run_ai_test_assist(
+    python_bin: &str,
+    script_dir: &Path,
+    arguments: &[String],
+) -> Result<serde_json::Value, String> {
+    let script = script_dir.join(AI_TEST_ASSIST_SCRIPT);
+    if !script.is_file() {
+        return Err("The AI test-assist helper is not available in this build".into());
+    }
+    let output = Command::new(python_bin)
+        .arg(&script)
+        .args(arguments)
+        .env("PATH", tools::enhanced_path())
+        .env("SWARM_ISSUE_WORKER_SCRIPT_DIR", script_dir)
+        .output()
+        .map_err(|error| format!("Could not run the AI test-assist helper: {error}"))?;
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        format!("The AI test-assist helper returned an unexpected response: {error} ({detail})")
+    })
+}
+
+/// Probes enabled providers in order and returns the first with usage
+/// headroom above `minimum_remaining_percent`. A single call covers every
+/// suite in this run that needs AI test data.
+pub fn check_ai_capability(
+    python_bin: &str,
+    script_dir: &Path,
+    providers: &[AiProviderOption],
+    minimum_remaining_percent: u8,
+) -> AiCapability {
+    let providers_json = serde_json::to_string(
+        &providers
+            .iter()
+            .map(|provider| {
+                serde_json::json!({
+                    "id": provider.id,
+                    "bin": provider.bin,
+                    "enabled": provider.enabled,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".into());
+    let arguments = vec![
+        "capacity".into(),
+        "--providers-json".into(),
+        providers_json,
+        "--minimum-percent".into(),
+        minimum_remaining_percent.to_string(),
+        "--python-bin".into(),
+        python_bin.into(),
+        "--script-dir".into(),
+        script_dir.to_string_lossy().into_owned(),
+    ];
+    match run_ai_test_assist(python_bin, script_dir, &arguments) {
+        Ok(value) => AiCapability {
+            available: value["available"].as_bool().unwrap_or(false),
+            provider: value["provider"].as_str().unwrap_or_default().into(),
+            detail: value["detail"].as_str().unwrap_or_default().into(),
+        },
+        Err(error) => AiCapability {
+            available: false,
+            provider: String::new(),
+            detail: error,
+        },
+    }
+}
+
+/// Generates best-effort data for every `ai_test_data` requirement of one
+/// suite, writes each to `<run-dir>/ai-data/<suite id>/<name>.txt`, and
+/// returns the directory plus a short record for the test run's history.
+fn generate_suite_ai_test_data(
+    run_dir: &Path,
+    suite: &TestSuiteDefinition,
+    ai: &AiRunOptions,
+    capability: &AiCapability,
+) -> Result<(PathBuf, Vec<AiGeneratedDataRecord>), String> {
+    let provider = ai
+        .providers
+        .iter()
+        .find(|candidate| candidate.id == capability.provider)
+        .ok_or_else(|| format!("Provider '{}' is no longer configured", capability.provider))?;
+    let dir = run_dir.join("ai-data").join(&suite.id);
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let mut records = Vec::new();
+    for requirement in &suite.requirements.ai_test_data {
+        let prompt = format!(
+            "You are generating best-effort placeholder data for an automated test suite named \
+             '{}'. The data will never be treated as real or verified — it only needs to plausibly \
+             match what is asked for below. Respond with ONLY the data itself, no explanation, no \
+             markdown fences.\n\nData needed ('{}'): {}",
+            suite.name, requirement.name, requirement.prompt
+        );
+        let arguments = vec![
+            "generate".into(),
+            "--provider".into(),
+            provider.id.clone(),
+            "--bin".into(),
+            provider.bin.clone(),
+            "--model".into(),
+            provider.model.clone(),
+            "--prompt".into(),
+            prompt,
+            "--timeout".into(),
+            "120".into(),
+        ];
+        let value = run_ai_test_assist(&ai.python_bin, &ai.script_dir, &arguments)?;
+        if !value["ok"].as_bool().unwrap_or(false) {
+            return Err(value["error"]
+                .as_str()
+                .unwrap_or("AI test-data generation failed")
+                .to_string());
+        }
+        let text = value["text"].as_str().unwrap_or_default();
+        fs::write(dir.join(format!("{}.txt", requirement.name)), text)
+            .map_err(|error| error.to_string())?;
+        let summary: String = if text.chars().count() > 160 {
+            text.chars().take(160).collect::<String>() + "…"
+        } else {
+            text.to_string()
+        };
+        records.push(AiGeneratedDataRecord {
+            name: requirement.name.clone(),
+            provider: provider.id.clone(),
+            summary,
+        });
+    }
+    Ok((dir, records))
+}
+
+/// Asks AI to suggest test entry points a conventional-manifest scan could
+/// not find, only ever called when that scan found nothing at all. Suggested
+/// suites always come back disabled — a human reviews and enables them
+/// explicitly, the same as the plain placeholder this replaces.
+fn ai_discover_suites(
+    workspace: &Path,
+    ai: &AiRunOptions,
+    capability: &AiCapability,
+) -> Result<(Vec<TestSuiteDefinition>, Vec<String>), String> {
+    let provider = ai
+        .providers
+        .iter()
+        .find(|candidate| candidate.id == capability.provider)
+        .ok_or_else(|| format!("Provider '{}' is no longer configured", capability.provider))?;
+    let arguments = vec![
+        "discover".into(),
+        "--workspace".into(),
+        workspace.to_string_lossy().into_owned(),
+        "--provider".into(),
+        provider.id.clone(),
+        "--bin".into(),
+        provider.bin.clone(),
+        "--model".into(),
+        provider.model.clone(),
+        "--timeout".into(),
+        "90".into(),
+    ];
+    let value = run_ai_test_assist(&ai.python_bin, &ai.script_dir, &arguments)?;
+    if !value["ok"].as_bool().unwrap_or(false) {
+        return Err(value["error"]
+            .as_str()
+            .unwrap_or("AI-assisted discovery failed")
+            .to_string());
+    }
+    let notes = value["notes"]
+        .as_array()
+        .map(|notes| {
+            notes
+                .iter()
+                .filter_map(|note| note.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut suites = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for raw in value["suites"].as_array().into_iter().flatten() {
+        let Some(command) = raw["command"].as_array() else {
+            continue;
+        };
+        let command: Vec<String> = command
+            .iter()
+            .filter_map(|part| part.as_str().map(str::to_string))
+            .collect();
+        if command.is_empty() || command.iter().any(String::is_empty) {
+            continue;
+        }
+        let name = raw["name"]
+            .as_str()
+            .unwrap_or("AI-suggested suite")
+            .to_string();
+        let mut id = suite_id(raw["id"].as_str().unwrap_or(&name));
+        if id.is_empty() {
+            id = suite_id(&name);
+        }
+        while !seen_ids.insert(id.clone()) {
+            id = format!("{id}-2");
+        }
+        suites.push(TestSuiteDefinition {
+            id,
+            name,
+            command,
+            timeout_seconds: raw["timeoutSeconds"].as_u64().unwrap_or(default_timeout()),
+            disruptive: raw["disruptive"].as_bool().unwrap_or(false),
+            // AI-suggested commands are unverified guesses; a human must
+            // review and turn them on explicitly.
+            enabled: false,
+            requirements: Requirements::default(),
+        });
+    }
+    Ok((suites, notes))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn run_once(
     workspace: &Path,
     run_dir: &Path,
@@ -1070,6 +1413,7 @@ pub fn run_once(
     allow_disruptive: bool,
     triage_enabled: bool,
     trigger: &str,
+    ai: &AiRunOptions,
 ) -> Result<i32, String> {
     let definition = load_definition(workspace)?;
     let resolved_inputs = load_inputs(run_dir, saved_inputs);
@@ -1077,6 +1421,22 @@ pub fn run_once(
     if !plan.available {
         return Err(plan.error);
     }
+    // Checked once for the whole run, not per suite: every suite that needs
+    // AI test data shares the same provider pick and usage snapshot.
+    let any_suite_needs_ai = definition
+        .suites
+        .iter()
+        .any(|suite| !suite.requirements.ai_test_data.is_empty());
+    let capability = if any_suite_needs_ai && ai.enabled {
+        Some(check_ai_capability(
+            &ai.python_bin,
+            &ai.script_dir,
+            &ai.providers,
+            ai.minimum_remaining_percent,
+        ))
+    } else {
+        None
+    };
     let results_path = run_dir.join("test-results.json");
     let mut results = TestRunResults {
         schema_version: 1,
@@ -1088,7 +1448,8 @@ pub fn run_once(
         suites: plan
             .suites
             .iter()
-            .map(|suite| {
+            .enumerate()
+            .map(|(index, suite)| {
                 let mut result = suite.result.clone();
                 // A new cycle always retries every eligible suite. Historical
                 // terminal states are for display only and must never turn a
@@ -1101,6 +1462,29 @@ pub fn run_once(
                     result.finished_at = None;
                     result.duration_ms = None;
                     result.output.clear();
+                    result.ai_generated_data.clear();
+                    if !definition.suites[index]
+                        .requirements
+                        .ai_test_data
+                        .is_empty()
+                    {
+                        if !ai.enabled {
+                            result.state = "Not executed".into();
+                            result.blocked = true;
+                            result.detail = "Not executed - reason: AI test-data generation is \
+                                turned off for this repository"
+                                .into();
+                        } else if let Some(capability) = &capability {
+                            if !capability.available {
+                                result.state = "Not executed".into();
+                                result.blocked = true;
+                                result.detail = format!(
+                                    "Not executed - reason: AI required and usage exhausted ({})",
+                                    capability.detail
+                                );
+                            }
+                        }
+                    }
                 }
                 result
             })
@@ -1117,15 +1501,41 @@ pub fn run_once(
         results.suites[index].started_at = Some(started_at);
         results.suites[index].detail.clear();
         write_results(&results_path, &results)?;
-        let outcome =
-            run_suite(workspace, run_dir, suite, &plan.selected_device).unwrap_or_else(|error| {
-                CommandOutcome {
-                    exit_code: Some(127),
-                    duration_ms: 0,
-                    detail: error,
-                    output: String::new(),
+        if !suite.requirements.ai_test_data.is_empty() {
+            // Gated above: reaching this point means `ai.enabled` and a
+            // capability with headroom were both confirmed for this run.
+            let capability = capability.as_ref().expect("gated above");
+            match generate_suite_ai_test_data(run_dir, suite, ai, capability) {
+                Ok((_dir, records)) => results.suites[index].ai_generated_data = records,
+                Err(error) => {
+                    results.suites[index].state = "Failed".into();
+                    results.suites[index].detail =
+                        format!("AI test-data generation failed: {error}");
+                    results.suites[index].finished_at = Some(unix_timestamp());
+                    write_results(&results_path, &results)?;
+                    any_failure = true;
+                    continue;
                 }
-            });
+            }
+        }
+        let ai_data_dir = if suite.requirements.ai_test_data.is_empty() {
+            None
+        } else {
+            Some(run_dir.join("ai-data").join(&suite.id))
+        };
+        let outcome = run_suite(
+            workspace,
+            run_dir,
+            suite,
+            &plan.selected_device,
+            ai_data_dir.as_deref(),
+        )
+        .unwrap_or_else(|error| CommandOutcome {
+            exit_code: Some(127),
+            duration_ms: 0,
+            detail: error,
+            output: String::new(),
+        });
         results.suites[index].state = if outcome.exit_code == Some(0) {
             "Passed".into()
         } else {
@@ -1178,6 +1588,7 @@ fn run_suite(
     run_dir: &Path,
     suite: &TestSuiteDefinition,
     selected_device: &str,
+    ai_data_dir: Option<&Path>,
 ) -> Result<CommandOutcome, String> {
     fs::create_dir_all(run_dir).map_err(|error| error.to_string())?;
     let log_path = run_dir.join(format!("{}.log", suite.id));
@@ -1193,6 +1604,9 @@ fn run_suite(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    if let Some(dir) = ai_data_dir {
+        command.env("SWARM_AI_TEST_DATA_DIR", dir);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1317,6 +1731,30 @@ pub fn run_cli(arguments: &[String]) -> Option<i32> {
         HashMap::from([("fireTvSerial".into(), selected)])
     };
     let trigger = if once { "manual" } else { "scheduled" };
+    let enabled_providers: Vec<String> = arguments[marker + 1..]
+        .windows(2)
+        .filter(|pair| pair[0] == "--enabled-provider")
+        .map(|pair| pair[1].clone())
+        .collect();
+    let ai = AiRunOptions {
+        enabled: arguments
+            .iter()
+            .any(|argument| argument == "--ai-test-data-enabled"),
+        python_bin: value("--python-bin").unwrap_or_else(|| "python3".into()),
+        script_dir: PathBuf::from(value("--script-dir").unwrap_or_default()),
+        minimum_remaining_percent: value("--minimum-remaining-percent")
+            .and_then(|value| value.parse::<u8>().ok())
+            .unwrap_or(10),
+        providers: crate::config::KNOWN_PROVIDERS
+            .iter()
+            .map(|id| AiProviderOption {
+                id: (*id).to_string(),
+                bin: value(&format!("--{id}-bin")).unwrap_or_default(),
+                model: value(&format!("--{id}-model")).unwrap_or_default(),
+                enabled: enabled_providers.iter().any(|enabled| enabled == id),
+            })
+            .collect(),
+    };
     loop {
         let inputs_before_run = input_signature(&run_dir);
         match run_once(
@@ -1327,6 +1765,7 @@ pub fn run_cli(arguments: &[String]) -> Option<i32> {
             allow_disruptive,
             triage_enabled,
             trigger,
+            &ai,
         ) {
             Ok(code) if once => return Some(code),
             Err(error) if once => {
@@ -1394,7 +1833,7 @@ mod tests {
         )
         .unwrap();
 
-        let draft = detect_definition(workspace.path()).unwrap();
+        let draft = detect_definition(workspace.path(), None).unwrap();
         let definition: TestDefinition = serde_json::from_str(&draft.definition).unwrap();
         assert_eq!(draft.detected_suites, 3);
         assert_eq!(
@@ -1415,11 +1854,41 @@ mod tests {
     #[test]
     fn detection_returns_an_editable_disabled_placeholder_when_no_tests_are_found() {
         let workspace = tempdir().unwrap();
-        let draft = detect_definition(workspace.path()).unwrap();
+        let draft = detect_definition(workspace.path(), None).unwrap();
         let definition: TestDefinition = serde_json::from_str(&draft.definition).unwrap();
         assert_eq!(draft.detected_suites, 0);
         assert_eq!(definition.suites.len(), 1);
         assert!(!definition.suites[0].enabled);
+    }
+
+    #[test]
+    fn detection_skips_ai_discovery_and_notes_why_when_usage_is_exhausted() {
+        let workspace = tempdir().unwrap();
+        let script_dir = tempdir().unwrap();
+        write_stub_ai_assist(script_dir.path(), StubAiAssist::CapacityUnavailable);
+        let ai = ai_options_with_stub(script_dir.path(), "claude");
+        let draft = detect_definition(workspace.path(), Some(&ai)).unwrap();
+        let definition: TestDefinition = serde_json::from_str(&draft.definition).unwrap();
+        assert_eq!(definition.suites.len(), 1);
+        assert!(!definition.suites[0].enabled);
+        assert!(draft
+            .notes
+            .iter()
+            .any(|note| note.contains("AI-assisted discovery was skipped")));
+    }
+
+    #[test]
+    fn detection_adds_disabled_ai_suggested_suites_when_capacity_allows() {
+        let workspace = tempdir().unwrap();
+        let script_dir = tempdir().unwrap();
+        write_stub_ai_assist(script_dir.path(), StubAiAssist::DiscoverOneSuite);
+        let ai = ai_options_with_stub(script_dir.path(), "claude");
+        let draft = detect_definition(workspace.path(), Some(&ai)).unwrap();
+        let definition: TestDefinition = serde_json::from_str(&draft.definition).unwrap();
+        assert_eq!(draft.detected_suites, 1);
+        assert_eq!(definition.suites.len(), 1);
+        assert!(!definition.suites[0].enabled);
+        assert_eq!(definition.suites[0].command, ["make", "test"]);
     }
 
     #[test]
@@ -1495,6 +1964,7 @@ mod tests {
                 false,
                 false,
                 "manual",
+                &ai_disabled(),
             )
             .unwrap(),
             1
@@ -1550,10 +2020,176 @@ mod tests {
                 false,
                 false,
                 "scheduled",
+                &ai_disabled(),
             )
             .unwrap(),
             1
         );
         assert!(!marker.exists());
+    }
+
+    fn ai_disabled() -> AiRunOptions {
+        AiRunOptions {
+            enabled: false,
+            python_bin: "python3".into(),
+            script_dir: PathBuf::new(),
+            providers: Vec::new(),
+            minimum_remaining_percent: 10,
+        }
+    }
+
+    enum StubAiAssist {
+        CapacityUnavailable,
+        DiscoverOneSuite,
+    }
+
+    /// Writes a fake `ai_test_assist.py` that answers with a fixed, canned
+    /// response for whichever subcommand it's called with — standing in for
+    /// the real helper (which needs a real, signed-in AI CLI) so the Rust
+    /// wiring around it — gating, file writes, run results — can be tested
+    /// deterministically and offline.
+    fn write_stub_ai_assist(script_dir: &Path, stub: StubAiAssist) {
+        // Every real call opens with a `capacity` probe before doing
+        // anything else, so each stub answers both subcommands it needs.
+        let body = match stub {
+            StubAiAssist::CapacityUnavailable => {
+                r#"print('{"available": false, "provider": null, "detail": "session 2% remaining"}')"#
+                    .to_string()
+            }
+            StubAiAssist::DiscoverOneSuite => {
+                "if sys.argv[1] == 'capacity':\n\
+                 \tprint('{\"available\": true, \"provider\": \"claude\", \"detail\": \"99% remaining\"}')\n\
+                 elif sys.argv[1] == 'discover':\n\
+                 \tprint('{\"ok\": true, \"suites\": [{\"id\": \"make\", \"name\": \"Make tests\", \
+                 \"command\": [\"make\", \"test\"]}], \"notes\": []}')\n"
+                    .to_string()
+            }
+        };
+        fs::write(
+            script_dir.join(AI_TEST_ASSIST_SCRIPT),
+            format!("import sys\n{body}\n"),
+        )
+        .unwrap();
+    }
+
+    fn ai_options_with_stub(script_dir: &Path, provider_id: &str) -> AiRunOptions {
+        AiRunOptions {
+            enabled: true,
+            python_bin: "python3".into(),
+            script_dir: script_dir.to_path_buf(),
+            providers: vec![AiProviderOption {
+                id: provider_id.into(),
+                bin: "stub-bin".into(),
+                model: String::new(),
+                enabled: true,
+            }],
+            minimum_remaining_percent: 10,
+        }
+    }
+
+    #[test]
+    fn ai_test_data_suite_is_not_executed_when_the_repository_switch_is_off() {
+        let workspace = tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".swarm")).unwrap();
+        fs::write(
+            definition_path(workspace.path()),
+            r#"{"version":1,"suites":[{"id":"needs-ai","name":"Needs AI","command":["/usr/bin/true"],
+                "requirements":{"aiTestData":[{"name":"sample","prompt":"a sample"}]}}]}"#,
+        )
+        .unwrap();
+        let run_dir = workspace.path().join("run");
+        run_once(
+            workspace.path(),
+            &run_dir,
+            "owner/repo",
+            &HashMap::new(),
+            false,
+            false,
+            "manual",
+            &ai_disabled(),
+        )
+        .unwrap();
+        let results = read_results(&run_dir.join("test-results.json")).unwrap();
+        assert_eq!(results.suites[0].state, "Not executed");
+        assert!(results.suites[0].detail.contains("turned off"));
+    }
+
+    #[test]
+    fn ai_test_data_suite_is_not_executed_when_usage_is_exhausted() {
+        let workspace = tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".swarm")).unwrap();
+        fs::write(
+            definition_path(workspace.path()),
+            r#"{"version":1,"suites":[{"id":"needs-ai","name":"Needs AI","command":["/usr/bin/true"],
+                "requirements":{"aiTestData":[{"name":"sample","prompt":"a sample"}]}}]}"#,
+        )
+        .unwrap();
+        let script_dir = tempdir().unwrap();
+        write_stub_ai_assist(script_dir.path(), StubAiAssist::CapacityUnavailable);
+        let ai = ai_options_with_stub(script_dir.path(), "claude");
+        let run_dir = workspace.path().join("run");
+        run_once(
+            workspace.path(),
+            &run_dir,
+            "owner/repo",
+            &HashMap::new(),
+            false,
+            false,
+            "manual",
+            &ai,
+        )
+        .unwrap();
+        let results = read_results(&run_dir.join("test-results.json")).unwrap();
+        assert_eq!(results.suites[0].state, "Not executed");
+        assert!(results.suites[0]
+            .detail
+            .contains("AI required and usage exhausted"));
+        assert!(results.suites[0].detail.contains("2% remaining"));
+    }
+
+    #[test]
+    fn ai_test_data_suite_runs_and_records_generated_data_when_capacity_allows() {
+        let workspace = tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".swarm")).unwrap();
+        fs::write(
+            definition_path(workspace.path()),
+            r#"{"version":1,"suites":[{"id":"needs-ai","name":"Needs AI",
+                "command":["/bin/sh", "-c", "test -f \"$SWARM_AI_TEST_DATA_DIR/sample.txt\""],
+                "requirements":{"aiTestData":[{"name":"sample","prompt":"a sample"}]}}]}"#,
+        )
+        .unwrap();
+        let script_dir = tempdir().unwrap();
+        // This run needs both `capacity` and `generate` answered distinctly,
+        // unlike the canned single-answer stubs above.
+        fs::write(
+            script_dir.path().join(AI_TEST_ASSIST_SCRIPT),
+            "import sys\n\
+             if sys.argv[1] == 'capacity':\n\
+             \tprint('{\"available\": true, \"provider\": \"claude\", \"detail\": \"99% remaining\"}')\n\
+             elif sys.argv[1] == 'generate':\n\
+             \tprint('{\"ok\": true, \"text\": \"sample data\"}')\n",
+        )
+        .unwrap();
+        let ai = ai_options_with_stub(script_dir.path(), "claude");
+        let run_dir = workspace.path().join("run");
+        run_once(
+            workspace.path(),
+            &run_dir,
+            "owner/repo",
+            &HashMap::new(),
+            false,
+            false,
+            "manual",
+            &ai,
+        )
+        .unwrap();
+        let results = read_results(&run_dir.join("test-results.json")).unwrap();
+        assert_eq!(results.suites[0].state, "Passed");
+        assert_eq!(results.suites[0].ai_generated_data.len(), 1);
+        assert_eq!(results.suites[0].ai_generated_data[0].provider, "claude");
+        assert_eq!(
+            results.suites[0].ai_generated_data[0].summary,
+            "sample data"
+        );
     }
 }

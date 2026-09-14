@@ -17,13 +17,14 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 6] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 7] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
     "setup_github_bots.py",
     "codex_rate_limits.py",
     "ai_execution_history.py",
+    "ai_test_assist.py",
 ];
 
 struct AppState {
@@ -517,6 +518,37 @@ fn resolve_providers(config: &AppConfig) -> Vec<ResolvedProvider> {
         .collect()
 }
 
+/// Builds the test scheduler's view of "can AI help with a gap right now" —
+/// the repository's own on/off switch plus every provider's resolved binary,
+/// so `testing::check_ai_capability`/`generate_suite_ai_test_data` can probe
+/// usage without needing an `AppConfig` of their own. `python3` falls back to
+/// the bare command name (rather than erroring) so a missing interpreter
+/// surfaces as "AI unavailable" for the suites that need it, not as a reason
+/// to refuse deterministic test runs entirely.
+fn resolve_ai_run_options(
+    config: &AppConfig,
+    repo: &RepoConfig,
+    script_dir: &Path,
+) -> testing::AiRunOptions {
+    testing::AiRunOptions {
+        enabled: repo.uat_ai_test_data_enabled,
+        python_bin: tools::find_executable("python3", &config.python_bin)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "python3".into()),
+        script_dir: script_dir.to_path_buf(),
+        minimum_remaining_percent: config.minimum_remaining_percent,
+        providers: resolve_providers(config)
+            .into_iter()
+            .map(|provider| testing::AiProviderOption {
+                id: provider.id,
+                bin: provider.bin.to_string_lossy().into_owned(),
+                model: provider.model,
+                enabled: provider.enabled,
+            })
+            .collect(),
+    }
+}
+
 /// Global scheduler flags for `install_swarm_issue_cron.py`. Per-repo detail
 /// lives in the `--repos-file`; unknown provider flags added by the
 /// caller are forwarded to every repo's worker invocation.
@@ -724,6 +756,30 @@ fn start_uat_scheduler(
     if run_once {
         arguments.push("--once".into());
     }
+    // AI gap-filling is best-effort: a repository with no Python/AI resources
+    // bundled still gets an ordinary, fully deterministic test run — suites
+    // that ask for `aiTestData` simply come back "Not executed".
+    if let Ok(script_dir) = worker_script_dir(&app) {
+        let ai = resolve_ai_run_options(&config, repo, &script_dir);
+        if ai.enabled {
+            arguments.push("--ai-test-data-enabled".into());
+        }
+        arguments.extend([
+            "--python-bin".into(),
+            ai.python_bin,
+            "--script-dir".into(),
+            ai.script_dir.to_string_lossy().into_owned(),
+            "--minimum-remaining-percent".into(),
+            ai.minimum_remaining_percent.to_string(),
+        ]);
+        for provider in &ai.providers {
+            arguments.extend([format!("--{}-bin", provider.id), provider.bin.clone()]);
+            arguments.extend([format!("--{}-model", provider.id), provider.model.clone()]);
+            if provider.enabled {
+                arguments.extend(["--enabled-provider".into(), provider.id.clone()]);
+            }
+        }
+    }
     state.processes.spawn(
         &app,
         &format!("uat:{}", repo.id),
@@ -768,7 +824,12 @@ fn detect_test_definition<R: tauri::Runtime>(
             testing::definition_path(&workspace).display()
         ));
     }
-    testing::detect_definition(&workspace)
+    // AI-assisted discovery is best-effort: a repository with no Python/AI
+    // resources bundled still gets ordinary deterministic detection.
+    let ai = worker_script_dir(&app)
+        .ok()
+        .map(|script_dir| resolve_ai_run_options(&config, repo, &script_dir));
+    testing::detect_definition(&workspace, ai.as_ref())
 }
 
 #[tauri::command]

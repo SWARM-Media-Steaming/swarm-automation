@@ -135,17 +135,27 @@
     },
     "uat-suite": {
       title: "Test scheduler",
-      html: "<p>Runs the tests a repository declares in <code>.swarm/tests.json</code> — every suite in that file, not just UAT. When that file is missing, <strong>Detect tests &amp; create draft</strong> finds conventional test entry points and lets you review the JSON before saving it to the repository.</p><p>Each suite’s requirements are checked independently. <strong>Start</strong> keeps a daily cycle running at the chosen hour; <strong>Run now</strong> executes one cycle immediately.</p>",
+      html: "<p>Runs whatever tests this repository declares in <code>.swarm/tests.json</code>, on a schedule, without any AI involved. AI only gets involved for a gap plain scanning can't fill on its own:</p><ul><li><strong>Finding tests</strong> — if <strong>Find tests &amp; create draft</strong> can't spot any conventional test command, it asks AI to look at the repository layout for one. Anything AI suggests starts turned off until you review and enable it.</li><li><strong>Filling in test data</strong> — a test can ask for sample data that isn't fixed ahead of time (see <strong>How tests run</strong>). AI makes a best-effort version right before that test runs.</li></ul><p>Both only happen when there's enough AI usage available (the same shared limit set in AI Configuration) — otherwise the app does the deterministic part only and says so.</p><p><strong>Start</strong> keeps a daily cycle running at the chosen hour; <strong>Run now</strong> executes one cycle immediately.</p>",
+      links: [],
+    },
+    "scheduler-run-settings": {
+      title: "How tests run",
+      html: "<ul><li><strong>Allow disruptive tests</strong> — some tests change real state (data, devices, external services). They stay off until you turn this on.</li><li><strong>Let AI fill in test data</strong> — a test's own definition can ask for data that isn't fixed ahead of time (for example, realistic-looking sample records). When this is on and AI has usage available, AI makes a best-effort version and the test run records exactly what it made. When it's off, or usage runs out, that test is marked <strong>Not executed</strong> instead of guessing on its own.</li><li><strong>Explain failures with AI</strong> — separate from the setting above. After a real failure, asks AI to read the results and add a plain-language explanation, at the cost of AI usage.</li></ul>",
+      links: [],
+    },
+    "scheduler-suites": {
+      title: "Every test and its status",
+      html: "<ul><li><strong>Ready</strong> / <strong>Passed</strong> / <strong>Failed</strong> — the normal lifecycle of a test that ran.</li><li><strong>Skipped</strong> — something the test needs (hardware, a file, a setting) is missing; this is not a failure.</li><li><strong>Not executed</strong> — the test asked AI for sample data, but AI was turned off or had no usage left when the run started. Not a failure either — it just didn't get a chance to run this cycle.</li><li><strong>Waiting for input</strong> — more than one eligible device was found; choose one below to continue.</li></ul><p>A test with AI-generated data shows what AI made, and which provider made it, right on that test's entry.</p>",
       links: [],
     },
     "test-runs": {
-      title: "Test run history",
-      html: "<p>Each completed cycle is listed newest first with when it ran, how it was triggered, its duration, and a pass / fail / skipped tally. Open a run to see every suite it executed and that suite’s outcome.</p>",
+      title: "Past runs",
+      html: "<p>Each completed cycle is listed newest first with when it ran, how it was triggered, its duration, and a pass / fail / skipped tally. Open a run to see every test it ran, that test's outcome, and any AI-generated data used along the way.</p>",
       links: [],
     },
     "test-requirements": {
-      title: "Test requirements",
-      html: "<p>Repositories declare executables, files, healthy servers, mounts, credentials, and devices per suite.</p><ul><li><strong>Ready</strong> — the requirement was discovered.</li><li><strong>Waiting for input</strong> — choose between multiple detected devices.</li><li><strong>Blocked</strong> — equipment or configuration is absent; this is not a test failure.</li></ul><p>Selections are saved only for this repository. Test commands receive no interactive input.</p>",
+      title: "What's ready to run",
+      html: "<p>A repository's tests can each declare things they need: programs, files, healthy servers, mounts, credentials, devices, or AI-generated data.</p><ul><li><strong>Ready</strong> — the requirement was found.</li><li><strong>Waiting for input</strong> — choose between multiple detected devices.</li><li><strong>Blocked</strong> — equipment or configuration is absent; this is not a test failure.</li></ul><p>Selections are saved only for this repository. Test commands receive no interactive input.</p>",
       links: [],
     },
     "repo-profile": {
@@ -314,6 +324,7 @@
       repo_dir: "",
       uat_hour: 3,
       uat_triage_enabled: true,
+      uat_ai_test_data_enabled: true,
       test_inputs: {},
       allow_disruptive_tests: false,
       run_dir: "",
@@ -910,8 +921,22 @@
       const command = document.createElement("code");
       command.textContent = suite.command;
       card.appendChild(command);
+      appendAiGeneratedDataNote(card, suite.aiGeneratedData);
       suitesBox.appendChild(card);
     });
+  }
+
+  // Shared by the live suite list and test-run history: a short note on what
+  // AI made up for a suite that asked for best-effort test data, per
+  // "documented in the test run" — never silent about it.
+  function appendAiGeneratedDataNote(container, records) {
+    if (!Array.isArray(records) || !records.length) return;
+    const note = document.createElement("p");
+    note.className = "ai-data-note";
+    note.textContent = `AI-generated data (${records.map((r) => r.provider).join(", ")}): ${records
+      .map((r) => `${r.name} — ${r.summary}`)
+      .join("; ")}`;
+    container.appendChild(note);
   }
 
   async function refreshTestPlan({ quiet = false } = {}) {
@@ -994,6 +1019,7 @@
     ["Passed", "passed"],
     ["Failed", "failed"],
     ["Skipped", "skipped"],
+    ["Not executed", "not-executed"],
   ];
 
   function renderTestRuns() {
@@ -1012,12 +1038,13 @@
     runs.forEach((run) => {
       const suites = run.suites || [];
       const tally = suites.reduce((counts, suite) => {
-        const key = String(suite.state || "").toLowerCase();
+        const key = String(suite.state || "").toLowerCase().replaceAll(" ", "-");
         if (key === "passed") counts.passed += 1;
         else if (key === "failed") counts.failed += 1;
+        else if (key === "not-executed") counts["not-executed"] += 1;
         else counts.skipped += 1;
         return counts;
-      }, { passed: 0, failed: 0, skipped: 0 });
+      }, { passed: 0, failed: 0, skipped: 0, "not-executed": 0 });
 
       const item = document.createElement("details");
       item.className = "test-run";
@@ -1056,6 +1083,7 @@
         const detail = document.createElement("small");
         detail.textContent = suite.detail || `${suite.id}${suite.durationMs ? ` · ${Math.round(suite.durationMs / 1000)}s` : ""}`;
         words.append(name, detail);
+        appendAiGeneratedDataNote(words, suite.aiGeneratedData);
         const badge = document.createElement("span");
         badge.className = `suite-state ${stateClass}`;
         badge.textContent = suite.state || "Unknown";
@@ -2426,6 +2454,13 @@
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !byId("help-modal").hidden) closeHelp();
+      // Clickable panel headings are plain elements with role="button", not
+      // real <button>s, so they need Enter/Space activation spelled out.
+      const heading = event.target.closest("[data-help][role=\"button\"]");
+      if (heading && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        openHelp(heading.dataset.help);
+      }
     });
     byId("schedule-mode-select").addEventListener("change", (event) => selectSchedule(event.target.value));
     document.querySelectorAll("[data-config], [data-repo-config], [data-provider-bin], #days-field input").forEach((input) => {
