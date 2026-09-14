@@ -1933,7 +1933,6 @@ fn merge_integration_branch(
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?.clone();
     let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
-    let git = tools::configured_or_detected("", "git")?;
     let (view_ok, view_out) = run_capture_owned(
         &gh,
         &[
@@ -1979,10 +1978,17 @@ fn merge_integration_branch(
             "Could not merge the promotion PR #{pr_number}: {message}"
         ));
     }
-    if let Ok(workspace) = resolve_workspace(&app, &config, &repo) {
-        let ws = workspace.to_string_lossy().into_owned();
-        let _ = git_c(&git, &ws, &["fetch", "--prune", &repo.remote_name]);
-    }
+    // This used to also `git fetch --prune` the shared workspace here before
+    // handing off to `git_overview` below — a second, redundant fetch of the
+    // same workspace the issue worker may be actively committing in right
+    // now, on top of the one `git_overview` already performs to build its
+    // return value. Promotion can run concurrently with the issue worker
+    // since it stopped requiring the worker to be stopped first (see
+    // `reconcile_integration_for_promotion`'s doc comment); every avoidable
+    // extra shared-workspace touch narrows that window, so this dropped the
+    // redundant one. The remaining fetch inside `git_overview` is no more
+    // than what any ordinary dashboard refresh already does at any time,
+    // worker running or not.
     git_overview(app, state, repo_id)
 }
 
