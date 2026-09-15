@@ -4,7 +4,8 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "test": "node --test ui/logging.test.js"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4"
