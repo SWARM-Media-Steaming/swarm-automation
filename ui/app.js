@@ -100,7 +100,7 @@
     },
     "software-update": {
       title: "Software updates",
-      html: "<p>New versions are published automatically after each change passes tests. Updates install in place and restart the app — your configuration and running work are untouched.</p><ul><li><strong>Don't check</strong> — stay on the current version until you update by hand.</li><li><strong>Notify me</strong> — a banner appears when a new version is available; you choose when to install.</li><li><strong>Install automatically on quit</strong> — the next version is downloaded in the background and applied the next time you quit.</li></ul><p><strong>Check now</strong> works in any mode.</p>",
+      html: "<p>New versions are published automatically after each change passes tests. Updates install in place and restart the app — your configuration is untouched.</p><ul><li><strong>Notify me</strong> — a banner appears when a new version is available; you choose when to install.</li><li><strong>Automatically</strong> — a detected update waits until the issue worker and every test scheduler are idle on their own (never stopped just to make room), then downloads, installs, and restarts.</li></ul><p><strong>Check now</strong> works in either mode and also lists the 3 most recent release builds and 3 most recent beta builds so you can pick a specific version — anything older than what's installed is shown for context but can't be selected.</p>",
       links: [],
     },
     "bot-identities": {
@@ -2043,9 +2043,10 @@
 
   async function refreshAppVersion() {
     try {
-      const version = await window.__TAURI__.app.getVersion();
+      const version = await invoke("app_version");
       byId("update-version-pill").textContent = `v${version}`;
-    } catch (_) { /* getVersion is unavailable outside a Tauri window */ }
+      byId("app-version-label").textContent = `v${version}`;
+    } catch (_) { /* unavailable outside a Tauri window */ }
   }
 
   function renderUpdateDetail(summary) {
@@ -2059,10 +2060,58 @@
     detail.appendChild(button("Install & restart", "primary-button compact", applyUpdate));
   }
 
+  // Only the newest release and newest beta (`directInstall`) can be
+  // installed from here today — see install_update_candidate's doc comment
+  // on the Rust side. The rest of the 3+3 list is shown for context so a
+  // version pick is never silently hidden, just explained.
+  function renderUpdateCandidates(candidates) {
+    const container = byId("update-candidates");
+    container.replaceChildren();
+    if (!candidates || !candidates.length) {
+      container.classList.add("hidden");
+      return;
+    }
+    container.classList.remove("hidden");
+    const heading = document.createElement("p");
+    heading.className = "panel-copy";
+    heading.textContent = "Check Now: 3 most recent release builds and 3 most recent beta builds.";
+    container.appendChild(heading);
+    candidates.forEach((candidate) => {
+      const row = document.createElement("div");
+      row.className = "workspace-row";
+      const label = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = `${candidate.version} · ${candidate.channel === "beta" ? "Beta" : "Release"}`;
+      label.appendChild(title);
+      const meta = document.createElement("small");
+      const published = candidate.publishedAt ? new Date(candidate.publishedAt).toLocaleDateString() : "";
+      let reason = "";
+      if (!candidate.installable) {
+        reason = "Older than the installed version — downgrading isn't supported yet.";
+      } else if (!candidate.directInstall) {
+        reason = "Context only — only the newest release and newest beta install directly today.";
+      }
+      meta.textContent = [published, reason].filter(Boolean).join(" — ");
+      label.appendChild(meta);
+      row.appendChild(label);
+      const actions = document.createElement("div");
+      actions.className = "control-row";
+      const canInstall = candidate.installable && candidate.directInstall;
+      const install = button(canInstall ? "Install" : "Not available", "secondary-button compact", () => installUpdateCandidate(candidate));
+      install.disabled = !canInstall;
+      actions.appendChild(install);
+      row.appendChild(actions);
+      container.appendChild(row);
+    });
+  }
+
   async function checkForUpdate({ quiet = false } = {}) {
     await withBusy("check-update", async () => {
       byId("update-status").textContent = "Checking for updates…";
-      const summary = await invoke("check_for_update");
+      const [summary, candidates] = await Promise.all([
+        invoke("check_for_update"),
+        invoke("list_update_candidates").catch(() => []),
+      ]);
       state.pendingUpdate = summary;
       if (summary) {
         byId("update-status").textContent = `Version ${summary.version} is available (you have ${summary.currentVersion}).`;
@@ -2073,6 +2122,7 @@
         renderUpdateDetail(null);
         if (!quiet) showToast("SWARM Automation is up to date.", "success");
       }
+      renderUpdateCandidates(candidates);
     }, { progress: "Checking for updates…" });
   }
 
@@ -2080,6 +2130,12 @@
     await withBusy("apply-update", async () => {
       await invoke("install_update"); // the process restarts on success
     }, { progress: "Downloading update… the app will restart when it's ready." });
+  }
+
+  async function installUpdateCandidate(candidate) {
+    await withBusy("apply-update", async () => {
+      await invoke("install_update_candidate", { tag: candidate.tag, channel: candidate.channel }); // restarts on success
+    }, { progress: `Downloading ${candidate.version}… the app will restart when it's ready.` });
   }
 
   function showUpdateBanner(summary) {

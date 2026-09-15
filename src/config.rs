@@ -509,7 +509,7 @@ impl AppConfig {
         ) {
             return Err("Unknown issue-worker schedule mode.".into());
         }
-        if !matches!(self.auto_update.as_str(), "off" | "notify" | "auto") {
+        if !matches!(self.auto_update.as_str(), "notify" | "auto") {
             return Err("Unknown software-update mode.".into());
         }
         validate_time(&self.schedule_time)?;
@@ -595,7 +595,9 @@ impl AppConfig {
     pub fn normalize(&mut self) {
         self.normalize_providers();
         self.normalize_repositories();
-        if self.auto_update.trim().is_empty() {
+        // "off" was removed: every config that had it silently becomes
+        // "notify" rather than failing validation on load.
+        if self.auto_update.trim().is_empty() || self.auto_update == "off" {
             self.auto_update = default_auto_update();
         }
     }
@@ -914,19 +916,23 @@ mod tests {
         assert_eq!(older.auto_update, "notify");
 
         let mut config = config_with_one_repo();
-        for mode in ["off", "notify", "auto"] {
+        for mode in ["notify", "auto"] {
             config.auto_update = mode.into();
             assert!(config.validate().is_ok(), "{mode} should be accepted");
         }
-        config.auto_update = "sometimes".into();
-        assert!(config
-            .validate()
-            .unwrap_err()
-            .contains("software-update mode"));
+        for rejected in ["off", "sometimes"] {
+            config.auto_update = rejected.into();
+            assert!(config
+                .validate()
+                .unwrap_err()
+                .contains("software-update mode"));
+        }
 
-        config.auto_update = String::new();
-        config.normalize();
-        assert_eq!(config.auto_update, "notify");
+        for stale in ["", "off"] {
+            config.auto_update = stale.into();
+            config.normalize();
+            assert_eq!(config.auto_update, "notify");
+        }
     }
 
     #[test]
