@@ -82,6 +82,12 @@ struct RepoStatus {
     bot_config_exists: bool,
     /// Per-repo validation error, if any.
     repo_config_error: String,
+    /// Set when the issue worker is silently skipping this repo every
+    /// cycle because its checkout is dirty with no saved in-progress issue
+    /// to explain why (see `deferred_checkout_reason`). Previously this was
+    /// only visible by reading `cron.log`; surfaced here so it shows up as
+    /// a dashboard warning instead of requiring someone to go looking.
+    deferred_reason: Option<String>,
     repository: RepositoryInspection,
 }
 
@@ -332,6 +338,9 @@ fn get_automation_status<R: tauri::Runtime>(
             uat_available: repository.uat_available,
             bot_config_exists: Path::new(&repo.effective_apps_config()).is_file(),
             repo_config_error: repo_error(&config, repo),
+            deferred_reason: workspace_ready
+                .then(|| deferred_checkout_reason(&config, repo, &workspace))
+                .flatten(),
             repository,
         });
     }
@@ -363,6 +372,32 @@ async fn get_automation_status_background(
     })
     .await
     .map_err(|error| format!("Status refresh background task failed: {error}"))?
+}
+
+/// Mirrors `install_swarm_issue_cron.py`'s `synchronize_repository`
+/// pre-flight: a dirty checkout with no `in-progress-issue.json` means the
+/// scheduler is silently skipping this repo's issue worker every cycle
+/// (logged, but only to `cron.log`, repeated every ~10 minutes with nothing
+/// pointing anyone at it). Best-effort — any error just means "can't tell,"
+/// not "this is broken," since the real pre-flight check already runs (and
+/// logs) on every cycle regardless of whether the dashboard can see it.
+fn deferred_checkout_reason(config: &AppConfig, repo: &RepoConfig, workspace: &Path) -> Option<String> {
+    let state_dir = PathBuf::from(&config.worker_state_dir).join(&repo.id);
+    if state_dir.join("in-progress-issue.json").is_file() {
+        return None;
+    }
+    let git = tools::configured_or_detected("", "git").ok()?;
+    let ws = workspace.to_string_lossy().into_owned();
+    let (ok, status) = git_c(&git, &ws, &["status", "--porcelain"]);
+    if !ok || status.trim().is_empty() {
+        return None;
+    }
+    Some(
+        "This repository's checkout has uncommitted changes with no saved work-round to \
+         explain them, so the issue worker is skipping it every cycle instead of risking \
+         someone's in-progress work. Check the checkout in Repository, or see cron.log."
+            .to_string(),
+    )
 }
 
 /// The validation message for a single repo (empty when it is fine), so the UI

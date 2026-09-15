@@ -787,6 +787,9 @@
     const pill = byId("repo-valid-pill");
     pill.textContent = repo?.valid ? "Ready" : (status.workspaceManaged ? "Not cloned" : "Needs attention");
     pill.className = `status-pill ${repo?.valid ? "running" : "error"}`;
+    const deferredWarning = byId("repo-deferred-warning");
+    deferredWarning.classList.toggle("hidden", !status.deferredReason);
+    deferredWarning.textContent = status.deferredReason || "";
     const pathEl = byId("workspace-path");
     if (pathEl) pathEl.textContent = status.workspacePath || "—";
     const container = byId("repo-inspection");

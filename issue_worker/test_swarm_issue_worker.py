@@ -1826,6 +1826,87 @@ class RunnerTestCase(unittest.TestCase):
             self.assertEqual(branch, "ai/codex/issue-114")
             self.assertTrue((repo / "dirty.txt").is_file())
 
+    def test_scheduler_recovers_a_checkout_with_only_harmless_untracked_files(self) -> None:
+        """A stale issue branch left over from an interrupted work-round
+        (no in-progress-issue.json, so no owner) whose tree already matches
+        the integration branch on the remote -- exactly what an untracked
+        scratch file plus a leftover checkout looks like -- should be
+        repositioned automatically instead of deferring every cycle
+        forever (see issue-branch-delivery.md)."""
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-recover-test.") as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            remote = root / "remote.git"
+            state = root / "state"
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            for name, value in (("user.name", "runner test"), ("user.email", "runner@example.invalid")):
+                subprocess.run(["git", "-C", str(repo), "config", name, value], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+            subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(repo), "push", "-q", "-u", "origin", "main"], check=True)
+            subprocess.run(["git", "-C", str(repo), "branch", "ai-main", "main"], check=True)
+            subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", "ai-main"], check=True)
+
+            # A stale, reused issue branch with no unique content -- and a
+            # harmless untracked scratch file, the way a UAT test-detection
+            # scan leaves one behind.
+            subprocess.run(["git", "-C", str(repo), "switch", "-q", "-c", "ai/claude/issue-999"], check=True)
+            (repo / ".swarm").mkdir()
+            (repo / ".swarm" / "tests.json").write_text("{}\n", encoding="utf-8")
+
+            args = runner_module.build_parser().parse_args(
+                ["--repo-dir", str(repo), "--state-dir", str(state)]
+            )
+            runner = runner_module.Runner(args, [])
+
+            self.assertTrue(runner.synchronize_repository(runner.repos[0]))
+            branch = subprocess.run(
+                ["git", "-C", str(repo), "branch", "--show-current"], text=True,
+                stdout=subprocess.PIPE, check=True,
+            ).stdout.strip()
+            self.assertEqual(branch, "ai-main")
+            self.assertTrue((repo / ".swarm" / "tests.json").is_file())
+
+    def test_scheduler_still_defers_untracked_files_on_a_checkout_with_unmerged_work(self) -> None:
+        """The same untracked-only shape, but this time the current commit
+        genuinely has content the remote integration branch does not --
+        auto-recovery must never fire here, or it would be exactly the
+        silent-discard bug issue-branch-delivery.md describes."""
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-no-recover-test.") as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            remote = root / "remote.git"
+            state = root / "state"
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            for name, value in (("user.name", "runner test"), ("user.email", "runner@example.invalid")):
+                subprocess.run(["git", "-C", str(repo), "config", name, value], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+            subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(repo), "push", "-q", "-u", "origin", "main"], check=True)
+            subprocess.run(["git", "-C", str(repo), "branch", "ai-main", "main"], check=True)
+            subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", "ai-main"], check=True)
+
+            subprocess.run(["git", "-C", str(repo), "switch", "-q", "-c", "ai/claude/issue-999"], check=True)
+            (repo / "unmerged.txt").write_text("unique work\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "unmerged.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "unmerged work"], check=True)
+            (repo / "scratch.json").write_text("{}\n", encoding="utf-8")
+
+            args = runner_module.build_parser().parse_args(
+                ["--repo-dir", str(repo), "--state-dir", str(state)]
+            )
+            runner = runner_module.Runner(args, [])
+
+            self.assertFalse(runner.synchronize_repository(runner.repos[0]))
+            branch = subprocess.run(
+                ["git", "-C", str(repo), "branch", "--show-current"], text=True,
+                stdout=subprocess.PIPE, check=True,
+            ).stdout.strip()
+            self.assertEqual(branch, "ai/claude/issue-999")
+            self.assertTrue((repo / "unmerged.txt").is_file())
+
     @staticmethod
     def _repos_file(root: Path, labels: tuple[str, ...]) -> Path:
         entries = []
