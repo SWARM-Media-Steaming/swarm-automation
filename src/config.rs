@@ -145,6 +145,11 @@ pub struct RepoConfig {
     pub uat_hour: u8,
     /// Run the repository-defined `failureTriage` command after a real failure.
     pub uat_triage_enabled: bool,
+    /// Let a suite that declares `requirements.aiTestData` ask an enabled AI
+    /// provider to fill in best-effort sample data before it runs. Off means
+    /// every such suite is marked "Not executed" instead, guaranteeing zero
+    /// AI usage from tests regardless of provider capacity.
+    pub uat_ai_test_data_enabled: bool,
     /// Repository-local selections used only by the deterministic test runner.
     /// Values are deliberately limited to non-secret discovery choices (for
     /// example an adb serial); credentials remain in the environment/files
@@ -180,6 +185,7 @@ impl Default for RepoConfig {
             repo_dir: String::new(),
             uat_hour: 3,
             uat_triage_enabled: true,
+            uat_ai_test_data_enabled: true,
             test_inputs: HashMap::new(),
             allow_disruptive_tests: false,
             run_dir: String::new(),

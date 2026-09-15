@@ -17,13 +17,14 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 6] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 7] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
     "setup_github_bots.py",
     "codex_rate_limits.py",
     "ai_execution_history.py",
+    "ai_test_assist.py",
 ];
 
 struct AppState {
@@ -381,7 +382,11 @@ async fn get_automation_status_background(
 /// pointing anyone at it). Best-effort — any error just means "can't tell,"
 /// not "this is broken," since the real pre-flight check already runs (and
 /// logs) on every cycle regardless of whether the dashboard can see it.
-fn deferred_checkout_reason(config: &AppConfig, repo: &RepoConfig, workspace: &Path) -> Option<String> {
+fn deferred_checkout_reason(
+    config: &AppConfig,
+    repo: &RepoConfig,
+    workspace: &Path,
+) -> Option<String> {
     let state_dir = PathBuf::from(&config.worker_state_dir).join(&repo.id);
     if state_dir.join("in-progress-issue.json").is_file() {
         return None;
@@ -550,6 +555,37 @@ fn resolve_providers(config: &AppConfig) -> Vec<ResolvedProvider> {
             enabled: provider.enabled,
         })
         .collect()
+}
+
+/// Builds the test scheduler's view of "can AI help with a gap right now" —
+/// the repository's own on/off switch plus every provider's resolved binary,
+/// so `testing::check_ai_capability`/`generate_suite_ai_test_data` can probe
+/// usage without needing an `AppConfig` of their own. `python3` falls back to
+/// the bare command name (rather than erroring) so a missing interpreter
+/// surfaces as "AI unavailable" for the suites that need it, not as a reason
+/// to refuse deterministic test runs entirely.
+fn resolve_ai_run_options(
+    config: &AppConfig,
+    repo: &RepoConfig,
+    script_dir: &Path,
+) -> testing::AiRunOptions {
+    testing::AiRunOptions {
+        enabled: repo.uat_ai_test_data_enabled,
+        python_bin: tools::find_executable("python3", &config.python_bin)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "python3".into()),
+        script_dir: script_dir.to_path_buf(),
+        minimum_remaining_percent: config.minimum_remaining_percent,
+        providers: resolve_providers(config)
+            .into_iter()
+            .map(|provider| testing::AiProviderOption {
+                id: provider.id,
+                bin: provider.bin.to_string_lossy().into_owned(),
+                model: provider.model,
+                enabled: provider.enabled,
+            })
+            .collect(),
+    }
 }
 
 /// Global scheduler flags for `install_swarm_issue_cron.py`. Per-repo detail
@@ -759,6 +795,30 @@ fn start_uat_scheduler(
     if run_once {
         arguments.push("--once".into());
     }
+    // AI gap-filling is best-effort: a repository with no Python/AI resources
+    // bundled still gets an ordinary, fully deterministic test run — suites
+    // that ask for `aiTestData` simply come back "Not executed".
+    if let Ok(script_dir) = worker_script_dir(&app) {
+        let ai = resolve_ai_run_options(&config, repo, &script_dir);
+        if ai.enabled {
+            arguments.push("--ai-test-data-enabled".into());
+        }
+        arguments.extend([
+            "--python-bin".into(),
+            ai.python_bin,
+            "--script-dir".into(),
+            ai.script_dir.to_string_lossy().into_owned(),
+            "--minimum-remaining-percent".into(),
+            ai.minimum_remaining_percent.to_string(),
+        ]);
+        for provider in &ai.providers {
+            arguments.extend([format!("--{}-bin", provider.id), provider.bin.clone()]);
+            arguments.extend([format!("--{}-model", provider.id), provider.model.clone()]);
+            if provider.enabled {
+                arguments.extend(["--enabled-provider".into(), provider.id.clone()]);
+            }
+        }
+    }
     state.processes.spawn(
         &app,
         &format!("uat:{}", repo.id),
@@ -803,7 +863,12 @@ fn detect_test_definition<R: tauri::Runtime>(
             testing::definition_path(&workspace).display()
         ));
     }
-    testing::detect_definition(&workspace)
+    // AI-assisted discovery is best-effort: a repository with no Python/AI
+    // resources bundled still gets ordinary deterministic detection.
+    let ai = worker_script_dir(&app)
+        .ok()
+        .map(|script_dir| resolve_ai_run_options(&config, repo, &script_dir));
+    testing::detect_definition(&workspace, ai.as_ref())
 }
 
 #[tauri::command]
@@ -967,6 +1032,64 @@ async fn get_execution_history_background(
     })
     .await
     .map_err(|error| format!("Execution history lookup failed: {error}"))?
+}
+
+/// Summary of `ai_execution_history.py --import-from-github`: every open and
+/// closed issue in the repo's GitHub backlog that had no existing execution
+/// history row got a synthetic `imported` one added.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionHistoryImportSummary {
+    total_issues: i64,
+    imported: i64,
+    skipped: i64,
+}
+
+#[tauri::command]
+fn import_execution_history<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<ExecutionHistoryImportSummary, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let database_path = execution_history_db_path(&config);
+    let script = worker_script_dir(&app)?.join("ai_execution_history.py");
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    let (ok, raw) = run_capture_owned(
+        &python,
+        &[
+            script.to_string_lossy().into_owned(),
+            "--db".into(),
+            database_path.to_string_lossy().into_owned(),
+            "--repository".into(),
+            repo.github_repository.clone(),
+            "--import-from-github".into(),
+            "--gh-bin".into(),
+            gh.to_string_lossy().into_owned(),
+        ],
+    );
+    if !ok {
+        return Err(format!(
+            "Importing GitHub issues into execution history failed: {raw}"
+        ));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("Import summary could not be parsed: {error}"))
+}
+
+#[tauri::command]
+async fn import_execution_history_background(
+    app: tauri::AppHandle,
+    repo_id: String,
+) -> Result<ExecutionHistoryImportSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        import_execution_history(app.clone(), state, repo_id)
+    })
+    .await
+    .map_err(|error| format!("Importing GitHub issues into execution history failed: {error}"))?
 }
 
 #[tauri::command]
@@ -2844,6 +2967,8 @@ fn main() {
             get_test_runs_background,
             get_execution_history,
             get_execution_history_background,
+            import_execution_history,
+            import_execution_history_background,
             save_test_device,
             pause_process,
             resume_process,
