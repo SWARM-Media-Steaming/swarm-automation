@@ -1,10 +1,10 @@
 use super::{
     create_test_definition, detect_test_definition, detect_tools, get_config,
     get_execution_history, get_test_plan, get_test_runs, inspect_repository,
-    issue_branch_pr_is_visible, needs_promotion, parse_pr_ref, promotion_approval_args,
-    reconcile_integration_for_promotion, repo_status_args, repo_worker_args, require_closed_issue,
-    save_config, save_test_device, scheduler_arguments, validate_worker_script_dir,
-    AiExecutionRecord, AppState, BranchAheadBehind, ResolvedProvider,
+    issue_branch_pr_is_visible, mark_permission_primed, needs_promotion, parse_pr_ref,
+    promotion_approval_args, reconcile_integration_for_promotion, repo_status_args,
+    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
+    validate_worker_script_dir, AiExecutionRecord, AppState, BranchAheadBehind, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -136,6 +136,41 @@ fn save_config_then_get_config_round_trips_through_a_real_file() {
             & 0o777;
         assert_eq!(mode, 0o600, "config.json must be owner-only");
     }
+}
+
+#[test]
+fn mark_permission_primed_persists_the_flag_and_is_idempotent() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    assert!(
+        !get_config(app.state())
+            .expect("get_config should succeed")
+            .terminal_automation_permission_primed
+    );
+
+    mark_permission_primed(&app);
+
+    assert!(
+        get_config(app.state())
+            .expect("get_config should succeed")
+            .terminal_automation_permission_primed,
+        "in-memory config should reflect priming immediately"
+    );
+    let config_path = test_app._data_dir.path().join(crate::config::CONFIG_FILE);
+    let persisted = crate::config::load(&config_path);
+    assert!(
+        persisted.terminal_automation_permission_primed,
+        "priming must be persisted so it never runs again on the next launch"
+    );
+
+    // Calling it again (e.g. a second `spawn_permission_priming` guard check
+    // racing at startup) must stay a harmless no-op, not toggle anything off.
+    mark_permission_primed(&app);
+    assert!(
+        get_config(app.state())
+            .expect("get_config should succeed")
+            .terminal_automation_permission_primed
+    );
 }
 
 #[test]

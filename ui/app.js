@@ -2566,6 +2566,7 @@
         renderLogs();
       });
       await listen("update-available", (event) => showUpdateBanner(event.payload));
+      await listen("system-permission-primed", (event) => showToast(event.payload));
       void refreshAppVersion();
       // Tool detection and repository inspection run independently. Keeping
       // them out of the startup await path prevents slow CLIs or network-backed
