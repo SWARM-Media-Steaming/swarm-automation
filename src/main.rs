@@ -2859,6 +2859,65 @@ fn apple_script_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+const PERMISSION_PRIMED_MESSAGE: &str = "SWARM Automation requested macOS's one-time permission to control Terminal, used for provider and GitHub sign-in. Approve it once and the app won't ask again.";
+
+/// Sends a harmless Apple Event to Terminal purely to surface macOS's
+/// Automation permission prompt for controlling other apps. `open_provider_login`
+/// needs that same permission to run sign-in commands, but asking for it lazily
+/// mid sign-in is exactly the surprise popup issue #85 asks to avoid — doing it
+/// once on startup instead front-loads the interruption to a moment the user
+/// expects it.
+#[cfg(target_os = "macos")]
+fn prime_terminal_automation_permission() {
+    let _ = Command::new("/usr/bin/osascript")
+        .args(["-e", "tell application \"Terminal\" to get name"])
+        .status();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prime_terminal_automation_permission() {}
+
+/// Records that permission priming has run (successful or not — macOS itself
+/// remembers the user's answer from here on) so it is never attempted again.
+fn mark_permission_primed<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let state = app.state::<AppState>();
+    let saved = {
+        let Ok(mut config) = state.config.lock() else {
+            return;
+        };
+        config.terminal_automation_permission_primed = true;
+        config.clone()
+    };
+    if let Ok(path) = app_config_path(app) {
+        let _ = config::save_unchecked(&path, &saved);
+    }
+}
+
+/// Runs once per install, on startup: front-loads the macOS Automation
+/// permission prompt that `open_provider_login` would otherwise trigger the
+/// first time a user signs in to a provider mid-task. Non-macOS platforms
+/// need no such permission, so they're marked primed immediately.
+fn spawn_permission_priming(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let already_primed = match state.config.lock() {
+        Ok(config) => config.terminal_automation_permission_primed,
+        Err(_) => return,
+    };
+    if already_primed {
+        return;
+    }
+    if cfg!(not(target_os = "macos")) {
+        mark_permission_primed(app);
+        return;
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = tauri::async_runtime::spawn_blocking(prime_terminal_automation_permission).await;
+        mark_permission_primed(&handle);
+        let _ = handle.emit("system-permission-primed", PERMISSION_PRIMED_MESSAGE);
+    });
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         let _ = window.show();
@@ -2936,6 +2995,7 @@ fn main() {
                 .map_err(|_| std::io::Error::other("Configuration lock was poisoned"))? = loaded;
             install_tray(app)?;
             spawn_startup_update_check(app.handle());
+            spawn_permission_priming(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
