@@ -352,6 +352,14 @@ pub struct AppConfig {
     pub gh_bin: String,
     pub python_bin: String,
 
+    /// Set once the app has attempted to establish macOS's one-time
+    /// Automation permission for controlling Terminal (used to run provider
+    /// and `gh` sign-in commands). Guards `spawn_permission_priming` so it
+    /// runs at most once per install, on startup, instead of leaving the
+    /// permission prompt to surprise the user later mid sign-in.
+    #[serde(default)]
+    pub terminal_automation_permission_primed: bool,
+
     // --- Legacy fields (pre-`repositories` / pre-`providers`). Read once by
     //     `normalize()` to carry a v1 config forward, then never written. ---
     #[serde(default, skip_serializing)]
@@ -436,6 +444,7 @@ impl Default for AppConfig {
                 .into_owned(),
             gh_bin: String::new(),
             python_bin: String::new(),
+            terminal_automation_permission_primed: false,
             profile_name: String::new(),
             repo_dir: String::new(),
             github_repository: String::new(),
@@ -746,6 +755,16 @@ pub fn load(path: &Path) -> AppConfig {
 
 pub fn save(path: &Path, config: &AppConfig) -> Result<(), String> {
     config.validate()?;
+    save_unchecked(path, config)
+}
+
+/// Writes the config file as-is, skipping the full-settings `validate()` gate
+/// `save` applies. Reserved for internal bookkeeping flags (e.g. one-time
+/// permission priming, see `terminal_automation_permission_primed`) that must
+/// persist even before the user has finished initial setup — an
+/// unconfigured app (no repositories yet) is a normal state for those, even
+/// though it is not a valid state to run the worker against.
+pub fn save_unchecked(path: &Path, config: &AppConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
