@@ -73,9 +73,9 @@ impl Default for ProviderSettings {
 impl ProviderSettings {
     fn preset(id: &str) -> Self {
         let (model, effort) = match id {
-            "claude" => ("claude-sonnet-5", "high"),
-            "codex" => ("gpt-5.6-sol", "high"),
-            "grok" => ("grok-4.6", "high"),
+            "claude" => ("claude-sonnet-5", "low"),
+            "codex" => ("gpt-5.6-luna", "medium"),
+            "grok" => ("grok-4.6", "low"),
             _ => ("", "high"),
         };
         Self {
@@ -610,10 +610,10 @@ impl AppConfig {
                     value.to_string()
                 }
             };
-            let legacy_effort = |value: &str| {
+            let legacy_effort = |value: &str, id: &str| {
                 let value = value.trim();
                 if value.is_empty() {
-                    "high".to_string()
+                    ProviderSettings::preset(id).effort
                 } else {
                     value.to_string()
                 }
@@ -623,14 +623,14 @@ impl AppConfig {
                     id: "claude".into(),
                     enabled: true,
                     model: legacy(&self.claude_model, "claude"),
-                    effort: legacy_effort(&self.claude_effort),
+                    effort: legacy_effort(&self.claude_effort, "claude"),
                     bin: std::mem::take(&mut self.claude_bin),
                 },
                 ProviderSettings {
                     id: "codex".into(),
                     enabled: true,
                     model: legacy(&self.codex_model, "codex"),
-                    effort: legacy_effort(&self.codex_effort),
+                    effort: legacy_effort(&self.codex_effort, "codex"),
                     bin: std::mem::take(&mut self.codex_bin),
                 },
                 ProviderSettings::preset("grok"),
