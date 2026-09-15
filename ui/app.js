@@ -48,7 +48,7 @@
     claude: {
       label: "Claude", cli: "Claude Code", help: "provider-claude",
       models: [
-        { value: "claude-sonnet-5", label: "Claude Sonnet 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
+        { value: "claude-sonnet-5", label: "Claude Sonnet 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "low" },
         { value: "claude-opus-5", label: "Claude Opus 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
         { value: "claude-fable-5", label: "Claude Fable 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
       ],
@@ -57,9 +57,9 @@
     codex: {
       label: "Codex", cli: "Codex CLI", help: "provider-codex",
       models: [
+        { value: "gpt-5.6-luna", label: "GPT-5.6 Luna", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "medium" },
         { value: "gpt-5.6-sol", label: "GPT-5.6 Sol", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "high" },
         { value: "gpt-5.6-terra", label: "GPT-5.6 Terra", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "medium" },
-        { value: "gpt-5.6-luna", label: "GPT-5.6 Luna", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "medium" },
         { value: "gpt-5.5", label: "GPT-5.5", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium" },
       ],
       docs: "https://developers.openai.com/codex/cli/",
@@ -67,7 +67,7 @@
     grok: {
       label: "Grok", cli: "Grok Build", help: "provider-grok",
       models: [
-        { value: "grok-4.6", label: "Grok 4.6", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "high" },
+        { value: "grok-4.6", label: "Grok 4.6", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "low" },
       ],
       docs: "https://docs.x.ai/build/overview",
     },
