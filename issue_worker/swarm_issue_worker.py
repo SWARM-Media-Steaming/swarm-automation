@@ -3270,8 +3270,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _provider_model_defaults = {
         "claude": "claude-sonnet-5",
-        "codex": "gpt-5.6-sol",
+        "codex": "gpt-5.6-luna",
         "grok": "grok-4.6",
+    }
+    _provider_effort_defaults = {
+        "claude": "low",
+        "codex": "medium",
+        "grok": "low",
     }
     for _key in KNOWN_PROVIDER_KEYS:
         parser.add_argument(
@@ -3280,7 +3285,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         parser.add_argument(
             f"--{_key}-effort",
-            default=env_value(f"SWARM_{_key.upper()}_EFFORT", "high"),
+            default=env_value(f"SWARM_{_key.upper()}_EFFORT", _provider_effort_defaults[_key]),
         )
         parser.add_argument(
             f"--{_key}-bin",

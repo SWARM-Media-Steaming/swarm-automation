@@ -24,7 +24,7 @@
           <button class="nav-item" data-view-target="help"><span class="nav-icon">?</span>Help</button>
         </nav>
         <div class="sidebar-foot">
-          <div class="machine-state"><span class="pulse-dot"></span><span>Runs on this Mac</span></div>
+          <div class="machine-state"><span class="pulse-dot"></span><span>Runs on this Mac</span><span id="app-version-label" class="app-version"></span></div>
           <button id="hide-button" class="quiet-button">Hide to menu bar</button>
         </div>
       </aside>
@@ -167,7 +167,7 @@
         <section id="view-advanced" class="view">
           <div class="section-intro"><div><p class="eyebrow">ADVANCED</p><h2>Optional automation settings</h2><p>The defaults work for normal GitHub.com repositories. Change these only when your workflow requires it.</p></div></div>
           <div class="settings-grid">
-            <article class="panel"><div class="panel-header"><div><p class="eyebrow">SOFTWARE UPDATE</p><h3>App updates <button class="help-dot" data-help="software-update" aria-label="About software updates">?</button></h3></div><span id="update-version-pill" class="status-pill">v0.0.0</span></div><div class="stacked-form"><label>When a new version is available <select data-config="auto_update"><option value="off">Don't check</option><option value="notify">Notify me</option><option value="auto">Install automatically on quit</option></select></label><div class="control-row"><button id="check-update" class="secondary-button">Check now</button></div><p id="update-status" class="panel-copy">Updates install in place and restart the app. New versions ship automatically after each change passes tests.</p><div id="update-detail" class="verification-results"></div></div></article>
+            <article class="panel"><div class="panel-header"><div><p class="eyebrow">SOFTWARE UPDATE</p><h3>App updates <button class="help-dot" data-help="software-update" aria-label="About software updates">?</button></h3></div><span id="update-version-pill" class="status-pill">v0.0.0</span></div><div class="stacked-form"><label>When a new version is available <select data-config="auto_update"><option value="notify">Notify me</option><option value="auto">Automatically</option></select></label><div class="control-row"><button id="check-update" class="secondary-button">Check now</button></div><p id="update-status" class="panel-copy">Updates install in place and restart the app. New versions ship automatically after each change passes tests.</p><div id="update-detail" class="verification-results"></div><div id="update-candidates" class="stacked-form hidden"></div></div></article>
             <article class="panel"><div class="panel-header"><div><p class="eyebrow">WORK POLICY</p><h3>Issue instructions <span class="opt">optional</span> <button class="help-dot" data-help="work-policy" aria-label="About issue instructions">?</button></h3></div></div><div class="stacked-form"><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="require_issue_tests" /><span></span><div><strong>Require issue tests</strong><small>Tell the AI to add or update UAT and integration tests for the issue.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="allow_environment_only_summary" /><span></span><div><strong>Allow environment-only summary</strong><small>If the issue is not a code problem, the AI can explain that without writing code.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-config="ai_execution_history_enabled" /><span></span><div><strong>Store AI execution history</strong><small>Keep sanitized prompts, outcomes, and lifecycle details in the local SQLite database.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-config="prompt_feedback_upload_enabled" /><span></span><div><strong>Allow prompt feedback upload</strong><small>Independently allow future uploads to a human-review platform. No uploader is configured yet.</small></div></label></div></article>
             <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">PROVIDER EXECUTABLES</p><h3>CLI path overrides <span class="opt">optional</span> <button class="help-dot" data-help="provider-bins" aria-label="About provider executable overrides">?</button></h3></div></div><div class="form-grid three"><label>Claude <input data-provider-bin="claude" placeholder="Auto-detect" /></label><label>Codex <input data-provider-bin="codex" placeholder="Auto-detect" /></label><label>Grok <input data-provider-bin="grok" placeholder="Auto-detect" /></label></div></article>
           </div>
@@ -176,8 +176,8 @@
         <section id="view-debug" class="view">
           <div class="section-intro"><div><p class="eyebrow">INFO &amp; DEBUG</p><h2>Environment and live diagnostics</h2><p>Tool detection and logs refresh independently so slow checks do not block the rest of the interface.</p></div><button id="refresh-tools" class="secondary-button">Refresh tools</button></div>
           <div id="tool-grid" class="tool-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div></div>
-          <div class="section-heading"><div><p class="eyebrow">LIVE OUTPUT</p><h2>Worker, test, setup, and install logs</h2></div><div class="control-row"><button id="clear-log" class="secondary-button">Clear view</button><button id="open-log-folder" class="secondary-button">Open log folder</button></div></div>
-          <div class="log-toolbar"><div class="log-filters"><button class="active" data-log-filter="all">All</button><button data-log-filter="Issue worker">Worker</button><button data-log-filter="Test scheduler">Tests</button><button data-log-filter="Setup">Setup</button></div><label class="log-search">Search logs<input id="log-search-input" type="search" placeholder="Filter text" /></label><span id="log-live-state" class="live-label"><span></span>LISTENING</span></div><pre id="full-log" class="full-log debug-log">Waiting for output…</pre>
+          <div class="section-heading"><div><p class="eyebrow">ACTIONABLE LOG</p><h2>Worker milestones and errors</h2><p>Routine command output is hidden. The complete local log remains available from the log folder.</p></div><div class="control-row"><button id="clear-log" class="secondary-button">Clear view</button><button id="open-log-folder" class="secondary-button">Open log folder</button></div></div>
+          <div class="log-toolbar"><div class="log-filters"><button class="active" data-log-filter="all">All</button><button data-log-filter="worker">Worker</button><button data-log-filter="errors">Errors</button></div><label class="log-search">Search logs<input id="log-search-input" type="search" placeholder="Filter text" /></label><span id="log-live-state" class="live-label"><span></span>LISTENING</span></div><div id="full-log" class="full-log debug-log" role="log" aria-live="polite"><p class="log-empty">Waiting for actionable output…</p></div>
         </section>
 
         <section id="view-help" class="view">
@@ -240,6 +240,7 @@
       </div>
     </div>
 
+    <script src="logging.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
