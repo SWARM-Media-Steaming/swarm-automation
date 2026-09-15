@@ -268,16 +268,65 @@ class Runner:
             # A saved issue owns the checkout — leave it exactly as it is; the
             # worker resumes it and does its own fetching.
             return True
-        if self.git(repo, "status", "--porcelain").stdout.strip():
-            self.log(
-                "Repository has uncommitted work with no saved issue owner; deferring synchronization and AI."
-            )
-            return False
+        status_lines = self.git(repo, "status", "--porcelain").stdout.splitlines()
+        if status_lines:
+            if any(not line.startswith("??") for line in status_lines):
+                self.log(
+                    "Repository has uncommitted tracked changes with no saved issue owner; "
+                    "deferring synchronization and AI."
+                )
+                return False
+            if not self._recover_harmless_untracked_checkout(repo):
+                self.log(
+                    "Repository has untracked files with no saved issue owner, and its checkout "
+                    "could not be confirmed safe to reposition automatically; deferring "
+                    "synchronization and AI for manual review."
+                )
+                return False
         fetched = self.git(repo, "fetch", "--prune", str(repo["remote_name"]))
         if fetched.returncode != 0:
             detail = fetched.stderr.strip() or fetched.stdout.strip() or "git fetch failed"
             self.log(f"Could not fetch {repo['remote_name']}: {detail}; deferring this run.")
             return False
+        return True
+
+    def _recover_harmless_untracked_checkout(self, repo: dict[str, object]) -> bool:
+        """Called only once every line of `git status --porcelain` is an
+        untracked (`??`) entry -- no staged or modified tracked file is
+        present, so nothing tracked can be lost. The checkout can still be
+        sitting on whatever branch an interrupted work-round left it on
+        (see issue-branch-delivery.md for one way that happens), which is
+        what actually blocks every future cycle here, not the untracked
+        files themselves.
+
+        Repositioning onto the integration branch is only safe once that's
+        *proven*, not assumed: fetch it fresh, and require the current
+        commit's tree to already be byte-identical to the remote
+        integration branch's tree (a pure two-commit `git diff`, which
+        never looks at the working directory, so the untracked files can't
+        skew it). Any real difference -- a genuinely unmerged commit sitting
+        here, a fetch failure -- leaves this repository deferred for a
+        human to look at, exactly as before.
+        """
+        remote_name = str(repo["remote_name"])
+        integration_branch = str(repo["integration_branch"])
+        fetched = self.git(repo, "fetch", "--prune", remote_name, integration_branch)
+        if fetched.returncode != 0:
+            return False
+        integration_ref = f"{remote_name}/{integration_branch}"
+        identical = self.git(repo, "diff", "--quiet", "HEAD", integration_ref)
+        if identical.returncode != 0:
+            return False
+        switched = self.git(repo, "switch", integration_branch)
+        if switched.returncode != 0:
+            switched = self.git(repo, "switch", "-c", integration_branch, integration_ref)
+        if switched.returncode != 0:
+            return False
+        self.log(
+            "Repository had only untracked scratch files with no saved issue owner, and its "
+            f"checkout already matched {integration_ref} -- repositioned onto {integration_branch} "
+            "and continuing automatically."
+        )
         return True
 
     def run_worker(self, repo: dict[str, object], prefix: str = "") -> int:
