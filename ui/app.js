@@ -1703,9 +1703,9 @@
     return link;
   }
 
-  // Overview is intentionally an allowlist of meaningful milestones. Every
-  // raw line still goes to Info & Debug, while routine command output, paths,
-  // HTTP requests, usage text, and process details stay out of this view.
+  // Overview is intentionally an allowlist of meaningful milestones. Routine
+  // command output, paths, HTTP requests, usage text, and process details stay
+  // out of both the activity feed and the actionable log.
   function importantActivity(raw) {
     const log = parseAutomationLog(raw);
     if (!log) return null;
@@ -1953,36 +1953,45 @@
     byId("toggle-activity-live").textContent = state.activityPaused ? "Resume updates" : "Pause updates";
   }
 
-  function meaningfulLogLines(lines) {
-    const suppressing = new Set();
-    return lines.filter((raw) => {
-      const match = String(raw).match(/^\[[^\]]+\] \[(.*)\/([^/\]]+)\] (.*)$/);
-      if (!match) return true;
-      const key = `${match[1]}/${match[2]}`;
-      const payload = match[3];
-      if (/^\[\d{4}-\d{2}-\d{2}[ T]/.test(payload)) suppressing.delete(key);
-      if (/^##\s+(?:Changes|Verification|Operational notes)\s*$/i.test(payload.trim())) {
-        suppressing.add(key);
-        return false;
-      }
-      return !suppressing.has(key);
-    });
-  }
-
   function renderLogs() {
     const search = state.logSearch.trim().toLowerCase();
-    const filtered = meaningfulLogLines(state.logs).filter((line) => {
-      if (state.logFilter !== "all" && !line.includes(`[${state.logFilter}/`)) return false;
-      if (search && !line.toLowerCase().includes(search)) return false;
+    const entries = window.SwarmLogging.actionableLogEntries(state.logs);
+    const filtered = entries.filter((entry) => {
+      if (state.logFilter === "worker" && !entry.worker) return false;
+      if (state.logFilter === "errors" && entry.level !== "error") return false;
+      if (search && !`${entry.time} ${entry.source} ${entry.message}`.toLowerCase().includes(search)) return false;
       return true;
     });
-    const text = filtered.length ? filtered.join("\n") : "Waiting for output…";
     const full = byId("full-log");
     const stayAtBottom = full.scrollTop + full.clientHeight >= full.scrollHeight - 28;
-    full.textContent = text;
+    full.replaceChildren();
+    if (!filtered.length) {
+      const empty = document.createElement("p");
+      empty.className = "log-empty";
+      empty.textContent = entries.length ? "No actionable logs match this filter." : "Waiting for actionable output…";
+      full.appendChild(empty);
+    }
+    filtered.forEach((entry) => {
+      const line = document.createElement("div");
+      line.className = `log-line ${entry.level}`;
+      const time = document.createElement("span");
+      time.className = "log-line-time";
+      time.textContent = entry.time;
+      const level = document.createElement("strong");
+      level.className = "log-line-level";
+      level.textContent = entry.level === "error" ? "ERROR" : "INFO";
+      const message = document.createElement("span");
+      message.className = "log-line-message";
+      message.textContent = entry.message;
+      const source = document.createElement("span");
+      source.className = "log-line-source";
+      source.textContent = entry.source;
+      line.append(time, level, message, source);
+      full.appendChild(line);
+    });
     if (stayAtBottom) full.scrollTop = full.scrollHeight;
     renderActivity();
-    byId("log-count").textContent = String(Math.min(state.logs.length, 999));
+    byId("log-count").textContent = String(Math.min(entries.length, 999));
   }
 
   async function chooseRepository() {
