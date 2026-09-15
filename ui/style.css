@@ -210,7 +210,8 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .test-run-suite strong, .execution-note strong { display: block; color: #cbd2df; font-size: 10px; }
 .test-run-suite small, .execution-note small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 9px; overflow-wrap: anywhere; }
 .execution-notes { display: grid; gap: 6px; }
-.workspace-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-top: 16px; padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 8px; background: #0c111b; }
+.workspace-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-top: 16px; padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 8px; background: #0c111b; }.workspace-row strong { color: #cbd2df; font-size: 11px; }.workspace-row small { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.machine-state .app-version { margin-left: auto; color: var(--muted-2); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .workspace-label { display: block; color: var(--muted-2); font-size: 8px; text-transform: uppercase; letter-spacing: .1em; margin-bottom: 4px; }
 #workspace-path { font: 10px/1.4 ui-monospace, Menlo, monospace; color: #c4ccdb; overflow-wrap: anywhere; }
 .repo-inspection { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 16px; }.repo-fact { padding: 10px; border-radius: 7px; background: #0c111b; border: 1px solid var(--line-soft); }.repo-fact span { display: block; color: var(--muted-2); font-size: 8px; text-transform: uppercase; letter-spacing: .1em; }.repo-fact strong { display: block; color: #c4ccdb; font-size: 10px; margin-top: 5px; overflow-wrap: anywhere; }

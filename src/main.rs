@@ -1411,6 +1411,10 @@ fn check_repo_bot_readiness<R: tauri::Runtime>(
 
 // ----- Software update ----------------------------------------------------
 
+/// `owner/name` this app checks its own releases against — the GitHub side
+/// of `tauri.conf.json`'s updater endpoint and Cargo.toml's `repository`.
+const SELF_UPDATE_REPO: &str = "SWARM-Media-Steaming/swarm-automation";
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct UpdateSummary {
@@ -1418,6 +1422,127 @@ struct UpdateSummary {
     version: String,
     notes: String,
     pub_date: String,
+}
+
+/// One release the "Check Now" version picker can show. `channel` is
+/// `"release"` (`main`, never prerelease) or `"beta"` (`ai-main`, always
+/// prerelease).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCandidate {
+    tag: String,
+    version: String,
+    channel: String,
+    published_at: String,
+    /// Strictly newer than the running version — true downgrade (installing
+    /// something older) is out of scope for now; see `install_update_candidate`.
+    installable: bool,
+    /// The newest published entry in its channel. This app can only install
+    /// these two today (see `install_update_candidate`'s doc comment); the
+    /// rest of the 3+3 list is shown for context only.
+    direct_install: bool,
+}
+
+#[derive(Deserialize, Clone)]
+struct GhRelease {
+    #[serde(rename = "tagName")]
+    tag_name: String,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    #[serde(rename = "isPrerelease")]
+    is_prerelease: bool,
+    #[serde(rename = "publishedAt", default)]
+    published_at: Option<String>,
+}
+
+fn running_app_version() -> &'static str {
+    env!("SWARM_APP_VERSION")
+}
+
+/// The exact version this build was published as, including a `-beta.<n>`
+/// or `+main.<n>` suffix when present — baked in at compile time by
+/// `build.rs` from the release workflow's `SWARM_APP_VERSION`, not just
+/// whatever is hand-written in Cargo.toml.
+#[tauri::command]
+fn app_version() -> String {
+    running_app_version().to_string()
+}
+
+fn parse_semver(raw: &str) -> Option<semver::Version> {
+    semver::Version::parse(raw.trim().trim_start_matches('v')).ok()
+}
+
+async fn list_releases(gh: PathBuf) -> Result<Vec<GhRelease>, String> {
+    let (ok, out) = tauri::async_runtime::spawn_blocking(move || {
+        run_capture_owned(
+            &gh,
+            &[
+                "release".into(),
+                "list".into(),
+                "--repo".into(),
+                SELF_UPDATE_REPO.into(),
+                "--limit".into(),
+                "30".into(),
+                "--json".into(),
+                "tagName,isDraft,isPrerelease,publishedAt".into(),
+            ],
+        )
+    })
+    .await
+    .map_err(|error| format!("Release lookup failed: {error}"))?;
+    if !ok {
+        return Err(format!("Could not list GitHub releases: {out}"));
+    }
+    let mut releases: Vec<GhRelease> = serde_json::from_str(&out)
+        .map_err(|error| format!("Unexpected release list from GitHub: {error}"))?;
+    releases.retain(|release| !release.is_draft);
+    releases.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+    Ok(releases)
+}
+
+/// The newest non-prerelease and newest prerelease release currently
+/// published, if any.
+fn top_channel_releases(releases: &[GhRelease]) -> (Option<&GhRelease>, Option<&GhRelease>) {
+    let top_release = releases.iter().find(|release| !release.is_prerelease);
+    let top_beta = releases.iter().find(|release| release.is_prerelease);
+    (top_release, top_beta)
+}
+
+#[tauri::command]
+async fn list_update_candidates<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Vec<UpdateCandidate>, String> {
+    let gh = {
+        let config = current_config(&app.state::<AppState>())?;
+        tools::configured_or_detected(&config.gh_bin, "gh")?
+    };
+    let releases = list_releases(gh).await?;
+    let current = parse_semver(running_app_version())
+        .ok_or_else(|| "Could not parse the running app version.".to_string())?;
+
+    let mut candidates = Vec::new();
+    for prerelease in [false, true] {
+        let channel = if prerelease { "beta" } else { "release" };
+        for (index, release) in releases
+            .iter()
+            .filter(|release| release.is_prerelease == prerelease)
+            .take(3)
+            .enumerate()
+        {
+            let Some(version) = parse_semver(&release.tag_name) else {
+                continue;
+            };
+            candidates.push(UpdateCandidate {
+                tag: release.tag_name.clone(),
+                version: version.to_string(),
+                channel: channel.into(),
+                published_at: release.published_at.clone().unwrap_or_default(),
+                installable: version > current,
+                direct_install: index == 0,
+            });
+        }
+    }
+    Ok(candidates)
 }
 
 /// Best-effort: a bundle updated from a downloaded archive can inherit the
@@ -1475,9 +1600,131 @@ async fn install_update<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(
     app.restart()
 }
 
-/// Honour `auto_update` once at startup, off the UI thread. `"auto"` installs
-/// and relaunches; `"notify"` emits `update-available` for the banner; `"off"`
-/// does nothing.
+/// Install a specific "Check Now" candidate. Only the newest release and
+/// newest beta build (`direct_install` in `UpdateCandidate`) can actually be
+/// installed today: those are the only two manifests this app knows how to
+/// resolve safely — the default endpoint for the release channel, and that
+/// beta tag's own per-release manifest for the beta channel. Installing an
+/// older, non-latest entry from either channel (context-only in the picker)
+/// would need fetching and verifying that specific release's signed
+/// artifact directly, bypassing the updater plugin's own "is this newer"
+/// resolution — the same open-ended work this app's true-downgrade path
+/// deliberately leaves for a follow-up issue, so it is out of scope here too.
+#[tauri::command]
+async fn install_update_candidate<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    tag: String,
+    channel: String,
+) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let gh = {
+        let config = current_config(&app.state::<AppState>())?;
+        tools::configured_or_detected(&config.gh_bin, "gh")?
+    };
+    let releases = list_releases(gh).await?;
+    let (top_release, top_beta) = top_channel_releases(&releases);
+    let expected = match channel.as_str() {
+        "release" => top_release,
+        "beta" => top_beta,
+        _ => return Err(format!("Unknown update channel: {channel}")),
+    };
+    if expected.map(|release| release.tag_name.as_str()) != Some(tag.as_str()) {
+        return Err(
+            "Only the newest release and newest beta build can be installed directly today; \
+             this entry is shown for context only."
+                .into(),
+        );
+    }
+
+    let update = if channel == "beta" {
+        let endpoint =
+            format!("https://github.com/{SELF_UPDATE_REPO}/releases/download/{tag}/latest.json");
+        let url = url::Url::parse(&endpoint).map_err(|error| error.to_string())?;
+        app.updater_builder()
+            .endpoints(vec![url])
+            .map_err(|error| error.to_string())?
+            .build()
+            .map_err(|error| error.to_string())?
+            .check()
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        pending_update(&app).await?
+    };
+    let Some(update) = update else {
+        return Err("That version is no longer available to install.".into());
+    };
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|error| error.to_string())?;
+    strip_quarantine();
+    app.restart()
+}
+
+/// True once neither the issue worker nor any enabled repo's test scheduler
+/// has a live process. Both are long-running, self-scheduling processes —
+/// there is no finer "busy this instant" signal than that — but that is
+/// also exactly the granularity that matters here: restarting this app to
+/// apply an update always stops every tracked process (see the `RunEvent::
+/// Exit` handler), so waiting for a slot to already be stopped is what
+/// keeps that restart from ever cutting off live work.
+fn workers_idle<R: tauri::Runtime>(app: &tauri::AppHandle<R>, config: &AppConfig) -> bool {
+    let Ok(log_path) = automation_log_path(app) else {
+        return false;
+    };
+    let state = app.state::<AppState>();
+    let issue_idle = state
+        .processes
+        .status(app, "issue", "Issue worker scheduler", &log_path)
+        .map(|status| status.state == "stopped")
+        .unwrap_or(true);
+    issue_idle
+        && config.enabled_repos().all(|repo| {
+            state
+                .processes
+                .status(
+                    app,
+                    &format!("uat:{}", repo.id),
+                    &format!("Test scheduler · {}", repo.label()),
+                    &log_path,
+                )
+                .map(|status| status.state == "stopped")
+                .unwrap_or(true)
+        })
+}
+
+/// Poll until `workers_idle` — never sends either process a stop signal.
+/// Interrupting the issue worker mid-cycle can leave a git checkout stuck
+/// with no recorded owner (`.claude/rules/issue-branch-delivery.md`), so an
+/// "Automatically" install waits out real work instead of forcing it to
+/// yield. Bails out if the user switches away from "Automatically" while
+/// this is waiting.
+async fn wait_for_workers_idle(app: &tauri::AppHandle) {
+    loop {
+        let config = {
+            let state = app.state::<AppState>();
+            let Ok(config) = state.config.lock() else {
+                return;
+            };
+            if config.auto_update != "auto" {
+                return;
+            }
+            config.clone()
+        };
+        if workers_idle(app, &config) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
+/// Honour `auto_update` once at startup, off the UI thread. `"notify"`
+/// emits `update-available` for the banner. `"auto"` ("Automatically" in
+/// the UI) waits for the issue worker and every enabled repo's test
+/// scheduler to go idle on their own (see `wait_for_workers_idle`), then
+/// downloads, installs, and relaunches.
 fn spawn_startup_update_check(app: &tauri::AppHandle) {
     let mode = {
         let state = app.state::<AppState>();
@@ -1486,15 +1733,13 @@ fn spawn_startup_update_check(app: &tauri::AppHandle) {
         };
         config.auto_update.clone()
     };
-    if mode == "off" {
-        return;
-    }
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let Ok(Some(update)) = pending_update(&handle).await else {
             return;
         };
         if mode == "auto" {
+            wait_for_workers_idle(&handle).await;
             if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
                 strip_quarantine();
                 handle.restart();
@@ -3054,6 +3299,9 @@ fn main() {
             hide_to_tray,
             check_for_update,
             install_update,
+            app_version,
+            list_update_candidates,
+            install_update_candidate,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build SWARM Automation");
