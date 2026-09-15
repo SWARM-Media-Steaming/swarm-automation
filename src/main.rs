@@ -382,7 +382,11 @@ async fn get_automation_status_background(
 /// pointing anyone at it). Best-effort — any error just means "can't tell,"
 /// not "this is broken," since the real pre-flight check already runs (and
 /// logs) on every cycle regardless of whether the dashboard can see it.
-fn deferred_checkout_reason(config: &AppConfig, repo: &RepoConfig, workspace: &Path) -> Option<String> {
+fn deferred_checkout_reason(
+    config: &AppConfig,
+    repo: &RepoConfig,
+    workspace: &Path,
+) -> Option<String> {
     let state_dir = PathBuf::from(&config.worker_state_dir).join(&repo.id);
     if state_dir.join("in-progress-issue.json").is_file() {
         return None;
