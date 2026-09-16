@@ -50,6 +50,101 @@ pub struct TestDefinition {
     pub reporting: Option<ReportingDefinition>,
     #[serde(default)]
     pub failure_triage: Option<ReportingDefinition>,
+    /// Schema v2 user-supplied values. V1 definitions deserialize with an
+    /// empty list and retain their legacy requirements/device behavior.
+    #[serde(default)]
+    pub inputs: Vec<TestInputDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestInputDefinition {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub help: String,
+    #[serde(rename = "type")]
+    pub input_type: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default: serde_json::Value,
+    #[serde(default)]
+    pub validation: InputValidation,
+    #[serde(default)]
+    pub discovery: Option<InputDiscovery>,
+    /// Empty means every suite consumes the input.
+    #[serde(default)]
+    pub suites: Vec<String>,
+    #[serde(default = "default_input_persistence")]
+    pub persistence: String,
+    #[serde(default)]
+    pub binding: InputBinding,
+    #[serde(default)]
+    pub options: Vec<InputOption>,
+}
+
+fn default_input_persistence() -> String {
+    "repository".into()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputValidation {
+    #[serde(default)]
+    pub pattern: String,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub min_length: Option<usize>,
+    #[serde(default)]
+    pub max_length: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InputDiscovery {
+    Kind(String),
+    Detailed {
+        kind: String,
+        #[serde(default)]
+        environment: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputBinding {
+    #[serde(default)]
+    pub environment: String,
+    /// Each entry is appended as one argv element. `{value}` is replaced
+    /// without tokenization; for booleans the entries are present only when true.
+    #[serde(default, alias = "argv")]
+    pub arguments: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InputOption {
+    Value(String),
+    Labeled { value: String, label: String },
+}
+
+impl InputOption {
+    fn value(&self) -> &str {
+        match self {
+            Self::Value(v) => v,
+            Self::Labeled { value, .. } => value,
+        }
+    }
+    fn label(&self) -> &str {
+        match self {
+            Self::Value(v) => v,
+            Self::Labeled { label, .. } => label,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +332,12 @@ pub struct SuiteResult {
     /// the repository's test definition.
     #[serde(default)]
     pub ai_generated_data: Vec<AiGeneratedDataRecord>,
+    /// Exact direct-exec argv, with secret values replaced by `<redacted>`.
+    #[serde(default)]
+    pub argv: Vec<String>,
+    /// Names only; environment values are deliberately not retained.
+    #[serde(default)]
+    pub environment: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +360,8 @@ pub struct SuitePlan {
     pub timeout_seconds: u64,
     pub disruptive: bool,
     pub requirements: Vec<RequirementStatus>,
+    pub argv: Vec<String>,
+    pub environment: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -272,6 +375,34 @@ pub struct TestPlan {
     pub device_selection_required: bool,
     pub devices: Vec<DetectedDevice>,
     pub suites: Vec<SuitePlan>,
+    pub inputs: Vec<ResolvedInput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedInput {
+    pub id: String,
+    pub label: String,
+    pub help: String,
+    pub input_type: String,
+    pub required: bool,
+    pub value: String,
+    pub has_value: bool,
+    pub valid: bool,
+    pub state: String,
+    pub message: String,
+    pub provenance: String,
+    pub persistence: String,
+    pub suites: Vec<String>,
+    pub options: Vec<ResolvedInputOption>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedInputOption {
+    pub value: String,
+    pub label: String,
+    pub detected: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -610,6 +741,7 @@ pub fn detect_definition(
         coverage_notes: Vec::new(),
         reporting: None,
         failure_triage: None,
+        inputs: Vec::new(),
     };
     validate_definition(&definition)?;
     let definition = serde_json::to_string_pretty(&definition)
@@ -674,11 +806,14 @@ pub fn load_definition(workspace: &Path) -> Result<TestDefinition, String> {
 }
 
 fn validate_definition(definition: &TestDefinition) -> Result<(), String> {
-    if definition.version != 1 {
+    if !matches!(definition.version, 1 | 2) {
         return Err(format!(
-            "Unsupported test definition version {}; expected 1",
+            "Unsupported test definition version {}; expected 1 or 2",
             definition.version
         ));
+    }
+    if definition.version == 1 && !definition.inputs.is_empty() {
+        return Err("Test inputs require schema version 2".into());
     }
     if definition.suites.is_empty() {
         return Err("The test definition must contain at least one suite".into());
@@ -764,6 +899,128 @@ fn validate_definition(definition: &TestDefinition) -> Result<(), String> {
             }
         }
     }
+    let suite_ids = definition
+        .suites
+        .iter()
+        .map(|s| s.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut input_ids = std::collections::HashSet::new();
+    for input in &definition.inputs {
+        if input.id.is_empty()
+            || !input
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            return Err("Input ids may contain only letters, digits, '-' and '_'".into());
+        }
+        if !input_ids.insert(input.id.as_str()) {
+            return Err(format!("Duplicate input id '{}'", input.id));
+        }
+        if input.label.trim().is_empty() {
+            return Err(format!("Input '{}' needs a label", input.id));
+        }
+        if !matches!(
+            input.input_type.as_str(),
+            "text"
+                | "number"
+                | "boolean"
+                | "file"
+                | "directory"
+                | "select"
+                | "device"
+                | "environment"
+                | "secret"
+        ) {
+            return Err(format!(
+                "Input '{}' has unsupported type '{}'",
+                input.id, input.input_type
+            ));
+        }
+        if !matches!(
+            input.persistence.as_str(),
+            "repository" | "session-only" | "keychain" | "os-keychain" | "osKeychain"
+        ) {
+            return Err(format!(
+                "Input '{}' has unsupported persistence policy '{}'",
+                input.id, input.persistence
+            ));
+        }
+        let keychain_persistence = matches!(
+            input.persistence.as_str(),
+            "keychain" | "os-keychain" | "osKeychain"
+        );
+        if input.input_type == "secret" && !keychain_persistence {
+            return Err(format!(
+                "Secret input '{}' must use keychain persistence",
+                input.id
+            ));
+        }
+        if input.input_type == "secret" && !input.default.is_null() {
+            return Err(format!(
+                "Secret input '{}' cannot declare a default value",
+                input.id
+            ));
+        }
+        if input.input_type != "secret" && keychain_persistence {
+            return Err(format!(
+                "Only secret inputs may use keychain persistence ('{}')",
+                input.id
+            ));
+        }
+        if input.binding.environment.is_empty() && input.binding.arguments.is_empty() {
+            return Err(format!(
+                "Input '{}' needs an environment or argument binding",
+                input.id
+            ));
+        }
+        if !input.binding.environment.is_empty()
+            && !input
+                .binding
+                .environment
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        {
+            return Err(format!(
+                "Input '{}' has an invalid environment variable name",
+                input.id
+            ));
+        }
+        if input.input_type != "boolean"
+            && input
+                .binding
+                .arguments
+                .iter()
+                .all(|a| !a.contains("{value}"))
+            && !input.binding.arguments.is_empty()
+        {
+            return Err(format!(
+                "Input '{}' argument binding must include {{value}}",
+                input.id
+            ));
+        }
+        if input
+            .suites
+            .iter()
+            .any(|id| !suite_ids.contains(id.as_str()))
+        {
+            return Err(format!("Input '{}' references an unknown suite", input.id));
+        }
+        if input.input_type == "select" && input.options.is_empty() && input.discovery.is_none() {
+            return Err(format!(
+                "Select input '{}' needs options or discovery",
+                input.id
+            ));
+        }
+        if !input.validation.pattern.is_empty() {
+            regex::Regex::new(&input.validation.pattern).map_err(|e| {
+                format!(
+                    "Input '{}' has an invalid validation pattern: {e}",
+                    input.id
+                )
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -823,9 +1080,313 @@ fn select_device(devices: &mut [DetectedDevice], saved: &str) -> (String, bool) 
     }
 }
 
+const KEYCHAIN_SERVICE: &str = "com.swarm-media-streaming.swarm-automation.test-input";
+
+fn keychain_entry(repo_id: &str, key: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYCHAIN_SERVICE, &format!("{repo_id}:{key}"))
+        .map_err(|error| format!("Could not access the OS keychain: {error}"))
+}
+
+pub fn save_secret(repo_id: &str, key: &str, value: Option<&str>) -> Result<(), String> {
+    let entry = keychain_entry(repo_id, key)?;
+    match value.filter(|value| !value.is_empty()) {
+        Some(value) => entry
+            .set_password(value)
+            .map_err(|error| format!("Could not save secret in the OS keychain: {error}")),
+        None => match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!(
+                "Could not clear secret from the OS keychain: {error}"
+            )),
+        },
+    }
+}
+
+fn load_secret(repo_id: &str, key: &str) -> Option<String> {
+    keychain_entry(repo_id, key).ok()?.get_password().ok()
+}
+
+fn default_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn discovery_values(input: &TestInputDefinition) -> Vec<(String, String)> {
+    let Some(discovery) = &input.discovery else {
+        return Vec::new();
+    };
+    let (kind, environment) = match discovery {
+        InputDiscovery::Kind(kind) => (kind.as_str(), ""),
+        InputDiscovery::Detailed { kind, environment } => (kind.as_str(), environment.as_str()),
+    };
+    match kind {
+        "adbDevices" | "fireTv" => discover_fire_tv_devices()
+            .into_iter()
+            .filter(|d| d.eligible)
+            .map(|d| {
+                let label = if d.description.is_empty() {
+                    d.serial.clone()
+                } else {
+                    format!("{} · {}", d.serial, d.description)
+                };
+                (d.serial, label)
+            })
+            .collect(),
+        "androidSdk" => ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+            .iter()
+            .filter_map(|name| std::env::var(name).ok())
+            .chain(std::env::var_os("HOME").map(|home| {
+                PathBuf::from(home)
+                    .join("Library/Android/sdk")
+                    .to_string_lossy()
+                    .into_owned()
+            }))
+            .filter(|path| Path::new(path).is_dir())
+            .map(|path| (path.clone(), path))
+            .collect(),
+        "environment" if !environment.is_empty() => std::env::var(environment)
+            .ok()
+            .map(|value| vec![(value.clone(), value)])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn input_error(
+    workspace: &Path,
+    input: &TestInputDefinition,
+    value: &str,
+    discovered: &[(String, String)],
+) -> Option<String> {
+    if value.is_empty() {
+        return input.required.then(|| "Required".into());
+    }
+    match input.input_type.as_str() {
+        "number" => {
+            let Ok(number) = value.parse::<f64>() else {
+                return Some("Must be a number".into());
+            };
+            if !number.is_finite() {
+                return Some("Must be a finite number".into());
+            }
+            if input.validation.min.is_some_and(|min| number < min) {
+                return Some(format!(
+                    "Must be at least {}",
+                    input.validation.min.unwrap()
+                ));
+            }
+            if input.validation.max.is_some_and(|max| number > max) {
+                return Some(format!("Must be at most {}", input.validation.max.unwrap()));
+            }
+        }
+        "boolean" if !matches!(value, "true" | "false") => {
+            return Some("Must be true or false".into())
+        }
+        "file" | "directory" => {
+            let path = resolve_requirement_path(workspace, value);
+            let valid = if input.input_type == "file" {
+                path.is_file()
+            } else {
+                path.is_dir()
+            };
+            if !valid {
+                return Some(format!(
+                    "{} is not an available {}",
+                    path.display(),
+                    input.input_type
+                ));
+            }
+        }
+        "select" => {
+            let allowed = input.options.iter().any(|option| option.value() == value)
+                || discovered.iter().any(|(candidate, _)| candidate == value);
+            if !allowed {
+                return Some("The selected value is no longer available".into());
+            }
+        }
+        "device"
+            if input.discovery.is_some()
+                && !discovered.iter().any(|(candidate, _)| candidate == value) =>
+        {
+            return Some("The selected device is no longer available".into());
+        }
+        _ => {}
+    }
+    if input
+        .validation
+        .min_length
+        .is_some_and(|min| value.chars().count() < min)
+    {
+        return Some(format!(
+            "Must contain at least {} characters",
+            input.validation.min_length.unwrap()
+        ));
+    }
+    if input
+        .validation
+        .max_length
+        .is_some_and(|max| value.chars().count() > max)
+    {
+        return Some(format!(
+            "Must contain at most {} characters",
+            input.validation.max_length.unwrap()
+        ));
+    }
+    if !input.validation.pattern.is_empty()
+        && !regex::Regex::new(&input.validation.pattern)
+            .ok()
+            .is_some_and(|pattern| pattern.is_match(value))
+    {
+        return Some("Does not match the required format".into());
+    }
+    None
+}
+
+fn resolve_inputs(
+    definition: &TestDefinition,
+    workspace: &Path,
+    repo_id: &str,
+    saved_inputs: &HashMap<String, String>,
+) -> (Vec<ResolvedInput>, HashMap<String, String>) {
+    let mut controls = Vec::new();
+    let mut values = HashMap::new();
+    for input in &definition.inputs {
+        let discovered = discovery_values(input);
+        let saved = if input.input_type == "secret" {
+            load_secret(repo_id, &input.id)
+        } else {
+            saved_inputs.get(&input.id).cloned()
+        };
+        let (value, provenance) = if let Some(value) = saved {
+            (value, "saved")
+        } else if let Some(value) = default_value(&input.default) {
+            (value, "default")
+        } else if discovered.len() == 1 {
+            (discovered[0].0.clone(), "detected")
+        } else {
+            (String::new(), "")
+        };
+        let mut error = input_error(workspace, input, &value, &discovered);
+        let unavailable_discovery = value.is_empty()
+            && input.required
+            && input.discovery.is_some()
+            && discovered.is_empty()
+            && matches!(input.input_type.as_str(), "device" | "select");
+        if unavailable_discovery {
+            error = Some("No available values were detected".into());
+        }
+        let has_value = !value.is_empty();
+        let state = if unavailable_discovery {
+            "invalid"
+        } else if error.is_some() {
+            if has_value {
+                "invalid"
+            } else {
+                "required"
+            }
+        } else if provenance == "detected" {
+            "detected"
+        } else if provenance == "saved" {
+            "saved"
+        } else {
+            "ready"
+        };
+        if has_value {
+            values.insert(input.id.clone(), value.clone());
+        }
+        let mut options = input
+            .options
+            .iter()
+            .map(|option| ResolvedInputOption {
+                value: option.value().into(),
+                label: option.label().into(),
+                detected: false,
+            })
+            .collect::<Vec<_>>();
+        for (value, label) in discovered {
+            if !options.iter().any(|option| option.value == value) {
+                options.push(ResolvedInputOption {
+                    value,
+                    label,
+                    detected: true,
+                });
+            }
+        }
+        controls.push(ResolvedInput {
+            id: input.id.clone(),
+            label: input.label.clone(),
+            help: input.help.clone(),
+            input_type: input.input_type.clone(),
+            required: input.required,
+            value: if input.input_type == "secret" {
+                String::new()
+            } else {
+                value
+            },
+            has_value,
+            valid: error.is_none(),
+            state: state.into(),
+            message: error.unwrap_or_default(),
+            provenance: provenance.into(),
+            persistence: input.persistence.clone(),
+            suites: input.suites.clone(),
+            options,
+        });
+    }
+    (controls, values)
+}
+
+fn input_consumed(input: &TestInputDefinition, suite: &TestSuiteDefinition) -> bool {
+    input.suites.is_empty() || input.suites.iter().any(|id| id == &suite.id)
+}
+
+fn bound_command(
+    definition: &TestDefinition,
+    suite: &TestSuiteDefinition,
+    values: &HashMap<String, String>,
+    redact: bool,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let mut argv = suite.command.clone();
+    let mut environment = Vec::new();
+    for input in definition
+        .inputs
+        .iter()
+        .filter(|input| input_consumed(input, suite))
+    {
+        let Some(actual) = values.get(&input.id) else {
+            continue;
+        };
+        let truthy = actual == "true";
+        let rendered = if redact && input.input_type == "secret" {
+            "<redacted>"
+        } else {
+            actual
+        };
+        if input.input_type != "boolean" || truthy {
+            argv.extend(
+                input
+                    .binding
+                    .arguments
+                    .iter()
+                    .map(|argument| argument.replace("{value}", rendered)),
+            );
+        }
+        if !input.binding.environment.is_empty() {
+            environment.push((input.binding.environment.clone(), rendered.to_string()));
+        }
+    }
+    (argv, environment)
+}
+
 pub fn build_plan(
     workspace: &Path,
     run_dir: &Path,
+    repo_id: &str,
     saved_inputs: &HashMap<String, String>,
     allow_disruptive: bool,
 ) -> TestPlan {
@@ -841,6 +1402,7 @@ pub fn build_plan(
             device_selection_required: false,
             devices: Vec::new(),
             suites: Vec::new(),
+            inputs: Vec::new(),
         };
     }
     let definition = match load_definition(workspace) {
@@ -855,6 +1417,7 @@ pub fn build_plan(
                 device_selection_required: false,
                 devices: Vec::new(),
                 suites: Vec::new(),
+                inputs: Vec::new(),
             }
         }
     };
@@ -872,6 +1435,7 @@ pub fn build_plan(
         .map(String::as_str)
         .unwrap_or_default();
     let (selected_device, device_selection_required) = select_device(&mut devices, saved);
+    let (inputs, resolved_values) = resolve_inputs(&definition, workspace, repo_id, saved_inputs);
     let previous = read_results(&results_path)
         .map(|results| {
             results
@@ -885,7 +1449,45 @@ pub fn build_plan(
         .suites
         .iter()
         .map(|suite| {
-            let requirements = evaluate_requirements(workspace, suite, &devices, &selected_device);
+            let mut requirements =
+                evaluate_requirements(workspace, suite, &devices, &selected_device);
+            for (input, control) in definition
+                .inputs
+                .iter()
+                .zip(inputs.iter())
+                .filter(|(input, _)| input_consumed(input, suite))
+            {
+                requirements.push(RequirementStatus {
+                    kind: "input".into(),
+                    label: input.label.clone(),
+                    state: if control.valid {
+                        "ready"
+                    } else if control.state == "invalid" {
+                        "missing"
+                    } else {
+                        "waiting"
+                    }
+                    .into(),
+                    detail: if control.valid {
+                        match control.provenance.as_str() {
+                            "saved" => "Using saved value".into(),
+                            "detected" => "Detected automatically".into(),
+                            "default" => "Using default value".into(),
+                            _ => "Value supplied".into(),
+                        }
+                    } else {
+                        control.message.clone()
+                    },
+                    action: if control.valid {
+                        String::new()
+                    } else if control.has_value {
+                        "Correct or reset this input".into()
+                    } else {
+                        "Supply this required input".into()
+                    },
+                    input_key: input.id.clone(),
+                });
+            }
             let waiting = requirements.iter().any(|item| item.state == "waiting");
             let missing = requirements.iter().any(|item| item.state == "missing");
             let disruptive_blocked = suite.disruptive && !allow_disruptive;
@@ -902,6 +1504,8 @@ pub fn build_plan(
                 output: String::new(),
                 log_path: String::new(),
                 ai_generated_data: Vec::new(),
+                argv: Vec::new(),
+                environment: Vec::new(),
             });
             if !suite.enabled {
                 result.state = "Skipped".into();
@@ -914,7 +1518,12 @@ pub fn build_plan(
             } else if waiting {
                 result.state = "Waiting for input".into();
                 result.blocked = true;
-                result.detail = "Choose a detected device to continue".into();
+                result.detail = requirements
+                    .iter()
+                    .filter(|item| item.state == "waiting")
+                    .map(|item| format!("{}: {}", item.label, item.detail))
+                    .collect::<Vec<_>>()
+                    .join("; ");
             } else if missing {
                 result.state = "Blocked".into();
                 result.blocked = true;
@@ -925,12 +1534,26 @@ pub fn build_plan(
                     .collect::<Vec<_>>()
                     .join("; ");
             }
+            let (mut argv, environment) = bound_command(&definition, suite, &resolved_values, true);
+            if !selected_device.is_empty() {
+                for device in &suite.requirements.devices {
+                    argv.extend([device.argument.clone(), selected_device.clone()]);
+                }
+            }
+            let environment_names = environment
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            result.argv = argv.clone();
+            result.environment = environment_names.clone();
             SuitePlan {
                 result,
-                command: suite.command.join(" "),
+                command: serde_json::to_string(&argv).unwrap_or_default(),
                 timeout_seconds: suite.timeout_seconds,
                 disruptive: suite.disruptive,
                 requirements,
+                argv,
+                environment: environment_names,
             }
         })
         .collect();
@@ -943,6 +1566,7 @@ pub fn build_plan(
         device_selection_required,
         devices,
         suites,
+        inputs,
     }
 }
 
@@ -1684,10 +2308,20 @@ pub fn run_once(
     let checkout = CheckoutGuard::acquire(workspace)?;
     let definition = load_definition(workspace)?;
     let resolved_inputs = load_inputs(run_dir, saved_inputs);
-    let plan = build_plan(workspace, run_dir, &resolved_inputs, allow_disruptive);
+    let repo_id = crate::config::repo_slug(repository);
+    let plan = build_plan(
+        workspace,
+        run_dir,
+        &repo_id,
+        &resolved_inputs,
+        allow_disruptive,
+    );
     if !plan.available {
         return Err(plan.error);
     }
+    // Resolve again for execution so secrets remain internal and the same
+    // validation/binding path is used immediately before children start.
+    let (_, input_values) = resolve_inputs(&definition, workspace, &repo_id, &resolved_inputs);
     // Checked once for the whole run, not per suite: every suite that needs
     // AI test data shares the same provider pick and usage snapshot.
     let any_suite_needs_ai = definition
@@ -1803,13 +2437,15 @@ pub fn run_once(
         } else {
             Some(run_dir.join("ai-data").join(&suite.id))
         };
-        let outcome = run_suite(
+        let outcome = run_suite_with_inputs(
             workspace,
             &run_dir
                 .join("test-logs")
                 .join(results.started_at.to_string()),
             suite,
             &plan.selected_device,
+            &definition,
+            &input_values,
             ai_data_dir.as_deref(),
             &checkout,
         )
@@ -1996,11 +2632,14 @@ fn stale_checkout_lock(path: &Path) -> bool {
     }
 }
 
-fn run_suite(
+#[allow(clippy::too_many_arguments)]
+fn run_suite_with_inputs(
     workspace: &Path,
     run_dir: &Path,
     suite: &TestSuiteDefinition,
     selected_device: &str,
+    definition: &TestDefinition,
+    input_values: &HashMap<String, String>,
     ai_data_dir: Option<&Path>,
     checkout: &CheckoutGuard,
 ) -> Result<CommandOutcome, String> {
@@ -2009,8 +2648,14 @@ fn run_suite(
     let stdout = File::create(&log_path).map_err(|error| error.to_string())?;
     let stderr = stdout.try_clone().map_err(|error| error.to_string())?;
     let started = Instant::now();
-    let mut command = Command::new(&suite.command[0]);
-    let arguments = suite_arguments(suite, selected_device);
+    let (bound, environment) = bound_command(definition, suite, input_values, false);
+    let mut command = Command::new(&bound[0]);
+    let mut arguments = bound[1..].to_vec();
+    if !selected_device.is_empty() {
+        for device in &suite.requirements.devices {
+            arguments.extend([device.argument.clone(), selected_device.to_string()]);
+        }
+    }
     command
         .args(&arguments)
         .current_dir(workspace)
@@ -2018,6 +2663,9 @@ fn run_suite(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    for (name, value) in environment {
+        command.env(name, value);
+    }
     if let Some(dir) = ai_data_dir {
         command.env("SWARM_AI_TEST_DATA_DIR", dir);
     }
@@ -2081,6 +2729,24 @@ fn run_suite(
             output = output.split_off(start);
         }
     }
+    let secrets = definition
+        .inputs
+        .iter()
+        .filter(|input| input.input_type == "secret")
+        .filter_map(|input| input_values.get(&input.id))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    for secret in &secrets {
+        output = output.replace(secret.as_str(), "<redacted>");
+    }
+    if !secrets.is_empty() {
+        if let Ok(mut full) = fs::read_to_string(&log_path) {
+            for secret in secrets {
+                full = full.replace(secret.as_str(), "<redacted>");
+            }
+            let _ = fs::write(&log_path, full);
+        }
+    }
     Ok(CommandOutcome {
         exit_code,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -2091,6 +2757,36 @@ fn run_suite(
     })
 }
 
+#[cfg(test)]
+fn run_suite(
+    workspace: &Path,
+    run_dir: &Path,
+    suite: &TestSuiteDefinition,
+    selected_device: &str,
+    ai_data_dir: Option<&Path>,
+    checkout: &CheckoutGuard,
+) -> Result<CommandOutcome, String> {
+    let definition = TestDefinition {
+        version: 1,
+        suites: vec![suite.clone()],
+        coverage_notes: Vec::new(),
+        reporting: None,
+        failure_triage: None,
+        inputs: Vec::new(),
+    };
+    run_suite_with_inputs(
+        workspace,
+        run_dir,
+        suite,
+        selected_device,
+        &definition,
+        &HashMap::new(),
+        ai_data_dir,
+        checkout,
+    )
+}
+
+#[cfg(test)]
 fn suite_arguments(suite: &TestSuiteDefinition, selected_device: &str) -> Vec<String> {
     let mut arguments = suite.command[1..].to_vec();
     if !selected_device.is_empty() {
@@ -2461,6 +3157,97 @@ mod tests {
     }
 
     #[test]
+    fn schema_v2_resolves_validates_and_binds_generic_inputs_per_suite() {
+        let workspace = tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".swarm")).unwrap();
+        let definition = serde_json::json!({
+            "version": 2,
+            "inputs": [
+                {"id":"stunPort","label":"STUN port","type":"number","required":true,"validation":{"min":1,"max":65535},"suites":["network"],"binding":{"environment":"SWARM_STUN_PORT"}},
+                {"id":"selector","label":"Scenario","type":"text","suites":["network"],"binding":{"arguments":["--test","{value}"]}},
+                {"id":"all","label":"All devices","type":"boolean","default":false,"suites":["network"],"binding":{"arguments":["--all"]}},
+                {"id":"data","label":"Data directory","type":"directory","required":true,"suites":["blocked"],"binding":{"environment":"SWARM_SERVER_DATA_DIR"}}
+            ],
+            "suites": [
+                {"id":"network","name":"Network","command":["runner","base"]},
+                {"id":"blocked","name":"Blocked","command":["runner"]}
+            ]
+        });
+        fs::write(
+            definition_path(workspace.path()),
+            serde_json::to_vec(&definition).unwrap(),
+        )
+        .unwrap();
+        let saved = HashMap::from([
+            ("stunPort".into(), "3478".into()),
+            ("selector".into(), "living room".into()),
+            ("all".into(), "true".into()),
+        ]);
+        let plan = build_plan(
+            workspace.path(),
+            &workspace.path().join("run"),
+            "owner__repo",
+            &saved,
+            false,
+        );
+        assert_eq!(plan.suites[0].result.state, "Ready");
+        assert_eq!(
+            plan.suites[0].argv,
+            ["runner", "base", "--test", "living room", "--all"]
+        );
+        assert_eq!(plan.suites[0].environment, ["SWARM_STUN_PORT"]);
+        assert_eq!(plan.suites[1].result.state, "Waiting for input");
+        assert!(plan.suites[1].result.detail.contains("Data directory"));
+        assert_eq!(
+            plan.inputs
+                .iter()
+                .find(|input| input.id == "stunPort")
+                .unwrap()
+                .provenance,
+            "saved"
+        );
+    }
+
+    #[test]
+    fn secret_bindings_are_redacted_from_plan_results_and_full_logs() {
+        let workspace = tempdir().unwrap();
+        let run_dir = tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".swarm")).unwrap();
+        fs::write(
+            definition_path(workspace.path()),
+            r#"{"version":1,"suites":[{"id":"probe","name":"Probe","command":["true"]}]}"#,
+        )
+        .unwrap();
+        commit_test_workspace(workspace.path());
+        let definition: TestDefinition = serde_json::from_value(serde_json::json!({
+            "version":2,
+            "inputs":[{"id":"token","label":"Token","type":"secret","required":true,"persistence":"keychain","binding":{"environment":"TEST_TOKEN","arguments":["{value}"]}}],
+            "suites":[{"id":"probe","name":"Probe","command":["/bin/sh","-c","printf '%s' \"$TEST_TOKEN\""]}]
+        })).unwrap();
+        validate_definition(&definition).unwrap();
+        let values = HashMap::from([("token".into(), "never-store-this".into())]);
+        let (preview, _) = bound_command(&definition, &definition.suites[0], &values, true);
+        assert!(preview.contains(&"<redacted>".to_string()));
+        assert!(!serde_json::to_string(&preview)
+            .unwrap()
+            .contains("never-store-this"));
+        let checkout = CheckoutGuard::acquire(workspace.path()).unwrap();
+        let outcome = run_suite_with_inputs(
+            workspace.path(),
+            run_dir.path(),
+            &definition.suites[0],
+            "",
+            &definition,
+            &values,
+            None,
+            &checkout,
+        )
+        .unwrap();
+        assert_eq!(outcome.output, "<redacted>");
+        assert_eq!(fs::read_to_string(outcome.log_path).unwrap(), "<redacted>");
+    }
+
+    #[test]
     fn invalid_android_sdk_blocks_before_execution() {
         let workspace = tempdir().unwrap();
         fs::create_dir_all(workspace.path().join(".swarm")).unwrap();
@@ -2478,6 +3265,7 @@ mod tests {
         let plan = build_plan(
             workspace.path(),
             &workspace.path().join("run"),
+            "test-repo",
             &HashMap::new(),
             false,
         );
@@ -2645,6 +3433,7 @@ mod tests {
         let plan = build_plan(
             workspace.path(),
             &workspace.path().join("run"),
+            "test-repo",
             &HashMap::new(),
             false,
         );
