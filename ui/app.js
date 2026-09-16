@@ -822,6 +822,8 @@
     if (!summary || !requirementsBox || !suitesBox) return;
     requirementsBox.replaceChildren();
     suitesBox.replaceChildren();
+    const inputsBox = byId("test-inputs");
+    inputsBox?.replaceChildren();
     if (!plan) {
       summary.textContent = "Requirements have not been checked yet.";
       suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No test plan loaded." }));
@@ -835,6 +837,8 @@
     const definitionMissing = !plan.available && !plan.definitionPath;
     onboarding.classList.toggle("hidden", !definitionMissing);
     if (!definitionMissing) byId("test-definition-draft").classList.add("hidden");
+
+    (plan.inputs || []).forEach((input) => renderTestInput(inputsBox, input));
 
     const allRequirements = [];
     const seen = new Set();
@@ -863,35 +867,6 @@
         row.append(mark, copy);
         requirementsBox.appendChild(row);
       });
-    }
-
-    const deviceRequirements = allRequirements.filter((requirement) => requirement.kind === "device");
-    const deviceField = byId("test-device-field");
-    const deviceSelect = byId("test-device-select");
-    deviceField.classList.toggle("hidden", deviceRequirements.length === 0);
-    deviceSelect.replaceChildren();
-    const eligibleDevices = (plan.devices || []).filter((device) => device.eligible);
-    if (!eligibleDevices.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "No authorized adb devices detected";
-      deviceSelect.appendChild(option);
-      deviceSelect.disabled = true;
-    } else {
-      deviceSelect.disabled = false;
-      if (plan.deviceSelectionRequired) {
-        const option = document.createElement("option");
-        option.value = "";
-        option.textContent = "Choose a device…";
-        deviceSelect.appendChild(option);
-      }
-      eligibleDevices.forEach((device) => {
-        const option = document.createElement("option");
-        option.value = device.serial;
-        option.textContent = `${device.serial}${device.description ? ` · ${device.description}` : ""}`;
-        deviceSelect.appendChild(option);
-      });
-      deviceSelect.value = plan.selectedDevice || "";
     }
 
     byId("test-suite-count").textContent = `${(plan.suites || []).length} suite${plan.suites?.length === 1 ? "" : "s"}`;
@@ -927,6 +902,68 @@
       appendAiGeneratedDataNote(card, suite.aiGeneratedData);
       suitesBox.appendChild(card);
     });
+  }
+
+  function renderTestInput(container, input) {
+    if (!container) return;
+    const model = window.SwarmTestInputs.controlModel(input);
+    const row = document.createElement("div");
+    row.className = `test-input-item ${input.state || "ready"}`;
+    const head = document.createElement("div");
+    head.className = "test-input-head";
+    const label = document.createElement("strong");
+    label.textContent = `${input.label}${input.required ? " · Required" : ""}`;
+    const stateLabel = document.createElement("span");
+    stateLabel.className = "test-input-state";
+    stateLabel.textContent = model.stateLabel;
+    head.append(label, stateLabel);
+    row.appendChild(head);
+
+    let control;
+    if (model.element === "select") {
+      control = document.createElement("select");
+      control.appendChild(Object.assign(document.createElement("option"), { value: "", textContent: input.required ? "Choose a value…" : "None" }));
+      (input.options || []).forEach((item) => control.appendChild(Object.assign(document.createElement("option"), {
+        value: item.value,
+        textContent: `${item.label}${item.detected ? " · Detected" : ""}`,
+      })));
+      control.value = input.value || "";
+    } else if (input.inputType === "boolean") {
+      const wrapper = document.createElement("label");
+      wrapper.className = "toggle";
+      control = document.createElement("input");
+      control.type = "checkbox";
+      control.checked = input.value === "true";
+      wrapper.append(control, document.createElement("span"), document.createTextNode(" Enabled"));
+      row.appendChild(wrapper);
+    } else {
+      control = document.createElement("input");
+      control.type = model.inputType;
+      control.value = model.value;
+      control.placeholder = model.placeholder;
+    }
+    control.setAttribute("aria-label", input.label);
+    if (input.inputType !== "boolean") row.appendChild(control);
+    const help = document.createElement("small");
+    help.textContent = input.message || input.help || `${input.persistence} persistence`;
+    row.appendChild(help);
+    const actions = document.createElement("div");
+    actions.className = "test-input-actions";
+    if (model.picker) {
+      const browse = Object.assign(document.createElement("button"), { type: "button", className: "secondary-button", textContent: "Browse" });
+      browse.addEventListener("click", async () => {
+        const chosen = await invoke("choose_test_input_path", { kind: input.inputType });
+        if (chosen) control.value = chosen;
+      });
+      actions.appendChild(browse);
+    }
+    const save = Object.assign(document.createElement("button"), { type: "button", className: "primary-button", textContent: "Save" });
+    save.addEventListener("click", () => saveTestInput(input.id, input.inputType === "boolean" ? String(control.checked) : control.value));
+    const clear = Object.assign(document.createElement("button"), { type: "button", className: "secondary-button", textContent: "Clear / reset" });
+    clear.addEventListener("click", () => saveTestInput(input.id, null));
+    actions.append(save, clear);
+    row.appendChild(actions);
+    container.appendChild(row);
   }
 
   // Shared by the live suite list and test-run history: a short note on what
@@ -1089,6 +1126,16 @@
         const detail = document.createElement("small");
         detail.textContent = suite.detail || `${suite.id}${suite.durationMs ? ` · ${Math.round(suite.durationMs / 1000)}s` : ""}`;
         words.append(name, detail);
+        if (Array.isArray(suite.argv) && suite.argv.length) {
+          const command = document.createElement("code");
+          command.textContent = JSON.stringify(suite.argv);
+          words.appendChild(command);
+        }
+        if (Array.isArray(suite.environment) && suite.environment.length) {
+          const environment = document.createElement("small");
+          environment.textContent = `Environment: ${suite.environment.join(", ")}`;
+          words.appendChild(environment);
+        }
         appendAiGeneratedDataNote(words, suite.aiGeneratedData);
         const badge = document.createElement("span");
         badge.className = `suite-state ${stateClass}`;
@@ -1319,16 +1366,15 @@
     }, { progress: "Scanning the GitHub issue backlog…" });
   }
 
-  async function selectTestDevice(event) {
-    const serial = event.target.value;
-    if (!serial || !currentRepo()) return;
-    await withBusy("test-device", async () => {
+  async function saveTestInput(key, value) {
+    if (!currentRepo()) return;
+    await withBusy(`test-input-${key}`, async () => {
       await saveBeforeAction();
-      state.config = await invoke("save_test_device", { repoId: currentRepo().id, serial });
+      state.config = await invoke("save_test_input", { repoId: currentRepo().id, key, value });
       bindConfig(state.config);
       await refreshTestPlan();
-      showToast("Device selection saved for this repository. Press Run now to retry blocked suites.", "success");
-    }, { progress: "Saving the device selection…" });
+      showToast(value === null ? "Test input reset." : "Test input saved. Waiting suites can now be retried.", "success");
+    }, { progress: "Saving the test input…" });
   }
 
   // Accepts "owner/name", a full github.com URL, or an SSH remote; returns
@@ -2587,7 +2633,6 @@
     byId("detect-test-definition").addEventListener("click", detectTestDefinition);
     byId("save-test-definition").addEventListener("click", saveTestDefinition);
     byId("cancel-test-definition").addEventListener("click", cancelTestDefinition);
-    byId("test-device-select").addEventListener("change", selectTestDevice);
     byId("active-repo-select").addEventListener("change", (event) => selectRepository(event.target.value));
     byId("add-repo").addEventListener("click", addRepository);
     byId("remove-repo").addEventListener("click", removeRepository);

@@ -3,7 +3,7 @@ use super::{
     get_execution_history, get_test_plan, get_test_runs, inspect_repository,
     issue_branch_pr_is_visible, mark_permission_primed, needs_promotion, parse_pr_ref,
     promotion_approval_args, reconcile_integration_for_promotion, repo_status_args,
-    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
+    repo_worker_args, require_closed_issue, save_config, save_test_input, scheduler_arguments,
     validate_worker_script_dir, AiExecutionRecord, AppState, BranchAheadBehind, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
@@ -29,6 +29,7 @@ fn test_app() -> TestApp {
             config: std::sync::Mutex::new(AppConfig::default()),
             processes: Default::default(),
             test_data_dir: Some(data_dir.path().to_path_buf()),
+            test_input_sessions: Default::default(),
         })
         .build(mock_context(noop_assets()))
         .expect("build mock tauri app");
@@ -415,11 +416,11 @@ fn test_definition_onboarding_detects_saves_and_enables_the_plan() {
 
     let plan = get_test_plan(app.clone(), app.state(), "octocat__example".into()).unwrap();
     assert!(plan.available);
-    assert_eq!(plan.suites[0].command, "cargo test --workspace");
+    assert_eq!(plan.suites[0].argv, ["cargo", "test", "--workspace"]);
 }
 
 #[test]
-fn device_choice_round_trips_per_repository_without_touching_other_profiles() {
+fn generic_input_round_trips_per_repository_without_touching_other_profiles() {
     let test_app = test_app();
     let app = test_app.handle();
     let first = real_git_checkout();
@@ -430,12 +431,22 @@ fn device_choice_round_trips_per_repository_without_touching_other_profiles() {
         ..repo("octocat/second")
     });
     save_config(app.clone(), app.state(), config).unwrap();
+    std::fs::create_dir_all(first.path().join(".swarm")).unwrap();
+    std::fs::write(first.path().join(".swarm/tests.json"), r#"{
+      "version":2,
+      "inputs":[
+        {"id":"fireTvSerial","label":"Fire TV","type":"device","persistence":"repository","binding":{"arguments":["--device","{value}"]}},
+        {"id":"selector","label":"Selector","type":"text","persistence":"session-only","binding":{"arguments":["--test","{value}"]}}
+      ],
+      "suites":[{"id":"tv","name":"TV","command":["true"]}]
+    }"#).unwrap();
 
-    let saved = save_test_device(
+    let saved = save_test_input(
         app.clone(),
         app.state(),
         "octocat__example".into(),
-        "192.0.2.8:5555".into(),
+        "fireTvSerial".into(),
+        Some("192.0.2.8:5555".into()),
     )
     .unwrap();
     assert_eq!(
@@ -443,6 +454,33 @@ fn device_choice_round_trips_per_repository_without_touching_other_profiles() {
         Some(&"192.0.2.8:5555".to_string())
     );
     assert!(saved.repositories[1].test_inputs.is_empty());
+
+    let saved = save_test_input(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        "selector".into(),
+        Some("smoke".into()),
+    )
+    .unwrap();
+    assert!(!saved.repositories[0].test_inputs.contains_key("selector"));
+    assert_eq!(
+        app.state::<AppState>().test_input_sessions.lock().unwrap()["octocat__example"]["selector"],
+        "smoke"
+    );
+    let reset = save_test_input(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        "selector".into(),
+        None,
+    )
+    .unwrap();
+    assert!(!reset.repositories[0].test_inputs.contains_key("selector"));
+    assert!(
+        !app.state::<AppState>().test_input_sessions.lock().unwrap()["octocat__example"]
+            .contains_key("selector")
+    );
 }
 
 #[test]

@@ -188,7 +188,8 @@ shows an editable JSON preview. Detection never executes a discovered command.
 After validation, **Save definition** creates `.swarm/tests.json` in the
 repository and enables the scheduler immediately; commit the new file to keep
 it with the project.
-The current schema version is `1`:
+Schema version `2` adds reusable UI inputs; version `1` definitions such as the
+following remain readable without migration:
 
 ```json
 {
@@ -236,6 +237,23 @@ The current schema version is `1`:
   }
 }
 ```
+
+A v2 definition adds a top-level `inputs` array. Each input declares an `id`,
+`label`, optional `help`, `type`, `required`, `default`, `validation`,
+`discovery`, consuming `suites`, `persistence`, and `binding`. For example,
+an Android SDK can bind `{ "environment": "ANDROID_HOME" }`, a Fire TV can
+discover `adbDevices` and bind `{ "arguments": ["--device", "{value}"] }`,
+and a boolean can bind `{ "arguments": ["--all"] }`. Argument entries are
+appended directly and `{value}` is replaced inside one argv element; strings
+are never parsed or evaluated by a shell.
+
+Supported types are `text`, `number`, `boolean`, `file`, `directory`, `select`,
+`device`, `environment`, and `secret`. Non-secret values use `repository` or
+`session-only` persistence. Secrets must use `keychain`; their values are not
+written to config, definitions, results, history, previews, or logs. Numeric
+bounds, length bounds, and regular-expression patterns are supported. Missing
+required values produce Waiting for input, while invalid paths, selections, or
+external prerequisites produce Blocked for only the suites that consume them.
 
 Suite IDs must be unique and use letters, digits, `-`, or `_`. Commands are
 argument arrays and run directly from the repository root with closed stdin;
