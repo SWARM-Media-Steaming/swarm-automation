@@ -1,3 +1,4 @@
+use crate::test_discovery;
 use crate::tools;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,11 +20,11 @@ fn default_version() -> u32 {
     1
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
-fn default_timeout() -> u64 {
+pub(crate) fn default_timeout() -> u64 {
     1800
 }
 
@@ -161,6 +162,12 @@ pub struct TestSuiteDefinition {
     pub enabled: bool,
     #[serde(default)]
     pub requirements: Requirements,
+    /// Other candidate paths or plain-language descriptions of assertions
+    /// this suite's command already exercises, so the coverage audit can
+    /// bucket a matching detected candidate as "covered" instead of
+    /// "unmapped" without scheduling it separately.
+    #[serde(default)]
+    pub covers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -457,10 +464,11 @@ fn boilerplate_suite(
             files: files.iter().map(|value| (*value).into()).collect(),
             ..Requirements::default()
         },
+        covers: Vec::new(),
     }
 }
 
-fn suite_id(value: &str) -> String {
+pub(crate) fn suite_id(value: &str) -> String {
     let mut id = value
         .chars()
         .map(|character| {
@@ -477,7 +485,7 @@ fn suite_id(value: &str) -> String {
     id.trim_matches('-').to_string()
 }
 
-fn suite_name(value: &str) -> String {
+pub(crate) fn suite_name(value: &str) -> String {
     value
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|part| !part.is_empty())
@@ -495,6 +503,14 @@ fn suite_name(value: &str) -> String {
 /// Build a reviewable definition from conventional, repository-owned test
 /// entry points. Detection reads manifests and filenames only; it never runs
 /// a discovered command.
+///
+/// Candidates are found recursively (see `test_discovery::discover_candidates`)
+/// across nested manifests, CI workflows, task runners, and conventional
+/// test-script directories, then classified. Only candidates classified as
+/// `atomic` become schedulable suites here; aggregates, aliases, helpers, and
+/// unknown/low-confidence candidates are surfaced as notes instead, so an
+/// aggregate like `full_uat_suite.sh` and the atomic commands it wraps are
+/// never scheduled together.
 pub fn detect_definition(
     workspace: &Path,
     ai: Option<&AiRunOptions>,
@@ -506,172 +522,41 @@ pub fn detect_definition(
         ));
     }
 
+    let candidates = test_discovery::discover_candidates(workspace)?;
     let mut suites = Vec::new();
     let mut notes = Vec::new();
-    let cargo_manifest = workspace.join("Cargo.toml");
-    if cargo_manifest.is_file() {
-        let manifest = fs::read_to_string(&cargo_manifest).unwrap_or_default();
-        let locked = workspace.join("Cargo.lock").is_file();
-        let (id, name, command): (&str, &str, Vec<&str>) = if manifest.contains("[workspace]") {
-            let mut command = vec!["cargo", "test", "--workspace"];
-            if locked {
-                command.push("--locked");
-            }
-            ("rust-workspace", "Rust workspace tests", command)
-        } else {
-            let mut command = vec!["cargo", "test"];
-            if locked {
-                command.push("--locked");
-            }
-            ("rust", "Rust tests", command)
-        };
-        suites.push(boilerplate_suite(
-            id,
-            name,
-            &command,
-            &["cargo"],
-            &["Cargo.toml"],
-        ));
-    }
 
-    let package_json = workspace.join("package.json");
-    if package_json.is_file() {
-        let has_test_script = fs::read_to_string(&package_json)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|value| {
-                value
-                    .pointer("/scripts/test")
-                    .and_then(|test| test.as_str())
-                    .map(str::to_string)
-            })
-            .is_some_and(|script| {
-                let normalized = script.to_ascii_lowercase();
-                !script.trim().is_empty() && !normalized.contains("no test specified")
-            });
-        if has_test_script {
-            let (executable, command): (&str, &[&str]) =
-                if workspace.join("pnpm-lock.yaml").is_file() {
-                    ("pnpm", &["pnpm", "test"])
-                } else if workspace.join("yarn.lock").is_file() {
-                    ("yarn", &["yarn", "test"])
-                } else {
-                    ("npm", &["npm", "test"])
-                };
-            suites.push(boilerplate_suite(
-                "javascript",
-                "JavaScript tests",
-                command,
-                &[executable],
-                &["package.json"],
-            ));
-        }
-    }
-
-    if ["pyproject.toml", "pytest.ini", "tox.ini"]
-        .iter()
-        .any(|name| workspace.join(name).is_file())
-    {
-        let manifest = ["pyproject.toml", "pytest.ini", "tox.ini"]
+    for candidate in candidates.iter().filter(|c| c.classification == "atomic") {
+        let covers = candidate
+            .covers
             .iter()
-            .find(|name| workspace.join(name).is_file())
-            .copied()
-            .unwrap_or("pyproject.toml");
-        suites.push(boilerplate_suite(
-            "python",
-            "Python tests",
-            &["python3", "-m", "pytest"],
-            &["python3"],
-            &[manifest],
-        ));
-    }
-
-    if workspace.join("go.mod").is_file() {
-        suites.push(boilerplate_suite(
-            "go",
-            "Go tests",
-            &["go", "test", "./..."],
-            &["go"],
-            &["go.mod"],
-        ));
-    }
-
-    let gradle_wrappers = ["gradlew", "clients/tv-android/gradlew"];
-    for wrapper in gradle_wrappers {
-        if !workspace.join(wrapper).is_file() {
-            continue;
-        }
-        let mut suite = if wrapper == "gradlew" {
-            boilerplate_suite(
-                "gradle",
-                "Gradle tests",
-                &["./gradlew", "test"],
-                &["java"],
-                &["gradlew"],
-            )
-        } else {
-            boilerplate_suite(
-                "android",
-                "Android tests",
-                &[
-                    "./clients/tv-android/gradlew",
-                    "-p",
-                    "clients/tv-android",
-                    "test",
-                ],
-                &["java"],
-                &["clients/tv-android/gradlew"],
-            )
-        };
-        suite.timeout_seconds = 3600;
-        suites.push(suite);
-    }
-
-    let scripts_dir = workspace.join("scripts/tests");
-    if scripts_dir.is_dir() {
-        let mut scripts = fs::read_dir(&scripts_dir)
-            .map_err(|error| format!("Could not inspect {}: {error}", scripts_dir.display()))?
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().is_file())
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter(|name| name.ends_with(".sh"))
-            .filter(|name| {
-                let stem = name.trim_end_matches(".sh");
-                (stem.starts_with("test_")
-                    || stem.ends_with("_tests")
-                    || matches!(
-                        stem,
-                        "tv_e2e_suite" | "tv_uat_suite" | "tv_uat_resilience_suite"
-                    ))
-                    && !stem.contains("cron")
-                    && !stem.starts_with("full_")
-            })
+            .filter(|path| candidates.iter().any(|other| &other.path == *path))
+            .cloned()
             .collect::<Vec<_>>();
-        scripts.sort();
-        for filename in scripts {
-            let stem = filename.trim_end_matches(".sh");
-            let relative = format!("scripts/tests/{filename}");
-            let mut suite = boilerplate_suite(
-                &suite_id(stem),
-                &suite_name(stem),
-                &["bash", &relative],
-                &["bash"],
-                &[&relative],
-            );
-            if stem.starts_with("tv_") {
-                suite.requirements.executables.push("adb".into());
-                suite.requirements.devices.push(DeviceRequirement {
-                    device_type: "fireTv".into(),
-                    input: default_device_input(),
-                    argument: default_device_argument(),
-                });
-                suite.timeout_seconds = 7200;
-            }
-            if stem.contains("resilience") || stem.contains("disruptive") {
-                suite.disruptive = true;
-            }
-            suites.push(suite);
-        }
+        suites.push(TestSuiteDefinition {
+            id: candidate.id.clone(),
+            name: candidate.name.clone(),
+            command: candidate.command.clone(),
+            timeout_seconds: candidate.timeout_seconds.unwrap_or_else(default_timeout),
+            disruptive: candidate.disruptive,
+            enabled: candidate.confidence != "low",
+            requirements: candidate.requirements.clone(),
+            covers,
+        });
+    }
+    for candidate in candidates.iter().filter(|c| c.classification != "atomic") {
+        notes.push(format!(
+            "{} — {} ({}, {} confidence): {}",
+            if candidate.path.is_empty() {
+                candidate.name.as_str()
+            } else {
+                candidate.path.as_str()
+            },
+            candidate.name,
+            candidate.classification,
+            candidate.confidence,
+            candidate.detail,
+        ));
     }
 
     let mut detected_suites = suites.len();
@@ -2289,6 +2174,7 @@ fn ai_discover_suites(
             // review and turn them on explicitly.
             enabled: false,
             requirements: Requirements::default(),
+            covers: Vec::new(),
         });
     }
     Ok((suites, notes))
@@ -3149,6 +3035,7 @@ mod tests {
                 }],
                 ..Requirements::default()
             },
+            covers: Vec::new(),
         };
         assert_eq!(
             suite_arguments(&suite, "192.0.2.44:5555"),
@@ -3398,6 +3285,7 @@ mod tests {
             disruptive: false,
             enabled: true,
             requirements: Requirements::default(),
+            covers: Vec::new(),
         };
         let outcome = run_suite(
             workspace.path(),
