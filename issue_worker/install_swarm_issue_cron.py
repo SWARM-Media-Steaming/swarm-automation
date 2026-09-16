@@ -264,6 +264,12 @@ class Runner:
                 f"Worker repository is not a Git checkout: {repo['workspace_dir']}; deferring this run."
             )
             return False
+        if self.checkout_test_lock_active(repo):
+            self.log(
+                "The repository test scheduler owns this checkout; deferring issue work "
+                "until the recorded commit finishes testing."
+            )
+            return False
         if self.in_progress_file(repo).exists():
             # A saved issue owns the checkout — leave it exactly as it is; the
             # worker resumes it and does its own fetching.
@@ -288,6 +294,27 @@ class Runner:
             detail = fetched.stderr.strip() or fetched.stdout.strip() or "git fetch failed"
             self.log(f"Could not fetch {repo['remote_name']}: {detail}; deferring this run.")
             return False
+        return True
+
+    def checkout_test_lock_active(self, repo: dict[str, object]) -> bool:
+        common_dir = self.git(repo, "rev-parse", "--git-common-dir").stdout.strip()
+        if not common_dir:
+            return False
+        common_path = Path(common_dir)
+        if not common_path.is_absolute():
+            common_path = Path(str(repo["workspace_dir"])) / common_path
+        lock = common_path / "swarm-test-run.lock"
+        if not lock.exists():
+            return False
+        try:
+            pid = int(lock.read_text(encoding="utf-8").splitlines()[0])
+            os.kill(pid, 0)
+        except (ValueError, IndexError, ProcessLookupError):
+            lock.unlink(missing_ok=True)
+            return False
+        except (OSError, PermissionError):
+            # If liveness cannot be disproved, preserve the lock and checkout.
+            return True
         return True
 
     def _recover_harmless_untracked_checkout(self, repo: dict[str, object]) -> bool:

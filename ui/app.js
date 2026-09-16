@@ -1021,6 +1021,7 @@
   const RUN_OUTCOMES = [
     ["Passed", "passed"],
     ["Failed", "failed"],
+    ["Blocked", "blocked"],
     ["Skipped", "skipped"],
     ["Not executed", "not-executed"],
   ];
@@ -1044,10 +1045,11 @@
         const key = String(suite.state || "").toLowerCase().replaceAll(" ", "-");
         if (key === "passed") counts.passed += 1;
         else if (key === "failed") counts.failed += 1;
+        else if (key === "blocked" || key === "waiting-for-input") counts.blocked += 1;
         else if (key === "not-executed") counts["not-executed"] += 1;
         else counts.skipped += 1;
         return counts;
-      }, { passed: 0, failed: 0, skipped: 0, "not-executed": 0 });
+      }, { passed: 0, failed: 0, blocked: 0, skipped: 0, "not-executed": 0 });
 
       const item = document.createElement("details");
       item.className = "test-run";
@@ -1058,7 +1060,8 @@
       when.textContent = formatTimestamp(run.finishedAt || run.startedAt);
       const meta = document.createElement("small");
       const trigger = run.trigger === "manual" ? "Run now" : run.trigger === "scheduled" ? "Scheduled" : "—";
-      meta.textContent = `${trigger} · ${formatDuration(run.startedAt, run.finishedAt)} · ${suites.length} suite${suites.length === 1 ? "" : "s"}`;
+      const commit = run.testedCommit ? ` · ${run.testedCommit.slice(0, 12)}` : "";
+      meta.textContent = `${trigger} · ${formatDuration(run.startedAt, run.finishedAt)}${commit} · ${suites.length} suite${suites.length === 1 ? "" : "s"}`;
       head.append(when, meta);
       const badges = document.createElement("div");
       badges.className = "test-run-tally";
