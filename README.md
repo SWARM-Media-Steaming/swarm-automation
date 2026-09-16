@@ -188,11 +188,15 @@ shows an editable JSON preview. Detection never executes a discovered command.
 After validation, **Save definition** creates `.swarm/tests.json` in the
 repository and enables the scheduler immediately; commit the new file to keep
 it with the project.
-The current schema version is `1`:
+Schema version `2` adds reusable UI inputs; version `1` definitions such as the
+following remain readable without migration:
 
 ```json
 {
   "version": 1,
+  "coverageNotes": [
+    "Aggregate wrappers are omitted; this list contains each coverage area once."
+  ],
   "suites": [
     {
       "id": "backend",
@@ -204,17 +208,21 @@ The current schema version is `1`:
         "executables": ["cargo"],
         "files": ["Cargo.toml"],
         "servers": [
-          { "name": "API", "host": "127.0.0.1", "port": 8080, "timeoutSeconds": 3 }
+          { "name": "API", "url": "http://127.0.0.1:8080/health", "timeoutSeconds": 3 }
         ],
         "mounts": [
           { "name": "ROM share", "path": "/Volumes/roms", "kind": "smb" }
         ],
+        "paths": [
+          { "name": "Library database", "path": "~/Library/Application Support/example/library.sqlite", "kind": "file", "readable": true }
+        ],
+        "androidSdk": { "project": "clients/tv-android" },
         "credentials": [
           { "name": "Test token", "environment": "TEST_TOKEN" },
           { "name": "Device key", "file": "~/.config/example/device-key.json" }
         ],
         "devices": [
-          { "type": "fireTv", "input": "fireTvSerial" }
+          { "type": "fireTv", "input": "fireTvSerial", "argument": "--device" }
         ]
       }
     }
@@ -230,23 +238,50 @@ The current schema version is `1`:
 }
 ```
 
+A v2 definition adds a top-level `inputs` array. Each input declares an `id`,
+`label`, optional `help`, `type`, `required`, `default`, `validation`,
+`discovery`, consuming `suites`, `persistence`, and `binding`. For example,
+an Android SDK can bind `{ "environment": "ANDROID_HOME" }`, a Fire TV can
+discover `adbDevices` and bind `{ "arguments": ["--device", "{value}"] }`,
+and a boolean can bind `{ "arguments": ["--all"] }`. Argument entries are
+appended directly and `{value}` is replaced inside one argv element; strings
+are never parsed or evaluated by a shell.
+
+Supported types are `text`, `number`, `boolean`, `file`, `directory`, `select`,
+`device`, `environment`, and `secret`. Non-secret values use `repository` or
+`session-only` persistence. Secrets must use `keychain`; their values are not
+written to config, definitions, results, history, previews, or logs. Numeric
+bounds, length bounds, and regular-expression patterns are supported. Missing
+required values produce Waiting for input, while invalid paths, selections, or
+external prerequisites produce Blocked for only the suites that consume them.
+
 Suite IDs must be unique and use letters, digits, `-`, or `_`. Commands are
 argument arrays and run directly from the repository root with closed stdin;
 they are never placed in an interactive shell. `timeoutSeconds` defaults to
 1800. Disabled suites and disruptive suites that have not been allowed in the
 repository profile are skipped.
 
-Every requirement is evaluated per suite. Missing equipment or configuration
-marks only that suite as blocked/Skipped; it does not create a test failure or
+Every requirement is evaluated per suite. HTTP server requirements validate
+the declared endpoint's response, Android SDK requirements require installed
+platform/build tools and `platform-tools/adb`, and file/directory/mount checks
+perform a real read rather than accepting metadata alone. Missing equipment or configuration
+marks only that suite as Blocked; it does not create a test failure or
 stop eligible suites. When exactly one authorized device is returned by
 `adb devices -l`, it is selected automatically. A saved repository choice is
 reused when present, while multiple eligible devices produce Waiting for input
 until a device is selected in Test Scheduler. The selected serial is exposed to
-commands as `SWARM_FIRE_TV_SERIAL`.
+each hardware command through its declared argument (by default, two argv
+entries: `--device` and the exact serial).
 
+Runs require a clean Git checkout with a tracked `.swarm/tests.json`. The
+runner records `testedCommit`, holds a checkout lock that the issue scheduler
+respects, and stops remaining execution as blocked if HEAD or its branch moves.
 Results are updated atomically after each state change in
 `<run-dir>/test-results.json`. States are Ready, Running, Passed, Failed,
-Skipped, and Waiting for input. Suite logs are retained beside the result file.
+Blocked, Skipped, and Waiting for input. Suite logs are retained in full beside
+the result file, while results and history carry only a bounded output preview.
+On Unix, suite children receive a safe file-descriptor soft limit (up to 8192,
+without lowering a higher inherited limit).
 Each completed cycle is also archived under `<run-dir>/test-runs/` (newest 50)
 and shown in the **Test runs** history in Test Scheduler, where opening a run
 lists every suite it executed with its pass / fail / skipped outcome.

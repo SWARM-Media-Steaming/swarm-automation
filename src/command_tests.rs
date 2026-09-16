@@ -1,9 +1,9 @@
 use super::{
-    create_test_definition, detect_test_definition, detect_tools, get_config,
+    audit_test_coverage, create_test_definition, detect_test_definition, detect_tools, get_config,
     get_execution_history, get_test_plan, get_test_runs, inspect_repository,
     issue_branch_pr_is_visible, mark_permission_primed, needs_promotion, parse_pr_ref,
     promotion_approval_args, reconcile_integration_for_promotion, repo_status_args,
-    repo_worker_args, require_closed_issue, save_config, save_test_device, scheduler_arguments,
+    repo_worker_args, require_closed_issue, save_config, save_test_input, scheduler_arguments,
     validate_worker_script_dir, AiExecutionRecord, AppState, BranchAheadBehind, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
@@ -29,6 +29,7 @@ fn test_app() -> TestApp {
             config: std::sync::Mutex::new(AppConfig::default()),
             processes: Default::default(),
             test_data_dir: Some(data_dir.path().to_path_buf()),
+            test_input_sessions: Default::default(),
         })
         .build(mock_context(noop_assets()))
         .expect("build mock tauri app");
@@ -415,11 +416,86 @@ fn test_definition_onboarding_detects_saves_and_enables_the_plan() {
 
     let plan = get_test_plan(app.clone(), app.state(), "octocat__example".into()).unwrap();
     assert!(plan.available);
-    assert_eq!(plan.suites[0].command, "cargo test --workspace");
+    assert_eq!(plan.suites[0].argv, ["cargo", "test", "--workspace"]);
 }
 
 #[test]
-fn device_choice_round_trips_per_repository_without_touching_other_profiles() {
+fn detect_test_definition_can_be_regenerated_without_overwriting_the_committed_file() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    std::fs::write(
+        repo_dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = []\n",
+    )
+    .unwrap();
+    save_config(app.clone(), app.state(), valid_config(repo_dir.path())).unwrap();
+
+    let draft =
+        detect_test_definition(app.clone(), app.state(), "octocat__example".into()).unwrap();
+    create_test_definition(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        draft.definition.clone(),
+    )
+    .unwrap();
+    let committed = std::fs::read_to_string(repo_dir.path().join(".swarm/tests.json")).unwrap();
+
+    // Detection can be re-run for review once a definition is committed; it
+    // must never overwrite the committed file, only note that one exists.
+    let second_draft =
+        detect_test_definition(app.clone(), app.state(), "octocat__example".into()).unwrap();
+    assert!(second_draft
+        .notes
+        .iter()
+        .any(|note| note.contains("already exists")));
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.path().join(".swarm/tests.json")).unwrap(),
+        committed
+    );
+    let error = create_test_definition(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        second_draft.definition,
+    )
+    .unwrap_err();
+    assert!(error.contains("already exists"));
+}
+
+#[test]
+fn audit_test_coverage_reports_unmapped_candidates_against_the_committed_definition() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    std::fs::create_dir_all(repo_dir.path().join(".swarm")).unwrap();
+    std::fs::write(
+        repo_dir.path().join(".swarm/tests.json"),
+        r#"{"version":1,"suites":[{"id":"rust","name":"Rust","command":["cargo","test"],"requirements":{"files":["Cargo.toml"]}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_dir.path().join("Cargo.toml"),
+        "[package]\nname = \"x\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo_dir.path().join("go-tool")).unwrap();
+    std::fs::write(repo_dir.path().join("go-tool/go.mod"), "module x\n").unwrap();
+    save_config(app.clone(), app.state(), valid_config(repo_dir.path())).unwrap();
+
+    let audit = audit_test_coverage(app.clone(), app.state(), "octocat__example".into()).unwrap();
+    assert_eq!(audit.mapped_scheduled.len(), 1);
+    assert_eq!(audit.mapped_scheduled[0].id, "rust");
+    assert!(!audit.complete);
+    assert!(audit
+        .unmapped
+        .iter()
+        .any(|entry| entry.source == "go-manifest"));
+}
+
+#[test]
+fn generic_input_round_trips_per_repository_without_touching_other_profiles() {
     let test_app = test_app();
     let app = test_app.handle();
     let first = real_git_checkout();
@@ -430,12 +506,22 @@ fn device_choice_round_trips_per_repository_without_touching_other_profiles() {
         ..repo("octocat/second")
     });
     save_config(app.clone(), app.state(), config).unwrap();
+    std::fs::create_dir_all(first.path().join(".swarm")).unwrap();
+    std::fs::write(first.path().join(".swarm/tests.json"), r#"{
+      "version":2,
+      "inputs":[
+        {"id":"fireTvSerial","label":"Fire TV","type":"device","persistence":"repository","binding":{"arguments":["--device","{value}"]}},
+        {"id":"selector","label":"Selector","type":"text","persistence":"session-only","binding":{"arguments":["--test","{value}"]}}
+      ],
+      "suites":[{"id":"tv","name":"TV","command":["true"]}]
+    }"#).unwrap();
 
-    let saved = save_test_device(
+    let saved = save_test_input(
         app.clone(),
         app.state(),
         "octocat__example".into(),
-        "192.0.2.8:5555".into(),
+        "fireTvSerial".into(),
+        Some("192.0.2.8:5555".into()),
     )
     .unwrap();
     assert_eq!(
@@ -443,6 +529,33 @@ fn device_choice_round_trips_per_repository_without_touching_other_profiles() {
         Some(&"192.0.2.8:5555".to_string())
     );
     assert!(saved.repositories[1].test_inputs.is_empty());
+
+    let saved = save_test_input(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        "selector".into(),
+        Some("smoke".into()),
+    )
+    .unwrap();
+    assert!(!saved.repositories[0].test_inputs.contains_key("selector"));
+    assert_eq!(
+        app.state::<AppState>().test_input_sessions.lock().unwrap()["octocat__example"]["selector"],
+        "smoke"
+    );
+    let reset = save_test_input(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        "selector".into(),
+        None,
+    )
+    .unwrap();
+    assert!(!reset.repositories[0].test_inputs.contains_key("selector"));
+    assert!(
+        !app.state::<AppState>().test_input_sessions.lock().unwrap()["octocat__example"]
+            .contains_key("selector")
+    );
 }
 
 #[test]

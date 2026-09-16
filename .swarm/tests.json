@@ -1,10 +1,14 @@
 {
   "version": 1,
+  "coverageNotes": [
+    "cargo test --locked is the single authoritative Rust invocation; no Rust test aliases are scheduled separately.",
+    "Frontend and issue-worker tests are independent coverage areas and run once each."
+  ],
   "suites": [
     {
       "id": "backend",
       "name": "Rust backend and command integration",
-      "command": ["cargo", "test"],
+      "command": ["cargo", "test", "--locked"],
       "timeoutSeconds": 1800,
       "disruptive": false,
       "requirements": {
@@ -14,13 +18,24 @@
     },
     {
       "id": "frontend",
-      "name": "Scheduler UI syntax",
-      "command": ["node", "--check", "ui/app.js"],
-      "timeoutSeconds": 60,
+      "name": "Scheduler UI tests",
+      "command": ["npm", "test"],
+      "timeoutSeconds": 300,
       "disruptive": false,
       "requirements": {
-        "executables": ["node"],
-        "files": ["ui/app.js", "ui/index.html", "ui/style.css"]
+        "executables": ["npm"],
+        "files": ["package.json", "package-lock.json", "ui/logging.test.js"]
+      }
+    },
+    {
+      "id": "issue-worker",
+      "name": "Issue worker tests",
+      "command": ["python3", "-m", "unittest", "discover", "-s", "issue_worker", "-p", "test_*.py"],
+      "timeoutSeconds": 1800,
+      "disruptive": false,
+      "requirements": {
+        "executables": ["python3", "git"],
+        "files": ["issue_worker/test_swarm_issue_worker.py", "issue_worker/test_ai_test_assist.py"]
       }
     }
   ]

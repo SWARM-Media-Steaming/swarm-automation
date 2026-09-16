@@ -22,6 +22,8 @@
     promotions: [],
     testPlan: null,
     testRuns: null,
+    testDefinitionDraftOpen: false,
+    coverageAudit: null,
     executionHistory: null,
     executionHistorySearch: "",
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
@@ -146,6 +148,11 @@
     "scheduler-suites": {
       title: "Every test and its status",
       html: "<ul><li><strong>Ready</strong> / <strong>Passed</strong> / <strong>Failed</strong> — the normal lifecycle of a test that ran.</li><li><strong>Skipped</strong> — something the test needs (hardware, a file, a setting) is missing; this is not a failure.</li><li><strong>Not executed</strong> — the test asked AI for sample data, but AI was turned off or had no usage left when the run started. Not a failure either — it just didn't get a chance to run this cycle.</li><li><strong>Waiting for input</strong> — more than one eligible device was found; choose one below to continue.</li></ul><p>A test with AI-generated data shows what AI made, and which provider made it, right on that test's entry.</p>",
+      links: [],
+    },
+    "coverage-audit": {
+      title: "Coverage audit",
+      html: "<p>Recursively scans the repository for every plausible test entry point — nested manifests, CI workflow steps, task-runner targets, and conventional test scripts — and compares each one against the committed <code>.swarm/tests.json</code>. It never executes anything it finds and never changes the committed file.</p><ul><li><strong>Mapped &amp; scheduled</strong> — matches an enabled suite in the committed definition.</li><li><strong>Covered by another suite</strong> — an aggregate, alias, or workspace member whose assertions another scheduled or covered command already exercises, so it is intentionally not scheduled again.</li><li><strong>Disabled, pending review</strong> — matches a suite the committed definition has turned off.</li><li><strong>Unmapped</strong> — found by discovery but not accounted for anywhere in the committed definition; coverage cannot be called complete while this list is non-empty.</li></ul>",
       links: [],
     },
     "test-runs": {
@@ -774,8 +781,10 @@
     });
     const detectDefinition = byId("detect-test-definition");
     const saveDefinition = byId("save-test-definition");
+    const runAudit = byId("run-coverage-audit");
     if (detectDefinition) detectDefinition.disabled = state.busy.has("detect-test-definition");
     if (saveDefinition) saveDefinition.disabled = state.busy.has("save-test-definition");
+    if (runAudit) runAudit.disabled = state.busy.has("run-coverage-audit");
   }
 
   function addFact(container, label, value) {
@@ -822,6 +831,8 @@
     if (!summary || !requirementsBox || !suitesBox) return;
     requirementsBox.replaceChildren();
     suitesBox.replaceChildren();
+    const inputsBox = byId("test-inputs");
+    inputsBox?.replaceChildren();
     if (!plan) {
       summary.textContent = "Requirements have not been checked yet.";
       suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No test plan loaded." }));
@@ -833,8 +844,17 @@
     summary.textContent = plan.error || `.swarm/tests.json · structured results: ${plan.resultsPath}`;
     const onboarding = byId("test-definition-onboarding");
     const definitionMissing = !plan.available && !plan.definitionPath;
-    onboarding.classList.toggle("hidden", !definitionMissing);
-    if (!definitionMissing) byId("test-definition-draft").classList.add("hidden");
+    onboarding.classList.remove("hidden");
+    byId("test-definition-onboarding-title").textContent = definitionMissing
+      ? "Set up tests for this repository"
+      : "Regenerate the draft for review";
+    byId("test-definition-onboarding-copy").textContent = definitionMissing
+      ? "Finds test commands this project already uses (and asks AI to look harder only if nothing turns up) and lets you review the result before anything is written."
+      : "Re-runs discovery for comparison. This never overwrites the committed .swarm/tests.json — copy anything you want into it by hand.";
+    byId("detect-test-definition").textContent = definitionMissing ? "Find tests & create draft" : "Regenerate draft";
+    if (state.testDefinitionDraftOpen !== true) byId("test-definition-draft").classList.add("hidden");
+
+    (plan.inputs || []).forEach((input) => renderTestInput(inputsBox, input));
 
     const allRequirements = [];
     const seen = new Set();
@@ -863,35 +883,6 @@
         row.append(mark, copy);
         requirementsBox.appendChild(row);
       });
-    }
-
-    const deviceRequirements = allRequirements.filter((requirement) => requirement.kind === "device");
-    const deviceField = byId("test-device-field");
-    const deviceSelect = byId("test-device-select");
-    deviceField.classList.toggle("hidden", deviceRequirements.length === 0);
-    deviceSelect.replaceChildren();
-    const eligibleDevices = (plan.devices || []).filter((device) => device.eligible);
-    if (!eligibleDevices.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "No authorized adb devices detected";
-      deviceSelect.appendChild(option);
-      deviceSelect.disabled = true;
-    } else {
-      deviceSelect.disabled = false;
-      if (plan.deviceSelectionRequired) {
-        const option = document.createElement("option");
-        option.value = "";
-        option.textContent = "Choose a device…";
-        deviceSelect.appendChild(option);
-      }
-      eligibleDevices.forEach((device) => {
-        const option = document.createElement("option");
-        option.value = device.serial;
-        option.textContent = `${device.serial}${device.description ? ` · ${device.description}` : ""}`;
-        deviceSelect.appendChild(option);
-      });
-      deviceSelect.value = plan.selectedDevice || "";
     }
 
     byId("test-suite-count").textContent = `${(plan.suites || []).length} suite${plan.suites?.length === 1 ? "" : "s"}`;
@@ -927,6 +918,68 @@
       appendAiGeneratedDataNote(card, suite.aiGeneratedData);
       suitesBox.appendChild(card);
     });
+  }
+
+  function renderTestInput(container, input) {
+    if (!container) return;
+    const model = window.SwarmTestInputs.controlModel(input);
+    const row = document.createElement("div");
+    row.className = `test-input-item ${input.state || "ready"}`;
+    const head = document.createElement("div");
+    head.className = "test-input-head";
+    const label = document.createElement("strong");
+    label.textContent = `${input.label}${input.required ? " · Required" : ""}`;
+    const stateLabel = document.createElement("span");
+    stateLabel.className = "test-input-state";
+    stateLabel.textContent = model.stateLabel;
+    head.append(label, stateLabel);
+    row.appendChild(head);
+
+    let control;
+    if (model.element === "select") {
+      control = document.createElement("select");
+      control.appendChild(Object.assign(document.createElement("option"), { value: "", textContent: input.required ? "Choose a value…" : "None" }));
+      (input.options || []).forEach((item) => control.appendChild(Object.assign(document.createElement("option"), {
+        value: item.value,
+        textContent: `${item.label}${item.detected ? " · Detected" : ""}`,
+      })));
+      control.value = input.value || "";
+    } else if (input.inputType === "boolean") {
+      const wrapper = document.createElement("label");
+      wrapper.className = "toggle";
+      control = document.createElement("input");
+      control.type = "checkbox";
+      control.checked = input.value === "true";
+      wrapper.append(control, document.createElement("span"), document.createTextNode(" Enabled"));
+      row.appendChild(wrapper);
+    } else {
+      control = document.createElement("input");
+      control.type = model.inputType;
+      control.value = model.value;
+      control.placeholder = model.placeholder;
+    }
+    control.setAttribute("aria-label", input.label);
+    if (input.inputType !== "boolean") row.appendChild(control);
+    const help = document.createElement("small");
+    help.textContent = input.message || input.help || `${input.persistence} persistence`;
+    row.appendChild(help);
+    const actions = document.createElement("div");
+    actions.className = "test-input-actions";
+    if (model.picker) {
+      const browse = Object.assign(document.createElement("button"), { type: "button", className: "secondary-button", textContent: "Browse" });
+      browse.addEventListener("click", async () => {
+        const chosen = await invoke("choose_test_input_path", { kind: input.inputType });
+        if (chosen) control.value = chosen;
+      });
+      actions.appendChild(browse);
+    }
+    const save = Object.assign(document.createElement("button"), { type: "button", className: "primary-button", textContent: "Save" });
+    save.addEventListener("click", () => saveTestInput(input.id, input.inputType === "boolean" ? String(control.checked) : control.value));
+    const clear = Object.assign(document.createElement("button"), { type: "button", className: "secondary-button", textContent: "Clear / reset" });
+    clear.addEventListener("click", () => saveTestInput(input.id, null));
+    actions.append(save, clear);
+    row.appendChild(actions);
+    container.appendChild(row);
   }
 
   // Shared by the live suite list and test-run history: a short note on what
@@ -978,12 +1031,14 @@
         item.textContent = `• ${note}`;
         notes.appendChild(item);
       });
+      state.testDefinitionDraftOpen = true;
       byId("test-definition-draft").classList.remove("hidden");
       byId("test-definition-editor").focus();
     }, { progress: "Detecting tests…" });
   }
 
   function cancelTestDefinition() {
+    state.testDefinitionDraftOpen = false;
     byId("test-definition-draft").classList.add("hidden");
     byId("test-definition-editor").value = "";
   }
@@ -1004,6 +1059,75 @@
     }, { progress: "Saving the test definition…" });
   }
 
+  async function runCoverageAudit() {
+    const repo = currentRepo();
+    if (!repo) return;
+    await withBusy("run-coverage-audit", async () => {
+      state.coverageAudit = await invoke("audit_test_coverage", { repoId: repo.id });
+      renderCoverageAudit();
+    }, { progress: "Auditing test coverage…" });
+  }
+
+  function coverageAuditRow(entry) {
+    const row = document.createElement("div");
+    row.className = "requirement-item ready";
+    const mark = document.createElement("span");
+    mark.className = "requirement-mark";
+    mark.textContent = "•";
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = `${entry.name} · ${entry.classification} (${entry.confidence} confidence, ${entry.source})`;
+    const detail = document.createElement("small");
+    detail.textContent = [entry.path, entry.mappedTo ? `→ ${entry.mappedTo}` : "", entry.detail]
+      .filter(Boolean)
+      .join(" — ");
+    copy.append(title, detail);
+    row.append(mark, copy);
+    return row;
+  }
+
+  function renderCoverageAudit() {
+    const audit = state.coverageAudit;
+    const groups = byId("coverage-audit-groups");
+    const count = byId("coverage-audit-count");
+    const warning = byId("coverage-audit-warning");
+    if (!groups || !count || !warning) return;
+    if (!audit) {
+      count.textContent = "Not run";
+      count.classList.remove("ready");
+      warning.classList.add("hidden");
+      return;
+    }
+    const total =
+      audit.mappedScheduled.length + audit.mappedCovered.length + audit.disabledPendingReview.length + audit.unmapped.length;
+    count.textContent = `${total} candidate${total === 1 ? "" : "s"}`;
+    count.classList.toggle("ready", audit.complete);
+    warning.classList.toggle("hidden", audit.complete);
+    if (!audit.complete) {
+      warning.textContent = `${audit.unmapped.length} candidate${audit.unmapped.length === 1 ? "" : "s"} are not accounted for in .swarm/tests.json. Coverage is not complete until every candidate is scheduled, covered, or explicitly disabled pending review.`;
+    }
+    groups.replaceChildren();
+    [
+      ["Mapped & scheduled", audit.mappedScheduled],
+      ["Covered by another suite", audit.mappedCovered],
+      ["Disabled, pending review", audit.disabledPendingReview],
+      ["Unmapped", audit.unmapped],
+    ].forEach(([label, entries]) => {
+      const section = document.createElement("div");
+      section.className = "coverage-audit-group";
+      const heading = document.createElement("p");
+      heading.className = "eyebrow";
+      heading.textContent = `${label} · ${entries.length}`;
+      section.appendChild(heading);
+      if (!entries.length) {
+        section.appendChild(Object.assign(document.createElement("span"), { className: "fine-print", textContent: "None." }));
+      } else {
+        entries.forEach((entry) => section.appendChild(coverageAuditRow(entry)));
+      }
+      groups.appendChild(section);
+    });
+  }
+
   function formatTimestamp(seconds) {
     if (!seconds) return "—";
     return new Date(seconds * 1000).toLocaleString();
@@ -1021,6 +1145,7 @@
   const RUN_OUTCOMES = [
     ["Passed", "passed"],
     ["Failed", "failed"],
+    ["Blocked", "blocked"],
     ["Skipped", "skipped"],
     ["Not executed", "not-executed"],
   ];
@@ -1044,10 +1169,11 @@
         const key = String(suite.state || "").toLowerCase().replaceAll(" ", "-");
         if (key === "passed") counts.passed += 1;
         else if (key === "failed") counts.failed += 1;
+        else if (key === "blocked" || key === "waiting-for-input") counts.blocked += 1;
         else if (key === "not-executed") counts["not-executed"] += 1;
         else counts.skipped += 1;
         return counts;
-      }, { passed: 0, failed: 0, skipped: 0, "not-executed": 0 });
+      }, { passed: 0, failed: 0, blocked: 0, skipped: 0, "not-executed": 0 });
 
       const item = document.createElement("details");
       item.className = "test-run";
@@ -1058,7 +1184,8 @@
       when.textContent = formatTimestamp(run.finishedAt || run.startedAt);
       const meta = document.createElement("small");
       const trigger = run.trigger === "manual" ? "Run now" : run.trigger === "scheduled" ? "Scheduled" : "—";
-      meta.textContent = `${trigger} · ${formatDuration(run.startedAt, run.finishedAt)} · ${suites.length} suite${suites.length === 1 ? "" : "s"}`;
+      const commit = run.testedCommit ? ` · ${run.testedCommit.slice(0, 12)}` : "";
+      meta.textContent = `${trigger} · ${formatDuration(run.startedAt, run.finishedAt)}${commit} · ${suites.length} suite${suites.length === 1 ? "" : "s"}`;
       head.append(when, meta);
       const badges = document.createElement("div");
       badges.className = "test-run-tally";
@@ -1086,6 +1213,16 @@
         const detail = document.createElement("small");
         detail.textContent = suite.detail || `${suite.id}${suite.durationMs ? ` · ${Math.round(suite.durationMs / 1000)}s` : ""}`;
         words.append(name, detail);
+        if (Array.isArray(suite.argv) && suite.argv.length) {
+          const command = document.createElement("code");
+          command.textContent = JSON.stringify(suite.argv);
+          words.appendChild(command);
+        }
+        if (Array.isArray(suite.environment) && suite.environment.length) {
+          const environment = document.createElement("small");
+          environment.textContent = `Environment: ${suite.environment.join(", ")}`;
+          words.appendChild(environment);
+        }
         appendAiGeneratedDataNote(words, suite.aiGeneratedData);
         const badge = document.createElement("span");
         badge.className = `suite-state ${stateClass}`;
@@ -1316,16 +1453,15 @@
     }, { progress: "Scanning the GitHub issue backlog…" });
   }
 
-  async function selectTestDevice(event) {
-    const serial = event.target.value;
-    if (!serial || !currentRepo()) return;
-    await withBusy("test-device", async () => {
+  async function saveTestInput(key, value) {
+    if (!currentRepo()) return;
+    await withBusy(`test-input-${key}`, async () => {
       await saveBeforeAction();
-      state.config = await invoke("save_test_device", { repoId: currentRepo().id, serial });
+      state.config = await invoke("save_test_input", { repoId: currentRepo().id, key, value });
       bindConfig(state.config);
       await refreshTestPlan();
-      showToast("Device selection saved for this repository. Press Run now to retry blocked suites.", "success");
-    }, { progress: "Saving the device selection…" });
+      showToast(value === null ? "Test input reset." : "Test input saved. Waiting suites can now be retried.", "success");
+    }, { progress: "Saving the test input…" });
   }
 
   // Accepts "owner/name", a full github.com URL, or an SSH remote; returns
@@ -2191,11 +2327,14 @@
     state.branchOverview = null;
     state.testPlan = null;
     state.testRuns = null;
+    state.coverageAudit = null;
+    state.testDefinitionDraftOpen = false;
     state.executionHistory = null;
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
     renderStatus();
+    renderCoverageAudit();
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
@@ -2584,7 +2723,7 @@
     byId("detect-test-definition").addEventListener("click", detectTestDefinition);
     byId("save-test-definition").addEventListener("click", saveTestDefinition);
     byId("cancel-test-definition").addEventListener("click", cancelTestDefinition);
-    byId("test-device-select").addEventListener("change", selectTestDevice);
+    byId("run-coverage-audit").addEventListener("click", runCoverageAudit);
     byId("active-repo-select").addEventListener("change", (event) => selectRepository(event.target.value));
     byId("add-repo").addEventListener("click", addRepository);
     byId("remove-repo").addEventListener("click", removeRepository);

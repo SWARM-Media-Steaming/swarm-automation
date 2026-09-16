@@ -1,11 +1,13 @@
 mod config;
 mod processes;
+mod test_discovery;
 mod testing;
 mod tools;
 
 use config::{AppConfig, RepoConfig, CONFIG_FILE};
 use processes::{process_is_running, ProcessManager, ProcessStatus};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -37,6 +39,8 @@ struct AppState {
     /// Always `None` in production — see apps/server/src/gui.rs's
     /// `test_data_dir` for the same pattern.
     test_data_dir: Option<PathBuf>,
+    /// Non-secret values explicitly declared `session-only`, keyed by repo.
+    test_input_sessions: Mutex<HashMap<String, HashMap<String, String>>>,
 }
 
 impl Default for AppState {
@@ -45,6 +49,7 @@ impl Default for AppState {
             config: Mutex::new(AppConfig::default()),
             processes: ProcessManager::default(),
             test_data_dir: None,
+            test_input_sessions: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -208,6 +213,24 @@ async fn choose_repository(app: tauri::AppHandle) -> Result<Option<RepositoryIns
         let path = folder.to_string();
         inspect_repository_path(Path::new(&path))
     }))
+}
+
+#[tauri::command]
+async fn choose_test_input_path(
+    app: tauri::AppHandle,
+    kind: String,
+) -> Result<Option<String>, String> {
+    let (sender, receiver) = tokio_oneshot();
+    if kind == "directory" {
+        app.dialog().file().pick_folder(move |path| {
+            let _ = sender.send(path.map(|value| value.to_string()));
+        });
+    } else {
+        app.dialog().file().pick_file(move |path| {
+            let _ = sender.send(path.map(|value| value.to_string()));
+        });
+    }
+    receiver.recv().map_err(|error| error.to_string())
 }
 
 // tauri-plugin-dialog callbacks are synchronous from this application's
@@ -766,6 +789,18 @@ fn start_uat_scheduler(
     // Validate before spawning so a malformed repository definition is a clear
     // configuration error, never an opaque failed test process.
     testing::load_definition(&workspace)?;
+    // Refresh the non-secret runner handoff on every start. This deliberately
+    // drops session-only values left by an earlier app process.
+    let mut runner_inputs = repo.test_inputs.clone();
+    if let Some(session) = state
+        .test_input_sessions
+        .lock()
+        .map_err(|_| "Test input session lock was poisoned")?
+        .get(&repo.id)
+    {
+        runner_inputs.extend(session.clone());
+    }
+    testing::save_inputs(&repo.effective_run_dir(&workspace), &runner_inputs)?;
     let program = std::env::current_exe()
         .map_err(|error| format!("Could not locate the test runner: {error}"))?;
     let mut arguments = vec![
@@ -840,10 +875,20 @@ fn get_test_plan<R: tauri::Runtime>(
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?;
     let workspace = resolve_workspace(&app, &config, repo)?;
+    let mut inputs = repo.test_inputs.clone();
+    if let Some(session) = state
+        .test_input_sessions
+        .lock()
+        .map_err(|_| "Test input session lock was poisoned")?
+        .get(&repo.id)
+    {
+        inputs.extend(session.clone());
+    }
     Ok(testing::build_plan(
         &workspace,
         &repo.effective_run_dir(&workspace),
-        &repo.test_inputs,
+        &repo.id,
+        &inputs,
         repo.allow_disruptive_tests,
     ))
 }
@@ -857,18 +902,42 @@ fn detect_test_definition<R: tauri::Runtime>(
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?;
     let workspace = prepared_workspace(&app, &config, repo)?;
-    if testing::definition_path(&workspace).exists() {
-        return Err(format!(
-            "{} already exists. Refresh requirements to load it.",
-            testing::definition_path(&workspace).display()
-        ));
-    }
     // AI-assisted discovery is best-effort: a repository with no Python/AI
     // resources bundled still gets ordinary deterministic detection.
     let ai = worker_script_dir(&app)
         .ok()
         .map(|script_dir| resolve_ai_run_options(&config, repo, &script_dir));
-    testing::detect_definition(&workspace, ai.as_ref())
+    let mut draft = testing::detect_definition(&workspace, ai.as_ref())?;
+    // A committed definition is the authoritative one; detection may be
+    // re-run for review at any time, but `create_test_definition` refuses to
+    // overwrite it, so this is always safe to regenerate.
+    if testing::definition_path(&workspace).exists() {
+        draft.notes.insert(
+            0,
+            format!(
+                "{} already exists and is authoritative; this draft is for review only and will not overwrite it.",
+                testing::TEST_DEFINITION_PATH
+            ),
+        );
+    }
+    Ok(draft)
+}
+
+#[tauri::command]
+fn audit_test_coverage<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<test_discovery::CoverageAudit, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = resolve_workspace(&app, &config, repo)?;
+    let definition = testing::load_definition(&workspace)?;
+    let candidates = test_discovery::discover_candidates(&workspace)?;
+    Ok(test_discovery::audit_coverage(
+        &candidates,
+        &definition.suites,
+    ))
 }
 
 #[tauri::command]
@@ -1093,27 +1162,81 @@ async fn import_execution_history_background(
 }
 
 #[tauri::command]
-fn save_test_device<R: tauri::Runtime>(
+fn save_test_input<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
     repo_id: String,
-    serial: String,
+    key: String,
+    value: Option<String>,
 ) -> Result<AppConfig, String> {
     let mut config = current_config(&state)?;
-    let repo = config
+    let repo_index = config
         .repositories
-        .iter_mut()
-        .find(|repo| repo.id == repo_id)
+        .iter()
+        .position(|repo| repo.id == repo_id)
         .ok_or_else(|| format!("Unknown repository id: {repo_id}"))?;
-    if serial.trim().is_empty() {
-        repo.test_inputs.remove("fireTvSerial");
-    } else {
-        repo.test_inputs
-            .insert("fireTvSerial".into(), serial.trim().into());
-    }
-    let selected_inputs = repo.test_inputs.clone();
-    let repo_snapshot = repo.clone();
+    let repo_snapshot = config.repositories[repo_index].clone();
     let workspace = resolve_workspace(&app, &config, &repo_snapshot)?;
+    let definition = testing::load_definition(&workspace)?;
+    let input = definition
+        .inputs
+        .iter()
+        .find(|input| input.id == key)
+        .ok_or_else(|| format!("The test definition does not declare input '{key}'"))?;
+    let normalized = value
+        .map(|value| {
+            if input.input_type == "secret" {
+                value
+            } else {
+                value.trim().to_string()
+            }
+        })
+        .filter(|value| !value.is_empty());
+    match input.persistence.as_str() {
+        "keychain" | "os-keychain" | "osKeychain" => {
+            testing::save_secret(&repo_id, &key, normalized.as_deref())?;
+            config.repositories[repo_index].test_inputs.remove(&key);
+            if let Some(session) = state
+                .test_input_sessions
+                .lock()
+                .map_err(|_| "Test input session lock was poisoned")?
+                .get_mut(&repo_id)
+            {
+                session.remove(&key);
+            }
+        }
+        "session-only" => {
+            let mut sessions = state
+                .test_input_sessions
+                .lock()
+                .map_err(|_| "Test input session lock was poisoned")?;
+            let repo_values = sessions.entry(repo_id.clone()).or_default();
+            if let Some(value) = normalized {
+                repo_values.insert(key.clone(), value);
+            } else {
+                repo_values.remove(&key);
+            }
+        }
+        _ => {
+            let repo = &mut config.repositories[repo_index];
+            if let Some(value) = normalized {
+                repo.test_inputs.insert(key.clone(), value);
+            } else {
+                repo.test_inputs.remove(&key);
+            }
+        }
+    }
+    // The runner is a separate closed-stdin process. This file is only the
+    // non-secret handoff; keychain values are loaded by the runner itself.
+    let mut selected_inputs = config.repositories[repo_index].test_inputs.clone();
+    if let Some(session) = state
+        .test_input_sessions
+        .lock()
+        .map_err(|_| "Test input session lock was poisoned")?
+        .get(&repo_id)
+    {
+        selected_inputs.extend(session.clone());
+    }
     if workspace.is_dir() {
         testing::save_inputs(
             &repo_snapshot.effective_run_dir(&workspace),
@@ -3268,13 +3391,15 @@ fn main() {
             get_test_plan_background,
             detect_test_definition,
             create_test_definition,
+            audit_test_coverage,
             get_test_runs,
             get_test_runs_background,
             get_execution_history,
             get_execution_history_background,
             import_execution_history,
             import_execution_history_background,
-            save_test_device,
+            save_test_input,
+            choose_test_input_path,
             pause_process,
             resume_process,
             stop_process,
