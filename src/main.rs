@@ -1,5 +1,6 @@
 mod config;
 mod processes;
+mod test_discovery;
 mod testing;
 mod tools;
 
@@ -901,18 +902,42 @@ fn detect_test_definition<R: tauri::Runtime>(
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?;
     let workspace = prepared_workspace(&app, &config, repo)?;
-    if testing::definition_path(&workspace).exists() {
-        return Err(format!(
-            "{} already exists. Refresh requirements to load it.",
-            testing::definition_path(&workspace).display()
-        ));
-    }
     // AI-assisted discovery is best-effort: a repository with no Python/AI
     // resources bundled still gets ordinary deterministic detection.
     let ai = worker_script_dir(&app)
         .ok()
         .map(|script_dir| resolve_ai_run_options(&config, repo, &script_dir));
-    testing::detect_definition(&workspace, ai.as_ref())
+    let mut draft = testing::detect_definition(&workspace, ai.as_ref())?;
+    // A committed definition is the authoritative one; detection may be
+    // re-run for review at any time, but `create_test_definition` refuses to
+    // overwrite it, so this is always safe to regenerate.
+    if testing::definition_path(&workspace).exists() {
+        draft.notes.insert(
+            0,
+            format!(
+                "{} already exists and is authoritative; this draft is for review only and will not overwrite it.",
+                testing::TEST_DEFINITION_PATH
+            ),
+        );
+    }
+    Ok(draft)
+}
+
+#[tauri::command]
+fn audit_test_coverage<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<test_discovery::CoverageAudit, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let workspace = resolve_workspace(&app, &config, repo)?;
+    let definition = testing::load_definition(&workspace)?;
+    let candidates = test_discovery::discover_candidates(&workspace)?;
+    Ok(test_discovery::audit_coverage(
+        &candidates,
+        &definition.suites,
+    ))
 }
 
 #[tauri::command]
@@ -3366,6 +3391,7 @@ fn main() {
             get_test_plan_background,
             detect_test_definition,
             create_test_definition,
+            audit_test_coverage,
             get_test_runs,
             get_test_runs_background,
             get_execution_history,

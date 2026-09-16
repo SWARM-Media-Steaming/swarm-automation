@@ -22,6 +22,8 @@
     promotions: [],
     testPlan: null,
     testRuns: null,
+    testDefinitionDraftOpen: false,
+    coverageAudit: null,
     executionHistory: null,
     executionHistorySearch: "",
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
@@ -146,6 +148,11 @@
     "scheduler-suites": {
       title: "Every test and its status",
       html: "<ul><li><strong>Ready</strong> / <strong>Passed</strong> / <strong>Failed</strong> — the normal lifecycle of a test that ran.</li><li><strong>Skipped</strong> — something the test needs (hardware, a file, a setting) is missing; this is not a failure.</li><li><strong>Not executed</strong> — the test asked AI for sample data, but AI was turned off or had no usage left when the run started. Not a failure either — it just didn't get a chance to run this cycle.</li><li><strong>Waiting for input</strong> — more than one eligible device was found; choose one below to continue.</li></ul><p>A test with AI-generated data shows what AI made, and which provider made it, right on that test's entry.</p>",
+      links: [],
+    },
+    "coverage-audit": {
+      title: "Coverage audit",
+      html: "<p>Recursively scans the repository for every plausible test entry point — nested manifests, CI workflow steps, task-runner targets, and conventional test scripts — and compares each one against the committed <code>.swarm/tests.json</code>. It never executes anything it finds and never changes the committed file.</p><ul><li><strong>Mapped &amp; scheduled</strong> — matches an enabled suite in the committed definition.</li><li><strong>Covered by another suite</strong> — an aggregate, alias, or workspace member whose assertions another scheduled or covered command already exercises, so it is intentionally not scheduled again.</li><li><strong>Disabled, pending review</strong> — matches a suite the committed definition has turned off.</li><li><strong>Unmapped</strong> — found by discovery but not accounted for anywhere in the committed definition; coverage cannot be called complete while this list is non-empty.</li></ul>",
       links: [],
     },
     "test-runs": {
@@ -774,8 +781,10 @@
     });
     const detectDefinition = byId("detect-test-definition");
     const saveDefinition = byId("save-test-definition");
+    const runAudit = byId("run-coverage-audit");
     if (detectDefinition) detectDefinition.disabled = state.busy.has("detect-test-definition");
     if (saveDefinition) saveDefinition.disabled = state.busy.has("save-test-definition");
+    if (runAudit) runAudit.disabled = state.busy.has("run-coverage-audit");
   }
 
   function addFact(container, label, value) {
@@ -835,8 +844,15 @@
     summary.textContent = plan.error || `.swarm/tests.json · structured results: ${plan.resultsPath}`;
     const onboarding = byId("test-definition-onboarding");
     const definitionMissing = !plan.available && !plan.definitionPath;
-    onboarding.classList.toggle("hidden", !definitionMissing);
-    if (!definitionMissing) byId("test-definition-draft").classList.add("hidden");
+    onboarding.classList.remove("hidden");
+    byId("test-definition-onboarding-title").textContent = definitionMissing
+      ? "Set up tests for this repository"
+      : "Regenerate the draft for review";
+    byId("test-definition-onboarding-copy").textContent = definitionMissing
+      ? "Finds test commands this project already uses (and asks AI to look harder only if nothing turns up) and lets you review the result before anything is written."
+      : "Re-runs discovery for comparison. This never overwrites the committed .swarm/tests.json — copy anything you want into it by hand.";
+    byId("detect-test-definition").textContent = definitionMissing ? "Find tests & create draft" : "Regenerate draft";
+    if (state.testDefinitionDraftOpen !== true) byId("test-definition-draft").classList.add("hidden");
 
     (plan.inputs || []).forEach((input) => renderTestInput(inputsBox, input));
 
@@ -1015,12 +1031,14 @@
         item.textContent = `• ${note}`;
         notes.appendChild(item);
       });
+      state.testDefinitionDraftOpen = true;
       byId("test-definition-draft").classList.remove("hidden");
       byId("test-definition-editor").focus();
     }, { progress: "Detecting tests…" });
   }
 
   function cancelTestDefinition() {
+    state.testDefinitionDraftOpen = false;
     byId("test-definition-draft").classList.add("hidden");
     byId("test-definition-editor").value = "";
   }
@@ -1039,6 +1057,75 @@
       await refreshTestPlan();
       showToast(`Test definition created at ${path}. Commit it to keep it with the repository.`, "success");
     }, { progress: "Saving the test definition…" });
+  }
+
+  async function runCoverageAudit() {
+    const repo = currentRepo();
+    if (!repo) return;
+    await withBusy("run-coverage-audit", async () => {
+      state.coverageAudit = await invoke("audit_test_coverage", { repoId: repo.id });
+      renderCoverageAudit();
+    }, { progress: "Auditing test coverage…" });
+  }
+
+  function coverageAuditRow(entry) {
+    const row = document.createElement("div");
+    row.className = "requirement-item ready";
+    const mark = document.createElement("span");
+    mark.className = "requirement-mark";
+    mark.textContent = "•";
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = `${entry.name} · ${entry.classification} (${entry.confidence} confidence, ${entry.source})`;
+    const detail = document.createElement("small");
+    detail.textContent = [entry.path, entry.mappedTo ? `→ ${entry.mappedTo}` : "", entry.detail]
+      .filter(Boolean)
+      .join(" — ");
+    copy.append(title, detail);
+    row.append(mark, copy);
+    return row;
+  }
+
+  function renderCoverageAudit() {
+    const audit = state.coverageAudit;
+    const groups = byId("coverage-audit-groups");
+    const count = byId("coverage-audit-count");
+    const warning = byId("coverage-audit-warning");
+    if (!groups || !count || !warning) return;
+    if (!audit) {
+      count.textContent = "Not run";
+      count.classList.remove("ready");
+      warning.classList.add("hidden");
+      return;
+    }
+    const total =
+      audit.mappedScheduled.length + audit.mappedCovered.length + audit.disabledPendingReview.length + audit.unmapped.length;
+    count.textContent = `${total} candidate${total === 1 ? "" : "s"}`;
+    count.classList.toggle("ready", audit.complete);
+    warning.classList.toggle("hidden", audit.complete);
+    if (!audit.complete) {
+      warning.textContent = `${audit.unmapped.length} candidate${audit.unmapped.length === 1 ? "" : "s"} are not accounted for in .swarm/tests.json. Coverage is not complete until every candidate is scheduled, covered, or explicitly disabled pending review.`;
+    }
+    groups.replaceChildren();
+    [
+      ["Mapped & scheduled", audit.mappedScheduled],
+      ["Covered by another suite", audit.mappedCovered],
+      ["Disabled, pending review", audit.disabledPendingReview],
+      ["Unmapped", audit.unmapped],
+    ].forEach(([label, entries]) => {
+      const section = document.createElement("div");
+      section.className = "coverage-audit-group";
+      const heading = document.createElement("p");
+      heading.className = "eyebrow";
+      heading.textContent = `${label} · ${entries.length}`;
+      section.appendChild(heading);
+      if (!entries.length) {
+        section.appendChild(Object.assign(document.createElement("span"), { className: "fine-print", textContent: "None." }));
+      } else {
+        entries.forEach((entry) => section.appendChild(coverageAuditRow(entry)));
+      }
+      groups.appendChild(section);
+    });
   }
 
   function formatTimestamp(seconds) {
@@ -2240,11 +2327,14 @@
     state.branchOverview = null;
     state.testPlan = null;
     state.testRuns = null;
+    state.coverageAudit = null;
+    state.testDefinitionDraftOpen = false;
     state.executionHistory = null;
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
     renderStatus();
+    renderCoverageAudit();
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
@@ -2633,6 +2723,7 @@
     byId("detect-test-definition").addEventListener("click", detectTestDefinition);
     byId("save-test-definition").addEventListener("click", saveTestDefinition);
     byId("cancel-test-definition").addEventListener("click", cancelTestDefinition);
+    byId("run-coverage-audit").addEventListener("click", runCoverageAudit);
     byId("active-repo-select").addEventListener("change", (event) => selectRepository(event.target.value));
     byId("add-repo").addEventListener("click", addRepository);
     byId("remove-repo").addEventListener("click", removeRepository);
