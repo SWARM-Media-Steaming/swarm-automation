@@ -1,8 +1,8 @@
 use crate::tools;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -11,6 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const TEST_DEFINITION_PATH: &str = ".swarm/tests.json";
 const TEST_INPUTS_FILE: &str = "test-inputs.json";
+const OUTPUT_PREVIEW_BYTES: usize = 16 * 1024;
+const CHILD_NOFILE_LIMIT: u64 = 8192;
+const CHECKOUT_LOCK_FILE: &str = "swarm-test-run.lock";
 
 fn default_version() -> u32 {
     1
@@ -39,6 +42,10 @@ pub struct TestDefinition {
     pub version: u32,
     #[serde(default)]
     pub suites: Vec<TestSuiteDefinition>,
+    /// Reviewed explanation of coverage relationships and intentionally
+    /// omitted aggregate/alias commands.
+    #[serde(default)]
+    pub coverage_notes: Vec<String>,
     #[serde(default)]
     pub reporting: Option<ReportingDefinition>,
     #[serde(default)]
@@ -73,6 +80,10 @@ pub struct Requirements {
     #[serde(default)]
     pub mounts: Vec<MountRequirement>,
     #[serde(default)]
+    pub paths: Vec<PathRequirement>,
+    #[serde(default)]
+    pub android_sdk: Option<AndroidSdkRequirement>,
+    #[serde(default)]
     pub credentials: Vec<CredentialRequirement>,
     #[serde(default)]
     pub devices: Vec<DeviceRequirement>,
@@ -99,8 +110,14 @@ pub struct AiTestDataRequirement {
 #[serde(rename_all = "camelCase")]
 pub struct ServerRequirement {
     pub name: String,
+    #[serde(default)]
     pub host: String,
+    #[serde(default)]
     pub port: u16,
+    /// Optional HTTP health endpoint. When set, a successful 2xx/3xx HTTP
+    /// response is required; merely accepting a TCP connection is not enough.
+    #[serde(default)]
+    pub url: String,
     #[serde(default = "default_health_timeout")]
     pub timeout_seconds: u64,
 }
@@ -112,6 +129,27 @@ pub struct MountRequirement {
     pub path: String,
     #[serde(default)]
     pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathRequirement {
+    pub name: String,
+    pub path: String,
+    /// `file`, `directory`, or `any` (the default).
+    #[serde(default)]
+    pub kind: String,
+    /// Open/read the path during preflight instead of accepting metadata alone.
+    #[serde(default = "default_true")]
+    pub readable: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidSdkRequirement {
+    /// Gradle project containing an optional `local.properties` sdk.dir entry.
+    #[serde(default)]
+    pub project: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,10 +169,18 @@ pub struct DeviceRequirement {
     pub device_type: String,
     #[serde(default = "default_device_input")]
     pub input: String,
+    /// Argument understood by the suite script. The scheduler appends this
+    /// and the selected serial as two distinct argv entries.
+    #[serde(default = "default_device_argument")]
+    pub argument: String,
 }
 
 fn default_device_input() -> String {
     "fireTvSerial".into()
+}
+
+fn default_device_argument() -> String {
+    "--device".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +229,9 @@ pub struct SuiteResult {
     pub duration_ms: Option<u64>,
     #[serde(default)]
     pub output: String,
+    /// Full log retained on disk; `output` is only a bounded preview.
+    #[serde(default)]
+    pub log_path: String,
     /// What an AI provider generated for this suite's `ai_test_data`
     /// requirements, if any — the run's own record of what was made up, per
     /// the repository's test definition.
@@ -238,6 +287,9 @@ pub struct TestDefinitionDraft {
 pub struct TestRunResults {
     pub schema_version: u32,
     pub repository: String,
+    /// Immutable Git commit captured before any suite starts.
+    #[serde(default)]
+    pub tested_commit: String,
     pub definition_path: String,
     pub started_at: u64,
     pub finished_at: Option<u64>,
@@ -328,19 +380,24 @@ pub fn detect_definition(
     let cargo_manifest = workspace.join("Cargo.toml");
     if cargo_manifest.is_file() {
         let manifest = fs::read_to_string(&cargo_manifest).unwrap_or_default();
-        let (id, name, command): (&str, &str, &[&str]) = if manifest.contains("[workspace]") {
-            (
-                "rust-workspace",
-                "Rust workspace tests",
-                &["cargo", "test", "--workspace"],
-            )
+        let locked = workspace.join("Cargo.lock").is_file();
+        let (id, name, command): (&str, &str, Vec<&str>) = if manifest.contains("[workspace]") {
+            let mut command = vec!["cargo", "test", "--workspace"];
+            if locked {
+                command.push("--locked");
+            }
+            ("rust-workspace", "Rust workspace tests", command)
         } else {
-            ("rust", "Rust tests", &["cargo", "test"])
+            let mut command = vec!["cargo", "test"];
+            if locked {
+                command.push("--locked");
+            }
+            ("rust", "Rust tests", command)
         };
         suites.push(boilerplate_suite(
             id,
             name,
-            command,
+            &command,
             &["cargo"],
             &["Cargo.toml"],
         ));
@@ -475,6 +532,7 @@ pub fn detect_definition(
                 suite.requirements.devices.push(DeviceRequirement {
                     device_type: "fireTv".into(),
                     input: default_device_input(),
+                    argument: default_device_argument(),
                 });
                 suite.timeout_seconds = 7200;
             }
@@ -549,6 +607,7 @@ pub fn detect_definition(
     let definition = TestDefinition {
         version: 1,
         suites,
+        coverage_notes: Vec::new(),
         reporting: None,
         failure_triage: None,
     };
@@ -651,6 +710,48 @@ fn validate_definition(definition: &TestDefinition) -> Result<(), String> {
                 return Err(format!(
                     "Suite '{}' uses unsupported device type '{}'",
                     suite.id, device.device_type
+                ));
+            }
+            if device.argument.trim().is_empty() || !device.argument.starts_with('-') {
+                return Err(format!(
+                    "Device argument in suite '{}' must be a non-empty option such as --device",
+                    suite.id
+                ));
+            }
+        }
+        if let Some(android) = &suite.requirements.android_sdk {
+            if Path::new(&android.project).is_absolute() {
+                return Err(format!(
+                    "Android SDK project in suite '{}' must be relative to the repository",
+                    suite.id
+                ));
+            }
+        }
+        for path in &suite.requirements.paths {
+            if path.name.trim().is_empty() || path.path.trim().is_empty() {
+                return Err(format!(
+                    "Path requirements in suite '{}' need a name and path",
+                    suite.id
+                ));
+            }
+            if !matches!(path.kind.as_str(), "" | "any" | "file" | "directory") {
+                return Err(format!(
+                    "Path '{}' in suite '{}' has unsupported kind '{}'",
+                    path.name, suite.id, path.kind
+                ));
+            }
+        }
+        for server in &suite.requirements.servers {
+            if server.url.is_empty() && (server.host.is_empty() || server.port == 0) {
+                return Err(format!(
+                    "Server '{}' in suite '{}' needs either url or host and port",
+                    server.name, suite.id
+                ));
+            }
+            if !server.url.is_empty() && !server.url.starts_with("http://") {
+                return Err(format!(
+                    "Server '{}' in suite '{}' uses an unsupported health URL; only http:// is supported",
+                    server.name, suite.id
                 ));
             }
         }
@@ -799,6 +900,7 @@ pub fn build_plan(
                 finished_at: None,
                 duration_ms: None,
                 output: String::new(),
+                log_path: String::new(),
                 ai_generated_data: Vec::new(),
             });
             if !suite.enabled {
@@ -814,7 +916,7 @@ pub fn build_plan(
                 result.blocked = true;
                 result.detail = "Choose a detected device to continue".into();
             } else if missing {
-                result.state = "Skipped".into();
+                result.state = "Blocked".into();
                 result.blocked = true;
                 result.detail = requirements
                     .iter()
@@ -864,36 +966,34 @@ fn evaluate_requirements(
         ));
     }
     for relative in &suite.requirements.files {
-        let path = workspace.join(relative);
+        let path = resolve_requirement_path(workspace, relative);
+        let ready = path.is_file() && File::open(&path).is_ok();
         statuses.push(requirement(
             "file",
             relative,
-            path.exists(),
-            if path.exists() {
+            ready,
+            if ready {
                 path.to_string_lossy().into_owned()
             } else {
-                format!("{} is missing", path.display())
+                format!("{} is missing or unreadable", path.display())
             },
             format!("Create or restore {relative}"),
         ));
     }
     for server in &suite.requirements.servers {
-        let ready = server_ready(server);
+        let (ready, detail) = server_ready(server);
         statuses.push(requirement(
             "server",
             &server.name,
             ready,
-            if ready {
-                format!("{}:{} accepted a connection", server.host, server.port)
-            } else {
-                format!("{}:{} is not reachable", server.host, server.port)
-            },
+            detail,
             format!("Start {} and verify its address", server.name),
         ));
     }
     for mount in &suite.requirements.mounts {
-        let path = Path::new(&mount.path);
-        let ready = path.is_dir() && mount_kind_matches(path, &mount.kind);
+        let path = expand_home(&mount.path);
+        let ready =
+            path.is_dir() && fs::read_dir(&path).is_ok() && mount_kind_matches(&path, &mount.kind);
         statuses.push(requirement(
             "mount",
             &mount.name,
@@ -912,6 +1012,48 @@ fn evaluate_requirements(
                 )
             },
             format!("Mount {} and refresh requirements", mount.name),
+        ));
+    }
+    for path_requirement in &suite.requirements.paths {
+        let path = resolve_requirement_path(workspace, &path_requirement.path);
+        let metadata = fs::metadata(&path).ok();
+        let kind_ready =
+            metadata
+                .as_ref()
+                .is_some_and(|metadata| match path_requirement.kind.as_str() {
+                    "file" => metadata.is_file(),
+                    "directory" => metadata.is_dir(),
+                    "" | "any" => true,
+                    _ => false,
+                });
+        let readable = !path_requirement.readable || readable_path(&path, &path_requirement.kind);
+        let ready = kind_ready && readable;
+        statuses.push(requirement(
+            "path",
+            &path_requirement.name,
+            ready,
+            if ready {
+                format!("{} is present and readable", path.display())
+            } else {
+                format!(
+                    "{} is missing, has the wrong type, or is not readable",
+                    path.display()
+                )
+            },
+            format!(
+                "Make {} available and refresh requirements",
+                path_requirement.name
+            ),
+        ));
+    }
+    if let Some(android) = &suite.requirements.android_sdk {
+        let (ready, detail) = android_sdk_ready(workspace, android);
+        statuses.push(requirement(
+            "androidSdk",
+            "Android SDK",
+            ready,
+            detail,
+            "Install a usable Android SDK or set sdk.dir, ANDROID_HOME, or ANDROID_SDK_ROOT".into(),
         ));
     }
     for credential in &suite.requirements.credentials {
@@ -1021,14 +1163,143 @@ fn requirement(
     }
 }
 
-fn server_ready(server: &ServerRequirement) -> bool {
+fn server_ready(server: &ServerRequirement) -> (bool, String) {
+    if !server.url.is_empty() {
+        return http_health_ready(server);
+    }
     let Ok(addresses) = (server.host.as_str(), server.port).to_socket_addrs() else {
-        return false;
+        return (
+            false,
+            format!("{}:{} could not be resolved", server.host, server.port),
+        );
     };
     let timeout = Duration::from_secs(server.timeout_seconds.max(1));
-    addresses
+    let ready = addresses
         .into_iter()
-        .any(|address| TcpStream::connect_timeout(&address, timeout).is_ok())
+        .any(|address| TcpStream::connect_timeout(&address, timeout).is_ok());
+    (
+        ready,
+        if ready {
+            format!("{}:{} accepted a connection", server.host, server.port)
+        } else {
+            format!("{}:{} is not reachable", server.host, server.port)
+        },
+    )
+}
+
+fn http_health_ready(server: &ServerRequirement) -> (bool, String) {
+    let Ok(url) = url::Url::parse(&server.url) else {
+        return (false, format!("{} is not a valid URL", server.url));
+    };
+    let Some(host) = url.host_str() else {
+        return (false, format!("{} has no host", server.url));
+    };
+    let port = url.port_or_known_default().unwrap_or(80);
+    let timeout = Duration::from_secs(server.timeout_seconds.max(1));
+    let Ok(addresses) = (host, port).to_socket_addrs() else {
+        return (false, format!("{} could not be resolved", server.url));
+    };
+    for address in addresses {
+        let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else {
+            continue;
+        };
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+        let target = if let Some(query) = url.query() {
+            format!("{}?{}", url.path(), query)
+        } else if url.path().is_empty() {
+            "/".into()
+        } else {
+            url.path().into()
+        };
+        let request = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        if stream.write_all(request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut response = [0_u8; 128];
+        let Ok(count) = stream.read(&mut response) else {
+            continue;
+        };
+        let status = String::from_utf8_lossy(&response[..count])
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok());
+        if status.is_some_and(|status| (200..400).contains(&status)) {
+            return (
+                true,
+                format!("{} returned HTTP {}", server.url, status.unwrap()),
+            );
+        }
+        return (
+            false,
+            status.map_or_else(
+                || format!("{} did not return HTTP", server.url),
+                |status| format!("{} returned HTTP {status}", server.url),
+            ),
+        );
+    }
+    (false, format!("{} is not reachable", server.url))
+}
+
+fn resolve_requirement_path(workspace: &Path, value: &str) -> PathBuf {
+    let expanded = expand_home(value);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        workspace.join(expanded)
+    }
+}
+
+fn readable_path(path: &Path, kind: &str) -> bool {
+    match kind {
+        "directory" => fs::read_dir(path).is_ok(),
+        "file" => File::open(path).is_ok(),
+        _ if path.is_dir() => fs::read_dir(path).is_ok(),
+        _ => File::open(path).is_ok(),
+    }
+}
+
+fn android_sdk_ready(workspace: &Path, requirement: &AndroidSdkRequirement) -> (bool, String) {
+    let project = workspace.join(&requirement.project);
+    let local_sdk = fs::read_to_string(project.join("local.properties"))
+        .ok()
+        .and_then(|raw| {
+            raw.lines()
+                .find_map(|line| line.trim().strip_prefix("sdk.dir=").map(str::to_string))
+        })
+        .map(|value| PathBuf::from(value.replace("\\:", ":").replace("\\\\", "\\")));
+    let sdk = local_sdk
+        .or_else(|| std::env::var_os("ANDROID_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("ANDROID_SDK_ROOT").map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Android/sdk"))
+        });
+    let Some(sdk) = sdk else {
+        return (false, "No Android SDK location is configured".into());
+    };
+    let has_platform = directory_has_entry(&sdk.join("platforms"));
+    let has_build_tools = directory_has_entry(&sdk.join("build-tools"));
+    let has_adb = sdk.join("platform-tools/adb").is_file();
+    let ready = sdk.is_dir() && has_platform && has_build_tools && has_adb;
+    (
+        ready,
+        if ready {
+            format!("Usable Android SDK at {}", sdk.display())
+        } else {
+            format!(
+                "Android SDK at {} is incomplete (needs a platform, build-tools, and platform-tools/adb)",
+                sdk.display()
+            )
+        },
+    )
+}
+
+fn directory_has_entry(path: &Path) -> bool {
+    fs::read_dir(path)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some()
 }
 
 fn mount_kind_matches(path: &Path, kind: &str) -> bool {
@@ -1110,19 +1381,14 @@ fn write_results(path: &Path, results: &TestRunResults) -> Result<(), String> {
 }
 
 /// Records a finished run under `<run-dir>/test-runs/<started_at>.json` and
-/// prunes the oldest entries beyond `HISTORY_LIMIT`. Per-suite command output
-/// is dropped from the archived copy so the history stays small; the live
-/// `test-results.json` keeps the full output for the most recent run.
+/// prunes the oldest entries beyond `HISTORY_LIMIT`. Each suite contains only
+/// the bounded preview captured from its full sibling `.log` file.
 fn append_history(run_dir: &Path, results: &TestRunResults) {
     let dir = run_dir.join(HISTORY_DIR);
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let mut archived = results.clone();
-    for suite in &mut archived.suites {
-        suite.output.clear();
-    }
-    let Ok(bytes) = serde_json::to_vec_pretty(&archived) else {
+    let Ok(bytes) = serde_json::to_vec_pretty(results) else {
         return;
     };
     let path = dir.join(format!("{}.json", results.started_at));
@@ -1415,6 +1681,7 @@ pub fn run_once(
     trigger: &str,
     ai: &AiRunOptions,
 ) -> Result<i32, String> {
+    let checkout = CheckoutGuard::acquire(workspace)?;
     let definition = load_definition(workspace)?;
     let resolved_inputs = load_inputs(run_dir, saved_inputs);
     let plan = build_plan(workspace, run_dir, &resolved_inputs, allow_disruptive);
@@ -1441,6 +1708,7 @@ pub fn run_once(
     let mut results = TestRunResults {
         schema_version: 1,
         repository: repository.into(),
+        tested_commit: checkout.commit.clone(),
         definition_path: definition_path(workspace).to_string_lossy().into_owned(),
         started_at: unix_timestamp(),
         finished_at: None,
@@ -1462,6 +1730,7 @@ pub fn run_once(
                     result.finished_at = None;
                     result.duration_ms = None;
                     result.output.clear();
+                    result.log_path.clear();
                     result.ai_generated_data.clear();
                     if !definition.suites[index]
                         .requirements
@@ -1496,6 +1765,17 @@ pub fn run_once(
         if results.suites[index].state != "Ready" {
             continue;
         }
+        if let Err(error) = checkout.verify(workspace) {
+            for remaining in results.suites.iter_mut().skip(index) {
+                if remaining.state == "Ready" {
+                    remaining.state = "Blocked".into();
+                    remaining.blocked = true;
+                    remaining.detail = error.clone();
+                }
+            }
+            write_results(&results_path, &results)?;
+            break;
+        }
         let started_at = unix_timestamp();
         results.suites[index].state = "Running".into();
         results.suites[index].started_at = Some(started_at);
@@ -1525,18 +1805,26 @@ pub fn run_once(
         };
         let outcome = run_suite(
             workspace,
-            run_dir,
+            &run_dir
+                .join("test-logs")
+                .join(results.started_at.to_string()),
             suite,
             &plan.selected_device,
             ai_data_dir.as_deref(),
+            &checkout,
         )
         .unwrap_or_else(|error| CommandOutcome {
             exit_code: Some(127),
             duration_ms: 0,
             detail: error,
             output: String::new(),
+            log_path: String::new(),
+            blocked: false,
         });
-        results.suites[index].state = if outcome.exit_code == Some(0) {
+        results.suites[index].state = if outcome.blocked {
+            results.suites[index].blocked = true;
+            "Blocked".into()
+        } else if outcome.exit_code == Some(0) {
             "Passed".into()
         } else {
             any_failure = true;
@@ -1547,6 +1835,7 @@ pub fn run_once(
         results.suites[index].duration_ms = Some(outcome.duration_ms);
         results.suites[index].detail = outcome.detail;
         results.suites[index].output = outcome.output;
+        results.suites[index].log_path = outcome.log_path;
         write_results(&results_path, &results)?;
     }
     results.finished_at = Some(unix_timestamp());
@@ -1581,6 +1870,130 @@ struct CommandOutcome {
     duration_ms: u64,
     detail: String,
     output: String,
+    log_path: String,
+    blocked: bool,
+}
+
+struct CheckoutGuard {
+    commit: String,
+    branch: String,
+    lock_path: PathBuf,
+    _lock: File,
+}
+
+impl CheckoutGuard {
+    fn acquire(workspace: &Path) -> Result<Self, String> {
+        let commit = git_value(workspace, &["rev-parse", "--verify", "HEAD"])?;
+        let status = git_value(
+            workspace,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        if !status.is_empty() {
+            return Err(
+                "The test checkout must be clean so results identify an exact commit; commit or remove local changes first"
+                    .into(),
+            );
+        }
+        git_value(
+            workspace,
+            &["ls-files", "--error-unmatch", TEST_DEFINITION_PATH],
+        )
+        .map_err(|_| {
+            format!(
+                "{TEST_DEFINITION_PATH} must be tracked before tests can run so a fresh clone uses the same contract"
+            )
+        })?;
+        let branch = git_value(workspace, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .unwrap_or_else(|_| "(detached)".into());
+        let common_dir = git_value(workspace, &["rev-parse", "--git-common-dir"])?;
+        let common_dir = {
+            let path = PathBuf::from(common_dir);
+            if path.is_absolute() {
+                path
+            } else {
+                workspace.join(path)
+            }
+        };
+        let lock_path = common_dir.join(CHECKOUT_LOCK_FILE);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut lock = match options.open(&lock_path) {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if stale_checkout_lock(&lock_path) {
+                    fs::remove_file(&lock_path).map_err(|remove_error| {
+                        format!("Could not remove stale test-run lock: {remove_error}")
+                    })?;
+                    options.open(&lock_path).map_err(|retry_error| {
+                        format!("Could not acquire checkout test-run lock: {retry_error}")
+                    })?
+                } else {
+                    return Err(
+                        "Another test or issue-worker run currently owns this checkout".into(),
+                    );
+                }
+            }
+            Err(error) => return Err(format!("Could not acquire checkout test-run lock: {error}")),
+        };
+        writeln!(lock, "{}\n{}", std::process::id(), commit)
+            .map_err(|error| format!("Could not write checkout test-run lock: {error}"))?;
+        Ok(Self {
+            commit,
+            branch,
+            lock_path,
+            _lock: lock,
+        })
+    }
+
+    fn verify(&self, workspace: &Path) -> Result<(), String> {
+        let commit = git_value(workspace, &["rev-parse", "--verify", "HEAD"])?;
+        let branch = git_value(workspace, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .unwrap_or_else(|_| "(detached)".into());
+        if commit != self.commit || branch != self.branch {
+            return Err(format!(
+                "Blocked because the checkout changed during the run (expected {} at {}, found {} at {})",
+                self.branch, self.commit, branch, commit
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for CheckoutGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
+fn git_value(workspace: &Path, arguments: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(workspace)
+        .output()
+        .map_err(|error| format!("Could not inspect the test checkout: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not inspect the test checkout: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn stale_checkout_lock(path: &Path) -> bool {
+    let pid = fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| raw.lines().next()?.parse::<i32>().ok());
+    let Some(pid) = pid else { return true };
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid, 0) != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 fn run_suite(
@@ -1589,6 +2002,7 @@ fn run_suite(
     suite: &TestSuiteDefinition,
     selected_device: &str,
     ai_data_dir: Option<&Path>,
+    checkout: &CheckoutGuard,
 ) -> Result<CommandOutcome, String> {
     fs::create_dir_all(run_dir).map_err(|error| error.to_string())?;
     let log_path = run_dir.join(format!("{}.log", suite.id));
@@ -1596,11 +2010,11 @@ fn run_suite(
     let stderr = stdout.try_clone().map_err(|error| error.to_string())?;
     let started = Instant::now();
     let mut command = Command::new(&suite.command[0]);
+    let arguments = suite_arguments(suite, selected_device);
     command
-        .args(&suite.command[1..])
+        .args(&arguments)
         .current_dir(workspace)
         .env("PATH", tools::enhanced_path())
-        .env("SWARM_FIRE_TV_SERIAL", selected_device)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
@@ -1611,12 +2025,13 @@ fn run_suite(
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+        set_safe_nofile_limit(&mut command);
     }
     let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start suite '{}': {error}", suite.name))?;
     let deadline = Instant::now() + Duration::from_secs(suite.timeout_seconds);
-    let (exit_code, detail) = loop {
+    let (exit_code, detail, blocked) = loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
             break (
                 status.code(),
@@ -1626,6 +2041,7 @@ fn run_suite(
                         .code()
                         .map_or_else(|| "signal".into(), |code| code.to_string())
                 ),
+                false,
             );
         }
         if Instant::now() >= deadline {
@@ -1639,15 +2055,26 @@ fn run_suite(
             break (
                 None,
                 format!("Timed out after {} seconds", suite.timeout_seconds),
+                false,
             );
+        }
+        if let Err(error) = checkout.verify(workspace) {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            #[cfg(not(unix))]
+            let _ = child.kill();
+            let _ = child.wait();
+            break (None, error, true);
         }
         thread::sleep(Duration::from_millis(100));
     };
     let mut output = String::new();
     if let Ok(mut file) = File::open(&log_path) {
         let _ = file.read_to_string(&mut output);
-        if output.len() > 64 * 1024 {
-            let mut start = output.len() - 64 * 1024;
+        if output.len() > OUTPUT_PREVIEW_BYTES {
+            let mut start = output.len() - OUTPUT_PREVIEW_BYTES;
             while !output.is_char_boundary(start) {
                 start += 1;
             }
@@ -1659,7 +2086,40 @@ fn run_suite(
         duration_ms: started.elapsed().as_millis() as u64,
         detail,
         output,
+        log_path: log_path.to_string_lossy().into_owned(),
+        blocked,
     })
+}
+
+fn suite_arguments(suite: &TestSuiteDefinition, selected_device: &str) -> Vec<String> {
+    let mut arguments = suite.command[1..].to_vec();
+    if !selected_device.is_empty() {
+        for device in &suite.requirements.devices {
+            arguments.extend([device.argument.clone(), selected_device.to_string()]);
+        }
+    }
+    arguments
+}
+
+#[cfg(unix)]
+fn set_safe_nofile_limit(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(|| {
+            let mut limits: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let desired = (CHILD_NOFILE_LIMIT as libc::rlim_t).min(limits.rlim_max);
+            if limits.rlim_cur < desired {
+                limits.rlim_cur = desired;
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &limits) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
 }
 
 fn run_auxiliary_command(
@@ -1679,6 +2139,7 @@ fn run_auxiliary_command(
     {
         use std::os::unix::process::CommandExt;
         process.process_group(0);
+        set_safe_nofile_limit(&mut process);
     }
     let Ok(mut child) = process.spawn() else {
         return false;
@@ -1808,7 +2269,31 @@ fn seconds_until_hour(hour: u8) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
     use tempfile::tempdir;
+
+    fn commit_test_workspace(workspace: &Path) -> String {
+        let run = |arguments: &[&str]| {
+            let output = Command::new("git")
+                .args(arguments)
+                .current_dir(workspace)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {:?}: {}",
+                arguments,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "tests@example.invalid"]);
+        run(&["config", "user.name", "SWARM Tests"]);
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "test fixture"]);
+        run(&["rev-parse", "HEAD"])
+    }
 
     #[test]
     fn detects_conventional_manifests_and_classifies_hardware_scripts() {
@@ -1849,6 +2334,32 @@ mod tests {
         assert!(tv.disruptive);
         assert_eq!(tv.requirements.devices[0].device_type, "fireTv");
         assert!(tv.requirements.executables.contains(&"adb".to_string()));
+    }
+
+    #[test]
+    fn repository_test_contract_is_tracked_and_atomic() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let definition = load_definition(workspace).unwrap();
+        let ids = definition
+            .suites
+            .iter()
+            .map(|suite| suite.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), definition.suites.len());
+        assert!(definition
+            .suites
+            .iter()
+            .any(|suite| { suite.command == ["cargo", "test", "--locked"] }));
+        assert!(definition.suites.iter().all(|suite| {
+            !suite.command.iter().any(|argument| {
+                argument.contains("full_uat_suite") || argument.contains("media_server_uat_tests")
+            })
+        }));
+        assert!(git_value(
+            workspace,
+            &["ls-files", "--error-unmatch", TEST_DEFINITION_PATH]
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1926,6 +2437,203 @@ mod tests {
     }
 
     #[test]
+    fn selected_device_is_bound_as_exact_device_arguments() {
+        let suite = TestSuiteDefinition {
+            id: "tv".into(),
+            name: "TV".into(),
+            command: vec!["suite.sh".into(), "--no-issue".into()],
+            timeout_seconds: 10,
+            disruptive: false,
+            enabled: true,
+            requirements: Requirements {
+                devices: vec![DeviceRequirement {
+                    device_type: "fireTv".into(),
+                    input: "fireTvSerial".into(),
+                    argument: "--device".into(),
+                }],
+                ..Requirements::default()
+            },
+        };
+        assert_eq!(
+            suite_arguments(&suite, "192.0.2.44:5555"),
+            ["--no-issue", "--device", "192.0.2.44:5555"]
+        );
+    }
+
+    #[test]
+    fn invalid_android_sdk_blocks_before_execution() {
+        let workspace = tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join(".swarm")).unwrap();
+        fs::create_dir_all(workspace.path().join("clients/tv-android")).unwrap();
+        fs::write(
+            workspace.path().join("clients/tv-android/local.properties"),
+            "sdk.dir=/definitely/not/an/android/sdk\n",
+        )
+        .unwrap();
+        fs::write(
+            definition_path(workspace.path()),
+            r#"{"version":1,"suites":[{"id":"android","name":"Android","command":["/usr/bin/true"],"requirements":{"androidSdk":{"project":"clients/tv-android"}}}]}"#,
+        )
+        .unwrap();
+        let plan = build_plan(
+            workspace.path(),
+            &workspace.path().join("run"),
+            &HashMap::new(),
+            false,
+        );
+        assert_eq!(plan.suites[0].result.state, "Blocked");
+        assert!(plan.suites[0]
+            .requirements
+            .iter()
+            .any(|requirement| requirement.kind == "androidSdk" && requirement.state == "missing"));
+    }
+
+    #[test]
+    fn http_server_requirement_checks_the_health_path_and_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 256];
+            let count = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /health "));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        });
+        let requirement = ServerRequirement {
+            name: "Media server".into(),
+            host: String::new(),
+            port: 0,
+            url: format!("http://127.0.0.1:{port}/health"),
+            timeout_seconds: 1,
+        };
+        let (ready, detail) = server_ready(&requirement);
+        server.join().unwrap();
+        assert!(ready);
+        assert!(detail.contains("HTTP 200"));
+    }
+
+    #[test]
+    fn blocked_preconditions_do_not_return_a_test_failure() {
+        let workspace = tempdir().unwrap();
+        let run_dir = tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".swarm")).unwrap();
+        fs::write(
+            definition_path(workspace.path()),
+            r#"{"version":1,"suites":[{"id":"blocked","name":"Blocked","command":["/usr/bin/false"],"requirements":{"paths":[{"name":"library","path":"missing/library.sqlite","kind":"file"}]}}]}"#,
+        )
+        .unwrap();
+        commit_test_workspace(workspace.path());
+        assert_eq!(
+            run_once(
+                workspace.path(),
+                run_dir.path(),
+                "owner/repo",
+                &HashMap::new(),
+                false,
+                false,
+                "manual",
+                &ai_disabled(),
+            )
+            .unwrap(),
+            0
+        );
+        let results = read_results(&run_dir.path().join("test-results.json")).unwrap();
+        assert_eq!(results.suites[0].state, "Blocked");
+        assert!(results.suites[0].blocked);
+    }
+
+    #[test]
+    fn runner_detects_a_checkout_commit_change_and_blocks_the_suite() {
+        let workspace = tempdir().unwrap();
+        let run_dir = tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".swarm")).unwrap();
+        fs::write(
+            definition_path(workspace.path()),
+            r#"{"version":1,"suites":[{"id":"moves-head","name":"Moves HEAD","command":["/bin/sh","-c","git switch -q --detach HEAD~1; sleep 1"]}]}"#,
+        )
+        .unwrap();
+        commit_test_workspace(workspace.path());
+        fs::write(workspace.path().join("second"), "second").unwrap();
+        let run = |arguments: &[&str]| {
+            assert!(Command::new("git")
+                .args(arguments)
+                .current_dir(workspace.path())
+                .status()
+                .unwrap()
+                .success());
+        };
+        run(&["add", "second"]);
+        run(&["commit", "-q", "-m", "second"]);
+        assert_eq!(
+            run_once(
+                workspace.path(),
+                run_dir.path(),
+                "owner/repo",
+                &HashMap::new(),
+                false,
+                false,
+                "manual",
+                &ai_disabled(),
+            )
+            .unwrap(),
+            0
+        );
+        let results = read_results(&run_dir.path().join("test-results.json")).unwrap();
+        assert_eq!(results.suites[0].state, "Blocked");
+        assert!(results.suites[0].detail.contains("checkout changed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_suite_gets_a_safe_nofile_limit_and_bounded_output_preview() {
+        let workspace = tempdir().unwrap();
+        let run_dir = tempdir().unwrap();
+        fs::create_dir(workspace.path().join(".swarm")).unwrap();
+        fs::write(
+            definition_path(workspace.path()),
+            r#"{"version":1,"suites":[{"id":"probe","name":"Probe","command":["/usr/bin/true"]}]}"#,
+        )
+        .unwrap();
+        commit_test_workspace(workspace.path());
+        let checkout = CheckoutGuard::acquire(workspace.path()).unwrap();
+        let suite = TestSuiteDefinition {
+            id: "probe".into(),
+            name: "Probe".into(),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "ulimit -n; yes x | head -c 20000".into(),
+            ],
+            timeout_seconds: 5,
+            disruptive: false,
+            enabled: true,
+            requirements: Requirements::default(),
+        };
+        let outcome = run_suite(
+            workspace.path(),
+            run_dir.path(),
+            &suite,
+            "",
+            None,
+            &checkout,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.output.len() <= OUTPUT_PREVIEW_BYTES);
+        let full = fs::read(run_dir.path().join("probe.log")).unwrap();
+        assert!(full.len() > OUTPUT_PREVIEW_BYTES);
+        let limit = String::from_utf8_lossy(&full)
+            .lines()
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(limit >= 4096);
+    }
+
+    #[test]
     fn unrelated_ready_suite_is_not_blocked_by_missing_hardware() {
         let workspace = tempdir().unwrap();
         fs::create_dir(workspace.path().join(".swarm")).unwrap();
@@ -1941,7 +2649,7 @@ mod tests {
             false,
         );
         assert_eq!(plan.suites[0].result.state, "Ready");
-        assert_eq!(plan.suites[1].result.state, "Skipped");
+        assert_eq!(plan.suites[1].result.state, "Blocked");
         assert!(plan.suites[1].result.blocked);
     }
 
@@ -1954,6 +2662,7 @@ mod tests {
             r#"{"version":1,"suites":[{"id":"bad","name":"Bad","command":["/usr/bin/false"],"timeoutSeconds":2},{"id":"good","name":"Good","command":["/usr/bin/true"],"timeoutSeconds":2}]}"#,
         )
         .unwrap();
+        let tested_commit = commit_test_workspace(workspace.path());
         let run_dir = workspace.path().join("run");
         assert_eq!(
             run_once(
@@ -1972,6 +2681,7 @@ mod tests {
         let results = read_results(&run_dir.join("test-results.json")).unwrap();
         assert_eq!(results.suites[0].state, "Failed");
         assert_eq!(results.suites[1].state, "Passed");
+        assert_eq!(results.tested_commit, tested_commit);
         let history = list_runs(&run_dir);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].trigger, "manual");
@@ -2011,6 +2721,7 @@ mod tests {
             serde_json::to_vec(&definition).unwrap(),
         )
         .unwrap();
+        commit_test_workspace(workspace.path());
         assert_eq!(
             run_once(
                 workspace.path(),
@@ -2097,6 +2808,7 @@ mod tests {
                 "requirements":{"aiTestData":[{"name":"sample","prompt":"a sample"}]}}]}"#,
         )
         .unwrap();
+        commit_test_workspace(workspace.path());
         let run_dir = workspace.path().join("run");
         run_once(
             workspace.path(),
@@ -2124,6 +2836,7 @@ mod tests {
                 "requirements":{"aiTestData":[{"name":"sample","prompt":"a sample"}]}}]}"#,
         )
         .unwrap();
+        commit_test_workspace(workspace.path());
         let script_dir = tempdir().unwrap();
         write_stub_ai_assist(script_dir.path(), StubAiAssist::CapacityUnavailable);
         let ai = ai_options_with_stub(script_dir.path(), "claude");
@@ -2158,6 +2871,7 @@ mod tests {
                 "requirements":{"aiTestData":[{"name":"sample","prompt":"a sample"}]}}]}"#,
         )
         .unwrap();
+        commit_test_workspace(workspace.path());
         let script_dir = tempdir().unwrap();
         // This run needs both `capacity` and `generate` answered distinctly,
         // unlike the canned single-answer stubs above.
