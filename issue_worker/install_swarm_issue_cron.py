@@ -63,6 +63,10 @@ def schedule_days(value: str) -> frozenset[int]:
 
 
 class Runner:
+    # A transient network/GitHub failure shouldn't cost a whole cycle.
+    FETCH_ATTEMPTS = 3
+    FETCH_RETRY_SECONDS = 3
+
     def __init__(self, args: argparse.Namespace, worker_arguments: Sequence[str]) -> None:
         self.args = args
         self.worker_arguments = list(worker_arguments)
@@ -257,44 +261,85 @@ class Runner:
         branch positioning and the base -> integration parity merge; here we
         only confirm the checkout is usable and refresh remote refs."""
         if not self.args.git_bin:
-            self.log("Git is unavailable; deferring the worker.")
-            return False
+            return self._defer(repo, "Git is unavailable; deferring the worker.")
         if self.git(repo, "rev-parse", "--is-inside-work-tree").returncode != 0:
-            self.log(
-                f"Worker repository is not a Git checkout: {repo['workspace_dir']}; deferring this run."
+            return self._defer(
+                repo, f"{repo['workspace_dir']} is not a Git checkout; deferring this run."
             )
-            return False
         if self.checkout_test_lock_active(repo):
-            self.log(
-                "The repository test scheduler owns this checkout; deferring issue work "
-                "until the recorded commit finishes testing."
+            return self._defer(
+                repo,
+                "the repository test scheduler owns this checkout; deferring issue work "
+                "until the recorded commit finishes testing.",
             )
-            return False
         if self.in_progress_file(repo).exists():
             # A saved issue owns the checkout — leave it exactly as it is; the
             # worker resumes it and does its own fetching.
             return True
         status_lines = self.git(repo, "status", "--porcelain").stdout.splitlines()
         if status_lines:
-            if any(not line.startswith("??") for line in status_lines):
-                self.log(
-                    "Repository has uncommitted tracked changes with no saved issue owner; "
-                    "deferring synchronization and AI."
+            tracked = [line for line in status_lines if not line.startswith("??")]
+            if tracked:
+                return self._defer(
+                    repo,
+                    f"{self._current_branch(repo)} has uncommitted changes to tracked files "
+                    f"({self._summarize_paths(tracked)}) and no saved issue owns them; "
+                    "deferring synchronization and AI (left untouched for manual review).",
                 )
-                return False
-            if not self._recover_harmless_untracked_checkout(repo):
-                self.log(
-                    "Repository has untracked files with no saved issue owner, and its checkout "
-                    "could not be confirmed safe to reposition automatically; deferring "
-                    "synchronization and AI for manual review."
+            blocker = self._recover_harmless_untracked_checkout(repo)
+            if blocker is not None:
+                reason, transient = blocker
+                outcome = "will retry next cycle" if transient else "left untouched for manual review"
+                return self._defer(
+                    repo,
+                    f"{reason}; untracked files ({self._summarize_paths(status_lines)}) have no "
+                    f"saved issue owner; deferring synchronization and AI ({outcome}).",
                 )
-                return False
-        fetched = self.git(repo, "fetch", "--prune", str(repo["remote_name"]))
+        fetched = self._fetch_with_retry(repo)
         if fetched.returncode != 0:
-            detail = fetched.stderr.strip() or fetched.stdout.strip() or "git fetch failed"
-            self.log(f"Could not fetch {repo['remote_name']}: {detail}; deferring this run.")
-            return False
+            return self._defer(
+                repo,
+                f"Could not fetch {repo['remote_name']}: "
+                f"{self._git_detail(fetched, 'git fetch failed')}; deferring this run.",
+            )
         return True
+
+    def _defer(self, repo: dict[str, object], reason: str) -> bool:
+        """Log why this repository is skipped for the cycle -- always naming the
+        repository, since parallel workers interleave their output -- and
+        return False for synchronize_repository to hand straight back."""
+        self.log(f"{repo['label']}: {reason}")
+        return False
+
+    def _current_branch(self, repo: dict[str, object]) -> str:
+        branch = self.git(repo, "branch", "--show-current").stdout.strip()
+        return f"'{branch}'" if branch else "detached HEAD"
+
+    @staticmethod
+    def _git_detail(result: subprocess.CompletedProcess[str], fallback: str) -> str:
+        """First line of git's own explanation, trimmed to keep log lines short."""
+        text = result.stderr.strip() or result.stdout.strip() or fallback
+        return text.splitlines()[0][:160]
+
+    @staticmethod
+    def _summarize_paths(status_lines: Sequence[str], limit: int = 3) -> str:
+        paths = [line[3:] for line in status_lines]
+        shown = ", ".join(paths[:limit])
+        return f"{shown} +{len(paths) - limit} more" if len(paths) > limit else shown
+
+    def _fetch_with_retry(
+        self, repo: dict[str, object], *refs: str
+    ) -> subprocess.CompletedProcess[str]:
+        """`git fetch --prune <remote> [refs]`, retried a couple of times: a
+        dropped connection or a brief GitHub hiccup should not skip a cycle."""
+        arguments = ("fetch", "--prune", str(repo["remote_name"]), *refs)
+        result = self.git(repo, *arguments)
+        for _ in range(self.FETCH_ATTEMPTS - 1):
+            if result.returncode == 0 or self.stop_requested:
+                break
+            time.sleep(self.FETCH_RETRY_SECONDS)
+            result = self.git(repo, *arguments)
+        return result
 
     def checkout_test_lock_active(self, repo: dict[str, object]) -> bool:
         common_dir = self.git(repo, "rev-parse", "--git-common-dir").stdout.strip()
@@ -317,44 +362,85 @@ class Runner:
             return True
         return True
 
-    def _recover_harmless_untracked_checkout(self, repo: dict[str, object]) -> bool:
+    def _recover_harmless_untracked_checkout(
+        self, repo: dict[str, object]
+    ) -> tuple[str, bool] | None:
         """Called only once every line of `git status --porcelain` is an
         untracked (`??`) entry -- no staged or modified tracked file is
-        present, so nothing tracked can be lost. The checkout can still be
-        sitting on whatever branch an interrupted work-round left it on
-        (see issue-branch-delivery.md for one way that happens), which is
-        what actually blocks every future cycle here, not the untracked
-        files themselves.
+        present, so nothing tracked can be lost. Returns None when the
+        checkout is fine to carry on with, otherwise `(reason, transient)`:
+        a one-line explanation for the log, and whether it should clear up
+        by itself on a later cycle rather than needing a human.
+
+        Untracked files alone never change whether the worker can proceed
+        (a clean checkout takes the same path), so a checkout already on
+        the integration branch needs nothing here. What can block every
+        future cycle is the checkout sitting on whatever branch an
+        interrupted work-round left it on (see issue-branch-delivery.md for
+        one way that happens).
 
         Repositioning onto the integration branch is only safe once that's
-        *proven*, not assumed: fetch it fresh, and require the current
-        commit's tree to already be byte-identical to the remote
-        integration branch's tree (a pure two-commit `git diff`, which
-        never looks at the working directory, so the untracked files can't
-        skew it). Any real difference -- a genuinely unmerged commit sitting
-        here, a fetch failure -- leaves this repository deferred for a
-        human to look at, exactly as before.
+        *proven*, not assumed: fetch it fresh, then require that the current
+        commit is either already reachable from the remote integration
+        branch (everything on it has been merged) or has a tree byte-
+        identical to it (a squash/rebase merge). Both are pure commit-to-
+        commit checks that never look at the working directory, so the
+        untracked files can't skew them. Any real difference -- a genuinely
+        unmerged commit sitting here -- leaves this repository deferred for
+        a human to look at, exactly as before.
         """
-        remote_name = str(repo["remote_name"])
+        label = str(repo["label"])
         integration_branch = str(repo["integration_branch"])
-        fetched = self.git(repo, "fetch", "--prune", remote_name, integration_branch)
+        integration_ref = f"{repo['remote_name']}/{integration_branch}"
+        current = self._current_branch(repo)
+        if current == f"'{integration_branch}'":
+            return None
+        fetched = self._fetch_with_retry(repo, integration_branch)
         if fetched.returncode != 0:
-            return False
-        integration_ref = f"{remote_name}/{integration_branch}"
-        identical = self.git(repo, "diff", "--quiet", "HEAD", integration_ref)
-        if identical.returncode != 0:
-            return False
-        switched = self.git(repo, "switch", integration_branch)
-        if switched.returncode != 0:
-            switched = self.git(repo, "switch", "-c", integration_branch, integration_ref)
-        if switched.returncode != 0:
-            return False
-        self.log(
-            "Repository had only untracked scratch files with no saved issue owner, and its "
-            f"checkout already matched {integration_ref} -- repositioned onto {integration_branch} "
-            "and continuing automatically."
+            return (
+                f"could not fetch {integration_ref} ({self._git_detail(fetched, 'git fetch failed')})",
+                True,
+            )
+        # `merge-base --is-ancestor` and `diff --quiet` both exit 1 for the
+        # "no" answer and >1 for a genuine error, which must not read as "no".
+        contained = self.git(repo, "merge-base", "--is-ancestor", "HEAD", integration_ref)
+        if contained.returncode == 1:
+            identical = self.git(repo, "diff", "--quiet", "HEAD", integration_ref)
+            if identical.returncode == 1:
+                count = self.git(repo, "rev-list", "--count", f"{integration_ref}..HEAD")
+                latest = self.git(repo, "log", "-1", "--format=%h %s")
+                return (
+                    f"{current} has {count.stdout.strip() or 'some'} commit(s) not in "
+                    f"{integration_ref} (latest {latest.stdout.strip()[:80]})",
+                    False,
+                )
+            contained = identical
+        if contained.returncode != 0:
+            return (
+                f"could not compare {current} with {integration_ref} "
+                f"({self._git_detail(contained, 'git comparison failed')})",
+                False,
+            )
+        local_exists = self.git(
+            repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{integration_branch}"
+        ).returncode == 0
+        switched = (
+            self.git(repo, "switch", integration_branch)
+            if local_exists
+            else self.git(repo, "switch", "-c", integration_branch, integration_ref)
         )
-        return True
+        if switched.returncode != 0:
+            return (
+                f"could not switch {current} to {integration_branch} "
+                f"({self._git_detail(switched, 'git switch failed')})",
+                # A leftover .lock file from a concurrent git process clears itself.
+                ".lock" in switched.stderr,
+            )
+        self.log(
+            f"{label}: untracked-only checkout on {current} was already contained in "
+            f"{integration_ref}; repositioned onto {integration_branch} and continuing automatically."
+        )
+        return None
 
     def run_worker(self, repo: dict[str, object], prefix: str = "") -> int:
         # Each repo gets its own snapshot so parallel workers never race on a

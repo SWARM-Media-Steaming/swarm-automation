@@ -2030,6 +2030,150 @@ class RunnerTestCase(unittest.TestCase):
             self.assertTrue((repo / "unmerged.txt").is_file())
 
     @staticmethod
+    def _git(repo: Path, *arguments: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *arguments], text=True, stdout=subprocess.PIPE, check=True
+        ).stdout.strip()
+
+    def _recovery_runner(self, root: Path) -> tuple[runner_module.Runner, Path, Path, list[str]]:
+        """A checkout on `main` with a pushed `ai-main`, plus a runner whose
+        log lines are captured (and whose fetch retries don't sleep)."""
+        repo = root / "repo"
+        remote = root / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        for name, value in (("user.name", "runner test"), ("user.email", "runner@example.invalid")):
+            self._git(repo, "config", name, value)
+        self._git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+        self._git(repo, "remote", "add", "origin", str(remote))
+        self._git(repo, "push", "-q", "-u", "origin", "main")
+        self._git(repo, "branch", "ai-main", "main")
+        self._git(repo, "push", "-q", "origin", "ai-main")
+        args = runner_module.build_parser().parse_args(
+            ["--repo-dir", str(repo), "--state-dir", str(root / "state")]
+        )
+        runner = runner_module.Runner(args, [])
+        runner.repos[0]["label"] = "acme/widgets"
+        logged: list[str] = []
+        patches = (
+            mock.patch.object(runner, "log", side_effect=logged.append),
+            mock.patch.object(runner_module.time, "sleep"),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return runner, repo, remote, logged
+
+    def test_scheduler_repositions_a_stale_branch_whose_commits_are_already_merged(self) -> None:
+        """The leftover issue branch's commit was merged into ai-main and
+        ai-main has since moved on, so the trees differ -- but every commit
+        on the branch is reachable from the remote integration branch, so
+        nothing can be lost by leaving it."""
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-ancestor-test.") as temporary:
+            runner, repo, _remote, logged = self._recovery_runner(Path(temporary))
+            self._git(repo, "switch", "-q", "-c", "ai/claude/issue-7")
+            (repo / "feature.txt").write_text("done\n", encoding="utf-8")
+            self._git(repo, "add", "feature.txt")
+            self._git(repo, "commit", "-q", "-m", "feature")
+            self._git(repo, "switch", "-q", "ai-main")
+            self._git(repo, "merge", "-q", "--no-ff", "-m", "merge feature", "ai/claude/issue-7")
+            (repo / "later.txt").write_text("later\n", encoding="utf-8")
+            self._git(repo, "add", "later.txt")
+            self._git(repo, "commit", "-q", "-m", "later work")
+            self._git(repo, "push", "-q", "origin", "ai-main")
+            self._git(repo, "switch", "-q", "ai/claude/issue-7")
+            (repo / "scratch.json").write_text("{}\n", encoding="utf-8")
+
+            self.assertTrue(runner.synchronize_repository(runner.repos[0]))
+            self.assertEqual(self._git(repo, "branch", "--show-current"), "ai-main")
+            self.assertTrue((repo / "scratch.json").is_file())
+            self.assertTrue(any(
+                line.startswith("acme/widgets: ") and "already contained in origin/ai-main" in line
+                for line in logged
+            ), logged)
+
+    def test_scheduler_names_repo_branch_and_unmerged_commits_when_it_defers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-explain-test.") as temporary:
+            runner, repo, _remote, logged = self._recovery_runner(Path(temporary))
+            self._git(repo, "switch", "-q", "-c", "ai/claude/issue-999")
+            (repo / "unmerged.txt").write_text("unique work\n", encoding="utf-8")
+            self._git(repo, "add", "unmerged.txt")
+            self._git(repo, "commit", "-q", "-m", "unmerged work")
+            (repo / "scratch.json").write_text("{}\n", encoding="utf-8")
+
+            self.assertFalse(runner.synchronize_repository(runner.repos[0]))
+            self.assertEqual(len(logged), 1, logged)
+            message = logged[0]
+            self.assertTrue(message.startswith("acme/widgets: "), message)
+            self.assertIn("'ai/claude/issue-999' has 1 commit(s) not in origin/ai-main", message)
+            self.assertIn("unmerged work", message)
+            self.assertIn("untracked files (scratch.json)", message)
+            self.assertIn("manual review", message)
+            # The UI's activity feed classifies deferrals by this phrase.
+            self.assertRegex(message, r"; deferring synchronization")
+
+    def test_scheduler_retries_a_flaky_fetch_before_deferring_the_recovery(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-fetch-retry-test.") as temporary:
+            runner, repo, remote, logged = self._recovery_runner(Path(temporary))
+            self._git(repo, "switch", "-q", "-c", "ai/claude/issue-5")
+            (repo / "scratch.json").write_text("{}\n", encoding="utf-8")
+            real_git = runner.git
+            failures = {"left": 2}
+
+            def flaky(target, *arguments):
+                if arguments[:1] == ("fetch",) and failures["left"]:
+                    failures["left"] -= 1
+                    return subprocess.CompletedProcess(arguments, 128, "", "fatal: unable to access remote\n")
+                return real_git(target, *arguments)
+
+            with mock.patch.object(runner, "git", side_effect=flaky):
+                self.assertTrue(runner.synchronize_repository(runner.repos[0]))
+            self.assertEqual(failures["left"], 0)
+            self.assertEqual(self._git(repo, "branch", "--show-current"), "ai-main")
+
+    def test_scheduler_reports_a_persistent_fetch_failure_as_transient(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-fetch-down-test.") as temporary:
+            runner, repo, remote, logged = self._recovery_runner(Path(temporary))
+            self._git(repo, "switch", "-q", "-c", "ai/claude/issue-5")
+            (repo / "scratch.json").write_text("{}\n", encoding="utf-8")
+            self._git(repo, "remote", "set-url", "origin", str(remote.parent / "gone.git"))
+
+            self.assertFalse(runner.synchronize_repository(runner.repos[0]))
+            self.assertEqual(self._git(repo, "branch", "--show-current"), "ai/claude/issue-5")
+            message = logged[-1]
+            self.assertTrue(message.startswith("acme/widgets: could not fetch origin/ai-main ("), message)
+            self.assertIn("will retry next cycle", message)
+            # The UI's activity feed classifies this as "could not reach GitHub".
+            self.assertRegex(message, r"(?i)could not fetch .*; deferring")
+
+    def test_scheduler_skips_recovery_when_already_on_the_integration_branch(self) -> None:
+        """Untracked files on `ai-main` itself need no repositioning, so the
+        recovery must not fetch (a failure there used to defer the repo for
+        manual review) or log a no-op 'repositioned' line every cycle."""
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-on-integration-test.") as temporary:
+            runner, repo, _remote, logged = self._recovery_runner(Path(temporary))
+            self._git(repo, "switch", "-q", "ai-main")
+            (repo / ".swarm").mkdir()
+            (repo / ".swarm" / "tests.json").write_text("{}\n", encoding="utf-8")
+
+            self.assertTrue(runner.synchronize_repository(runner.repos[0]))
+            self.assertEqual(logged, [])
+
+    def test_scheduler_names_repo_and_files_when_tracked_changes_defer_it(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-tracked-test.") as temporary:
+            runner, repo, _remote, logged = self._recovery_runner(Path(temporary))
+            (repo / "notes.txt").write_text("v1\n", encoding="utf-8")
+            self._git(repo, "add", "notes.txt")
+            self._git(repo, "commit", "-q", "-m", "notes")
+            (repo / "notes.txt").write_text("v2\n", encoding="utf-8")
+
+            self.assertFalse(runner.synchronize_repository(runner.repos[0]))
+            message = logged[-1]
+            self.assertTrue(message.startswith("acme/widgets: 'main' has uncommitted changes"), message)
+            self.assertIn("notes.txt", message)
+            self.assertRegex(message, r"; deferring synchronization")
+
+    @staticmethod
     def _repos_file(root: Path, labels: tuple[str, ...]) -> Path:
         entries = []
         for label in labels:

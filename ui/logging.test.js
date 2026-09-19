@@ -37,6 +37,21 @@ test("keeps errors, marks them red-ready, and removes the redundant prefix", () 
   assert.equal(actionableLogEntry(line("Could not fetch origin; deferring this run.")).level, "error");
 });
 
+test("surfaces a repository deferred for manual review, naming the repository", () => {
+  const unmerged = actionableLogEntry(line(
+    "acme/widgets: 'ai/claude/issue-9' has 2 commit(s) not in origin/ai-main (latest 1a2b3c4 Fix x); "
+    + "untracked files (.swarm/) have no saved issue owner; deferring synchronization and AI (left untouched for manual review).",
+  ));
+  assert.equal(unmerged.level, "error");
+  assert.match(unmerged.message, /^acme\/widgets: /);
+
+  const tracked = actionableLogEntry(line(
+    "acme/widgets: 'main' has uncommitted changes to tracked files (notes.txt) and no saved issue owns them; "
+    + "deferring synchronization and AI (left untouched for manual review).",
+  ));
+  assert.equal(tracked.level, "error");
+});
+
 test("shows queued work waiting for provider usage as an actionable pause", () => {
   const entry = actionableLogEntry(line(
     "No enabled provider (Claude, Codex) has at least 20% remaining in every active quota window; stopping.",
