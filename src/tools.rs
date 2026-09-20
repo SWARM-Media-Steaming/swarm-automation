@@ -5,6 +5,15 @@ use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    pub value: String,
+    pub label: String,
+    pub efforts: Vec<String>,
+    pub default_effort: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolInfo {
     pub id: String,
     pub label: String,
@@ -15,6 +24,9 @@ pub struct ToolInfo {
     pub authenticated: Option<bool>,
     pub status: String,
     pub installable: bool,
+    /// Models and reasoning levels reported by this installed provider CLI.
+    /// An empty list means the CLI is missing or does not expose a catalog.
+    pub models: Vec<ModelInfo>,
 }
 
 pub fn enhanced_path() -> String {
@@ -137,6 +149,158 @@ fn basic_tool(id: &str, label: &str, name: &str, required: bool, configured: &st
         }
         .into(),
         installable: false,
+        models: Vec::new(),
+    }
+}
+
+fn display_model_name(value: &str) -> String {
+    value
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.to_ascii_lowercase().as_str() {
+            "gpt" => "GPT".into(),
+            "claude" => "Claude".into(),
+            "grok" => "Grok".into(),
+            _ if part
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.') =>
+            {
+                part.into()
+            }
+            _ => {
+                let mut characters = part.chars();
+                characters
+                    .next()
+                    .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+                    .unwrap_or_default()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn values_in_parentheses(text: &str, option: &str) -> Vec<String> {
+    let Some(start) = text.find(option) else {
+        return Vec::new();
+    };
+    let excerpt = &text[start..text.len().min(start + 500)];
+    let Some(open) = excerpt.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = excerpt[open + 1..].find(')') else {
+        return Vec::new();
+    };
+    excerpt[open + 1..open + 1 + close]
+        .split(',')
+        .map(|value| value.trim().trim_matches(['\'', '"']))
+        .filter(|value| {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_claude_models(help: &str) -> Vec<ModelInfo> {
+    let efforts = values_in_parentheses(help, "--effort <level>");
+    let Some(start) = help.find("--model <model>") else {
+        return Vec::new();
+    };
+    let excerpt = &help[start..help.len().min(start + 700)];
+    let quoted = regex::Regex::new(r"'([a-z][a-z0-9._-]+)'").expect("valid model regex");
+    let mut values = Vec::new();
+    for capture in quoted.captures_iter(excerpt) {
+        let value = capture[1].to_string();
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    // Claude's aliases (sonnet, opus, etc.) track the latest model and are
+    // therefore preferable to the single full-name example in --help.
+    let aliases: Vec<_> = values
+        .iter()
+        .filter(|value| !value.starts_with("claude-"))
+        .cloned()
+        .collect();
+    let selected = if aliases.is_empty() { values } else { aliases };
+    selected
+        .into_iter()
+        .map(|value| ModelInfo {
+            label: format!("Claude {} (latest)", display_model_name(&value)),
+            value,
+            efforts: efforts.clone(),
+            default_effort: String::new(),
+        })
+        .collect()
+}
+
+fn parse_codex_models(output: &str) -> Vec<ModelInfo> {
+    let Ok(catalog) = serde_json::from_str::<serde_json::Value>(output) else {
+        return Vec::new();
+    };
+    catalog["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|model| model["visibility"].as_str().unwrap_or("list") == "list")
+        .filter_map(|model| {
+            let value = model["slug"].as_str()?.to_string();
+            let efforts = model["supported_reasoning_levels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|level| level["effort"].as_str().map(str::to_string))
+                .collect();
+            Some(ModelInfo {
+                label: model["display_name"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| display_model_name(&value)),
+                value,
+                efforts,
+                default_effort: model["default_reasoning_level"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_grok_models(output: &str) -> Vec<ModelInfo> {
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").expect("valid ANSI regex");
+    let clean = ansi.replace_all(output, "");
+    let model = regex::Regex::new(r"(?m)^\s*\*\s+([^\s(]+)").expect("valid model regex");
+    model
+        .captures_iter(&clean)
+        .map(|capture| capture[1].to_string())
+        .map(|value| ModelInfo {
+            label: display_model_name(&value),
+            value,
+            // Grok currently accepts an effort flag but its model catalog and
+            // help do not enumerate supported values.
+            efforts: Vec::new(),
+            default_effort: String::new(),
+        })
+        .collect()
+}
+
+fn provider_models(id: &str, program: &Path) -> Vec<ModelInfo> {
+    let (_, output) = match id {
+        "claude" => command_output(program, &["--help"]),
+        // The bundled catalog is updated with the CLI and avoids a network
+        // refresh during the UI's periodic tool detection.
+        "codex" => command_output(program, &["debug", "models", "--bundled"]),
+        "grok" => command_output(program, &["models"]),
+        _ => return Vec::new(),
+    };
+    match id {
+        "claude" => parse_claude_models(&output),
+        "codex" => parse_codex_models(&output),
+        "grok" => parse_grok_models(&output),
+        _ => Vec::new(),
     }
 }
 
@@ -165,6 +329,9 @@ pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
     }
     let npm_available = tools.iter().any(|tool| tool.id == "npm" && tool.installed);
     for tool in &mut tools {
+        if crate::config::KNOWN_PROVIDERS.contains(&tool.id.as_str()) && tool.installed {
+            tool.models = provider_models(&tool.id, Path::new(&tool.path));
+        }
         match tool.id.as_str() {
             "gh" if tool.installed => {
                 let (ready, _) = command_output(
@@ -259,4 +426,51 @@ pub fn install_spec(provider: &str) -> Result<(PathBuf, Vec<String>), String> {
         _ => return Err("Only Claude Code and Codex CLI install via npm.".into()),
     };
     Ok((npm, vec!["install".into(), "-g".into(), package.into()]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_codex_catalog_model_specific_efforts() {
+        let models = parse_codex_models(
+            r#"{"models":[{"slug":"gpt-next","display_name":"GPT Next","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"}],"visibility":"list"},{"slug":"hidden","visibility":"hide"}]}"#,
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].value, "gpt-next");
+        assert_eq!(models[0].efforts, ["low", "medium"]);
+        assert_eq!(models[0].default_effort, "medium");
+    }
+
+    #[test]
+    fn parses_claude_help_aliases_and_efforts() {
+        let models = parse_claude_models(
+            "--effort <level> Effort (low, medium, high, xhigh, max)\n\
+             --model <model> Provide an alias (e.g. 'opus', 'sonnet') or full name (e.g. 'claude-opus-6').\n\
+             --next-option <value>",
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.value.as_str())
+                .collect::<Vec<_>>(),
+            ["opus", "sonnet"]
+        );
+        assert_eq!(models[0].efforts, ["low", "medium", "high", "xhigh", "max"]);
+    }
+
+    #[test]
+    fn parses_grok_model_list_without_authentication() {
+        let models = parse_grok_models(
+            "You are not authenticated.\n\nAvailable models:\n  * grok-4.6 (default)\n  * grok-next\n",
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.value.as_str())
+                .collect::<Vec<_>>(),
+            ["grok-4.6", "grok-next"]
+        );
+    }
 }

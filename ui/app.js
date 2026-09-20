@@ -49,28 +49,14 @@
   const PROVIDER_META = {
     claude: {
       label: "Claude", cli: "Claude Code", help: "provider-claude",
-      models: [
-        { value: "claude-sonnet-5", label: "Claude Sonnet 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "low" },
-        { value: "claude-opus-5", label: "Claude Opus 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
-        { value: "claude-fable-5", label: "Claude Fable 5", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
-      ],
       docs: "https://docs.anthropic.com/en/docs/claude-code/overview",
     },
     codex: {
       label: "Codex", cli: "Codex CLI", help: "provider-codex",
-      models: [
-        { value: "gpt-5.6-luna", label: "GPT-5.6 Luna", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "medium" },
-        { value: "gpt-5.6-sol", label: "GPT-5.6 Sol", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "high" },
-        { value: "gpt-5.6-terra", label: "GPT-5.6 Terra", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "medium" },
-        { value: "gpt-5.5", label: "GPT-5.5", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium" },
-      ],
       docs: "https://developers.openai.com/codex/cli/",
     },
     grok: {
       label: "Grok", cli: "Grok Build", help: "provider-grok",
-      models: [
-        { value: "grok-4.6", label: "Grok 4.6", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "low" },
-      ],
       docs: "https://docs.x.ai/build/overview",
     },
   };
@@ -398,7 +384,7 @@
   }
 
   function modelSpecs(providerId) {
-    return PROVIDER_META[providerId]?.models || [];
+    return state.tools.find((tool) => tool.id === providerId)?.models || [];
   }
 
   function defaultModel(providerId) {
@@ -407,21 +393,22 @@
 
   function selectedModelSpec(providerId, model) {
     const models = modelSpecs(providerId);
-    return models.find((entry) => entry.value === model) || models[0] || null;
+    return models.find((entry) => entry.value === model) || (!model ? models[0] : null) || null;
   }
 
   function effortOptions(providerId, model) {
-    return selectedModelSpec(providerId, model)?.efforts || ["high"];
+    return [...(selectedModelSpec(providerId, model)?.efforts || [])];
   }
 
   function defaultEffort(providerId, model) {
     const spec = selectedModelSpec(providerId, model);
-    const efforts = spec?.efforts || ["high"];
+    const efforts = spec?.efforts || [];
     return spec?.defaultEffort || (efforts.includes("high") ? "high" : efforts[0] || "high");
   }
 
   function populateEffortSelect(select, providerId, model, currentEffort) {
     const efforts = effortOptions(providerId, model);
+    if (!efforts.length) efforts.push(currentEffort || defaultEffort(providerId, model));
     select.replaceChildren();
     efforts.forEach((value) => {
       const option = document.createElement("option");
@@ -506,34 +493,47 @@
       modelReq.textContent = "*";
       modelReq.hidden = !provider.enabled;
       modelLabel.appendChild(modelReq);
-      const modelInput = document.createElement("select");
-      modelInput.className = "provider-model";
       const knownModels = modelSpecs(provider.id);
-      knownModels.forEach((entry) => {
-        const option = document.createElement("option");
-        option.value = entry.value;
-        option.textContent = entry.label;
-        modelInput.appendChild(option);
-      });
-      if (provider.model && !knownModels.some((entry) => entry.value === provider.model)) {
-        const option = document.createElement("option");
-        option.value = provider.model;
-        option.textContent = `Current unsupported: ${provider.model}`;
-        modelInput.appendChild(option);
+      const modelInput = document.createElement(knownModels.length ? "select" : "input");
+      modelInput.className = "provider-model";
+      if (knownModels.length) {
+        knownModels.forEach((entry) => {
+          const option = document.createElement("option");
+          option.value = entry.value;
+          option.textContent = entry.label;
+          modelInput.appendChild(option);
+        });
+        if (provider.model && !knownModels.some((entry) => entry.value === provider.model)) {
+          const option = document.createElement("option");
+          option.value = provider.model;
+          option.textContent = `${provider.model} (saved)`;
+          modelInput.appendChild(option);
+        }
+      } else {
+        modelInput.type = "text";
+        modelInput.title = "This CLI does not publish a model list; enter a model accepted by the CLI.";
       }
       modelInput.value = provider.model || defaultModel(provider.id);
       modelLabel.appendChild(modelInput);
       const effortLabel = document.createElement("label");
       effortLabel.textContent = "Effort ";
-      const effortSelect = document.createElement("select");
-      effortSelect.className = "provider-effort";
-      populateEffortSelect(effortSelect, provider.id, modelInput.value, provider.effort);
-      modelInput.addEventListener("change", () => {
-        populateEffortSelect(effortSelect, provider.id, modelInput.value, effortSelect.value);
-        setDirty();
-      });
-      effortSelect.addEventListener("change", setDirty);
-      effortLabel.appendChild(effortSelect);
+      const advertisedEfforts = effortOptions(provider.id, modelInput.value);
+      const effortInput = document.createElement(advertisedEfforts.length ? "select" : "input");
+      effortInput.className = "provider-effort";
+      if (advertisedEfforts.length) {
+        populateEffortSelect(effortInput, provider.id, modelInput.value, provider.effort);
+        modelInput.addEventListener("change", () => {
+          populateEffortSelect(effortInput, provider.id, modelInput.value, effortInput.value);
+          setDirty();
+        });
+      } else {
+        effortInput.type = "text";
+        effortInput.value = provider.effort || "high";
+        effortInput.title = "This CLI does not publish an effort list; enter a value accepted by the CLI.";
+        modelInput.addEventListener("change", setDirty);
+      }
+      effortInput.addEventListener("change", setDirty);
+      effortLabel.appendChild(effortInput);
       const preferredLabel = document.createElement("label");
       preferredLabel.className = "provider-choice";
       const preferredInput = document.createElement("input");
