@@ -24,9 +24,12 @@ pub struct ToolInfo {
     pub authenticated: Option<bool>,
     pub status: String,
     pub installable: bool,
-    /// Models and reasoning levels reported by this installed provider CLI.
-    /// An empty list means the CLI is missing or does not expose a catalog.
+    /// Models and reasoning levels for this provider; never empty for a known
+    /// provider so the UI can always offer a dropdown.
     pub models: Vec<ModelInfo>,
+    /// True when `models` was read from the installed CLI, false when it is the
+    /// built-in fallback used because the CLI is missing or exposes no catalog.
+    pub models_detected: bool,
 }
 
 pub fn enhanced_path() -> String {
@@ -150,6 +153,7 @@ fn basic_tool(id: &str, label: &str, name: &str, required: bool, configured: &st
         .into(),
         installable: false,
         models: Vec::new(),
+        models_detected: false,
     }
 }
 
@@ -179,39 +183,56 @@ fn display_model_name(value: &str) -> String {
         .join(" ")
 }
 
-fn values_in_parentheses(text: &str, option: &str) -> Vec<String> {
-    let Some(start) = text.find(option) else {
-        return Vec::new();
-    };
-    let excerpt = &text[start..text.len().min(start + 500)];
-    let Some(open) = excerpt.find('(') else {
-        return Vec::new();
-    };
-    let Some(close) = excerpt[open + 1..].find(')') else {
-        return Vec::new();
-    };
-    excerpt[open + 1..open + 1 + close]
-        .split(',')
-        .map(|value| value.trim().trim_matches(['\'', '"']))
-        .filter(|value| {
-            !value.is_empty()
-                && value
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+/// The help text for one CLI option: its own line plus the deeper-indented
+/// lines that wrap its description, joined into a single line.
+fn option_help(help: &str, option: &str) -> Option<String> {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut lines = help.lines().skip_while(|line| !line.contains(option));
+    let first = lines.next()?;
+    let base = indent(first);
+    let mut block = vec![first.trim()];
+    block.extend(
+        lines
+            .take_while(|line| !line.trim().is_empty() && indent(line) > base)
+            .map(str::trim),
+    );
+    Some(block.join(" "))
+}
+
+/// The first parenthesised list of plain words, e.g. `(low, medium, high)`.
+fn parenthesised_values(text: &str) -> Vec<String> {
+    let group = regex::Regex::new(r"\(([^()]*)\)").expect("valid group regex");
+    let values = group
+        .captures_iter(text)
+        .map(|capture| {
+            capture[1]
+                .trim_start_matches("choices:")
+                .split(',')
+                .map(|value| value.trim().trim_matches(['\'', '"', '`']))
+                .filter(|value| {
+                    !value.is_empty()
+                        && value
+                            .chars()
+                            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                })
+                .map(str::to_string)
+                .collect::<Vec<_>>()
         })
-        .map(str::to_string)
-        .collect()
+        .find(|values| values.len() >= 2)
+        .unwrap_or_default();
+    values
 }
 
 fn parse_claude_models(help: &str) -> Vec<ModelInfo> {
-    let efforts = values_in_parentheses(help, "--effort <level>");
-    let Some(start) = help.find("--model <model>") else {
+    let efforts = option_help(help, "--effort <level>")
+        .map(|text| parenthesised_values(&text))
+        .unwrap_or_default();
+    let Some(model_help) = option_help(help, "--model <model>") else {
         return Vec::new();
     };
-    let excerpt = &help[start..help.len().min(start + 700)];
-    let quoted = regex::Regex::new(r"'([a-z][a-z0-9._-]+)'").expect("valid model regex");
+    let quoted = regex::Regex::new(r#"['"`]([a-z][a-z0-9._-]+)['"`]"#).expect("valid model regex");
     let mut values = Vec::new();
-    for capture in quoted.captures_iter(excerpt) {
+    for capture in quoted.captures_iter(&model_help) {
         let value = capture[1].to_string();
         if !values.contains(&value) {
             values.push(value);
@@ -287,7 +308,42 @@ fn parse_grok_models(output: &str) -> Vec<ModelInfo> {
         .collect()
 }
 
-fn provider_models(id: &str, program: &Path) -> Vec<ModelInfo> {
+/// Effort levels per Grok model, from the catalog the CLI caches after
+/// talking to the Grok service (`grok models` itself lists no efforts).
+fn parse_grok_efforts(cache: &str) -> std::collections::HashMap<String, (Vec<String>, String)> {
+    let Ok(cache) = serde_json::from_str::<serde_json::Value>(cache) else {
+        return Default::default();
+    };
+    cache["models"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, model)| {
+            let levels = model["info"]["reasoning_efforts"].as_array()?;
+            let efforts: Vec<String> = levels
+                .iter()
+                .filter_map(|level| level["value"].as_str().map(str::to_string))
+                .collect();
+            let default = levels
+                .iter()
+                .find(|level| level["default"].as_bool().unwrap_or(false))
+                .and_then(|level| level["value"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            (!efforts.is_empty()).then(|| (id.clone(), (efforts, default)))
+        })
+        .collect()
+}
+
+fn grok_cached_efforts() -> std::collections::HashMap<String, (Vec<String>, String)> {
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".grok/models_cache.json"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|cache| parse_grok_efforts(&cache))
+        .unwrap_or_default()
+}
+
+fn discover_models(id: &str, program: &Path) -> Vec<ModelInfo> {
     let (_, output) = match id {
         "claude" => command_output(program, &["--help"]),
         // The bundled catalog is updated with the CLI and avoids a network
@@ -299,9 +355,69 @@ fn provider_models(id: &str, program: &Path) -> Vec<ModelInfo> {
     match id {
         "claude" => parse_claude_models(&output),
         "codex" => parse_codex_models(&output),
-        "grok" => parse_grok_models(&output),
+        "grok" => {
+            let cached = grok_cached_efforts();
+            let mut models = parse_grok_models(&output);
+            for model in &mut models {
+                if let Some((efforts, default)) = cached.get(&model.value) {
+                    model.efforts = efforts.clone();
+                    model.default_effort = default.clone();
+                }
+            }
+            models
+        }
         _ => Vec::new(),
     }
+}
+
+/// Effort levels every provider CLI accepts, used only for a model whose CLI
+/// does not enumerate its own.
+fn fallback_efforts(id: &str) -> Vec<String> {
+    let levels: &[&str] = match id {
+        "claude" => &["low", "medium", "high", "xhigh", "max"],
+        _ => &["low", "medium", "high", "xhigh"],
+    };
+    levels.iter().map(|level| level.to_string()).collect()
+}
+
+/// Last-resort catalog for a CLI that is not installed or reports nothing, so
+/// the UI still offers a dropdown rather than a free-form field.
+fn fallback_models(id: &str) -> Vec<ModelInfo> {
+    let (values, default_effort): (&[&str], &str) = match id {
+        "claude" => (&["opus", "sonnet", "haiku"], ""),
+        "codex" => (&["gpt-5.6-luna"], "medium"),
+        "grok" => (&["grok-4.6"], "high"),
+        _ => (&[], ""),
+    };
+    values
+        .iter()
+        .map(|value| ModelInfo {
+            value: value.to_string(),
+            label: display_model_name(value),
+            efforts: Vec::new(),
+            default_effort: default_effort.into(),
+        })
+        .collect()
+}
+
+/// Models for a provider: what the installed CLI reports, else the fallback.
+/// Returns whether the list came from the CLI.
+fn provider_models(id: &str, program: Option<&Path>) -> (Vec<ModelInfo>, bool) {
+    let discovered = program
+        .map(|program| discover_models(id, program))
+        .unwrap_or_default();
+    let detected = !discovered.is_empty();
+    let mut models = if detected {
+        discovered
+    } else {
+        fallback_models(id)
+    };
+    for model in &mut models {
+        if model.efforts.is_empty() {
+            model.efforts = fallback_efforts(id);
+        }
+    }
+    (models, detected)
 }
 
 pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
@@ -329,8 +445,9 @@ pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
     }
     let npm_available = tools.iter().any(|tool| tool.id == "npm" && tool.installed);
     for tool in &mut tools {
-        if crate::config::KNOWN_PROVIDERS.contains(&tool.id.as_str()) && tool.installed {
-            tool.models = provider_models(&tool.id, Path::new(&tool.path));
+        if crate::config::KNOWN_PROVIDERS.contains(&tool.id.as_str()) {
+            let program = tool.installed.then(|| PathBuf::from(&tool.path));
+            (tool.models, tool.models_detected) = provider_models(&tool.id, program.as_deref());
         }
         match tool.id.as_str() {
             "gh" if tool.installed => {
@@ -472,5 +589,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["grok-4.6", "grok-next"]
         );
+    }
+
+    #[test]
+    fn parses_wrapped_claude_help_as_printed_by_the_cli() {
+        let help = "\
+  --effort <level>                      Effort level for the current session
+                                        (low, medium, high, xhigh, max)
+  --environment <environment_id>        Create a new cloud session
+  --model <model>                       Model for the current session. Provide
+                                        an alias for the latest model (e.g.
+                                        'fable', 'opus', or 'sonnet') or a
+                                        model's full name (e.g.
+                                        'claude-fable-5').
+  -n, --name <name>                     Set a display name ('agent' setting)
+";
+        let models = parse_claude_models(help);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.value.as_str())
+                .collect::<Vec<_>>(),
+            ["fable", "opus", "sonnet"]
+        );
+        assert_eq!(models[0].efforts, ["low", "medium", "high", "xhigh", "max"]);
+    }
+
+    #[test]
+    fn reads_grok_efforts_from_the_cli_model_cache() {
+        let efforts = parse_grok_efforts(
+            r#"{"models":{"grok-4.6":{"info":{"reasoning_efforts":[{"value":"high","default":true},{"value":"low","default":false}]}},"plain":{"info":{}}}}"#,
+        );
+        assert_eq!(efforts.len(), 1);
+        assert_eq!(efforts["grok-4.6"].0, ["high", "low"]);
+        assert_eq!(efforts["grok-4.6"].1, "high");
+    }
+
+    #[test]
+    fn providers_without_a_catalog_still_get_dropdown_options() {
+        for id in crate::config::KNOWN_PROVIDERS {
+            let (models, detected) = provider_models(id, None);
+            assert!(!detected, "{id} has no CLI to read");
+            assert!(!models.is_empty(), "{id} needs fallback models");
+            assert!(models.iter().all(|model| !model.efforts.is_empty()));
+        }
     }
 }

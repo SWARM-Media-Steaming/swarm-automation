@@ -397,12 +397,16 @@
   }
 
   function effortOptions(providerId, model) {
-    return [...(selectedModelSpec(providerId, model)?.efforts || [])];
+    const spec = selectedModelSpec(providerId, model);
+    // A saved model the CLI no longer lists still needs a usable effort list:
+    // offer every level the provider's current models support.
+    const efforts = spec ? spec.efforts : modelSpecs(providerId).flatMap((entry) => entry.efforts);
+    return [...new Set(efforts)];
   }
 
   function defaultEffort(providerId, model) {
     const spec = selectedModelSpec(providerId, model);
-    const efforts = spec?.efforts || [];
+    const efforts = effortOptions(providerId, model);
     return spec?.defaultEffort || (efforts.includes("high") ? "high" : efforts[0] || "high");
   }
 
@@ -494,44 +498,36 @@
       modelReq.hidden = !provider.enabled;
       modelLabel.appendChild(modelReq);
       const knownModels = modelSpecs(provider.id);
-      const modelInput = document.createElement(knownModels.length ? "select" : "input");
+      const modelInput = document.createElement("select");
       modelInput.className = "provider-model";
-      if (knownModels.length) {
-        knownModels.forEach((entry) => {
-          const option = document.createElement("option");
-          option.value = entry.value;
-          option.textContent = entry.label;
-          modelInput.appendChild(option);
-        });
-        if (provider.model && !knownModels.some((entry) => entry.value === provider.model)) {
-          const option = document.createElement("option");
-          option.value = provider.model;
-          option.textContent = `${provider.model} (saved)`;
-          modelInput.appendChild(option);
-        }
-      } else {
-        modelInput.type = "text";
-        modelInput.title = "This CLI does not publish a model list; enter a model accepted by the CLI.";
+      knownModels.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.value;
+        option.textContent = entry.label;
+        modelInput.appendChild(option);
+      });
+      if (provider.model && !knownModels.some((entry) => entry.value === provider.model)) {
+        const option = document.createElement("option");
+        option.value = provider.model;
+        option.textContent = `${provider.model} (saved)`;
+        modelInput.appendChild(option);
+      }
+      if (tool && !tool.modelsDetected) {
+        modelInput.title = tool.installed
+          ? "The CLI did not report a model list, so built-in defaults are shown."
+          : "Install the CLI to load its current model list; built-in defaults are shown.";
       }
       modelInput.value = provider.model || defaultModel(provider.id);
       modelLabel.appendChild(modelInput);
       const effortLabel = document.createElement("label");
       effortLabel.textContent = "Effort ";
-      const advertisedEfforts = effortOptions(provider.id, modelInput.value);
-      const effortInput = document.createElement(advertisedEfforts.length ? "select" : "input");
+      const effortInput = document.createElement("select");
       effortInput.className = "provider-effort";
-      if (advertisedEfforts.length) {
-        populateEffortSelect(effortInput, provider.id, modelInput.value, provider.effort);
-        modelInput.addEventListener("change", () => {
-          populateEffortSelect(effortInput, provider.id, modelInput.value, effortInput.value);
-          setDirty();
-        });
-      } else {
-        effortInput.type = "text";
-        effortInput.value = provider.effort || "high";
-        effortInput.title = "This CLI does not publish an effort list; enter a value accepted by the CLI.";
-        modelInput.addEventListener("change", setDirty);
-      }
+      populateEffortSelect(effortInput, provider.id, modelInput.value, provider.effort);
+      modelInput.addEventListener("change", () => {
+        populateEffortSelect(effortInput, provider.id, modelInput.value, effortInput.value);
+        setDirty();
+      });
       effortInput.addEventListener("change", setDirty);
       effortLabel.appendChild(effortInput);
       const preferredLabel = document.createElement("label");
