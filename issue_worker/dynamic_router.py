@@ -101,6 +101,10 @@ _DEFAULT_PROVIDER_STRENGTHS: dict[str, str] = {
 # least this much confidence — "clearly a better choice", not a coin flip.
 REWORK_SAME_PROVIDER_MIN_CONFIDENCE = 0.8
 
+# Longest explanation kept for the grade and the complexity score. They are
+# shown to whoever receives the grade, so they get more room than a one-liner.
+EXPLANATION_LIMIT = 900
+
 ROUTER_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -116,6 +120,7 @@ ROUTER_RESPONSE_SCHEMA: dict[str, Any] = {
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "prompt_grade": {"type": "string", "enum": list(PROMPT_GRADES)},
         "grade_reason": {"type": "string"},
+        "complexity_reason": {"type": "string"},
     },
     "required": [
         "task_type",
@@ -129,6 +134,7 @@ ROUTER_RESPONSE_SCHEMA: dict[str, Any] = {
         "confidence",
         "prompt_grade",
         "grade_reason",
+        "complexity_reason",
     ],
 }
 
@@ -307,10 +313,16 @@ def build_router_prompt(
             "7. selected_model and reasoning_effort — copy the tier of the tool you selected whose range contains your complexity.",
             "8. confidence — a number from 0 to 1 for how sure you are of this routing decision.",
             "9. prompt_grade — exactly one of: " + ", ".join(PROMPT_GRADES) + ".",
-            "10. grade_reason — one or two sentences on how well the issue communicates the work.",
+            "10. grade_reason — a short paragraph, written to the person who filed the issue, on exactly why it earned",
+            "    this grade: what it does well, what is missing or ambiguous, and what would raise the grade.",
+            "11. complexity_reason — a short paragraph on how the complexity score was determined: the specific factors",
+            "    in this issue (scope, number of areas touched, unknowns, risk, testing needed) that put it at that",
+            "    score rather than one lower or higher.",
             "",
             "Grade clarity, specificity, requirements, acceptance criteria, useful context, ambiguity,",
             "and whether an AI coding agent could execute the work without guessing.",
+            "Score complexity from the size and difficulty of the work itself, not from how well it is written.",
+            "Complexity bands: 1-3 small and well-defined, 4-6 moderate, 7-8 large or subtle, 9-10 sweeping or high-risk.",
             "",
             "Available AI tools — pick selected_provider from these ids and match the work to what each is best at:",
             *tool_lines,
@@ -422,6 +434,7 @@ def resolve_routing_decision(
     reason = str(parsed.get("grade_reason") or "").strip()
     if not reason:
         raise RouterError("router grade explanation was missing")
+    complexity_reason = str(parsed.get("complexity_reason") or "").strip()
     confidence = _confidence(parsed.get("confidence"))
     chosen, override = _select_candidate(
         parsed.get("selected_provider"),
@@ -451,11 +464,26 @@ def resolve_routing_decision(
         "router_suggested_effort": str(parsed.get("reasoning_effort") or "").strip(),
         "confidence": confidence,
         "prompt_grade": grade,
-        "grade_reason": reason[:500],
+        "grade_reason": reason[:EXPLANATION_LIMIT],
+        "complexity_reason": complexity_reason[:EXPLANATION_LIMIT],
+        "tier_explanation": describe_tier(chosen, tier, complexity),
         "router_model": router_model,
         "router_effort": router_effort,
         "fallback": False,
     }
+
+
+def describe_tier(candidate: RouterCandidate, tier: RoutingTier, complexity: int) -> str:
+    """How a complexity score became a worker model and effort, in plain words."""
+    band = (
+        f"{tier.min_complexity}"
+        if tier.min_complexity == tier.max_complexity
+        else f"{tier.min_complexity}–{tier.max_complexity}"
+    )
+    return (
+        f"Complexity {complexity}/10 falls in {candidate.name}'s {band} band, which maps to "
+        f"{display_model_name(tier.model)} at {display_effort(tier.effort)} reasoning."
+    )
 
 
 def _select_candidate(
@@ -519,7 +547,9 @@ def fallback_routing_decision(
         "reasoning_effort": effort,
         "confidence": 0,
         "prompt_grade": "",
-        "grade_reason": reason.strip()[:500],
+        "grade_reason": reason.strip()[:EXPLANATION_LIMIT],
+        "complexity_reason": "",
+        "tier_explanation": "",
         "router_model": router_model,
         "router_effort": router_effort,
         "fallback": True,
@@ -611,7 +641,17 @@ def format_routing_notice(decision: dict[str, Any]) -> str:
     override = str(decision.get("provider_override_reason") or "").strip()
     if override:
         lines.append(override)
-    lines.extend(["", str(decision.get("grade_reason") or "").strip()])
+    grade_reason = str(decision.get("grade_reason") or "").strip()
+    if grade_reason:
+        lines.extend(["", f"Why this grade ({decision.get('prompt_grade')}): {grade_reason}"])
+    complexity_reason = str(decision.get("complexity_reason") or "").strip()
+    tier_explanation = str(decision.get("tier_explanation") or "").strip()
+    if complexity_reason or tier_explanation:
+        lines.append("")
+        if complexity_reason:
+            lines.append(f"How complexity was determined ({decision.get('complexity')}/10): {complexity_reason}")
+        if tier_explanation:
+            lines.append(tier_explanation)
     return "\n".join(lines)
 
 

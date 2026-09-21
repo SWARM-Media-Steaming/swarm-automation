@@ -8,6 +8,7 @@ from unittest import mock
 
 from dynamic_router import (
     REWORK_SAME_PROVIDER_MIN_CONFIDENCE,
+    ROUTER_RESPONSE_SCHEMA,
     RouterCandidate,
     RouterError,
     build_router_prompt,
@@ -53,6 +54,7 @@ def sample_payload(**overrides: object) -> dict[str, object]:
         "confidence": 0.91,
         "prompt_grade": "B+",
         "grade_reason": "Clear objective and context, but acceptance criteria are incomplete.",
+        "complexity_reason": "Touches the parser and two callers, and needs new regression tests.",
     }
     payload.update(overrides)
     return payload
@@ -276,9 +278,26 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertIn("Routing Confidence: 91%", notice)
         self.assertIn("AI Tools Considered: Codex, Grok", notice)
         self.assertIn("Why Codex: Codex is best at test-driven bug fixes", notice)
-        self.assertIn("acceptance criteria are incomplete", notice)
+        self.assertIn("Why this grade (B+): Clear objective and context, but acceptance criteria are incomplete.", notice)
+        self.assertIn("How complexity was determined (7/10): Touches the parser and two callers", notice)
+        self.assertIn("Complexity 7/10 falls in Codex's 7–8 band, which maps to GPT-5.6 Sol at High reasoning.", notice)
         self.assertEqual(display_model_name("claude-haiku-4-5"), "Claude Haiku 4.5")
         self.assertEqual(display_model_name("grok-4.3"), "Grok 4.3")
+
+    def test_prompt_asks_for_both_explanations(self) -> None:
+        prompt = build_router_prompt(title="t", body="b", labels=[], candidates=candidates("codex"))
+        self.assertIn("complexity_reason", prompt)
+        self.assertIn("exactly why it earned", prompt)
+        self.assertIn("complexity_reason", ROUTER_RESPONSE_SCHEMA["required"])
+
+    def test_decision_without_a_complexity_reason_still_explains_the_tier(self) -> None:
+        payload = sample_payload()
+        del payload["complexity_reason"]
+        decision = resolve(payload, "codex")
+        self.assertEqual(decision["complexity_reason"], "")
+        notice = format_routing_notice(decision)
+        self.assertNotIn("How complexity was determined", notice)
+        self.assertIn("falls in Codex's 7–8 band", notice)
 
     def test_notice_reports_when_the_router_was_overruled(self) -> None:
         decision = resolve(
