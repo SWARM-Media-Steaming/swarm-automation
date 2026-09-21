@@ -2234,9 +2234,17 @@
 
   async function refreshAppVersion() {
     try {
-      const version = await invoke("app_version");
-      byId("update-version-pill").textContent = `v${version}`;
-      byId("app-version-label").textContent = `v${version}`;
+      const version = window.SwarmVersion.formatBuildVersion(await invoke("app_version"));
+      byId("update-version-pill").textContent = version || "v0.0.0";
+      const label = byId("app-version-label");
+      label.textContent = version;
+      if (version) {
+        label.title = `Running build ${version}`;
+        label.setAttribute("aria-label", `Running build ${version}`);
+      } else {
+        label.removeAttribute("title");
+        label.removeAttribute("aria-label");
+      }
     } catch (_) { /* unavailable outside a Tauri window */ }
   }
 
