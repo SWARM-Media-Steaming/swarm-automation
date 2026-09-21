@@ -1714,6 +1714,129 @@ class WorkerTestCase(unittest.TestCase):
         create_linked.assert_called_once_with("ai/codex/issue-421", run_start)
         self.assertTrue(worker.read_state()["branch_linked"])
 
+    def empty_repo_worker(self, *extra: str) -> tuple[Worker, Path, Path]:
+        """A worker whose checkout was cloned from a brand-new, empty remote."""
+        remote = self.root / "empty-remote.git"
+        checkout = self.root / "empty-repo"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+        subprocess.run(
+            ["git", "clone", "-q", str(remote), str(checkout)],
+            check=True, stderr=subprocess.DEVNULL,
+        )
+        for key, value in (("user.name", "SWARM worker test"), ("user.email", "worker-test@example.invalid")):
+            subprocess.run(["git", "-C", str(checkout), "config", key, value], check=True)
+        argv = self._worker_argv(auto=True)
+        argv[argv.index("--repo-dir") + 1] = str(checkout)
+        argv.extend(["--github-repository", "acme/feedback", *extra])
+        return Worker(Config.from_args(build_parser().parse_args(argv))), remote, checkout
+
+    @staticmethod
+    def remote_heads(remote: Path) -> list[str]:
+        listing = subprocess.run(
+            ["git", "-C", str(remote), "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+            text=True, stdout=subprocess.PIPE, check=True,
+        ).stdout
+        return sorted(listing.split())
+
+    def test_empty_repository_gets_a_readme_main_and_then_an_issue_branch(self) -> None:
+        worker, remote, checkout = self.empty_repo_worker()
+        # A local unborn branch under another name must not matter.
+        subprocess.run(["git", "-C", str(checkout), "symbolic-ref", "HEAD", "refs/heads/master"], check=True)
+        worker.issue = IssueContext(1, "Initial application creation", "", [], "https://example.invalid/1")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+
+        run_start, recovery, _, _ = worker.prepare_repository()
+
+        self.assertFalse(recovery)
+        heads = self.remote_heads(remote)
+        self.assertIn("main", heads)
+        self.assertIn("ai-main", heads)
+        readme = subprocess.run(
+            ["git", "-C", str(remote), "show", "main:README.md"],
+            text=True, stdout=subprocess.PIPE, check=True,
+        ).stdout
+        self.assertIn("# feedback", readme)
+        self.assertIn("SWARM Automation", readme)
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(remote), "log", "--format=%s", "main"],
+                text=True, stdout=subprocess.PIPE, check=True,
+            ).stdout.split("\n")[:-1],
+            ["Initial commit"],
+        )
+        current = subprocess.run(
+            ["git", "-C", str(checkout), "branch", "--show-current"],
+            text=True, stdout=subprocess.PIPE, check=True,
+        ).stdout.strip()
+        self.assertEqual(current, "ai/claude/issue-1")
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(checkout), "status", "--porcelain"],
+                text=True, stdout=subprocess.PIPE, check=True,
+            ).stdout,
+            "",
+        )
+        self.assertTrue(run_start)
+
+    def test_empty_repository_bootstrap_leaves_a_repository_with_branches_alone(self) -> None:
+        # The standard fixture has commits locally and branches on the remote.
+        self.assertFalse(self.worker.bootstrap_empty_repository())
+        self.assertEqual(self.remote_heads(self.remote), ["ai-main", "main"])
+
+        # Empty locally but the remote has branches: that is a real problem, not
+        # a new repo, so nothing is pushed.
+        worker, remote, checkout = self.empty_repo_worker()
+        subprocess.run(["git", "-C", str(self.repo), "push", "-q", str(remote), "main"], check=True)
+        self.assertFalse(worker.bootstrap_empty_repository())
+        self.assertEqual(self.remote_heads(remote), ["main"])
+
+    def test_empty_repository_bootstrap_never_overwrites_checkout_files(self) -> None:
+        worker, remote, checkout = self.empty_repo_worker()
+        (checkout / "README.md").write_text("mine\n", encoding="utf-8")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertFalse(worker.bootstrap_empty_repository())
+        self.assertEqual(self.remote_heads(remote), [])
+        self.assertEqual((checkout / "README.md").read_text(encoding="utf-8"), "mine\n")
+        self.assertIn("not creating main over them", output.getvalue())
+
+    def test_empty_repository_bootstrap_does_nothing_in_a_dry_run(self) -> None:
+        worker, remote, _ = self.empty_repo_worker("--dry-run")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertFalse(worker.bootstrap_empty_repository())
+        self.assertEqual(self.remote_heads(remote), [])
+        self.assertIn("Dry run", output.getvalue())
+
+    def test_failed_empty_repository_bootstrap_changes_nothing_and_can_be_retried(self) -> None:
+        worker, remote, checkout = self.empty_repo_worker()
+        hook = remote / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'push rejected for the test' >&2\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(WorkerError, "Could not create main in the empty repository"):
+                worker.bootstrap_empty_repository()
+        self.assertEqual(self.remote_heads(remote), [])
+        self.assertFalse(
+            subprocess.run(
+                ["git", "-C", str(checkout), "rev-parse", "--verify", "--quiet", "HEAD"],
+                stdout=subprocess.DEVNULL,
+            ).returncode == 0,
+            "the local checkout stays empty so the next cycle can retry",
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(checkout), "status", "--porcelain"],
+                text=True, stdout=subprocess.PIPE, check=True,
+            ).stdout,
+            "",
+        )
+
+        hook.unlink()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(worker.bootstrap_empty_repository())
+        self.assertEqual(self.remote_heads(remote), ["main"])
+
     def test_fresh_pr_branch_fast_forwards_main_before_branching(self) -> None:
         updater = self.root / "updater"
         subprocess.run(

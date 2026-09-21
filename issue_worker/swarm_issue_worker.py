@@ -2471,9 +2471,79 @@ class Worker:
                 break
         return result.returncode
 
+    def remote_has_no_branches(self) -> bool:
+        """True only when the remote answers and has no branches at all — a
+        freshly created, empty GitHub repository."""
+        result = run_command(
+            [self.config.git_bin, "-C", self.config.repo_dir, "ls-remote", "--heads",
+             self.config.remote_name],
+            check=False,
+        )
+        return result.returncode == 0 and not result.stdout.strip()
+
+    def initial_readme(self) -> str:
+        name = self.config.github_repository.rsplit("/", 1)[-1] or self.config.github_repository
+        return (
+            f"# {name}\n\n"
+            "This repository was set up by SWARM Automation, which added this README as the "
+            f"initial commit so `{self.config.base_branch}` exists for issue work to branch from.\n\n"
+            "Assign an issue to the automation to start building.\n"
+        )
+
+    def bootstrap_empty_repository(self) -> bool:
+        """Give a brand-new, empty repository its first commit.
+
+        Issue work branches from `base_branch`, which does not exist until
+        something is pushed, so an empty repo would fail every cycle. This is the
+        one time the worker pushes to `base_branch`: a README-only initial commit,
+        made only when the remote has no branches at all and the local checkout
+        is empty and clean. The commit is built with plumbing so nothing local
+        changes until the push has succeeded, which makes a failed attempt
+        harmless to retry. Returns whether it created the branch."""
+        if self.git_ok("rev-parse", "--verify", "--quiet", "HEAD"):
+            return False
+        if not self.remote_has_no_branches():
+            return False
+        remote = self.config.remote_name
+        base = self.config.base_branch
+        if self.worktree_status():
+            log(
+                f"{self.config.github_repository} has no branches yet, but its checkout has "
+                f"files of its own; not creating {base} over them."
+            )
+            return False
+        if self.config.dry_run:
+            log(f"Dry run: {self.config.github_repository} is empty; would create {base} with a README.")
+            return False
+        log(f"{self.config.github_repository} is empty; creating {base} with an initial README commit.")
+        git = [self.config.git_bin, "-C", self.config.repo_dir]
+        identity = self.integration_push_environment()
+        blob = run_command(
+            [*git, "hash-object", "-w", "--stdin"], input_text=self.initial_readme()
+        ).stdout.strip()
+        tree = run_command(
+            [*git, "mktree"], input_text=f"100644 blob {blob}\tREADME.md\n"
+        ).stdout.strip()
+        commit = run_command(
+            [*git, "commit-tree", tree, "-m", "Initial commit"], env=identity
+        ).stdout.strip()
+        result = self.push_ref(f"{commit}:refs/heads/{base}")
+        if result.returncode != 0:
+            raise WorkerError(
+                f"Could not create {base} in the empty repository "
+                f"{self.config.github_repository}: "
+                f"{(result.stderr or result.stdout or '').strip() or 'git push failed'}"
+            )
+        self.git("fetch", remote)
+        self.git("symbolic-ref", "HEAD", f"refs/heads/{base}")
+        self.git("reset", "--hard", f"{remote}/{base}")
+        log(f"Created {base} at {commit} in {self.config.github_repository}.")
+        return True
+
     def synchronize_base_branch(self) -> str:
         """Fast-forward the local read-only mirror of `base_branch` from the
-        remote. Nothing is ever pushed to `base_branch`."""
+        remote. The only push to `base_branch` is the initial README commit that
+        `bootstrap_empty_repository` makes in a brand-new, empty repository."""
         remote = self.config.remote_name
         base = self.config.base_branch
         if not self.git_ok("show-ref", "--verify", f"refs/heads/{base}"):
@@ -2639,6 +2709,8 @@ class Worker:
         assert self.issue and self.choice
         if not self.git_ok("rev-parse", "--is-inside-work-tree"):
             raise WorkerError(f"--repo-dir is not a Git repository: {self.config.repo_dir}")
+        # A brand-new repository has no `base_branch` to branch from; create it first.
+        self.bootstrap_empty_repository()
         current_branch = self.git("branch", "--show-current")
         expected = self.expected_branch()
         state_exists = self.in_progress_file.exists()
