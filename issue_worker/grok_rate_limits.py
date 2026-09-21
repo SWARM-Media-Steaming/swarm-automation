@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import select
 import subprocess
 import sys
@@ -27,33 +28,54 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def send(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
+class LineReader:
+    """Reads newline-delimited messages from a child's stdout with a deadline.
+
+    `select()` only reports what is still in the OS pipe, so it must not be
+    mixed with a buffered `readline()`: when the agent writes several lines at
+    once (a notification followed by the reply), the buffered reader swallows
+    them all, `select()` then sees nothing, and the wait times out. This keeps
+    its own buffer over `os.read` instead."""
+
+    def __init__(self, stream: Any) -> None:
+        self.fd = stream.fileno()
+        self.buffer = b""
+
+    def readline(self, deadline: float) -> bytes:
+        while b"\n" not in self.buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("timed out waiting for the Grok agent")
+            readable, _, _ = select.select([self.fd], [], [], remaining)
+            if not readable:
+                raise TimeoutError("timed out waiting for the Grok agent")
+            chunk = os.read(self.fd, 65536)
+            if not chunk:
+                raise RuntimeError("the Grok agent exited before replying")
+            self.buffer += chunk
+        line, _, self.buffer = self.buffer.partition(b"\n")
+        return line
+
+
+def send(process: subprocess.Popen[bytes], message: dict[str, Any]) -> None:
     assert process.stdin is not None
-    process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+    process.stdin.write(json.dumps(message, separators=(",", ":")).encode() + b"\n")
     process.stdin.flush()
 
 
-def receive_response(
-    process: subprocess.Popen[str], request_id: int, deadline: float
-) -> dict[str, Any]:
-    assert process.stdout is not None
+def receive_response(reader: LineReader, request_id: int, deadline: float) -> dict[str, Any]:
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("timed out waiting for the Grok agent")
-        readable, _, _ = select.select([process.stdout], [], [], remaining)
-        if not readable:
-            raise TimeoutError("timed out waiting for the Grok agent")
-        line = process.stdout.readline()
-        if not line:
-            raise RuntimeError("the Grok agent exited before replying")
         try:
-            message = json.loads(line)
+            message = json.loads(reader.readline(deadline))
         except ValueError:
             continue  # stray non-protocol output
         # Notifications (no id) such as `_x.ai/mcp/servers_updated` can arrive
         # in between; only the reply to our request matters.
-        if message.get("id") == request_id and ("result" in message or "error" in message):
+        if (
+            isinstance(message, dict)
+            and message.get("id") == request_id
+            and ("result" in message or "error" in message)
+        ):
             return message
 
 
@@ -84,7 +106,7 @@ def normalize(result: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
-    process: subprocess.Popen[str] | None = None
+    process: subprocess.Popen[bytes] | None = None
     deadline = time.monotonic() + args.timeout
 
     try:
@@ -93,11 +115,12 @@ def main() -> int:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+            bufsize=0,
             # A neutral directory, so no project's own Grok config or hooks load.
             cwd=tempfile.gettempdir(),
         )
+        assert process.stdout is not None
+        reader = LineReader(process.stdout)
         send(
             process,
             {
@@ -111,12 +134,12 @@ def main() -> int:
                 },
             },
         )
-        initialized = receive_response(process, 1, deadline)
+        initialized = receive_response(reader, 1, deadline)
         if "error" in initialized:
             raise RuntimeError(f"Grok initialization failed: {initialized['error']}")
 
         send(process, {"jsonrpc": "2.0", "id": 2, "method": "_x.ai/billing", "params": {}})
-        response = receive_response(process, 2, deadline)
+        response = receive_response(reader, 2, deadline)
         if "error" in response:
             raise RuntimeError(f"Grok billing request failed: {response['error']}")
         result = response.get("result")

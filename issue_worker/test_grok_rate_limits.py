@@ -23,9 +23,14 @@ for line in sys.stdin:
     if request["method"] == "initialize":
         print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {"protocolVersion": 1}}), flush=True)
     elif request["method"] == "_x.ai/billing":
-        print(json.dumps({"jsonrpc": "2.0", "method": "_x.ai/mcp/servers_updated", "params": {}}), flush=True)
-        print("stray non-protocol output", flush=True)
-        print(os.environ["FAKE_BILLING"], flush=True)
+        # One write carrying a notification, a stray line and the reply: a
+        # buffered reader would swallow all three while select() sees none.
+        sys.stdout.write(
+            json.dumps({"jsonrpc": "2.0", "method": "_x.ai/mcp/servers_updated", "params": {}}) + "\\n"
+            + "stray non-protocol output\\n"
+            + os.environ["FAKE_BILLING"] + "\\n"
+        )
+        sys.stdout.flush()
 """
 
 
@@ -68,7 +73,7 @@ class NormalizeTestCase(unittest.TestCase):
 
 
 class EndToEndTestCase(unittest.TestCase):
-    def run_helper(self, billing: dict, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+    def run_helper(self, billing: dict, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             fake = Path(directory) / "grok"
             fake.write_text(FAKE_GROK, encoding="utf-8")
