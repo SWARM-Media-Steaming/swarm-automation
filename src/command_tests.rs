@@ -109,6 +109,7 @@ fn resolved_provider(id: &str, bin: &str) -> ResolvedProvider {
         effort: "high".into(),
         router_model: format!("{id}-router"),
         router_effort: "low".into(),
+        strengths: format!("{id} is best at tests"),
         bin: PathBuf::from(bin),
         enabled: true,
     }
@@ -132,6 +133,10 @@ fn provider_scheduler_arguments_carry_dynamic_routing_settings() {
     assert!(off
         .windows(2)
         .any(|pair| pair[0] == "--codex-router-effort" && pair[1] == "low"));
+    // The router needs every tool's strengths to choose between the tools.
+    assert!(off
+        .windows(2)
+        .any(|pair| pair[0] == "--codex-router-strengths" && pair[1] == "codex is best at tests"));
     let tiers = off
         .windows(2)
         .find(|pair| pair[0] == "--routing-tiers")

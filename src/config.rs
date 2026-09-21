@@ -78,6 +78,30 @@ fn router_preset(id: &str) -> (&str, &str) {
     }
 }
 
+/// What each AI tool tends to be good at. The router weighs these when it
+/// chooses which enabled tool receives an issue, so the "Codex is better at
+/// this, Grok at that" judgement is an editable setting rather than something
+/// hardcoded in the worker. Keep in sync with `_DEFAULT_PROVIDER_STRENGTHS` in
+/// `issue_worker/dynamic_router.py`.
+pub fn provider_strengths_preset(id: &str) -> &'static str {
+    match id {
+        "claude" => {
+            "Multi-file refactors, following an existing codebase's conventions, careful \
+             review of someone else's work, and writing documentation or tests in the \
+             surrounding style."
+        }
+        "codex" => {
+            "Precise bug fixes, test-driven changes, and long autonomous edit-run-verify \
+             loops where the work is checked by running it."
+        }
+        "grok" => {
+            "Fast turnarounds on well-scoped changes, scripting and configuration work, \
+             and quick orientation in unfamiliar code."
+        }
+        _ => "",
+    }
+}
+
 /// Built-in complexity bands. An empty saved table is filled from this on
 /// normalize so the mapping stays in config instead of being scattered
 /// through the worker.
@@ -129,6 +153,9 @@ pub struct ProviderSettings {
     pub router_model: String,
     /// Reasoning effort for [`Self::router_model`].
     pub router_effort: String,
+    /// What this tool is best at. The router weighs it when it picks which
+    /// enabled tool an issue goes to. Ignored while routing is off.
+    pub strengths: String,
     /// Executable path override; empty means auto-detect on PATH.
     pub bin: String,
 }
@@ -142,6 +169,7 @@ impl Default for ProviderSettings {
             effort: "high".into(),
             router_model: String::new(),
             router_effort: "low".into(),
+            strengths: String::new(),
             bin: String::new(),
         }
     }
@@ -163,6 +191,7 @@ impl ProviderSettings {
             effort: effort.into(),
             router_model: router_model.into(),
             router_effort: router_effort.into(),
+            strengths: provider_strengths_preset(id).into(),
             bin: String::new(),
         }
     }
@@ -809,6 +838,9 @@ impl AppConfig {
             if provider.router_effort.trim().is_empty() {
                 provider.router_effort = router_effort.into();
             }
+            if provider.strengths.trim().is_empty() {
+                provider.strengths = provider_strengths_preset(&provider.id).into();
+            }
         }
         self.claude_model.clear();
         self.claude_effort.clear();
@@ -1180,6 +1212,10 @@ mod tests {
         );
         assert_eq!(config.provider("codex").unwrap().router_effort, "low");
         assert_eq!(config.provider("grok").unwrap().router_model, "grok-4.3");
+        assert_eq!(
+            config.provider("codex").unwrap().strengths,
+            provider_strengths_preset("codex")
+        );
         let codex_tiers = &config.routing_tiers["codex"];
         assert!(codex_tiers.iter().any(|tier| {
             tier.model == "gpt-5.6-sol" && tier.min_complexity == 7 && tier.effort == "high"
@@ -1189,12 +1225,26 @@ mod tests {
         config.dynamic_model_routing = true;
         config.provider_mut("grok").unwrap().router_model = "grok-4.6".into();
         config.provider_mut("grok").unwrap().router_effort = "low".into();
+        config.provider_mut("grok").unwrap().strengths = "Grok is best at scripting".into();
         let encoded = serde_json::to_string(&config).unwrap();
         let mut decoded: AppConfig = serde_json::from_str(&encoded).unwrap();
         decoded.normalize();
         assert!(decoded.dynamic_model_routing);
         assert_eq!(decoded.provider("grok").unwrap().router_model, "grok-4.6");
+        assert_eq!(
+            decoded.provider("grok").unwrap().strengths,
+            "Grok is best at scripting"
+        );
         assert!(decoded.validate().is_ok());
+
+        // Cleared strengths fall back to the built-in description so the
+        // router always has something to distinguish the tools by.
+        decoded.provider_mut("grok").unwrap().strengths.clear();
+        decoded.normalize();
+        assert_eq!(
+            decoded.provider("grok").unwrap().strengths,
+            provider_strengths_preset("grok")
+        );
 
         decoded.routing_tiers.get_mut("claude").unwrap().clear();
         decoded.normalize();

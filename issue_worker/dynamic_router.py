@@ -1,9 +1,11 @@
-"""Optional dynamic model routing for one GitHub issue.
+"""Optional dynamic AI routing for one GitHub issue.
 
-The router grades the original issue and scores its complexity. The worker
-model and reasoning effort then come from the configured tier table for that
-score. The original issue text is never rewritten. Keep the default tier
-tables in sync with ``default_routing_tiers`` in ``src/config.rs``.
+The router grades the original issue, scores its complexity, and picks which
+of the enabled AI tools runs the work. The worker model and reasoning effort
+then come from that tool's configured tier table for the score. The original
+issue text is never rewritten. Keep the default tier tables and provider
+strengths in sync with ``default_routing_tiers`` / ``ProviderSettings`` in
+``src/config.rs``.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -72,11 +75,39 @@ _DEFAULT_ROUTER = {
     "grok": ("grok-4.3", "low"),
 }
 
+# What each AI tool tends to be good at. The router weighs these when it picks
+# which enabled tool receives an issue, so "Codex is better at A, Grok at B" is
+# a setting an operator edits rather than a judgement baked into this file.
+# Keep in sync with ``provider_strengths_preset`` in ``src/config.rs``.
+_DEFAULT_PROVIDER_STRENGTHS: dict[str, str] = {
+    "claude": (
+        "Multi-file refactors, following an existing codebase's conventions, careful "
+        "review of someone else's work, and writing documentation or tests in the "
+        "surrounding style."
+    ),
+    "codex": (
+        "Precise bug fixes, test-driven changes, and long autonomous edit-run-verify "
+        "loops where the work is checked by running it."
+    ),
+    "grok": (
+        "Fast turnarounds on well-scoped changes, scripting and configuration work, "
+        "and quick orientation in unfamiliar code."
+    ),
+}
+
+# A rework is deliberately sent to a different AI tool than the one that
+# produced the previous pass, so the follow-up is an independent second
+# opinion. The router may keep the previous tool only when it says so with at
+# least this much confidence — "clearly a better choice", not a coin flip.
+REWORK_SAME_PROVIDER_MIN_CONFIDENCE = 0.8
+
 ROUTER_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
         "task_type": {"type": "string"},
+        "selected_provider": {"type": "string"},
+        "provider_reason": {"type": "string"},
         "complexity": {"type": "integer", "minimum": 1, "maximum": 10},
         "risk": {"type": "string", "enum": list(RISK_LEVELS)},
         "context_requirement": {"type": "string", "enum": list(CONTEXT_REQUIREMENTS)},
@@ -88,6 +119,8 @@ ROUTER_RESPONSE_SCHEMA: dict[str, Any] = {
     },
     "required": [
         "task_type",
+        "selected_provider",
+        "provider_reason",
         "complexity",
         "risk",
         "context_requirement",
@@ -121,6 +154,26 @@ class RoutingTier:
             "model": self.model,
             "effort": self.effort,
         }
+
+
+@dataclasses.dataclass(frozen=True)
+class RouterCandidate:
+    """One enabled AI tool the router may hand this issue to.
+
+    ``tiers`` is that tool's complexity table, ``strengths`` the operator's
+    description of what it is good at, and ``usage_remaining`` its headroom at
+    selection time (None when it could not be read).
+    """
+
+    key: str
+    name: str
+    tiers: tuple[RoutingTier, ...]
+    strengths: str = ""
+    usage_remaining: float | None = None
+
+
+def default_provider_strengths(provider: str) -> str:
+    return _DEFAULT_PROVIDER_STRENGTHS.get(provider, "")
 
 
 def default_router_model(provider: str) -> str:
@@ -199,19 +252,49 @@ def build_router_prompt(
     title: str,
     body: str,
     labels: list[str],
-    provider: str,
-    tiers: tuple[RoutingTier, ...] | list[RoutingTier],
+    candidates: Sequence[RouterCandidate],
+    previous_provider: str = "",
+    rework: bool = False,
 ) -> str:
-    """Ask for a grade of the original issue. The issue text is quoted only."""
-    tier_lines = [
-        f"- complexity {tier.min_complexity}-{tier.max_complexity}: model {tier.model}, reasoning {tier.effort}"
-        for tier in tiers
-    ]
+    """Ask for a grade of the original issue. The issue text is quoted only.
+
+    Every enabled AI tool with capacity is offered, with its strengths and its
+    complexity tiers, so the router picks the tool as well as the model.
+    """
+    if not candidates:
+        raise RouterError("no AI tools are available to route to")
+    tool_lines: list[str] = []
+    for candidate in candidates:
+        headline = f"- {candidate.key} ({candidate.name})"
+        if candidate.usage_remaining is not None:
+            headline += f" — usage remaining: {candidate.usage_remaining:g}%"
+        tool_lines.append(headline)
+        if candidate.strengths.strip():
+            tool_lines.append(f"  Best at: {candidate.strengths.strip()}")
+        tool_lines.append(
+            "  Tiers: "
+            + "; ".join(
+                f"complexity {tier.min_complexity}-{tier.max_complexity} → {tier.model} / {tier.effort}"
+                for tier in candidate.tiers
+            )
+        )
+    ids = ", ".join(candidate.key for candidate in candidates)
+    previous = str(previous_provider or "").strip().lower()
+    rework_lines: list[str] = []
+    if rework and previous:
+        rework_lines = [
+            "",
+            f"This issue is being reworked. {previous} completed the previous pass.",
+            f"Favor a different AI tool so the rework is an independent second opinion. Choose {previous}",
+            "again only when it is clearly the better tool for this specific work — say why in",
+            f"provider_reason, and report confidence of at least {REWORK_SAME_PROVIDER_MIN_CONFIDENCE:g}",
+            f"when you do. Lower confidence in {previous} is read as 'no clear reason' and the work goes elsewhere.",
+        ]
     quoted_body = body if body.strip() else "(empty)"
     return "\n".join(
         [
-            "You are the SWARM dynamic model router.",
-            "Grade the original GitHub issue below for an AI coding agent.",
+            "You are the SWARM dynamic AI router.",
+            "Grade the original GitHub issue below for an AI coding agent and choose which AI tool runs it.",
             "Do not rewrite, expand, or replace the issue. Return one JSON object and nothing else.",
             "",
             "Score these and only these:",
@@ -219,17 +302,19 @@ def build_router_prompt(
             "2. complexity — integer 1 through 10.",
             "3. context_requirement — small, medium, or large.",
             "4. risk — low, medium, or high.",
-            "5. selected_model and reasoning_effort — copy the tier below whose range contains your complexity.",
-            "6. confidence — a number from 0 to 1.",
-            "7. prompt_grade — exactly one of: " + ", ".join(PROMPT_GRADES) + ".",
-            "8. grade_reason — one or two sentences on how well the issue communicates the work.",
+            f"5. selected_provider — the id of the AI tool best suited to this work, one of: {ids}.",
+            "6. provider_reason — one or two sentences naming what about this issue makes that tool the right one.",
+            "7. selected_model and reasoning_effort — copy the tier of the tool you selected whose range contains your complexity.",
+            "8. confidence — a number from 0 to 1 for how sure you are of this routing decision.",
+            "9. prompt_grade — exactly one of: " + ", ".join(PROMPT_GRADES) + ".",
+            "10. grade_reason — one or two sentences on how well the issue communicates the work.",
             "",
             "Grade clarity, specificity, requirements, acceptance criteria, useful context, ambiguity,",
             "and whether an AI coding agent could execute the work without guessing.",
             "",
-            f"Provider: {provider}",
-            "Configured tiers:",
-            *tier_lines,
+            "Available AI tools — pick selected_provider from these ids and match the work to what each is best at:",
+            *tool_lines,
+            *rework_lines,
             "",
             "Original issue title:",
             title,
@@ -288,17 +373,25 @@ def _confidence(value: Any) -> float:
 
 
 def resolve_routing_decision(
-    provider: str,
     payload: dict[str, Any] | str,
-    tiers_by_provider: dict[str, tuple[RoutingTier, ...] | list[RoutingTier]],
+    candidates: Sequence[RouterCandidate],
     *,
+    default_provider: str,
+    router_provider: str,
     router_model: str,
     router_effort: str,
+    previous_provider: str = "",
+    rework: bool = False,
+    minimum_same_provider_confidence: float = REWORK_SAME_PROVIDER_MIN_CONFIDENCE,
 ) -> dict[str, Any]:
-    """Validate the router object and apply the configured complexity tier.
+    """Validate the router object, pick the AI tool, and apply its tier.
 
     The router's own model suggestion is recorded, but the worker model and
-    effort are taken from the tier table so mappings stay configurable.
+    effort are taken from the selected tool's tier table so the mappings stay
+    configurable. A tool the router names that is not an available candidate
+    falls back to ``default_provider``. On a rework the previous tool is only
+    kept when the router is at least ``minimum_same_provider_confidence``
+    sure; otherwise the next candidate takes the round.
     """
     if isinstance(payload, str):
         parsed = parse_router_payload(payload)
@@ -306,6 +399,8 @@ def resolve_routing_decision(
         parsed = payload
     else:
         raise RouterError("router payload was not a JSON object")
+    if not candidates:
+        raise RouterError("no AI tools are available to route to")
     try:
         complexity = int(parsed["complexity"])
     except (KeyError, TypeError, ValueError) as error:
@@ -327,21 +422,34 @@ def resolve_routing_decision(
     reason = str(parsed.get("grade_reason") or "").strip()
     if not reason:
         raise RouterError("router grade explanation was missing")
-    tiers = tiers_by_provider.get(provider)
-    if not tiers:
-        raise RouterError(f"no routing tiers are configured for {provider}")
-    tier = tier_for_complexity(tiers, complexity)
+    confidence = _confidence(parsed.get("confidence"))
+    chosen, override = _select_candidate(
+        parsed.get("selected_provider"),
+        candidates,
+        default_provider=default_provider,
+        previous_provider=previous_provider,
+        rework=rework,
+        confidence=confidence,
+        minimum_same_provider_confidence=minimum_same_provider_confidence,
+    )
+    tier = tier_for_complexity(chosen.tiers, complexity)
     return {
-        "provider": provider,
+        "provider": chosen.key,
+        "provider_name": chosen.name,
+        "provider_reason": str(parsed.get("provider_reason") or "").strip()[:500],
+        "provider_override_reason": override,
+        "provider_candidates": [candidate.key for candidate in candidates],
+        "router_provider": router_provider,
         "task_type": task_type,
         "complexity": complexity,
         "risk": risk,
         "context_requirement": context,
         "selected_model": tier.model,
         "reasoning_effort": tier.effort,
+        "router_suggested_provider": str(parsed.get("selected_provider") or "").strip().lower(),
         "router_suggested_model": str(parsed.get("selected_model") or "").strip(),
         "router_suggested_effort": str(parsed.get("reasoning_effort") or "").strip(),
-        "confidence": _confidence(parsed.get("confidence")),
+        "confidence": confidence,
         "prompt_grade": grade,
         "grade_reason": reason[:500],
         "router_model": router_model,
@@ -350,17 +458,59 @@ def resolve_routing_decision(
     }
 
 
+def _select_candidate(
+    requested: Any,
+    candidates: Sequence[RouterCandidate],
+    *,
+    default_provider: str,
+    previous_provider: str,
+    rework: bool,
+    confidence: float,
+    minimum_same_provider_confidence: float,
+) -> tuple[RouterCandidate, str]:
+    """The AI tool that runs this issue, plus any note about overruling the router."""
+    by_key = {candidate.key: candidate for candidate in candidates}
+    by_name = {candidate.name.lower(): candidate for candidate in candidates}
+    default = by_key.get(str(default_provider).strip().lower(), candidates[0])
+    asked = str(requested or "").strip().lower()
+    chosen = by_key.get(asked) or by_name.get(asked)
+    override = ""
+    if chosen is None:
+        named = f"named {asked}, which is not an available AI tool" if asked else "named no AI tool"
+        override = f"The router {named}; {default.name} kept this issue."
+        chosen = default
+    previous = str(previous_provider or "").strip().lower()
+    if rework and previous and chosen.key == previous:
+        alternatives = [candidate for candidate in candidates if candidate.key != previous]
+        if alternatives and confidence < minimum_same_provider_confidence:
+            replacement = alternatives[0]
+            override = (
+                f"Rework: {chosen.name} completed the previous pass and was re-selected with only "
+                f"{int(round(confidence * 100))}% confidence, so {replacement.name} takes this round."
+            )
+            chosen = replacement
+    return chosen, override
+
+
 def fallback_routing_decision(
     *,
     provider: str,
+    provider_name: str = "",
     model: str,
     effort: str,
     reason: str,
     router_model: str,
     router_effort: str,
+    router_provider: str = "",
+    candidates: Sequence[str] = (),
 ) -> dict[str, Any]:
     return {
         "provider": provider,
+        "provider_name": provider_name or provider.capitalize(),
+        "provider_reason": "",
+        "provider_override_reason": "",
+        "provider_candidates": list(candidates),
+        "router_provider": router_provider or provider,
         "task_type": "",
         "complexity": None,
         "risk": "",
@@ -412,33 +562,56 @@ def display_effort(value: str) -> str:
     return key[:1].upper() + key[1:] if key else str(value or "")
 
 
+def provider_display_name(decision: dict[str, Any]) -> str:
+    name = str(decision.get("provider_name") or "").strip()
+    if name:
+        return name
+    key = str(decision.get("provider") or "").strip()
+    return key.capitalize() if key else ""
+
+
 def format_routing_notice(decision: dict[str, Any]) -> str:
     """Issue-comment block shown when SWARM takes ownership."""
     model = display_model_name(str(decision.get("selected_model") or ""))
     effort = display_effort(str(decision.get("reasoning_effort") or ""))
+    provider = provider_display_name(decision)
     if decision.get("fallback"):
         lines = [
             "SWARM AI Routing",
             "Routing fell back to the configured worker model and reasoning effort.",
-            f"Selected Model: {model}",
-            f"Reasoning: {effort}",
         ]
+        if provider:
+            lines.append(f"Selected AI: {provider}")
+        lines.extend([f"Selected Model: {model}", f"Reasoning: {effort}"])
         reason = str(decision.get("grade_reason") or "").strip()
         if reason:
             lines.extend(["", reason])
         return "\n".join(lines)
     confidence = float(decision.get("confidence") or 0)
     percent = int(round(confidence * 100))
+    considered = [
+        str(key).capitalize()
+        for key in decision.get("provider_candidates") or []
+        if str(key).strip()
+    ]
     lines = [
         "SWARM AI Routing",
         f"Prompt Grade: {decision.get('prompt_grade')}",
         f"Complexity: {decision.get('complexity')}/10",
+        f"Selected AI: {provider}",
         f"Selected Model: {model}",
         f"Reasoning: {effort}",
         f"Routing Confidence: {percent}%",
-        "",
-        str(decision.get("grade_reason") or "").strip(),
     ]
+    if considered:
+        lines.append(f"AI Tools Considered: {', '.join(considered)}")
+    provider_reason = str(decision.get("provider_reason") or "").strip()
+    if provider_reason:
+        lines.append(f"Why {provider}: {provider_reason}")
+    override = str(decision.get("provider_override_reason") or "").strip()
+    if override:
+        lines.append(override)
+    lines.extend(["", str(decision.get("grade_reason") or "").strip()])
     return "\n".join(lines)
 
 
