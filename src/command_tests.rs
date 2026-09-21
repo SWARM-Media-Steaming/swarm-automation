@@ -774,6 +774,24 @@ fn repo_worker_args_uses_the_global_preferred_provider_when_unset() {
 }
 
 #[test]
+fn repo_worker_args_passes_no_preference_through() {
+    let mut config = AppConfig {
+        preferred_provider: "auto".into(),
+        ..AppConfig::default()
+    };
+    let repo = repo("octocat/example");
+    config.repositories.push(repo.clone());
+    let args = repo_worker_args(
+        &config,
+        &repo,
+        &PathBuf::from("/tmp/ws"),
+        &PathBuf::from("/usr/bin/git"),
+        &PathBuf::from("/usr/bin/gh"),
+    );
+    assert_eq!(pair(&args, "--preferred-provider"), Some("auto"));
+}
+
+#[test]
 fn repo_worker_args_carries_advanced_issue_policy() {
     let repo = RepoConfig {
         require_issue_tests: true,

@@ -40,6 +40,7 @@ from swarm_issue_worker import (
     extract_followup_metadata,
     is_worker_comment,
     priority_rank,
+    resolve_preferred_provider,
 )
 
 
@@ -190,6 +191,50 @@ class WorkerTestCase(unittest.TestCase):
         )
         assert choice is not None
         self.assertEqual(choice.name, "Claude")
+
+    def test_no_preference_selects_the_provider_with_the_most_usage_remaining(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, preferred_provider="auto")
+        # A named favorite does not apply. The fullest remaining quota wins,
+        # including when that provider would have lost an equal-usage tie.
+        highest = self.worker.choose_provider(
+            "", {"Claude": 20.0, "Codex": 70.0, "Grok": 55.0}
+        )
+        assert highest is not None
+        self.assertEqual(highest.name, "Codex")
+
+        tied = self.worker.choose_provider(
+            "", {"Claude": 50.0, "Codex": 50.0, "Grok": 50.0}
+        )
+        assert tied is not None
+        self.assertEqual(tied.name, "Claude")
+
+        # Follow-up still rotates away from the previous provider.
+        after_codex = self.worker.choose_provider(
+            "Codex", {"Claude": 20.0, "Codex": 90.0, "Grok": 55.0}
+        )
+        assert after_codex is not None
+        self.assertEqual(after_codex.name, "Grok")
+        self.assertIsNone(self.worker.preferred_provider_key())
+        self.assertEqual(self.worker.default_provider(), "claude")
+        self.assertEqual(self.worker.review_provider("claude"), "codex")
+
+    def test_named_preference_still_only_breaks_equal_usage_ties(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, preferred_provider="codex")
+        drained = self.worker.choose_provider(
+            "", {"Claude": 90.0, "Codex": 40.0, "Grok": 55.0}
+        )
+        assert drained is not None
+        self.assertEqual(drained.name, "Claude")
+        tied = self.worker.choose_provider(
+            "", {"Claude": 50.0, "Codex": 50.0, "Grok": 50.0}
+        )
+        assert tied is not None
+        self.assertEqual(tied.name, "Codex")
+
+    def test_no_preference_is_kept_and_a_disabled_favorite_falls_back(self) -> None:
+        self.assertEqual(resolve_preferred_provider("auto", {"codex"}), "auto")
+        self.assertEqual(resolve_preferred_provider("claude", {"codex", "grok"}), "codex")
+        self.assertEqual(resolve_preferred_provider("AUTO", {"grok"}), "auto")
 
     def test_followup_rotates_away_from_the_previous_provider(self) -> None:
         headroom = {"Claude": 90.0, "Codex": 40.0, "Grok": 55.0}
@@ -2282,6 +2327,10 @@ class WorkerTestCase(unittest.TestCase):
         )
         self.assertEqual(overridden.github_repository, "example/repo")
         self.assertEqual(overridden.preferred_provider, "codex")
+        self.assertEqual(
+            build_parser().parse_args(["--preferred-provider", "auto"]).preferred_provider,
+            "auto",
+        )
         self.assertEqual(overridden.integration_branch, "staging")
 
 
