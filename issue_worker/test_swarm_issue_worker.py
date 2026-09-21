@@ -2921,6 +2921,91 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(empty["total"], 0)
         self.assertIsNone(empty["summary"]["averagePoints"])
 
+    def test_prompt_grades_search_and_grade_filter_page_like_history(self) -> None:
+        database_path = self.state / "grades-filter.sqlite3"
+        service_args = dict(
+            repository="octocat/example",
+            issue_url="",
+            issue_body="SECRET BODY",
+            provider="Codex",
+            model="m",
+            effort="high",
+            branch_name="b",
+            application_version="1",
+        )
+        rows = [
+            (1, "Alpha widget", {"prompt_grade": "A", "grade_reason": "Clear.", "fallback": False}),
+            (2, "Beta", {"prompt_grade": "B-", "grade_reason": "Thin.", "fallback": False}),
+            (3, "Widget beta", {"prompt_grade": "B-", "grade_reason": "Named.", "fallback": False}),
+            (4, "Skipped", {"prompt_grade": "", "grade_reason": "router unavailable", "fallback": True}),
+        ]
+        for number, title, decision in rows:
+            ExecutionHistoryService(True, database_path).start(
+                ExecutionStart(
+                    issue_number=number,
+                    issue_title=title,
+                    routing_decision=decision,
+                    **service_args,
+                ),
+                f"2026-09-2{number}T10:00:00-05:00",
+            )
+        # Enough B- rows to prove the grade filter is paged in SQLite, not sliced
+        # after the whole history is loaded.
+        for number in range(5, 16):
+            ExecutionHistoryService(True, database_path).start(
+                ExecutionStart(
+                    issue_number=number,
+                    issue_title=f"Extra {number}",
+                    routing_decision={"prompt_grade": "B-", "grade_reason": "Extra.", "fallback": False},
+                    **service_args,
+                ),
+                f"2026-09-21T10:{number:02d}:00-05:00",
+            )
+        repository = ExecutionHistoryRepository(database_path)
+
+        searched = repository.graded_for_repository("octocat/example", search="  widget ")
+        self.assertEqual([row["issue_number"] for row in searched["records"]], [3, 1])
+        self.assertEqual(searched["total"], 2)
+        self.assertEqual(searched["summary"]["distribution"]["A"], 1)
+        self.assertEqual(searched["summary"]["distribution"]["B-"], 1)
+        self.assertEqual(searched["summary"]["graded"], 2)
+        self.assertNotIn("original_issue_body", searched["records"][0])
+
+        only_b_minus = repository.graded_for_repository(
+            "octocat/example", search="widget", grade="B-"
+        )
+        self.assertEqual([row["issue_number"] for row in only_b_minus["records"]], [3])
+        self.assertEqual(only_b_minus["total"], 1)
+        # The chart still counts every grade in the search, so another bar can be chosen.
+        self.assertEqual(only_b_minus["summary"]["distribution"]["A"], 1)
+        self.assertEqual(only_b_minus["summary"]["graded"], 2)
+
+        grade_page = repository.graded_for_repository("octocat/example", grade=" B- ")
+        self.assertEqual(grade_page["total"], 13)
+        self.assertEqual(len(grade_page["records"]), 10)
+        self.assertTrue(all(
+            row["routing_decision"]["prompt_grade"] == "B-" for row in grade_page["records"]
+        ))
+        self.assertEqual(grade_page["summary"]["distribution"]["A"], 1)
+        self.assertEqual(grade_page["summary"]["graded"], 14)
+        last = repository.graded_for_repository("octocat/example", grade="B-", offset=99)
+        self.assertEqual(last["offset"], 10)
+        self.assertEqual(len(last["records"]), 3)
+
+        ignored = repository.graded_for_repository("octocat/example", grade="nope")
+        self.assertEqual(ignored["total"], 14)
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = execution_history_main(
+                ["--db", str(database_path), "--repository", "octocat/example",
+                 "--grades", "--search", "widget", "--grade", "B-", "--limit", "10"]
+            )
+        self.assertEqual(exit_code, 0)
+        cli_page = json.loads(buffer.getvalue())
+        self.assertEqual([row["issue_number"] for row in cli_page["records"]], [3])
+        self.assertEqual(cli_page["summary"]["distribution"]["A"], 1)
+
     def test_execution_history_migration_adds_routing_decision(self) -> None:
         database_path = self.state / "legacy-history.sqlite3"
         connection = sqlite3.connect(database_path)

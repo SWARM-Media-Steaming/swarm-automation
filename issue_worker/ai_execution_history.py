@@ -98,6 +98,12 @@ def normalize_search(search: str) -> str:
     return str(search or "").strip()[:200]
 
 
+def normalize_grade(grade: str) -> str:
+    """A router grade such as ``B-``, or ``""`` when the value is not one."""
+    text = str(grade or "").strip()
+    return text if text in GRADE_POINTS else ""
+
+
 def _search_filter(search: str) -> tuple[str, list[str]]:
     """SQL fragment for the Feedback search box.
 
@@ -477,46 +483,79 @@ class ExecutionHistoryRepository:
 
 
     def graded_for_repository(
-        self, repository: str, *, limit: int = PAGE_SIZE, offset: int = 0
+        self,
+        repository: str,
+        *,
+        search: str = "",
+        grade: str = "",
+        limit: int = PAGE_SIZE,
+        offset: int = 0,
     ) -> dict[str, Any]:
-        """One page of prompt grades, newest first, plus a summary of all of them.
+        """One page of prompt grades, newest first, plus a summary.
 
         A row counts as graded when its routing decision carries a real
         ``prompt_grade`` (routing fallbacks and runs without routing do not).
-        Only the columns the grades view shows are read, so issue bodies and
-        prompts never travel with a grade. Returns
-        ``{records, total, offset, limit, summary}``.
+        ``search`` matches the same columns as execution history. ``grade``
+        keeps only that letter (for example ``B-``) on the page; the summary
+        still counts every grade in the search so the chart can switch
+        filters. ``LIMIT``/``OFFSET`` run in SQLite, and an offset past the
+        end snaps to the last page. Only the columns the grades view shows
+        are read, so issue bodies and prompts never travel with a grade.
+        Returns ``{records, total, offset, limit, summary}``.
         """
         limit = clamp_page_size(limit)
         offset = clamp_offset(offset)
-        graded: list[dict[str, Any]] = []
+        selected = normalize_grade(grade)
+        search_clause, search_params = _search_filter(search)
+        grade_names = list(GRADE_POINTS)
+        grade_slots = ", ".join("?" for _ in grade_names)
+        where = (
+            " WHERE repository = ? AND routing_decision <> ''"
+            f" AND json_extract(routing_decision, '$.prompt_grade') IN ({grade_slots})"
+            f"{search_clause}"
+        )
+        params: list[Any] = [repository, *grade_names, *search_params]
+        page_where = where
+        page_params = list(params)
+        if selected:
+            page_where += " AND json_extract(routing_decision, '$.prompt_grade') = ?"
+            page_params.append(selected)
+        columns = (
+            "issue_number, issue_title, issue_url, attempt_number, started_at, "
+            "ai_provider, model, effort, final_status, routing_decision"
+        )
         with self.connect() as database:
-            rows = database.execute(
-                "SELECT issue_number, issue_title, issue_url, attempt_number, started_at, "
-                "ai_provider, model, effort, final_status, routing_decision "
-                "FROM ai_executions WHERE repository = ? AND routing_decision <> '' "
-                "ORDER BY started_at DESC, attempt_number DESC",
-                (repository,),
+            counts = database.execute(
+                "SELECT json_extract(routing_decision, '$.prompt_grade') AS grade, COUNT(*) "
+                f"FROM ai_executions{where} GROUP BY grade",
+                params,
+            ).fetchall()
+            total = int(
+                database.execute(
+                    f"SELECT COUNT(*) FROM ai_executions{page_where}",
+                    page_params,
+                ).fetchone()[0]
             )
-            for row in rows:
-                record = row_to_dict(row)
-                decision = record.get("routing_decision")
-                grade = decision.get("prompt_grade") if isinstance(decision, dict) else ""
-                if grade in GRADE_POINTS:
-                    graded.append(record)
-        total = len(graded)
-        if total and offset >= total:
-            offset = ((total - 1) // limit) * limit
-        elif not total:
-            offset = 0
+            if total == 0:
+                offset = 0
+            elif offset >= total:
+                offset = ((total - 1) // limit) * limit
+            rows = list(
+                database.execute(
+                    f"SELECT {columns} FROM ai_executions{page_where} "
+                    "ORDER BY started_at DESC, attempt_number DESC LIMIT ? OFFSET ?",
+                    (*page_params, limit, offset),
+                )
+            )
+        grades: list[str] = []
+        for grade_name, count in counts:
+            grades.extend([str(grade_name)] * int(count))
         return {
-            "records": graded[offset : offset + limit],
+            "records": [row_to_dict(row) for row in rows],
             "total": total,
             "offset": offset,
             "limit": limit,
-            "summary": summarize_grades(
-                [record["routing_decision"]["prompt_grade"] for record in graded]
-            ),
+            "summary": summarize_grades(grades),
         }
 
 
@@ -690,7 +729,10 @@ def main(argv: list[str] | None = None) -> int:
 
     `--grades` instead prints one page of prompt grades (the router's grade
     of each issue's original prompt, with the reason and complexity) plus a
-    summary of every graded execution — the Feedback view's grades panel.
+    summary of every graded execution in the current search — the Feedback
+    view's grades panel. `--search` filters that page the same way it filters
+    execution history. `--grade` keeps the page to one letter; the summary
+    still includes every grade in the search.
 
     `--import-from-github` instead scans that repository's full GitHub issue
     backlog (open and closed) and adds a synthetic `imported` row for any
@@ -727,6 +769,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Print one page of prompt grades plus a summary of every grade instead.",
     )
     parser.add_argument(
+        "--grade",
+        default="",
+        help="With --grades, return only this prompt grade (for example B-). The summary still counts every grade.",
+    )
+    parser.add_argument(
         "--search",
         default="",
         help="Case-insensitive match on issue number, title, provider, model, branch, or status.",
@@ -756,6 +803,8 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(
             ExecutionHistoryRepository(database_path).graded_for_repository(
                 repository_name,
+                search=args.search,
+                grade=args.grade,
                 limit=PAGE_SIZE if args.limit is None else args.limit,
                 offset=args.offset,
             ),

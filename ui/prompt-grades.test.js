@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { GRADES, gradeTone, distributionBars, summaryLine } = require("./prompt-grades.js");
+const { GRADES, gradeTone, distributionBars, toggleGrade, summaryLine } = require("./prompt-grades.js");
 
 test("maps each letter onto the shared state palette", () => {
   assert.equal(gradeTone("A+"), "passed");
@@ -19,7 +19,19 @@ test("scales bars against the most common grade and keeps empty grades", () => {
   assert.equal(bars.find((bar) => bar.grade === "B").percent, 50);
   assert.equal(bars.find((bar) => bar.grade === "F").percent, 25);
   assert.equal(bars.find((bar) => bar.grade === "C").count, 0);
-  assert.ok(distributionBars(null).every((bar) => bar.percent === 0));
+  assert.equal(bars.find((bar) => bar.grade === "B-").selected, false);
+  const selected = distributionBars({ distribution: { "B-": 2 } }, "B-");
+  assert.equal(selected.find((bar) => bar.grade === "B-").selected, true);
+  assert.equal(selected.find((bar) => bar.grade === "A").selected, false);
+  assert.ok(distributionBars(null).every((bar) => bar.percent === 0 && bar.selected === false));
+});
+
+test("clicking a grade selects it and clicking it again clears the filter", () => {
+  assert.equal(toggleGrade("", "B-"), "B-");
+  assert.equal(toggleGrade("B-", "B-"), "");
+  assert.equal(toggleGrade("B-", "A"), "A");
+  assert.equal(toggleGrade("A", "nope"), "A");
+  assert.equal(toggleGrade("", ""), "");
 });
 
 test("summarizes how many prompts earned a B or better", () => {
