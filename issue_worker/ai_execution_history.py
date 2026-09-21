@@ -22,6 +22,16 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = 1
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
+# Feedback shows one page of executions. Callers cannot raise this to dump
+# the whole history through the paged query.
+PAGE_SIZE = 10
+_SEARCHABLE_TEXT_COLUMNS = (
+    "issue_title",
+    "ai_provider",
+    "model",
+    "branch_name",
+    "final_status",
+)
 
 # Columns persisted as JSON-encoded text; the desktop UI wants them decoded
 # back into real arrays/objects rather than doubly-encoded strings.
@@ -63,6 +73,49 @@ def sanitize_text(value: Any) -> str:
 
 def sanitize_values(values: Iterable[Any]) -> list[str]:
     return [sanitize_text(value) for value in values]
+
+
+def normalize_search(search: str) -> str:
+    """Trim a Feedback search and cap its length."""
+    return str(search or "").strip()[:200]
+
+
+def _search_filter(search: str) -> tuple[str, list[str]]:
+    """SQL fragment for the Feedback search box.
+
+    The term must sit inside issue number, title, provider, model, branch, or
+    status. `%`, `_`, and `\\` are matched literally. Issue body and prompt
+    text are not searched.
+    """
+    term = normalize_search(search)
+    if not term:
+        return "", []
+    escaped = term.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped}%"
+    clauses = ["CAST(issue_number AS TEXT) LIKE ? ESCAPE '\\'"]
+    params = [pattern]
+    for column in _SEARCHABLE_TEXT_COLUMNS:
+        clauses.append(f"LOWER({column}) LIKE ? ESCAPE '\\'")
+        params.append(pattern)
+    return f" AND ({' OR '.join(clauses)})", params
+
+
+def clamp_page_size(limit: int) -> int:
+    try:
+        size = int(limit)
+    except (TypeError, ValueError):
+        return PAGE_SIZE
+    if size < 1:
+        return PAGE_SIZE
+    return min(size, PAGE_SIZE)
+
+
+def clamp_offset(offset: int) -> int:
+    try:
+        value = int(offset)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -331,7 +384,11 @@ class ExecutionHistoryRepository:
             )
 
     def for_repository(self, repository: str) -> list[sqlite3.Row]:
-        """Every execution for one repository, newest first — the desktop UI's feed."""
+        """Every execution for one repository, newest first.
+
+        The Feedback view uses ``page_for_repository`` so it does not pull
+        this full list into the desktop UI.
+        """
         with self.connect() as database:
             return list(
                 database.execute(
@@ -340,6 +397,44 @@ class ExecutionHistoryRepository:
                     (repository,),
                 )
             )
+
+    def page_for_repository(
+        self,
+        repository: str,
+        *,
+        search: str = "",
+        limit: int = PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[list[sqlite3.Row], int, int, int]:
+        """One page of executions, newest first, plus the filtered total.
+
+        ``LIMIT``/``OFFSET`` are applied in SQLite. An offset past the end is
+        pulled back to the last page so the caller still receives rows that
+        exist. Returns ``(rows, total, offset, limit)``.
+        """
+        limit = clamp_page_size(limit)
+        offset = clamp_offset(offset)
+        clause, params = _search_filter(search)
+        with self.connect() as database:
+            total = int(
+                database.execute(
+                    f"SELECT COUNT(*) FROM ai_executions WHERE repository = ?{clause}",
+                    (repository, *params),
+                ).fetchone()[0]
+            )
+            if total == 0:
+                offset = 0
+            elif offset >= total:
+                offset = ((total - 1) // limit) * limit
+            rows = list(
+                database.execute(
+                    "SELECT * FROM ai_executions WHERE repository = ?"
+                    f"{clause} ORDER BY started_at DESC, attempt_number DESC "
+                    "LIMIT ? OFFSET ?",
+                    (repository, *params, limit, offset),
+                )
+            )
+        return rows, total, offset, limit
 
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -454,12 +549,22 @@ class ExecutionHistoryService:
                 self.error = sanitize_text(error)
 
 
+def _page_requested(limit: int | None, offset: int, search: str) -> bool:
+    return limit is not None or offset != 0 or bool(normalize_search(search))
+
+
+def _empty_page() -> dict[str, Any]:
+    return {"records": [], "total": 0, "offset": 0, "limit": PAGE_SIZE}
+
+
 def main(argv: list[str] | None = None) -> int:
     """`python3 ai_execution_history.py --db PATH --repository OWNER/NAME`.
 
-    Prints the repository's executions as a JSON array on stdout — the
-    desktop app's Feedback view shells out to this the same way it already
-    shells out to the other worker scripts for one-off, read-only queries.
+    Without paging flags, prints the repository's executions as a JSON array
+    on stdout. `--limit`, `--offset`, or `--search` instead print one page
+    object (`records`/`total`/`offset`/`limit`) of at most 10 rows — the
+    desktop Feedback view always uses that form so it never receives the
+    full history.
 
     `--import-from-github` instead scans that repository's full GitHub issue
     backlog (open and closed) and adds a synthetic `imported` row for any
@@ -478,10 +583,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--gh-bin", default="gh", help="Path to the gh CLI (only used with --import-from-github)."
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=f"Page size. Clamped to {PAGE_SIZE}. Selects the paged JSON object.",
+    )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Number of matching executions to skip. Values past the end snap to the last page.",
+    )
+    parser.add_argument(
+        "--search",
+        default="",
+        help="Case-insensitive match on issue number, title, provider, model, branch, or status.",
+    )
     args = parser.parse_args(argv)
 
     database_path = Path(args.db).expanduser()
     repository_name = sanitize_text(args.repository)
+    paging = _page_requested(args.limit, args.offset, args.search)
 
     if args.import_from_github:
         repository = ExecutionHistoryRepository(database_path)
@@ -494,12 +617,33 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not database_path.is_file():
-        print("[]")
+        if paging:
+            json.dump(_empty_page(), sys.stdout)
+        else:
+            print("[]")
         return 0
 
     repository = ExecutionHistoryRepository(database_path)
-    rows = repository.for_repository(repository_name)
-    json.dump([row_to_dict(row) for row in rows], sys.stdout)
+    if not paging:
+        rows = repository.for_repository(repository_name)
+        json.dump([row_to_dict(row) for row in rows], sys.stdout)
+        return 0
+
+    rows, total, offset, limit = repository.page_for_repository(
+        repository_name,
+        search=args.search,
+        limit=PAGE_SIZE if args.limit is None else args.limit,
+        offset=args.offset,
+    )
+    json.dump(
+        {
+            "records": [row_to_dict(row) for row in rows],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        },
+        sys.stdout,
+    )
     return 0
 
 

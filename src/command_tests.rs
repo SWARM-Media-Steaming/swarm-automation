@@ -1,10 +1,11 @@
 use super::{
-    audit_test_coverage, create_test_definition, detect_test_definition, detect_tools, get_config,
-    get_execution_history, get_test_plan, get_test_runs, inspect_repository,
-    issue_branch_pr_is_visible, mark_permission_primed, needs_promotion, parse_pr_ref,
-    promotion_approval_args, reconcile_integration_for_promotion, repo_status_args,
+    audit_test_coverage, create_test_definition, detect_test_definition, detect_tools,
+    execution_history_query_args, get_config, get_execution_history, get_test_plan, get_test_runs,
+    inspect_repository, issue_branch_pr_is_visible, mark_permission_primed, needs_promotion,
+    parse_pr_ref, promotion_approval_args, reconcile_integration_for_promotion, repo_status_args,
     repo_worker_args, require_closed_issue, save_config, save_test_input, scheduler_arguments,
-    validate_worker_script_dir, AiExecutionRecord, AppState, BranchAheadBehind, ResolvedProvider,
+    validate_worker_script_dir, AiExecutionRecord, AppState, BranchAheadBehind,
+    ExecutionHistoryPage, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -334,9 +335,83 @@ fn execution_history_lookup_is_safe_before_any_execution_exists() {
         .into_owned();
     save_config(app.clone(), app.state(), config).unwrap();
 
-    let history =
-        get_execution_history(app.clone(), app.state(), "octocat__example".into()).unwrap();
-    assert!(history.is_empty());
+    let history = get_execution_history(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(history.records.is_empty());
+    assert_eq!(history.total, 0);
+    assert_eq!(history.offset, 0);
+    assert_eq!(history.limit, 10);
+}
+
+#[test]
+fn execution_history_query_always_requests_one_page() {
+    let args = execution_history_query_args(
+        Path::new("ai_execution_history.py"),
+        Path::new("history.sqlite3"),
+        "octocat/example",
+        Some(-4),
+        Some("  Widget  ".into()),
+    );
+    let value_after = |flag: &str| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .map(|index| args[index + 1].as_str())
+    };
+    assert_eq!(value_after("--limit"), Some("10"));
+    assert_eq!(value_after("--offset"), Some("0"));
+    assert_eq!(value_after("--search"), Some("Widget"));
+    assert_eq!(value_after("--repository"), Some("octocat/example"));
+
+    let unfiltered = execution_history_query_args(
+        Path::new("ai_execution_history.py"),
+        Path::new("history.sqlite3"),
+        "octocat/example",
+        None,
+        None,
+    );
+    assert!(unfiltered
+        .windows(2)
+        .any(|pair| pair[0] == "--limit" && pair[1] == "10"));
+    assert!(unfiltered
+        .windows(2)
+        .any(|pair| pair[0] == "--search" && pair[1].is_empty()));
+}
+
+#[test]
+fn execution_history_page_deserializes_the_python_page_and_serializes_camel_case() {
+    let json = r#"{
+        "records": [{
+            "execution_id": "11111111-1111-1111-1111-111111111111",
+            "repository": "octocat/example",
+            "issue_number": 63,
+            "issue_title": "Store prompt",
+            "original_issue_body": "Original body",
+            "ai_provider": "Claude",
+            "started_at": "2026-09-14T10:00:00-05:00",
+            "final_status": "completed",
+            "attempt_number": 1,
+            "updated_at": "2026-09-14T10:05:00-05:00"
+        }],
+        "total": 25,
+        "offset": 10,
+        "limit": 10
+    }"#;
+    let page: ExecutionHistoryPage = serde_json::from_str(json).expect("deserialize python page");
+    assert_eq!(page.total, 25);
+    assert_eq!(page.offset, 10);
+    assert_eq!(page.limit, 10);
+    assert_eq!(page.records[0].issue_number, 63);
+
+    let camel = serde_json::to_value(&page).expect("serialize for the frontend");
+    assert_eq!(camel["total"], 25);
+    assert_eq!(camel["records"][0]["issueNumber"], 63);
+    assert!(camel["records"][0].get("issue_number").is_none());
 }
 
 #[test]

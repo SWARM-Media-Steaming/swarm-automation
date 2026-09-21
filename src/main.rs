@@ -1071,29 +1071,86 @@ struct AiExecutionRecord {
     reviewer_feedback_at: Option<String>,
 }
 
+/// Feedback never asks the history CLI for more than this many rows.
+const EXECUTION_HISTORY_PAGE_SIZE: i64 = 10;
+
+/// One page of `ai_executions`. `records` deserialize from the Python CLI's
+/// snake_case rows and serialize to the frontend as camelCase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionHistoryPage {
+    records: Vec<AiExecutionRecord>,
+    total: i64,
+    offset: i64,
+    limit: i64,
+}
+
+fn normalize_execution_history_search(search: Option<String>) -> String {
+    search
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(200)
+        .collect()
+}
+
+fn execution_history_query_args(
+    script: &Path,
+    database: &Path,
+    repository: &str,
+    offset: Option<i64>,
+    search: Option<String>,
+) -> Vec<String> {
+    // `--limit` is always sent. Omitting it makes the CLI print every row.
+    vec![
+        script.to_string_lossy().into_owned(),
+        "--db".into(),
+        database.to_string_lossy().into_owned(),
+        "--repository".into(),
+        repository.to_string(),
+        "--limit".into(),
+        EXECUTION_HISTORY_PAGE_SIZE.to_string(),
+        "--offset".into(),
+        offset.unwrap_or(0).max(0).to_string(),
+        "--search".into(),
+        normalize_execution_history_search(search),
+    ]
+}
+
+fn empty_execution_history_page() -> ExecutionHistoryPage {
+    ExecutionHistoryPage {
+        records: Vec::new(),
+        total: 0,
+        offset: 0,
+        limit: EXECUTION_HISTORY_PAGE_SIZE,
+    }
+}
+
 #[tauri::command]
 fn get_execution_history<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
     repo_id: String,
-) -> Result<Vec<AiExecutionRecord>, String> {
+    offset: Option<i64>,
+    search: Option<String>,
+) -> Result<ExecutionHistoryPage, String> {
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?;
     let database_path = execution_history_db_path(&config);
     if !database_path.is_file() {
-        return Ok(Vec::new());
+        return Ok(empty_execution_history_page());
     }
     let script = worker_script_dir(&app)?.join("ai_execution_history.py");
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
     let (ok, raw) = run_capture_owned(
         &python,
-        &[
-            script.to_string_lossy().into_owned(),
-            "--db".into(),
-            database_path.to_string_lossy().into_owned(),
-            "--repository".into(),
-            repo.github_repository.clone(),
-        ],
+        &execution_history_query_args(
+            &script,
+            &database_path,
+            &repo.github_repository,
+            offset,
+            search,
+        ),
     );
     if !ok {
         return Err(format!("Execution history lookup failed: {raw}"));
@@ -1106,10 +1163,12 @@ fn get_execution_history<R: tauri::Runtime>(
 async fn get_execution_history_background(
     app: tauri::AppHandle,
     repo_id: String,
-) -> Result<Vec<AiExecutionRecord>, String> {
+    offset: Option<i64>,
+    search: Option<String>,
+) -> Result<ExecutionHistoryPage, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        get_execution_history(app.clone(), state, repo_id)
+        get_execution_history(app.clone(), state, repo_id, offset, search)
     })
     .await
     .map_err(|error| format!("Execution history lookup failed: {error}"))?
