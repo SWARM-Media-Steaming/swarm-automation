@@ -25,16 +25,17 @@ test("shows the issue being worked with its provider and phase", () => {
   assert.equal(rows[0].state, "running");
 });
 
-test("drops an issue once it finishes and falls back to an idle row", () => {
+test("drops an issue once it finishes instead of leaving a queue-check row", () => {
   const rows = deriveNowWorking({
     workerState: "running",
     repositories: [repo],
     logs: [
       line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
       line("Finished issue #84 with Claude: done"),
+      line("Starting a cycle over 1 repositories"),
     ],
   });
-  assert.deepEqual(rows.map((row) => [row.key, row.state]), [["issue:idle", "idle"]]);
+  assert.deepEqual(rows, []);
 });
 
 test("marks quota-paused issues as paused and shows nothing when the worker is stopped", () => {
@@ -62,7 +63,7 @@ test("keeps issues of different repositories apart", () => {
   assert.deepEqual(rows.map((row) => `${row.repository}${row.title}`), ["acme/app#1 One", "acme/site#1 Other"]);
 });
 
-test("reports an in-flight test run and an idle scheduler", () => {
+test("reports an in-flight test run and hides a scheduler that is only waiting", () => {
   const rows = deriveNowWorking({
     workerState: "stopped",
     repositories: [{ ...repo, uatState: "running" }, { ...repo, id: "r2", name: "acme/site", uatState: "running" }],
@@ -74,17 +75,26 @@ test("reports an in-flight test run and an idle scheduler", () => {
       r2: [{ startedAt: 1, finishedAt: 5, suites: [] }],
     },
   });
+  assert.equal(rows.length, 1);
   assert.equal(rows[0].title, "Running UI");
   assert.equal(rows[0].detail, "Manual run · 1 of 3 suites finished");
   assert.equal(rows[0].state, "running");
-  assert.equal(rows[1].state, "idle");
 });
 
-test("reports the latest CI result only for repositories monitored for Actions", () => {
-  const logs = [line("GitHub Actions on ai-main are passing."), line("Failing pipeline(s) on ai-main (Build) already have an issue.")];
-  assert.deepEqual(deriveNowWorking({ workerState: "stopped", repositories: [repo], logs }), []);
-  const rows = deriveNowWorking({ workerState: "stopped", repositories: [{ ...repo, monitorActions: true }], logs });
+test("shows a CI failure only while the worker is fixing it", () => {
+  const checked = [
+    line("GitHub Actions on ai-main are passing."),
+    line("Failing pipeline(s) on ai-main (Build) already have an issue."),
+    line("Could not check GitHub Actions; continuing with the issue queue: denied"),
+  ];
+  assert.deepEqual(deriveNowWorking({ workerState: "running", repositories: [{ ...repo, monitorActions: true }], logs: checked }), []);
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [{ ...repo, monitorActions: true }],
+    logs: [line("Working CI failure issue #12 filed by the Actions monitor: Fix failing CI on ai-main: Build")],
+  });
   assert.equal(rows.length, 1);
   assert.equal(rows[0].kind, "ci");
-  assert.equal(rows[0].state, "error");
+  assert.equal(rows[0].state, "running");
+  assert.equal(rows[0].title, "#12 Fix failing CI on ai-main: Build");
 });
