@@ -350,12 +350,29 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
 .raw-graph-panel summary { cursor: pointer; padding: 12px 14px; color: var(--muted); font-size: 10px; font-weight: 700; }
 .branch-graph { height: auto; max-height: 360px; min-height: 120px; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0 0 10px 10px; }
 
+.now-working-panel { margin-top: 16px; }
+.now-working-list { display: grid; gap: 1px; margin-top: 10px; }
+.now-working-row { display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 12px; border-top: 1px solid var(--line-soft); }
+.now-working-row:first-child { border-top: 0; }
+.now-working-kind { border-radius: 999px; padding: 4px 8px; text-align: center; font-size: 8px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; color: var(--violet); background: rgba(141,112,255,.12); }
+.now-working-row.tests .now-working-kind { color: var(--cyan); background: rgba(53,213,208,.1); }
+.now-working-row.ci .now-working-kind { color: var(--amber); background: rgba(240,187,98,.1); }
+.now-working-words { min-width: 0; }
+.now-working-words strong, .now-working-words span { display: block; overflow-wrap: anywhere; }
+.now-working-words strong { color: #dce1eb; font-size: 10px; line-height: 1.35; }
+.now-working-words span { margin-top: 3px; color: var(--muted-2); font-size: 9px; }
+.now-working-empty { display: grid; gap: 5px; padding: 18px; text-align: center; }
+.now-working-empty strong { color: #c9d0dd; font-size: 11px; }
+.now-working-empty span { color: var(--muted-2); font-size: 9px; }
+.status-pill.idle { color: #8994a8; background: #202737; }
+.status-pill.ok { color: #70e3a9; background: rgba(66,217,146,.12); }
 @media (max-width: 1060px) {
   .app-shell { grid-template-columns: 190px minmax(0, 1fr); }.feedback-loop { display: none; }.tool-grid { grid-template-columns: repeat(2, 1fr); }.form-grid.four { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 820px) {
   .service-grid, .two-column, .settings-grid { grid-template-columns: 1fr; }.span-two { grid-column: auto; }.form-grid.three, .form-grid.four { grid-template-columns: 1fr 1fr; }
   .service-timing, .service-timing.two { grid-template-columns: 1fr; }
+  .now-working-row { grid-template-columns: 1fr auto; }.now-working-kind { grid-column: 1 / -1; justify-self: start; }
   .repo-switcher { display: none; }
   .activity-toolbar { align-items: flex-start; flex-direction: column; }
   .automation-flow-options { grid-template-columns: 1fr; }
