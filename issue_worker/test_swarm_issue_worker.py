@@ -2350,6 +2350,8 @@ class WorkerTestCase(unittest.TestCase):
             "complexity": 7,
             "risk": "medium",
             "context_requirement": "large",
+            "selected_provider": "codex",
+            "provider_reason": "Codex is best at test-driven bug fixes like this one.",
             "selected_model": "gpt-5.6-luna",
             "reasoning_effort": "low",
             "confidence": 0.91,
@@ -2393,6 +2395,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(self.worker.build_prompt(False, "", False), before)
         self.assertEqual(self.worker.read_state()["model"], "gpt-5.6-sol")
         self.assertEqual(self.worker.read_state()["routing_decision"]["prompt_grade"], "B+")
+        self.assertEqual(self.worker.read_state()["routing_decision"]["provider"], "codex")
 
     def test_dynamic_routing_falls_back_and_still_posts_the_configured_model(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
@@ -2427,6 +2430,8 @@ class WorkerTestCase(unittest.TestCase):
         self.worker.routing.update(
             {
                 "provider": "codex",
+                "provider_name": "Codex",
+                "provider_candidates": ["codex", "claude", "grok"],
                 "selected_model": "gpt-5.6-sol",
                 "reasoning_effort": "high",
                 "fallback": False,
@@ -2444,6 +2449,9 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("Selected Model: GPT-5.6 Sol", notice)
         self.assertIn("Reasoning: High", notice)
         self.assertIn("Routing Confidence: 91%", notice)
+        self.assertIn("Selected AI: Codex", notice)
+        self.assertIn("AI Tools Considered: Codex, Claude, Grok", notice)
+        self.assertIn("Why Codex: Codex is best at test-driven bug fixes", notice)
         self.assertIn("acceptance criteria are incomplete", notice)
         self.assertEqual(self.worker.issue.body, "ORIGINAL")
 
@@ -2457,6 +2465,140 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIsNone(self.worker.routing)
         self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
 
+    def test_dynamic_routing_hands_the_issue_to_the_tool_that_suits_it(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(506, "Route the tool", "ORIGINAL", [], "https://example.invalid/506")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-506")
+        self.worker.provider_usages = {
+            "Claude": ProviderUsage(0, 80.0, "week 80% remaining"),
+            "Codex": ProviderUsage(0, 90.0, "week 90% remaining"),
+            "Grok": ProviderUsage(0, 70.0, "week 70% remaining"),
+        }
+        self.worker.provider_priority = ("Codex", "Claude", "Grok")
+        payload = self._routing_payload(
+            selected_provider="grok",
+            provider_reason="Grok is quickest on a small scripted change.",
+        )
+        with mock.patch("swarm_issue_worker.run_provider_router", return_value=payload) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        prompt = router.call_args.kwargs["prompt"]
+        for key in ("codex", "claude", "grok"):
+            self.assertIn(f"- {key} (", prompt)
+        # The router still runs on the provider that was picked for capacity.
+        self.assertEqual(router.call_args.kwargs["provider"], "codex")
+        self.assertEqual(self.worker.choice.name, "Grok")
+        self.assertEqual(self.worker.choice.model, "grok-4.6")
+        self.assertEqual(self.worker.choice.effort, "high")
+        self.assertTrue(self.worker.choice.session_id)
+        self.assertEqual(self.worker.expected_branch(), "ai/xai/issue-506")
+        self.assertEqual(self.worker.start_usage, self.worker.provider_usages["Grok"])
+        self.assertEqual(self.worker.routing["provider"], "grok")
+        self.assertEqual(
+            self.worker.routing["provider_reason"],
+            "Grok is quickest on a small scripted change.",
+        )
+        self.assertEqual(self.worker.issue.body, "ORIGINAL")
+
+    def test_dynamic_routing_only_offers_tools_that_have_capacity(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(507, "Capacity", "ORIGINAL", [], "https://example.invalid/507")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "low", "session-507")
+        self.worker.provider_priority = ("Grok", "Claude")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(selected_provider="codex"),
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        prompt = router.call_args.kwargs["prompt"]
+        self.assertIn("- grok (", prompt)
+        self.assertIn("- claude (", prompt)
+        self.assertNotIn("- codex (", prompt)
+        # Codex has no capacity this pass, so the issue stays with Grok.
+        self.assertEqual(self.worker.choice.name, "Grok")
+        self.assertIn("not an available AI tool", self.worker.routing["provider_override_reason"])
+
+    def test_dynamic_routing_favors_another_tool_when_reworking(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(
+            508, "Rework", "ORIGINAL", [], "https://example.invalid/508",
+            work_type="followup", previous_ai="Codex",
+        )
+        self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5", "low", "session-508")
+        self.worker.provider_priority = ("Claude", "Grok", "Codex")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(selected_provider="codex", confidence=0.55),
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        prompt = router.call_args.kwargs["prompt"]
+        self.assertIn("codex completed the previous pass", prompt)
+        self.assertEqual(self.worker.choice.name, "Claude")
+        self.assertIn("Rework:", self.worker.routing["provider_override_reason"])
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+            self.worker.post_started_comment()
+        notice = github.call_args.args[2]
+        self.assertIn("Selected AI: Claude", notice)
+        self.assertIn("Rework: Codex completed the previous pass", notice)
+
+    def test_dynamic_routing_keeps_the_previous_tool_when_it_is_clearly_better(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(
+            509, "Rework", "ORIGINAL", [], "https://example.invalid/509",
+            work_type="followup", previous_ai="Codex",
+        )
+        self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5", "low", "session-509")
+        self.worker.provider_priority = ("Claude", "Codex")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(
+                selected_provider="codex",
+                confidence=0.95,
+                provider_reason="Codex already has the failing test reproduced.",
+            ),
+        ):
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(self.worker.choice.name, "Codex")
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
+        self.assertEqual(self.worker.routing["provider_override_reason"], "")
+
+    def test_dynamic_routing_cannot_change_tools_on_an_owned_branch(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(510, "Owned", "ORIGINAL", [], "https://example.invalid/510")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-510")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.provider_priority = ("Codex", "Claude", "Grok")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(selected_provider="grok"),
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertNotIn("- grok (", router.call_args.kwargs["prompt"])
+        self.assertEqual(self.worker.choice.name, "Codex")
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
+        self.assertEqual(self.worker.read_state()["routing_decision"]["provider"], "codex")
+
+    def test_provider_strengths_reach_the_router_prompt(self) -> None:
+        parsed = build_parser().parse_args(
+            self._worker_argv(auto=False) + ["--grok-router-strengths", "Grok is best at scripting"]
+        )
+        config = Config.from_args(parsed)
+        self.assertEqual(config.spec("grok").strengths, "Grok is best at scripting")
+        self.assertIn("refactor", config.spec("claude").strengths.lower())
+        worker = Worker(dataclasses.replace(config, dynamic_model_routing=True))
+        worker.issue = IssueContext(511, "Strengths", "ORIGINAL", [], "https://example.invalid/511")
+        worker.choice = ProviderChoice("Grok", "grok-4.6", "low", "session-511")
+        worker.provider_priority = ("Grok", "Claude")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(selected_provider="grok"),
+        ) as router:
+            worker.maybe_apply_dynamic_routing()
+        self.assertIn("Best at: Grok is best at scripting", router.call_args.kwargs["prompt"])
+
     def test_invalid_routing_tier_json_is_rejected(self) -> None:
         with self.assertRaises(WorkerError):
             Config.from_args(build_parser().parse_args(self._worker_argv(auto=False) + ["--routing-tiers", "{"]))
@@ -2465,6 +2607,11 @@ class WorkerTestCase(unittest.TestCase):
         database_path = self.state / "routing-history.sqlite3"
         decision = {
             "provider": "codex",
+            "provider_name": "Codex",
+            "provider_reason": "Codex is best at test-driven bug fixes like this one.",
+            "provider_override_reason": "",
+            "provider_candidates": ["claude", "codex", "grok"],
+            "router_provider": "claude",
             "task_type": "debugging",
             "complexity": 7,
             "risk": "medium",
@@ -2504,7 +2651,13 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(row["model"], "gpt-5.6-sol")
         self.assertEqual(row["effort"], "high")
         self.assertEqual(row["original_issue_body"], "ORIGINAL")
-        self.assertEqual(json.loads(row["routing_decision"])["prompt_grade"], "B+")
+        stored = json.loads(row["routing_decision"])
+        self.assertEqual(stored["prompt_grade"], "B+")
+        # Which AI tool was chosen, out of which set, and why, are all recorded.
+        self.assertEqual(stored["provider"], "codex")
+        self.assertEqual(stored["provider_candidates"], ["claude", "codex", "grok"])
+        self.assertEqual(stored["router_provider"], "claude")
+        self.assertIn("test-driven", stored["provider_reason"])
 
     def test_execution_history_migration_adds_routing_decision(self) -> None:
         database_path = self.state / "legacy-history.sqlite3"

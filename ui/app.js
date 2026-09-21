@@ -87,12 +87,12 @@
     },
     "dynamic-model-routing": {
       title: "Dynamic Model Routing",
-      html: "<p><strong>OFF</strong> keeps today’s behavior: you choose the worker model and reasoning effort on each provider card.</p><p><strong>ON</strong> disables those worker selectors and shows <strong>Router model</strong> and <strong>Router effort</strong>. Before an issue is implemented, that router grades the original prompt and SWARM picks the worker model from the configured complexity tiers. The original issue text is not rewritten.</p>",
+      html: "<p><strong>OFF</strong> keeps today’s behavior: you choose the worker model and reasoning effort on each provider card.</p><p><strong>ON</strong> disables those worker selectors and shows <strong>Router model</strong>, <strong>Router effort</strong>, and <strong>Best at</strong>. Before an issue is implemented, that router grades the original prompt, then picks which enabled AI tool runs it — weighing each tool’s <strong>Best at</strong> description and its remaining usage — and takes the worker model and reasoning effort from that tool’s complexity tiers. The original issue text is not rewritten.</p><p>The chosen tool, why it was chosen, the grade, and the routing confidence are posted on the issue when work starts and stored with the run in AI history. A rework goes to a different tool than the previous pass unless the router is clearly confident the same one is the better choice.</p>",
       links: [],
     },
     "provider-include-exclude": {
       title: "Enabled AI tools",
-      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set the shared minimum quota reserve.</p><p><strong>Dynamic Model Routing</strong> grades the original issue and picks that provider’s worker model and reasoning effort from the saved complexity tiers. The card’s router model is what performs the grading. Turn routing off to choose the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
+      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set the shared minimum quota reserve.</p><p><strong>Dynamic Model Routing</strong> grades the original issue, picks which enabled provider handles it, and takes that provider’s worker model and reasoning effort from the saved complexity tiers. The card’s router model performs the grading, and its <strong>Best at</strong> text is what the router uses to tell the providers apart. Turn routing off to choose the provider order and the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
       links: [],
     },
     "software-update": {
@@ -472,6 +472,7 @@
         effort: entry.effort || defaultEffort(id, entry.model || defaultModel(id)),
         router_model: routerModel,
         router_effort: entry.router_effort || routerDefault.effort,
+        strengths: entry.strengths || routerDefault.strengths || "",
         bin: entry.bin || "",
       };
     });
@@ -572,7 +573,7 @@
       effortLabel.appendChild(effortInput);
       const routingNote = document.createElement("p");
       routingNote.className = "dynamic-routing-note fine-print";
-      routingNote.textContent = "Worker model and reasoning are chosen for each issue.";
+      routingNote.textContent = "AI tool, worker model, and reasoning are chosen for each issue.";
       const routerModelLabel = document.createElement("label");
       routerModelLabel.className = "router-model-label";
       routerModelLabel.append("Router model ");
@@ -604,6 +605,18 @@
       });
       routerEffortInput.addEventListener("change", setDirty);
       routerEffortLabel.appendChild(routerEffortInput);
+      const strengthsLabel = document.createElement("label");
+      strengthsLabel.className = "router-strengths-label";
+      strengthsLabel.append("Best at ");
+      const strengthsNote = document.createElement("small");
+      strengthsNote.textContent = "What this tool handles best. The router weighs it when it picks which enabled tool gets an issue.";
+      strengthsLabel.appendChild(strengthsNote);
+      const strengthsInput = document.createElement("textarea");
+      strengthsInput.className = "provider-router-strengths";
+      strengthsInput.rows = 3;
+      strengthsInput.value = provider.strengths || "";
+      strengthsInput.addEventListener("input", setDirty);
+      strengthsLabel.appendChild(strengthsInput);
       const quotaLabel = document.createElement("label");
       quotaLabel.append("Minimum quota remaining ");
       const quotaWrap = document.createElement("div");
@@ -624,7 +637,15 @@
       suffix.textContent = "%";
       quotaWrap.append(quotaInput, suffix);
       quotaLabel.appendChild(quotaWrap);
-      fields.append(modelLabel, effortLabel, routingNote, routerModelLabel, routerEffortLabel, quotaLabel);
+      fields.append(
+        modelLabel,
+        effortLabel,
+        routingNote,
+        routerModelLabel,
+        routerEffortLabel,
+        strengthsLabel,
+        quotaLabel,
+      );
 
       const actions = document.createElement("div");
       actions.className = "provider-actions";
@@ -712,6 +733,7 @@
       effort: card.querySelector(".provider-effort").value,
       router_model: card.querySelector(".provider-router-model")?.value.trim() || "",
       router_effort: card.querySelector(".provider-router-effort")?.value || "",
+      strengths: card.querySelector(".provider-router-strengths")?.value.trim() || "",
       bin: document.querySelector(`[data-provider-bin="${card.dataset.provider}"]`)?.value.trim() || "",
     }));
   }
@@ -1505,10 +1527,15 @@
           [
             `Grade ${routing.prompt_grade}`,
             routing.complexity != null ? `complexity ${routing.complexity}/10` : "",
+            routing.provider_name || routing.provider || "",
             routing.selected_model || "",
             routing.reasoning_effort || "",
             percent,
           ].filter(Boolean).join(" · "),
+        );
+        addSummaryParagraph(
+          `Why ${routing.provider_name || routing.provider || "this tool"}`,
+          [routing.provider_reason || "", routing.provider_override_reason || ""].filter(Boolean).join(" "),
         );
         addSummaryParagraph("Prompt grade", routing.grade_reason || "");
       }

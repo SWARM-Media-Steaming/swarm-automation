@@ -5,16 +5,34 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, () => {
   "use strict";
 
-  // Suggested router defaults. The desktop saves whatever the user picks;
-  // these fill a provider card that has no router settings yet.
+  // Suggested router defaults, including what each tool is best at — the
+  // router weighs those strengths when it picks which enabled tool gets an
+  // issue. Keep in sync with provider_strengths_preset in src/config.rs. The
+  // desktop saves whatever the user picks; these fill a provider card that has
+  // no router settings yet.
   const DEFAULT_ROUTER = {
-    claude: { model: "claude-haiku-4-5", effort: "low" },
-    codex: { model: "gpt-5.6-luna", effort: "low" },
-    grok: { model: "grok-4.3", effort: "low" },
+    claude: {
+      model: "claude-haiku-4-5",
+      effort: "low",
+      strengths:
+        "Multi-file refactors, following an existing codebase's conventions, careful review of someone else's work, and writing documentation or tests in the surrounding style.",
+    },
+    codex: {
+      model: "gpt-5.6-luna",
+      effort: "low",
+      strengths:
+        "Precise bug fixes, test-driven changes, and long autonomous edit-run-verify loops where the work is checked by running it.",
+    },
+    grok: {
+      model: "grok-4.3",
+      effort: "low",
+      strengths:
+        "Fast turnarounds on well-scoped changes, scripting and configuration work, and quick orientation in unfamiliar code.",
+    },
   };
 
   function defaultRouter(providerId) {
-    return DEFAULT_ROUTER[providerId] || { model: "", effort: "low" };
+    return DEFAULT_ROUTER[providerId] || { model: "", effort: "low", strengths: "" };
   }
 
   function routingControlState(dynamicRouting) {
@@ -32,10 +50,12 @@
     const effort = card.querySelector(".provider-effort");
     const routerModel = card.querySelector(".provider-router-model");
     const routerEffort = card.querySelector(".provider-router-effort");
+    const strengths = card.querySelector(".provider-router-strengths");
     const workerModelLabel = card.querySelector(".worker-model-label");
     const workerEffortLabel = card.querySelector(".worker-effort-label");
     const routerModelLabel = card.querySelector(".router-model-label");
     const routerEffortLabel = card.querySelector(".router-effort-label");
+    const strengthsLabel = card.querySelector(".router-strengths-label");
     const note = card.querySelector(".dynamic-routing-note");
     if (model) model.disabled = state.workerDisabled;
     if (effort) effort.disabled = state.workerDisabled;
@@ -45,6 +65,8 @@
     if (routerEffortLabel) routerEffortLabel.hidden = state.routerHidden;
     if (routerModel) routerModel.disabled = state.routerHidden;
     if (routerEffort) routerEffort.disabled = state.routerHidden;
+    if (strengthsLabel) strengthsLabel.hidden = state.routerHidden;
+    if (strengths) strengths.disabled = state.routerHidden;
     if (note) note.hidden = state.routerHidden;
     return state;
   }

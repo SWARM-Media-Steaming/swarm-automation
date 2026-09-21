@@ -267,6 +267,9 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .provider-fields label { font-size: 9px; }
 .provider-fields label.is-disabled { opacity: .5; }
 .provider-fields select:disabled { cursor: not-allowed; }
+.provider-fields textarea { width: 100%; margin-top: 7px; min-height: 62px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); padding: 9px 10px; outline: none; font-size: 11px; line-height: 1.5; }
+.provider-fields textarea:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(141,112,255,.09); }
+.provider-fields textarea:disabled { cursor: not-allowed; opacity: .5; }
 .dynamic-routing-note { margin: 0; }
 .provider-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: auto; }
 .provider-actions button { padding: 7px 11px; font-size: 9px; }
