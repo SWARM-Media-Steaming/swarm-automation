@@ -86,8 +86,15 @@ Issue pull requests target `ai-main`; automatic approval and merging are both
 off by default. An issue
 branch cannot merge while its linked GitHub issue is open. After a person closes
 the issue, the Repository view can squash-merge its PR and delete the branch; an
-auto-merge profile performs the same reconciliation on a later cycle. Nothing
-in the worker commits or pushes to `main`. A person can create or merge the
+auto-merge profile performs the same reconciliation on a later cycle. The
+worker never commits or pushes to `main` directly. By default a person creates
+or merges the `ai-main` → `main` promotion; the per-repository **Automatically
+merge `ai-main` into `main`** toggle (off by default, next to the issue-PR
+merging toggle on the Repository page) instead has the worker open, approve
+(with another provider's bot), and merge that promotion PR itself after issue
+PRs land, so finished work rolls up into `main` immediately. A promotion with
+conflicts stays open for a person, and a failed promotion never affects the
+issue's own delivery. A person can also create or merge the
 `ai-main` → `main` promotion pull request from the Overview or Repository view.
 The Overview's explicit **Merge to Main** action first reconciles `main` into
 `ai-main`, obtains a configured bot approval, and completes the promotion

@@ -718,6 +718,12 @@ fn repo_worker_args(
             "--no-auto-merge"
         }
         .into(),
+        if repo.auto_promote {
+            "--auto-promote"
+        } else {
+            "--no-auto-promote"
+        }
+        .into(),
         if repo.require_issue_tests {
             "--require-issue-tests"
         } else {

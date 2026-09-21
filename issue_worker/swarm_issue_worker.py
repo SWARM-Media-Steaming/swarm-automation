@@ -12,9 +12,10 @@ follow-up review pass prefers a *different* provider than the previous one,
 falling back to the same one only when it is the only one with capacity.
 
 All AI work happens on an integration branch (``--integration-branch``, default
-``ai-main``) that is kept in parity with ``--base-branch`` but is never merged
-into it automatically — that final promotion is a human action (a PR opened
-from the desktop app's Branches view). Each issue gets one branch,
+``ai-main``) that is kept in parity with ``--base-branch``. It is never merged
+into it automatically unless ``--auto-promote`` is set; otherwise that final
+promotion is a human action (a PR opened from the desktop app's Branches
+view). Each issue gets one branch,
 ``<prefix>/<first-ai>/issue-<n>``, reused by every later pass regardless of
 which provider runs it. Commit subjects are prefixed ``[<provider>]``.
 """
@@ -268,6 +269,7 @@ class Config:
     require_bot_auth: bool
     auto_approve: bool
     auto_merge: bool
+    auto_promote: bool
     require_issue_tests: bool
     allow_environment_only_summary: bool
     branch_prefix: str
@@ -312,6 +314,7 @@ class Config:
             require_bot_auth=args.require_bot_auth,
             auto_approve=args.auto_approve,
             auto_merge=args.auto_merge,
+            auto_promote=args.auto_promote,
             require_issue_tests=args.require_issue_tests,
             allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
@@ -1162,6 +1165,7 @@ class Worker:
                 f"Approved and squash-merged issue #{issue_number} from {branch} "
                 f"into {self.config.integration_branch} as {merge_sha}."
             )
+        self.auto_promote_integration_branch()
 
     def archive_closed_paused(self, paused_file: Path) -> Path:
         state = read_json(paused_file)
@@ -2721,7 +2725,12 @@ class Worker:
                 "nothing was pushed: " + "; ".join(untagged)
             )
 
-    def approve_pull_request(self, pr_url: str, implementing_provider: str | None = None) -> str:
+    def approve_pull_request(
+        self,
+        pr_url: str,
+        implementing_provider: str | None = None,
+        body: str = "Automated approval after the implementing provider completed verification.",
+    ) -> str:
         reviewer = self.review_provider(implementing_provider)
         self.github.gh(
             [
@@ -2732,7 +2741,7 @@ class Worker:
                 self.config.github_repository,
                 "--approve",
                 "--body",
-                "Automated approval after the implementing provider completed verification.",
+                body,
             ],
             reviewer,
         )
@@ -2859,7 +2868,134 @@ class Worker:
             )
             self.delete_remote_issue_branch(branch, self.choice.key)
             self.return_to_integration_branch(branch)
+            self.auto_promote_integration_branch(self.choice.key)
         return pr_url, branch, delivered_sha
+
+    def auto_promote_integration_branch(self, provider: str | None = None) -> str | None:
+        """Best-effort roll-up of `integration_branch` into `base_branch`.
+
+        Only runs when `--auto-promote` (and therefore issue-PR auto-merge) is
+        on. It works purely against GitHub (open or reuse the integration PR,
+        approve it as another provider's bot, merge-commit it), so the shared
+        checkout is never touched. It runs *after* an issue's own delivery has
+        already succeeded, so a failure here is logged and retried on the next
+        run instead of failing — or un-delivering — the issue work. Returns
+        the merged PR URL, or None when nothing was promoted. Without a
+        `provider` (the start-of-run sweep), the preferred enabled provider
+        opens the PR.
+        """
+        if not (self.config.auto_promote and self.config.auto_approve) or self.config.dry_run:
+            return None
+        if provider is None:
+            enabled = [spec.key for spec in self.config.enabled_specs]
+            if not enabled:
+                return None
+            preferred = self.config.preferred_provider.lower()
+            provider = preferred if preferred in enabled else enabled[0]
+        try:
+            return self.promote_integration_branch(provider)
+        except WorkerError as error:
+            log(
+                f"Could not promote {self.config.integration_branch} into "
+                f"{self.config.base_branch}; leaving it for the next run: {error}"
+            )
+            return None
+
+    def promote_integration_branch(self, provider: str) -> str | None:
+        remote = self.config.remote_name
+        base = self.config.base_branch
+        integ = self.config.integration_branch
+        self.git("fetch", remote, check=False)
+        if not self.git_ok("show-ref", "--verify", f"refs/remotes/{remote}/{integ}"):
+            return None
+        if not self.git_ok("show-ref", "--verify", f"refs/remotes/{remote}/{base}"):
+            return None
+        if int(self.git("rev-list", "--count", f"{remote}/{base}..{remote}/{integ}")) == 0:
+            return None
+        listing = json.loads(
+            self.github.gh(
+                [
+                    "pr",
+                    "list",
+                    "--repo",
+                    self.config.github_repository,
+                    "--base",
+                    base,
+                    "--head",
+                    integ,
+                    "--state",
+                    "open",
+                    "--limit",
+                    "1",
+                    "--json",
+                    "url,headRefOid,mergeable,reviewDecision",
+                ],
+                provider,
+            )
+        )
+        if listing:
+            pull_request = listing[0]
+            pr_url = str(pull_request["url"])
+        else:
+            output = self.github.gh(
+                [
+                    "pr",
+                    "create",
+                    "--repo",
+                    self.config.github_repository,
+                    "--head",
+                    integ,
+                    "--base",
+                    base,
+                    "--title",
+                    f"Merge {integ} into {base}",
+                    "--body-file",
+                    "-",
+                ],
+                provider,
+                f"Automatic promotion of AI-integration work from `{integ}` to `{base}`.\n",
+            ).strip()
+            pr_url = output.splitlines()[-1]
+            pull_request = {}
+        if str(pull_request.get("mergeable") or "").upper() == "CONFLICTING":
+            raise WorkerError(f"{pr_url} has merge conflicts; a human needs to resolve them")
+        if str(pull_request.get("reviewDecision") or "").upper() != "APPROVED":
+            self.approve_pull_request(
+                pr_url,
+                provider,
+                f"Automated approval to promote `{integ}` into `{base}`.",
+            )
+        head_sha = self.github.gh(
+            [
+                "pr",
+                "view",
+                pr_url,
+                "--repo",
+                self.config.github_repository,
+                "--json",
+                "headRefOid",
+                "--jq",
+                ".headRefOid",
+            ],
+            provider,
+        ).strip()
+        if not SHA_RE.fullmatch(head_sha):
+            raise WorkerError(f"GitHub returned no head commit for {pr_url}")
+        self.github.gh(
+            [
+                "pr",
+                "merge",
+                pr_url,
+                "--repo",
+                self.config.github_repository,
+                "--merge",
+                "--match-head-commit",
+                head_sha,
+            ],
+            provider,
+        )
+        log(f"Promoted {integ} into {base} via {pr_url}.")
+        return pr_url
 
     def merge_pull_request(
         self,
@@ -2902,8 +3038,13 @@ class Worker:
         body = (
             f"Squash-merged into `{self.config.integration_branch}` "
             f"(commit `{merge_sha}`) via {pr_url}.\n\n"
-            f"`{self.config.integration_branch}` reaches `{self.config.base_branch}` only when a "
-            "human merges the integration pull request."
+            + (
+                f"Automatic promotion is on, so `{self.config.integration_branch}` is then merged "
+                f"into `{self.config.base_branch}` automatically."
+                if self.config.auto_promote
+                else f"`{self.config.integration_branch}` reaches `{self.config.base_branch}` only "
+                "when a human merges the integration pull request."
+            )
         )
         self.github.gh(
             [
@@ -3326,6 +3467,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-merge",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_AUTO_MERGE", False),
+    )
+    parser.add_argument(
+        "--auto-promote",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_AUTO_PROMOTE", False),
     )
     parser.add_argument(
         "--require-issue-tests",
