@@ -98,3 +98,37 @@ test("shows a CI failure only while the worker is fixing it", () => {
   assert.equal(rows[0].state, "running");
   assert.equal(rows[0].title, "#12 Fix failing CI on ai-main: Build");
 });
+
+const labeled = (label, message) =>
+  `[12:34:56] [Issue worker scheduler/stdout] [${label}] [2026-09-15 12:34:56-0500] ${message}`;
+
+test("reads worker lines from parallel-repo runs that carry a repository label", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo, { ...repo, id: "r2", name: "acme/site" }],
+    logs: [
+      labeled("acme/app", "Selected oldest unprocessed assigned issue: #4 One"),
+      labeled("acme/app", "Selected Claude model claude-x"),
+      labeled("acme/site", "Selected oldest unprocessed assigned issue: #9 Two"),
+    ],
+  });
+  assert.deepEqual(rows.map((row) => `${row.repository}${row.title}`), ["acme/app#4 One", "acme/site#9 Two"]);
+  assert.equal(rows[0].detail, "Claude · Picked up from the queue");
+});
+
+test("shows a new issue that starts after an earlier one finished", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo],
+    logs: [
+      line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+      line("Finished issue #84 with Claude: done"),
+      line("Starting a cycle over 1 repositories"),
+      line("Selected oldest unprocessed assigned issue: #85 Next one"),
+      line("Codex is working. Detailed implementation output is hidden."),
+    ],
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].title, "#85 Next one");
+  assert.equal(rows[0].detail, "Codex · Codex is writing the change");
+});
