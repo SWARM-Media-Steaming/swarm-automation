@@ -137,6 +137,9 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .automation-flow-toggle strong { color: #cbd2df; font-size: 10px; line-height: 1.4; }
 .automation-flow-toggle small { margin-top: 5px; color: var(--muted-2); font-size: 9px; line-height: 1.45; }
 .automation-flow-toggle code { color: #c5bbff; font: inherit; }
+.branch-push-access { margin-top: 16px; display: grid; gap: 10px; }
+.branch-push-access .automation-flow-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.branch-push-access .panel-copy { margin: 0; }
 .policy-toggle { align-items: flex-start; padding: 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: rgba(8,11,18,.35); }
 .policy-toggle > span { margin-top: 1px; }
 .policy-toggle div { min-width: 0; }

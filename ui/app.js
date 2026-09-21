@@ -16,7 +16,7 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false },
+    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false, branchPushAccess: false },
     activeRepoId: "",
     branchOverview: null,
     promotions: [],
@@ -117,7 +117,7 @@
     },
     "auto-approve-merge": {
       title: "Approve & merge automatically",
-      html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention.</p><p><strong>Automatically merge <code>ai-main</code> into <code>main</code></strong> is off by default. When on, the worker also opens (or reuses) the <code>ai-main</code> → <code>main</code> pull request after issue PRs land, has another provider’s bot approve it, and merges it — so everything the app has finished lands on <code>main</code> immediately. It needs issue PR merging on, and a promotion with conflicts stays open for a person to resolve. Leave it off to keep <code>main</code> a human decision.</p>",
+      html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention.</p><p><strong>Automatically merge <code>ai-main</code> into <code>main</code></strong> is off by default. When on, the worker also opens (or reuses) the <code>ai-main</code> → <code>main</code> pull request after issue PRs land, has another provider’s bot approve it, and merges it — so everything the app has finished lands on <code>main</code> immediately. It needs issue PR merging on, and a promotion with conflicts stays open for a person to resolve. Leave it off to keep <code>main</code> a human decision.</p><p><strong>Allow bots to merge</strong> updates the human-owned branch’s existing push allow list so the worker’s GitHub Apps can perform that merge. People already on the list stay on it. If the branch does not restrict who can push, the button stays off.</p>",
       links: [],
     },
     "ci-monitoring": {
@@ -270,6 +270,7 @@
     if (view === "debug") void refreshTools({ quiet: true });
     if (view === "scheduler") void refreshTestPlan({ quiet: true });
     if (view === "repository") void refreshBotReadiness({ quiet: true });
+    if (view === "repository") void refreshBranchPushAccess({ quiet: true });
     if (view === "feedback") void refreshExecutionHistory({ quiet: true });
   }
 
@@ -1776,6 +1777,83 @@
     return { text: `${pending} bot${pending === 1 ? "" : "s"} need setup`, ok: false };
   }
 
+  const PUSH_ACCESS_PILL = {
+    allowed: ["Allowed", "running"],
+    missing: ["Blocked", "error"],
+    unrestricted: ["Open", "paused"],
+    unprotected: ["Open", "paused"],
+    unconfigured: ["No bots", "stopped"],
+  };
+
+  function renderBranchPushAccess(status) {
+    const pill = byId("branch-push-access-pill");
+    const copy = byId("branch-push-access-copy");
+    const button = byId("grant-bot-push-access");
+    const [text, tone] = PUSH_ACCESS_PILL[status?.state] || ["Not checked", "stopped"];
+    if (pill) {
+      pill.textContent = text;
+      pill.className = `status-pill ${tone}`;
+    }
+    if (copy) copy.textContent = status?.message || "Checking whether the worker bots are allowed to merge promotion pull requests.";
+    if (button) {
+      const branch = status?.branch || currentRepo()?.base_branch || "main";
+      button.textContent = `Allow bots to merge into ${branch}`;
+      button.disabled = !status?.canGrant;
+    }
+  }
+
+  async function refreshBranchPushAccess({ quiet = true } = {}) {
+    const repo = currentRepo();
+    if (!repo || !String(repo.github_repository || "").includes("/")) {
+      renderBranchPushAccess({
+        state: "unconfigured",
+        branch: repo?.base_branch || "main",
+        message: "Enter this repository's owner/name to check who can merge into its human-owned branch.",
+        canGrant: false,
+      });
+      return;
+    }
+    if (state.refreshing.branchPushAccess) return;
+    state.refreshing.branchPushAccess = true;
+    const repoId = repo.id;
+    try {
+      const status = await invoke("branch_push_access", { repoId });
+      if (currentRepo()?.id !== repoId) return;
+      renderBranchPushAccess(status);
+    } catch (error) {
+      if (currentRepo()?.id !== repoId) return;
+      renderBranchPushAccess({
+        state: "error",
+        branch: repo.base_branch || "main",
+        message: errorText(error),
+        canGrant: false,
+      });
+      if (!quiet) showToast(errorText(error), "error");
+    } finally {
+      state.refreshing.branchPushAccess = false;
+    }
+  }
+
+  async function grantBotPushAccess() {
+    const repo = currentRepo();
+    if (!repo) return;
+    if (state.dirty) {
+      showToast("Save changes before updating branch protection.", "error");
+      return;
+    }
+    const button = byId("grant-bot-push-access");
+    if (button) button.disabled = true;
+    try {
+      const status = await invoke("grant_bot_branch_push", { repoId: repo.id });
+      if (currentRepo()?.id !== repo.id) return;
+      renderBranchPushAccess(status);
+      showToast(status.message, status.state === "allowed" ? "success" : "");
+    } catch (error) {
+      showToast(errorText(error), "error");
+      await refreshBranchPushAccess({ quiet: true });
+    }
+  }
+
   async function refreshBotReadiness({ quiet = true } = {}) {
     const repo = currentRepo();
     if (!repo || !String(repo.github_repository || "").includes("/")) return;
@@ -2535,6 +2613,7 @@
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
+    if (document.querySelector("#view-repository.active")) void refreshBranchPushAccess({ quiet: true });
     if (document.querySelector("#view-feedback.active")) void refreshExecutionHistory({ quiet: true });
   }
 
@@ -2986,8 +3065,12 @@
     byId("setup-bots").addEventListener("click", setupBots);
     byId("recheck-bots").addEventListener("click", recheckBots);
     byId("verify-bots").addEventListener("click", verifyBots);
+    byId("grant-bot-push-access").addEventListener("click", grantBotPushAccess);
     window.addEventListener("focus", () => {
-      if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
+      if (document.querySelector("#view-repository.active")) {
+        void refreshBotReadiness({ quiet: true });
+        void refreshBranchPushAccess({ quiet: true });
+      }
     });
     byId("open-log-folder").addEventListener("click", () => invoke("open_automation_folder").catch((error) => showToast(errorText(error), "error")));
     byId("clear-log").addEventListener("click", () => {
@@ -3023,6 +3106,7 @@
       void refreshTools();
       void refreshTestPlan({ quiet: true });
       void refreshBotReadiness({ quiet: true });
+      void refreshBranchPushAccess({ quiet: true });
       void refreshPromotions({ quiet: true });
       window.setInterval(() => void refreshStatus({ quiet: true }), 2000);
       window.setInterval(() => {

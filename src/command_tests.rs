@@ -2,9 +2,10 @@ use super::{
     audit_test_coverage, create_test_definition, detect_test_definition, detect_tools,
     execution_history_query_args, get_config, get_execution_history, get_test_plan, get_test_runs,
     inspect_repository, issue_branch_pr_is_visible, mark_permission_primed, needs_promotion,
-    parse_pr_ref, promotion_approval_args, provider_scheduler_arguments,
-    reconcile_integration_for_promotion, repo_status_args, repo_worker_args, require_closed_issue,
-    save_config, save_test_input, scheduler_arguments,
+    bot_app_slugs_from_config, decide_bot_push_access, parse_pr_ref, promotion_approval_args,
+    provider_scheduler_arguments, push_access_message, reconcile_integration_for_promotion,
+    repo_status_args, repo_worker_args, require_closed_issue, save_config, save_test_input,
+    scheduler_arguments,
     validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
     ExecutionHistoryPage, ResolvedProvider,
 };
@@ -873,6 +874,87 @@ fn repo_worker_args_passes_no_preference_through() {
         &PathBuf::from("/usr/bin/gh"),
     );
     assert_eq!(pair(&args, "--preferred-provider"), Some("auto"));
+}
+
+#[test]
+fn bot_app_slugs_strip_the_bot_suffix_and_stay_unique() {
+    let raw = r#"{
+        "grok": {"bot_login": "swarm-media-steaming-swarm-grok[bot]"},
+        "claude": {"bot_login": "swarm-claude-bot[bot]"},
+        "again": {"bot_login": "swarm-claude-bot[bot]"}
+    }"#;
+    let slugs = bot_app_slugs_from_config(raw).expect("slugs");
+    assert_eq!(
+        slugs,
+        vec![
+            "swarm-claude-bot".to_string(),
+            "swarm-media-steaming-swarm-grok".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn push_access_adds_missing_bots_and_keeps_existing_people() {
+    let protection = serde_json::json!({
+        "restrictions": {
+            "users": [{"login": "DotNetRockStar"}],
+            "teams": [],
+            "apps": [{"slug": "already-there"}]
+        }
+    });
+    let wanted = vec![
+        "swarm-claude-bot".to_string(),
+        "swarm-codex-bot".to_string(),
+        "already-there".to_string(),
+    ];
+    let decision = decide_bot_push_access(Some(&protection), &wanted);
+    assert_eq!(decision.state, "missing");
+    assert!(decision.can_grant);
+    assert_eq!(decision.allowed_users, vec!["DotNetRockStar".to_string()]);
+    assert_eq!(
+        decision.apps,
+        vec![
+            "already-there".to_string(),
+            "swarm-claude-bot".to_string(),
+            "swarm-codex-bot".to_string(),
+        ]
+    );
+    assert_eq!(
+        decision.missing,
+        vec!["swarm-claude-bot".to_string(), "swarm-codex-bot".to_string()]
+    );
+    let message = push_access_message("main", &decision);
+    assert!(message.contains("DotNetRockStar"), "{message}");
+    assert!(message.contains("prohibits the merge"), "{message}");
+}
+
+#[test]
+fn push_access_is_already_allowed_when_every_bot_is_listed() {
+    let protection = serde_json::json!({
+        "restrictions": {
+            "users": [{"login": "DotNetRockStar"}],
+            "apps": [{"slug": "swarm-claude-bot"}]
+        }
+    });
+    let decision = decide_bot_push_access(
+        Some(&protection),
+        &["swarm-claude-bot".to_string()],
+    );
+    assert_eq!(decision.state, "allowed");
+    assert!(!decision.can_grant);
+    assert!(decision.missing.is_empty());
+}
+
+#[test]
+fn push_access_does_not_invent_a_restriction() {
+    let protection = serde_json::json!({
+        "restrictions": null,
+        "enforce_admins": {"enabled": true}
+    });
+    let decision = decide_bot_push_access(Some(&protection), &["swarm-claude-bot".to_string()]);
+    assert_eq!(decision.state, "unrestricted");
+    assert!(!decision.can_grant);
+    assert!(decide_bot_push_access(None, &["swarm-claude-bot".to_string()]).state == "unprotected");
 }
 
 #[test]

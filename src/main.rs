@@ -2914,6 +2914,44 @@ fn approve_promotion_pr<R: tauri::Runtime>(
     }
 }
 
+/// Whether the configured worker bots are allowed to merge into this
+/// repository's human-owned branch. Uses the signed-in `gh` user, which
+/// must be able to read branch protection.
+#[tauri::command]
+fn branch_push_access(
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<BranchPushAccess, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?.clone();
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    inspect_bot_branch_push(&gh, &repo)
+}
+
+/// Add the configured worker GitHub Apps to the human-owned branch's
+/// existing push allow list. People and teams already on that list stay
+/// there. A branch that does not restrict pushes is left unchanged.
+#[tauri::command]
+fn grant_bot_branch_push(
+    state: State<'_, AppState>,
+    repo_id: String,
+) -> Result<BranchPushAccess, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?.clone();
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    let slugs = match load_configured_bot_slugs(&repo) {
+        Ok(slugs) => slugs,
+        Err(_) => return Ok(unconfigured_push_access(&repo.base_branch)),
+    };
+    let protection = read_branch_protection(&gh, &repo.github_repository, &repo.base_branch)?;
+    let current = access_from_protection(&repo.base_branch, protection, &slugs);
+    if !current.can_grant {
+        return Ok(current);
+    }
+    grant_apps_push_access(&gh, &repo.github_repository, &repo.base_branch, &current.apps)?;
+    inspect_bot_branch_push(&gh, &repo)
+}
+
 #[tauri::command]
 fn promote_integration_branch(
     app: tauri::AppHandle,
@@ -2972,6 +3010,308 @@ fn parse_pr_ref(raw: &str) -> Option<(u64, String)> {
         return None;
     }
     Some((number.trim().parse().ok()?, url.to_string()))
+}
+
+/// GitHub App slug from a bot login (`swarm-claude-bot[bot]` → `swarm-claude-bot`).
+fn bot_login_slug(login: &str) -> &str {
+    login.trim().strip_suffix("[bot]").unwrap_or(login.trim())
+}
+
+fn path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn bot_app_slugs_from_config(raw: &str) -> Result<Vec<String>, String> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| format!("GitHub Apps config is not valid JSON: {error}"))?;
+    let entries = value
+        .as_object()
+        .ok_or("GitHub Apps config must be an object of provider entries")?;
+    let mut slugs = Vec::new();
+    for entry in entries.values() {
+        let login = entry
+            .get("bot_login")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        let slug = bot_login_slug(login);
+        if slug.is_empty() || slugs.iter().any(|existing| existing == slug) {
+            continue;
+        }
+        slugs.push(slug.to_string());
+    }
+    slugs.sort();
+    if slugs.is_empty() {
+        return Err("The GitHub Apps config has no bot identities to grant.".into());
+    }
+    Ok(slugs)
+}
+
+fn protection_api_path(repository: &str, branch: &str) -> String {
+    format!(
+        "repos/{}/branches/{}/protection",
+        repository.trim().trim_matches('/'),
+        path_segment(branch)
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PushAccessDecision {
+    state: &'static str,
+    apps: Vec<String>,
+    missing: Vec<String>,
+    allowed_users: Vec<String>,
+    can_grant: bool,
+}
+
+/// Decide whether the worker bots can be added to an existing push allow
+/// list. A branch with no allow list is left alone: turning restrictions on
+/// would lock out everyone who is not one of these apps.
+fn decide_bot_push_access(
+    protection: Option<&serde_json::Value>,
+    wanted: &[String],
+) -> PushAccessDecision {
+    let Some(protection) = protection else {
+        return PushAccessDecision {
+            state: "unprotected",
+            apps: Vec::new(),
+            missing: Vec::new(),
+            allowed_users: Vec::new(),
+            can_grant: false,
+        };
+    };
+    let Some(restrictions) = protection.get("restrictions").filter(|value| !value.is_null()) else {
+        return PushAccessDecision {
+            state: "unrestricted",
+            apps: Vec::new(),
+            missing: Vec::new(),
+            allowed_users: Vec::new(),
+            can_grant: false,
+        };
+    };
+    let allowed_users = restrictions
+        .get("users")
+        .and_then(|value| value.as_array())
+        .map(|users| {
+            users
+                .iter()
+                .filter_map(|user| {
+                    user.get("login")
+                        .and_then(|login| login.as_str())
+                        .or_else(|| user.as_str())
+                        .map(|login| login.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut apps: Vec<String> = restrictions
+        .get("apps")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|app| {
+                    app.get("slug")
+                        .and_then(|slug| slug.as_str())
+                        .or_else(|| app.as_str())
+                        .map(|slug| slug.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut missing = Vec::new();
+    for slug in wanted {
+        if apps.iter().any(|existing| existing == slug) {
+            continue;
+        }
+        missing.push(slug.clone());
+        apps.push(slug.clone());
+    }
+    apps.sort();
+    apps.dedup();
+    missing.sort();
+    if missing.is_empty() {
+        PushAccessDecision {
+            state: "allowed",
+            apps,
+            missing,
+            allowed_users,
+            can_grant: false,
+        }
+    } else {
+        PushAccessDecision {
+            state: "missing",
+            apps,
+            missing,
+            allowed_users,
+            can_grant: true,
+        }
+    }
+}
+
+fn push_access_message(branch: &str, decision: &PushAccessDecision) -> String {
+    let people = if decision.allowed_users.is_empty() {
+        "the current allow list".to_string()
+    } else {
+        decision.allowed_users.join(", ")
+    };
+    match decision.state {
+        "allowed" => format!(
+            "The worker bots can merge into {branch}. They are on the push allow list with {people}."
+        ),
+        "missing" => format!(
+            "{branch} only lets {people} merge. The worker bots are not on that list, so GitHub rejects promotion merges because the base branch policy prohibits the merge."
+        ),
+        "unrestricted" => format!(
+            "{branch} does not restrict who can push. There is no allow list to add the worker bots to."
+        ),
+        "unprotected" => format!(
+            "{branch} is not a protected branch. This grant applies only when GitHub restricts who can push."
+        ),
+        "unconfigured" => {
+            "Set up GitHub Apps before granting them merge access on the human-owned branch."
+                .into()
+        }
+        _ => format!("Could not determine push access for {branch}."),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchPushAccess {
+    branch: String,
+    state: String,
+    message: String,
+    apps: Vec<String>,
+    missing: Vec<String>,
+    allowed_users: Vec<String>,
+    can_grant: bool,
+}
+
+fn branch_push_status(branch: &str, decision: PushAccessDecision) -> BranchPushAccess {
+    BranchPushAccess {
+        branch: branch.to_string(),
+        state: decision.state.to_string(),
+        message: push_access_message(branch, &decision),
+        apps: decision.apps,
+        missing: decision.missing,
+        allowed_users: decision.allowed_users,
+        can_grant: decision.can_grant,
+    }
+}
+
+fn unconfigured_push_access(branch: &str) -> BranchPushAccess {
+    let decision = PushAccessDecision {
+        state: "unconfigured",
+        apps: Vec::new(),
+        missing: Vec::new(),
+        allowed_users: Vec::new(),
+        can_grant: false,
+    };
+    branch_push_status(branch, decision)
+}
+
+fn gh_api(gh: &Path, args: &[String]) -> Result<serde_json::Value, String> {
+    let (ok, message) = run_capture_owned(gh, args);
+    let trimmed = message.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if !ok {
+            let text = value
+                .get("message")
+                .and_then(|item| item.as_str())
+                .unwrap_or(trimmed);
+            let status_404 = value.get("status").and_then(|item| item.as_u64()) == Some(404)
+                || value.get("status").and_then(|item| item.as_str()) == Some("404");
+            if text.contains("Branch not protected") || status_404 {
+                return Ok(serde_json::Value::Null);
+            }
+            return Err(text.to_string());
+        }
+        return Ok(value);
+    }
+    if !ok && message.contains("Branch not protected") {
+        return Ok(serde_json::Value::Null);
+    }
+    if !ok {
+        return Err(message);
+    }
+    Err(format!("GitHub returned unexpected data: {message}"))
+}
+
+fn read_branch_protection(
+    gh: &Path,
+    repository: &str,
+    branch: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let value = gh_api(
+        gh,
+        &[
+            "api".into(),
+            protection_api_path(repository, branch),
+        ],
+    )
+    .map_err(|error| format!("Could not read branch protection for {branch}: {error}"))?;
+    if value.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+fn load_configured_bot_slugs(repo: &RepoConfig) -> Result<Vec<String>, String> {
+    let path = repo.effective_apps_config();
+    let raw = std::fs::read_to_string(&path).map_err(|_| {
+        format!("GitHub Apps are not set up yet ({path}). Use Set up GitHub Apps first.")
+    })?;
+    bot_app_slugs_from_config(&raw)
+}
+
+fn access_from_protection(
+    branch: &str,
+    protection: Option<serde_json::Value>,
+    slugs: &[String],
+) -> BranchPushAccess {
+    let decision = decide_bot_push_access(protection.as_ref(), slugs);
+    branch_push_status(branch, decision)
+}
+
+fn inspect_bot_branch_push(gh: &Path, repo: &RepoConfig) -> Result<BranchPushAccess, String> {
+    let branch = repo.base_branch.clone();
+    let slugs = match load_configured_bot_slugs(repo) {
+        Ok(slugs) => slugs,
+        Err(_) => return Ok(unconfigured_push_access(&branch)),
+    };
+    let protection = read_branch_protection(gh, &repo.github_repository, &branch)?;
+    Ok(access_from_protection(&branch, protection, &slugs))
+}
+
+fn grant_apps_push_access(
+    gh: &Path,
+    repository: &str,
+    branch: &str,
+    apps: &[String],
+) -> Result<(), String> {
+    let mut args = vec![
+        "api".into(),
+        "--method".into(),
+        "PUT".into(),
+        format!("{}/restrictions/apps", protection_api_path(repository, branch)),
+    ];
+    for slug in apps {
+        args.push("--raw-field".into());
+        args.push(format!("apps[]={slug}"));
+    }
+    gh_api(gh, &args).map(|_| ()).map_err(|error| {
+        format!("Could not update who can push to {branch}: {error}")
+    })
 }
 
 /// The open `integration -> base` promotion pull request for `repo`, as
@@ -3601,6 +3941,8 @@ fn main() {
             promote_integration_branch,
             promote_integration_branch_background,
             open_integration_pr,
+            branch_push_access,
+            grant_bot_branch_push,
             promotion_overview,
             promotion_overview_background,
             open_provider_login,
