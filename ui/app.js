@@ -31,6 +31,9 @@
     executionHistoryOffset: 0,
     executionHistoryRequest: 0,
     executionHistorySearchTimer: null,
+    promptGrades: null,
+    promptGradesOffset: 0,
+    promptGradesRequest: 0,
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
     botReadiness: {},
     botReadinessPoll: null,
@@ -202,6 +205,11 @@
       html: "<p>Every AI issue execution for the selected repository, newest first. The list loads ten at a time from the local database. Each row shows the AI tool, model, and effort level used. Search matches issue number, title, provider, branch, or status, and Previous and Next fetch another page. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
       links: [],
     },
+    "prompt-grades": {
+      title: "Prompt grades",
+      html: "<p>When <strong>Dynamic Model Routing</strong> is on, the router grades the original issue before any AI works on it — from <strong>A+</strong> down to <strong>F</strong> — and explains what the issue does well, what is missing, and what would raise the grade. This panel lists those grades for the selected repository, newest first, ten at a time.</p><p>The <strong>average grade</strong> uses a 4.0 scale (A = 4.0, B = 3.0, C = 2.0, D = 1.0, F = 0) across every graded run, and the bars count how many prompts earned each grade. Expand a row to read why it earned its grade, plus the complexity, tool, model, and confidence the router chose.</p><p>Runs without routing, and runs where the router was unavailable, are not graded and do not appear here. An issue that is reworked is graded again, so it can appear more than once. This view only reads the local execution history and never changes issue processing.</p>",
+      links: [],
+    },
     "provider-bins": {
       title: "AI program locations",
       html: "<p>The app normally finds Claude, Codex, and Grok automatically. Enter a full program path only when an installed provider is not detected or when you want to use a specific copy.</p>",
@@ -219,6 +227,7 @@
     ["Minimum quota remaining", "quota-threshold"],
     ["Test scheduler", "uat-suite"],
     ["Test run history", "test-runs"],
+    ["Prompt grades", "prompt-grades"],
     ["Execution history", "execution-history"],
     ["Where your data lives", "data-location"],
   ];
@@ -273,7 +282,10 @@
     if (view === "scheduler") void refreshTestPlan({ quiet: true });
     if (view === "repository") void refreshBotReadiness({ quiet: true });
     if (view === "repository") void refreshBranchPushAccess({ quiet: true });
-    if (view === "feedback") void refreshExecutionHistory({ quiet: true });
+    if (view === "feedback") {
+      void refreshPromptGrades({ quiet: true });
+      void refreshExecutionHistory({ quiet: true });
+    }
   }
 
   function populateHours() {
@@ -1666,6 +1678,189 @@
     }
   }
 
+  function promptGradesView() {
+    const page = state.promptGrades;
+    if (!page || !Array.isArray(page.records)) {
+      return { records: [], total: 0, offset: 0, limit: 10, summary: null };
+    }
+    return page;
+  }
+
+  function gradeBadge(grade, extraClass = "") {
+    const badge = document.createElement("span");
+    badge.className = `grade-badge ${window.SwarmPromptGrades.gradeTone(grade)} ${extraClass}`.trim();
+    badge.textContent = grade || "—";
+    return badge;
+  }
+
+  function buildPromptGradeItem(record) {
+    const decision = record.routingDecision || {};
+    const item = document.createElement("details");
+    item.className = "execution-record grade-record";
+
+    const summary = document.createElement("summary");
+    const head = document.createElement("div");
+    head.className = "execution-head";
+    const title = document.createElement("strong");
+    title.textContent = `#${record.issueNumber} ${record.issueTitle || ""}`.trim();
+    const meta = document.createElement("small");
+    meta.textContent = [
+      record.attemptNumber > 1 ? `Attempt ${record.attemptNumber}` : "",
+      record.startedAt ? `Graded ${formatIsoTimestamp(record.startedAt)}` : "",
+    ].filter(Boolean).join(" · ");
+    head.append(title, meta);
+    const tagging = document.createElement("div");
+    tagging.className = "execution-tagging";
+    [
+      ["AI tool", record.aiProvider],
+      ["Model", record.model],
+      ["Complexity", decision.complexity != null ? `${decision.complexity}/10` : ""],
+    ].forEach(([label, value]) => {
+      const cell = document.createElement("div");
+      cell.className = "execution-tag";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const text = document.createElement("strong");
+      text.textContent = value || "—";
+      text.title = value || "Not recorded";
+      cell.append(name, text);
+      tagging.appendChild(cell);
+    });
+    summary.append(gradeBadge(decision.prompt_grade), head, tagging);
+    item.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "execution-body";
+    const reason = document.createElement("p");
+    reason.className = "panel-copy";
+    const strong = document.createElement("strong");
+    strong.textContent = `Why ${decision.prompt_grade}: `;
+    reason.append(strong, document.createTextNode(decision.grade_reason || "The router gave no explanation."));
+    body.appendChild(reason);
+    const confidence = Number(decision.confidence);
+    const facts = document.createElement("div");
+    facts.className = "repo-inspection";
+    [
+      ["Effort", record.effort],
+      ["Router confidence", Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : ""],
+      ["Outcome", executionStatusMeta(record.finalStatus).label],
+    ].forEach(([label, value]) => {
+      if (!value) return;
+      const fact = document.createElement("div");
+      fact.className = "repo-fact";
+      const span = document.createElement("span");
+      span.textContent = label;
+      const valueEl = document.createElement("strong");
+      valueEl.textContent = value;
+      fact.append(span, valueEl);
+      facts.appendChild(fact);
+    });
+    if (facts.children.length) body.appendChild(facts);
+    if (record.issueUrl) {
+      const links = document.createElement("div");
+      links.className = "control-row";
+      links.appendChild(externalLink(`Open issue #${record.issueNumber} ↗`, record.issueUrl, "text-button"));
+      body.appendChild(links);
+    }
+    item.appendChild(body);
+    return item;
+  }
+
+  function renderPromptGradeSummary(summary) {
+    const box = byId("prompt-grades-summary");
+    if (!box) return;
+    const graded = Number(summary && summary.graded) || 0;
+    box.classList.toggle("hidden", graded === 0);
+    if (!graded) return;
+    const average = byId("prompt-grades-average");
+    average.className = `grade-badge ${window.SwarmPromptGrades.gradeTone(summary.averageGrade)}`;
+    average.textContent = summary.averageGrade || "—";
+    byId("prompt-grades-average-detail").textContent = [
+      Number.isFinite(Number(summary.averagePoints)) ? `${Number(summary.averagePoints).toFixed(2)} / 4.0` : "",
+      window.SwarmPromptGrades.summaryLine(summary),
+    ].filter(Boolean).join(" · ");
+    const bars = byId("prompt-grades-bars");
+    bars.replaceChildren();
+    window.SwarmPromptGrades.distributionBars(summary).forEach((bar) => {
+      const column = document.createElement("div");
+      column.className = `grade-bar ${bar.tone}`;
+      column.title = `${bar.count} prompt${bar.count === 1 ? "" : "s"} graded ${bar.grade}`;
+      const count = document.createElement("span");
+      count.className = "grade-bar-count";
+      count.textContent = bar.count ? String(bar.count) : "";
+      const track = document.createElement("div");
+      track.className = "grade-bar-track";
+      const fill = document.createElement("div");
+      fill.className = "grade-bar-fill";
+      fill.style.setProperty("--fill", `${bar.percent}%`);
+      track.appendChild(fill);
+      const label = document.createElement("span");
+      label.className = "grade-bar-label";
+      label.textContent = bar.grade;
+      column.append(count, track, label);
+      bars.appendChild(column);
+    });
+  }
+
+  function renderPromptGrades() {
+    const box = byId("prompt-grades-list");
+    if (!box) return;
+    box.replaceChildren();
+    const page = promptGradesView();
+    const total = Number(page.total) || 0;
+    const limit = Number(page.limit) || 10;
+    const offset = Number(page.offset) || 0;
+    const records = page.records;
+    renderPromptGradeSummary(page.summary);
+    const count = byId("prompt-grades-count");
+    if (count) {
+      count.textContent = !total || (offset === 0 && records.length >= total)
+        ? `${total} graded`
+        : `Showing ${offset + 1}-${offset + records.length} of ${total} graded`;
+    }
+    const pager = byId("prompt-grades-pager");
+    if (pager) {
+      pager.classList.toggle("hidden", total <= limit);
+      byId("prompt-grades-page-label").textContent =
+        `Page ${Math.floor(offset / limit) + 1} of ${Math.max(1, Math.ceil(total / limit))}`;
+      byId("prompt-grades-prev").disabled = offset <= 0;
+      byId("prompt-grades-next").disabled = offset + records.length >= total;
+    }
+    if (!records.length) {
+      box.appendChild(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: "No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.",
+      }));
+      return;
+    }
+    records.forEach((record) => box.appendChild(buildPromptGradeItem(record)));
+  }
+
+  async function refreshPromptGrades({ quiet = false } = {}) {
+    const repo = currentRepo();
+    const requestId = state.promptGradesRequest + 1;
+    state.promptGradesRequest = requestId;
+    if (!repo) {
+      state.promptGrades = null;
+      state.promptGradesOffset = 0;
+      renderPromptGrades();
+      return;
+    }
+    try {
+      const page = await invoke("get_prompt_grades_background", {
+        repoId: repo.id,
+        offset: Math.max(0, Number(state.promptGradesOffset) || 0),
+      });
+      if (requestId !== state.promptGradesRequest || repo.id !== state.activeRepoId) return;
+      state.promptGrades = page;
+      state.promptGradesOffset = Number(page.offset) || 0;
+      renderPromptGrades();
+    } catch (error) {
+      if (requestId !== state.promptGradesRequest) return;
+      if (!quiet) showToast(errorText(error), "error");
+    }
+  }
+
   async function importExecutionHistory() {
     const repo = currentRepo();
     if (!repo) return;
@@ -2721,6 +2916,8 @@
     state.coverageAudit = null;
     state.testDefinitionDraftOpen = false;
     state.executionHistory = null;
+    state.promptGrades = null;
+    state.promptGradesOffset = 0;
     state.executionHistoryOffset = 0;
     state.executionHistorySearch = "";
     clearTimeout(state.executionHistorySearchTimer);
@@ -2735,7 +2932,10 @@
     if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBranchPushAccess({ quiet: true });
-    if (document.querySelector("#view-feedback.active")) void refreshExecutionHistory({ quiet: true });
+    if (document.querySelector("#view-feedback.active")) {
+      void refreshPromptGrades({ quiet: true });
+      void refreshExecutionHistory({ quiet: true });
+    }
   }
 
   function branchNode(label, name, tip, meta = "", links = {}) {
@@ -3130,7 +3330,22 @@
     byId("refresh-tools").addEventListener("click", () => refreshTools());
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
     byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
-    byId("refresh-execution-history").addEventListener("click", () => refreshExecutionHistory());
+    byId("refresh-execution-history").addEventListener("click", () => {
+      void refreshPromptGrades();
+      void refreshExecutionHistory();
+    });
+    byId("prompt-grades-prev").addEventListener("click", () => {
+      const page = promptGradesView();
+      state.promptGradesOffset = Math.max(0, (Number(page.offset) || 0) - (Number(page.limit) || 10));
+      void refreshPromptGrades();
+    });
+    byId("prompt-grades-next").addEventListener("click", () => {
+      const page = promptGradesView();
+      const offset = Number(page.offset) || 0;
+      if (offset + page.records.length >= (Number(page.total) || 0)) return;
+      state.promptGradesOffset = offset + (Number(page.limit) || 10);
+      void refreshPromptGrades();
+    });
     byId("import-execution-history").addEventListener("click", () => importExecutionHistory());
     const executionSearch = byId("execution-history-search");
     const queueExecutionSearch = (immediate) => {

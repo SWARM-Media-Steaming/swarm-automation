@@ -1300,6 +1300,122 @@ async fn get_execution_history_background(
     .map_err(|error| format!("Execution history lookup failed: {error}"))?
 }
 
+/// One graded execution row from `ai_execution_history.py --grades`: just
+/// what the Feedback grades panel shows, never the issue body or prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+struct PromptGradeRecord {
+    issue_number: i64,
+    #[serde(default)]
+    issue_title: String,
+    #[serde(default)]
+    issue_url: String,
+    attempt_number: i64,
+    started_at: String,
+    #[serde(default)]
+    ai_provider: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    effort: String,
+    #[serde(default)]
+    final_status: String,
+    /// The router's decision, including `prompt_grade` and `grade_reason`.
+    #[serde(default)]
+    routing_decision: serde_json::Value,
+}
+
+/// Every graded execution's tally; the desktop reads these camelCase keys.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptGradeSummary {
+    #[serde(default)]
+    graded: i64,
+    #[serde(default)]
+    average_points: Option<f64>,
+    #[serde(default)]
+    average_grade: String,
+    #[serde(default)]
+    distribution: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptGradesPage {
+    records: Vec<PromptGradeRecord>,
+    total: i64,
+    offset: i64,
+    limit: i64,
+    #[serde(default)]
+    summary: PromptGradeSummary,
+}
+
+fn prompt_grades_query_args(
+    script: &Path,
+    database: &Path,
+    repository: &str,
+    offset: Option<i64>,
+) -> Vec<String> {
+    vec![
+        script.to_string_lossy().into_owned(),
+        "--db".into(),
+        database.to_string_lossy().into_owned(),
+        "--repository".into(),
+        repository.to_string(),
+        "--grades".into(),
+        "--limit".into(),
+        EXECUTION_HISTORY_PAGE_SIZE.to_string(),
+        "--offset".into(),
+        offset.unwrap_or(0).max(0).to_string(),
+    ]
+}
+
+#[tauri::command]
+fn get_prompt_grades<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_id: String,
+    offset: Option<i64>,
+) -> Result<PromptGradesPage, String> {
+    let config = current_config(&state)?;
+    let repo = resolve_repo(&config, &repo_id)?;
+    let database_path = execution_history_db_path(&config);
+    if !database_path.is_file() {
+        return Ok(PromptGradesPage {
+            records: Vec::new(),
+            total: 0,
+            offset: 0,
+            limit: EXECUTION_HISTORY_PAGE_SIZE,
+            summary: PromptGradeSummary::default(),
+        });
+    }
+    let script = worker_script_dir(&app)?.join("ai_execution_history.py");
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let (ok, raw) = run_capture_owned(
+        &python,
+        &prompt_grades_query_args(&script, &database_path, &repo.github_repository, offset),
+    );
+    if !ok {
+        return Err(format!("Prompt grades lookup failed: {raw}"));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("Prompt grades response could not be parsed: {error}"))
+}
+
+#[tauri::command]
+async fn get_prompt_grades_background(
+    app: tauri::AppHandle,
+    repo_id: String,
+    offset: Option<i64>,
+) -> Result<PromptGradesPage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_prompt_grades(app.clone(), state, repo_id, offset)
+    })
+    .await
+    .map_err(|error| format!("Prompt grades lookup failed: {error}"))?
+}
+
 /// Summary of `ai_execution_history.py --import-from-github`: every open and
 /// closed issue in the repo's GitHub backlog that had no existing execution
 /// history row got a synthetic `imported` one added.
@@ -3938,6 +4054,8 @@ fn main() {
             get_test_runs_background,
             get_execution_history,
             get_execution_history_background,
+            get_prompt_grades,
+            get_prompt_grades_background,
             import_execution_history,
             import_execution_history_background,
             save_test_input,
