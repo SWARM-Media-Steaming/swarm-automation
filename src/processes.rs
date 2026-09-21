@@ -456,7 +456,7 @@ fn follow_existing_log<R: Runtime>(
     });
 }
 
-fn emit_log<R: Runtime>(
+pub(crate) fn emit_log<R: Runtime>(
     app: &AppHandle<R>,
     log_path: &Path,
     source: &str,

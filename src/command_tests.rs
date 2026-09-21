@@ -4,7 +4,7 @@ use super::{
     inspect_repository, issue_branch_pr_is_visible, mark_permission_primed, needs_promotion,
     parse_pr_ref, promotion_approval_args, reconcile_integration_for_promotion, repo_status_args,
     repo_worker_args, require_closed_issue, save_config, save_test_input, scheduler_arguments,
-    validate_worker_script_dir, AiExecutionRecord, AppState, BranchAheadBehind,
+    validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
     ExecutionHistoryPage, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
@@ -192,6 +192,67 @@ fn save_config_round_trips_two_repositories() {
     assert_eq!(loaded.repositories.len(), 2);
     assert_eq!(loaded.repositories[1].integration_branch, "integration");
     assert_eq!(loaded.repositories[1].branch_prefix, "bots");
+}
+
+#[test]
+fn write_repos_file_lists_every_enabled_repo_and_is_rewritten_when_one_is_added() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let first = real_git_checkout();
+    let second = real_git_checkout();
+    let state_dir = tempfile::tempdir().expect("worker state dir");
+    let git = PathBuf::from("/usr/bin/git");
+    let gh = PathBuf::from("/usr/bin/gh");
+
+    let mut config = valid_config(first.path());
+    config.worker_state_dir = state_dir.path().to_string_lossy().into_owned();
+    let path = write_repos_file(&app, &config, &git, &gh).expect("write repos file");
+    assert_eq!(path, state_dir.path().join("repos.json"));
+    let labels = |path: &Path| -> Vec<String> {
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).expect("valid JSON");
+        entries
+            .iter()
+            .map(|entry| entry["label"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(labels(&path), ["octocat/example"]);
+
+    // A repository added later (and a disabled one, which must be skipped).
+    config.repositories.push(RepoConfig {
+        repo_dir: second.path().to_string_lossy().into_owned(),
+        ..repo("octocat/feedback")
+    });
+    config.repositories.push(RepoConfig {
+        enabled: false,
+        ..repo("octocat/dormant")
+    });
+    write_repos_file(&app, &config, &git, &gh).expect("rewrite repos file");
+    assert_eq!(labels(&path), ["octocat/example", "octocat/feedback"]);
+    assert!(
+        !state_dir.path().join("repos.json.tmp").exists(),
+        "the staging file is renamed into place"
+    );
+}
+
+#[test]
+fn write_repos_file_refuses_a_config_with_no_enabled_repository() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let state_dir = tempfile::tempdir().expect("worker state dir");
+    let config = AppConfig {
+        worker_state_dir: state_dir.path().to_string_lossy().into_owned(),
+        ..AppConfig::default()
+    };
+    let error = write_repos_file(
+        &app,
+        &config,
+        &PathBuf::from("/usr/bin/git"),
+        &PathBuf::from("/usr/bin/gh"),
+    )
+    .expect_err("nothing to schedule");
+    assert!(error.contains("Enable at least one repository"));
+    assert!(!state_dir.path().join("repos.json").exists());
 }
 
 #[test]

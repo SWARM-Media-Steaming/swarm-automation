@@ -87,7 +87,40 @@ class Runner:
         # repos are worked one at a time; with --parallel-repos each repo gets
         # its own worker in the same cycle (faster, but AI credits burn faster).
         self.repos = self._load_repos()
-        self.parallel_repos = bool(getattr(args, "parallel_repos", False)) and len(self.repos) > 1
+        self.parallel_repos = self._parallel_for(self.repos)
+
+    def _parallel_for(self, repos: list[dict[str, object]]) -> bool:
+        return bool(getattr(self.args, "parallel_repos", False)) and len(repos) > 1
+
+    def reload_repos(self) -> None:
+        """Pick up repository changes the desktop app saved since this scheduler
+        started (it rewrites --repos-file on every save). An unreadable file
+        keeps the current list rather than stopping the scheduler."""
+        if not getattr(self.args, "repos_file", ""):
+            return
+        try:
+            repos = self._load_repos()
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+            self.log(
+                f"WARNING: could not reload {self.args.repos_file}; "
+                f"keeping the current repository list: {error}"
+            )
+            return
+        before = [str(repo["label"]) for repo in self.repos]
+        after = [str(repo["label"]) for repo in repos]
+        # Always adopt the reloaded entries: per-repo worker arguments can change
+        # even when the set of repositories does not.
+        self.repos = repos
+        self.parallel_repos = self._parallel_for(repos)
+        if before != after:
+            added = [label for label in after if label not in before]
+            removed = [label for label in before if label not in after]
+            changes = [f"added {', '.join(added)}"] if added else []
+            changes += [f"removed {', '.join(removed)}"] if removed else []
+            self.log(
+                f"Repository list changed ({'; '.join(changes) or 'reordered'}); "
+                f"now working {len(repos)} repository(ies)."
+            )
 
     def _load_repos(self) -> list[dict[str, object]]:
         if getattr(self.args, "repos_file", ""):
@@ -641,6 +674,7 @@ class Runner:
                     if not self.wait_for_schedule():
                         break
                     scheduled_tick_active = True
+                self.reload_repos()
                 self.log(f"Starting a cycle over {len(self.repos)} repository(ies).")
                 if self.transcode_active():
                     self.log(

@@ -2821,6 +2821,83 @@ class RunnerTestCase(unittest.TestCase):
         # One synthesized repo -> nothing to parallelize.
         self.assertFalse(runner_module.Runner(args, []).parallel_repos)
 
+    def test_scheduler_picks_up_repositories_added_after_it_started(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-reload-test.") as temporary:
+            root = Path(temporary)
+            repos_file = self._repos_file(root, ("alpha", "beta"))
+            args = runner_module.build_parser().parse_args(
+                [
+                    "--repos-file", str(repos_file), "--state-dir", str(root / "state"),
+                    "--pgrep-bin", "", "--parallel-repos",
+                ]
+            )
+            runner = runner_module.Runner(args, [])
+            self.assertEqual([r["label"] for r in runner.repos], ["alpha", "beta"])
+
+            # The desktop app rewrites the file when a repository is added.
+            self._repos_file(root, ("alpha", "beta", "feedback"))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                runner.reload_repos()
+
+            self.assertEqual([r["label"] for r in runner.repos], ["alpha", "beta", "feedback"])
+            self.assertTrue(runner.parallel_repos)
+            self.assertIn("added feedback", output.getvalue())
+            self.assertIn("now working 3 repository(ies)", output.getvalue())
+
+            # Removing repositories down to one turns parallel mode off again.
+            self._repos_file(root, ("alpha",))
+            with contextlib.redirect_stdout(io.StringIO()):
+                runner.reload_repos()
+            self.assertEqual([r["label"] for r in runner.repos], ["alpha"])
+            self.assertFalse(runner.parallel_repos)
+
+    def test_scheduler_keeps_its_repositories_when_the_repos_file_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-reload-bad-test.") as temporary:
+            root = Path(temporary)
+            repos_file = self._repos_file(root, ("alpha", "beta"))
+            args = runner_module.build_parser().parse_args(
+                ["--repos-file", str(repos_file), "--state-dir", str(root / "state"), "--pgrep-bin", ""]
+            )
+            runner = runner_module.Runner(args, [])
+
+            for bad in ("{not json", "[]", '[{"label": "x"}]'):
+                repos_file.write_text(bad, encoding="utf-8")
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    runner.reload_repos()
+                self.assertEqual([r["label"] for r in runner.repos], ["alpha", "beta"], bad)
+                self.assertIn("keeping the current repository list", output.getvalue())
+
+            repos_file.unlink()
+            with contextlib.redirect_stdout(io.StringIO()):
+                runner.reload_repos()
+            self.assertEqual([r["label"] for r in runner.repos], ["alpha", "beta"])
+
+    def test_scheduler_reloads_repositories_at_the_start_of_each_cycle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-cycle-reload-test.") as temporary:
+            root = Path(temporary)
+            repos_file = self._repos_file(root, ("alpha",))
+            args = runner_module.build_parser().parse_args(
+                ["--repos-file", str(repos_file), "--state-dir", str(root / "state"), "--once", "--pgrep-bin", ""]
+            )
+            runner = runner_module.Runner(args, [])
+            self._repos_file(root, ("alpha", "feedback"))
+
+            worked: list[str] = []
+            with (
+                mock.patch.object(runner, "synchronize_repository", return_value=True),
+                mock.patch.object(
+                    runner, "run_worker",
+                    side_effect=lambda repo, *_: worked.append(str(repo["label"])) or 0,
+                ),
+                mock.patch.object(runner, "prune_cargo_target"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                runner.run()
+
+            self.assertEqual(worked, ["alpha", "feedback"])
+
     def test_parallel_cycle_works_every_repository_and_aggregates_status(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-parallel-test.") as temporary:
             root = Path(temporary)

@@ -199,7 +199,108 @@ fn save_config<R: tauri::Runtime>(
         .config
         .lock()
         .map_err(|_| "Configuration state lock was poisoned".to_string())? = config.clone();
+    refresh_running_scheduler(&app, &state, &config);
     Ok(config)
+}
+
+/// A running scheduler re-reads `repos.json` at the start of each cycle, but
+/// only the app writes it. Without this, a repository added (or a per-repo
+/// setting changed) while the worker is running would be ignored until someone
+/// stopped and restarted it. The write happens off the calling thread because
+/// preparing a newly added repository can mean cloning it, and it re-reads the
+/// saved config so overlapping saves cannot leave an older one on disk.
+fn refresh_running_scheduler<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &State<'_, AppState>,
+    config: &AppConfig,
+) {
+    let Ok(log_path) = automation_log_path(app) else {
+        return;
+    };
+    let _ = reconnect_issue_scheduler(app, state, config, &log_path);
+    let running = state
+        .processes
+        .status(app, "issue", "Issue worker scheduler", &log_path)
+        .map(|status| status.state != "stopped")
+        .unwrap_or(false);
+    if !running {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let outcome = (|| {
+            let state = app.state::<AppState>();
+            let config = current_config(&state)?;
+            config.validate()?;
+            let git = tools::configured_or_detected("", "git")?;
+            let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+            write_repos_file(&app, &config, &git, &gh).map(|_| config.enabled_repos().count())
+        })();
+        let message = match outcome {
+            Ok(count) => format!(
+                "Saved settings applied: the running worker will work {count} repository(ies) \
+                 starting with its next cycle."
+            ),
+            Err(error) => format!(
+                "Could not apply the saved settings to the running worker; restart it to pick \
+                 them up: {error}"
+            ),
+        };
+        processes::emit_log(
+            &app,
+            &log_path,
+            "Issue worker scheduler",
+            "stdout",
+            &message,
+        );
+    });
+}
+
+/// Serializes writers of `repos.json`: a save can overlap the worker starting.
+static REPOS_FILE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Prepares every enabled repo's workspace and writes the scheduler's
+/// per-repository spec (`repos.json`), returning its path. Written to a
+/// temporary file and renamed so a scheduler reading it mid-write never sees a
+/// truncated file.
+fn write_repos_file<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    git: &Path,
+    gh: &Path,
+) -> Result<PathBuf, String> {
+    let _guard = REPOS_FILE_LOCK
+        .lock()
+        .map_err(|_| "Repository list lock was poisoned".to_string())?;
+    let state_root = PathBuf::from(&config.worker_state_dir);
+    let mut spec = Vec::new();
+    for repo in config.enabled_repos() {
+        let workspace = prepared_workspace(app, config, repo)?;
+        let repo_state = state_root.join(&repo.id);
+        std::fs::create_dir_all(&repo_state).map_err(|error| error.to_string())?;
+        spec.push(serde_json::json!({
+            "label": repo.label(),
+            "workspace_dir": workspace.to_string_lossy(),
+            "state_dir": repo_state.to_string_lossy(),
+            "base_branch": repo.base_branch,
+            "remote_name": repo.remote_name,
+            "integration_branch": repo.integration_branch,
+            "worker_args": repo_worker_args(config, repo, &workspace, git, gh),
+        }));
+    }
+    if spec.is_empty() {
+        return Err("Enable at least one repository before starting the worker.".into());
+    }
+    std::fs::create_dir_all(&state_root).map_err(|error| error.to_string())?;
+    let repos_file = state_root.join("repos.json");
+    let staging = state_root.join("repos.json.tmp");
+    std::fs::write(
+        &staging,
+        serde_json::to_vec_pretty(&spec).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    std::fs::rename(&staging, &repos_file).map_err(|error| error.to_string())?;
+    Ok(repos_file)
 }
 
 #[tauri::command]
@@ -481,38 +582,13 @@ fn start_issue_worker(
     let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
     let state_root = PathBuf::from(&config.worker_state_dir);
 
-    // Ensure every enabled repo's workspace, then build one spec entry each.
-    let mut spec = Vec::new();
     // The desktop app and its Python worker form one versioned unit. Never
     // borrow automation scripts from a monitored repository: that copy may
     // implement a different command-line interface.
     let script_dir = worker_script_dir(&app)?;
-    for repo in config.enabled_repos() {
-        let workspace = prepared_workspace(&app, &config, repo)?;
-        let repo_state = state_root.join(&repo.id);
-        std::fs::create_dir_all(&repo_state).map_err(|error| error.to_string())?;
-        spec.push(serde_json::json!({
-            "label": repo.label(),
-            "workspace_dir": workspace.to_string_lossy(),
-            "state_dir": repo_state.to_string_lossy(),
-            "base_branch": repo.base_branch,
-            "remote_name": repo.remote_name,
-            "integration_branch": repo.integration_branch,
-            "worker_args": repo_worker_args(&config, repo, &workspace, &git, &gh),
-        }));
-    }
-    if spec.is_empty() {
-        return Err("Enable at least one repository before starting the worker.".into());
-    }
+    // Ensure every enabled repo's workspace, then write one spec entry each.
+    let repos_file = write_repos_file(&app, &config, &git, &gh)?;
     let runner = script_dir.join("install_swarm_issue_cron.py");
-
-    std::fs::create_dir_all(&state_root).map_err(|error| error.to_string())?;
-    let repos_file = state_root.join("repos.json");
-    std::fs::write(
-        &repos_file,
-        serde_json::to_vec_pretty(&spec).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
 
     let mut arguments = scheduler_arguments(&config, &runner, &python, &git, &repos_file, run_once);
     for provider in &providers {
