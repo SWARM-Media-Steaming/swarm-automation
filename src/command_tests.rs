@@ -4,10 +4,10 @@ use super::{
     get_execution_history, get_test_plan, get_test_runs, inspect_repository,
     issue_branch_pr_is_visible, mark_permission_primed, needs_promotion, parse_pr_ref,
     promotion_approval_args, provider_scheduler_arguments, push_access_message,
-    reconcile_integration_for_promotion, repo_status_args, repo_worker_args, require_closed_issue,
-    save_config, save_test_input, scheduler_arguments, validate_worker_script_dir,
-    write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind, ExecutionHistoryPage,
-    ResolvedProvider,
+    reconcile_integration_for_promotion, refresh_running_scheduler, repo_status_args,
+    repo_worker_args, require_closed_issue, save_config, save_test_input, scheduler_arguments,
+    validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
+    ExecutionHistoryPage, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -273,6 +273,31 @@ fn write_repos_file_lists_every_enabled_repo_and_is_rewritten_when_one_is_added(
     assert!(
         !state_dir.path().join("repos.json.tmp").exists(),
         "the staging file is renamed into place"
+    );
+}
+
+/// Regression: test configs default to the developer's real `worker_state_dir`.
+/// Saving one while their real scheduler was running used to adopt that
+/// scheduler and overwrite its real repos.json with the test's repositories,
+/// so the live worker switched to a repo that did not exist.
+#[test]
+fn saving_a_config_in_a_test_never_touches_a_running_schedulers_repos_file() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let checkout = real_git_checkout();
+    let state_dir = tempfile::tempdir().expect("worker state dir");
+    // A scheduler "running" for this state dir: its lock records a live PID.
+    let lock = state_dir.path().join("runner.lock");
+    std::fs::create_dir_all(&lock).unwrap();
+    std::fs::write(lock.join("pid"), std::process::id().to_string()).unwrap();
+    let mut config = valid_config(checkout.path());
+    config.worker_state_dir = state_dir.path().to_string_lossy().into_owned();
+
+    save_config(app.clone(), app.state(), config.clone()).expect("save");
+    assert!(refresh_running_scheduler(&app, &app.state(), &config).is_none());
+    assert!(
+        !state_dir.path().join("repos.json").exists(),
+        "a test must not write the scheduler's repos.json"
     );
 }
 

@@ -106,6 +106,14 @@ class Runner:
                 f"keeping the current repository list: {error}"
             )
             return
+        if not any(Path(str(repo["workspace_dir"])).is_dir() for repo in repos):
+            # A list none of whose checkouts exist cannot be work the app meant
+            # to schedule (a stale or foreign file); keep working what we have.
+            self.log(
+                f"WARNING: none of the repositories in {self.args.repos_file} has a checkout on "
+                "disk; keeping the current repository list."
+            )
+            return
         before = [str(repo["label"]) for repo in self.repos]
         after = [str(repo["label"]) for repo in repos]
         # Always adopt the reloaded entries: per-repo worker arguments can change

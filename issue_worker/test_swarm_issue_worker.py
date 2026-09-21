@@ -3715,6 +3715,33 @@ class RunnerTestCase(unittest.TestCase):
                 runner.reload_repos()
             self.assertEqual([r["label"] for r in runner.repos], ["alpha", "beta"])
 
+    def test_scheduler_ignores_a_reloaded_list_whose_checkouts_do_not_exist(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-reload-missing-test.") as temporary:
+            root = Path(temporary)
+            repos_file = self._repos_file(root, ("alpha", "beta"))
+            args = runner_module.build_parser().parse_args(
+                ["--repos-file", str(repos_file), "--state-dir", str(root / "state"), "--pgrep-bin", ""]
+            )
+            runner = runner_module.Runner(args, [])
+
+            # e.g. a fixture whose temp checkout has since been deleted.
+            entries = json.loads(repos_file.read_text(encoding="utf-8"))
+            for entry in entries:
+                entry["workspace_dir"] = str(root / "gone" / str(entry["label"]))
+            repos_file.write_text(json.dumps(entries), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                runner.reload_repos()
+
+            self.assertEqual([r["label"] for r in runner.repos], ["alpha", "beta"])
+            self.assertIn("has a checkout on disk", output.getvalue())
+
+            # One real checkout among them is enough to adopt the new list.
+            self._repos_file(root, ("alpha", "gamma"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                runner.reload_repos()
+            self.assertEqual([r["label"] for r in runner.repos], ["alpha", "gamma"])
+
     def test_scheduler_reloads_repositories_at_the_start_of_each_cycle(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-cycle-reload-test.") as temporary:
             root = Path(temporary)

@@ -200,7 +200,7 @@ fn save_config<R: tauri::Runtime>(
         .config
         .lock()
         .map_err(|_| "Configuration state lock was poisoned".to_string())? = config.clone();
-    refresh_running_scheduler(&app, &state, &config);
+    let _ = refresh_running_scheduler(&app, &state, &config);
     Ok(config)
 }
 
@@ -210,14 +210,21 @@ fn save_config<R: tauri::Runtime>(
 /// stopped and restarted it. The write happens off the calling thread because
 /// preparing a newly added repository can mean cloning it, and it re-reads the
 /// saved config so overlapping saves cannot leave an older one on disk.
+///
+/// Returns the writer thread, or None when there was nothing to do. It does
+/// nothing at all in tests (`test_data_dir` set): a test config uses the default
+/// `worker_state_dir`, which is the developer's real one, so this would find
+/// their real running scheduler and overwrite its real `repos.json` with the
+/// test's fixture repositories.
 fn refresh_running_scheduler<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     config: &AppConfig,
-) {
-    let Ok(log_path) = automation_log_path(app) else {
-        return;
-    };
+) -> Option<std::thread::JoinHandle<()>> {
+    if state.test_data_dir.is_some() {
+        return None;
+    }
+    let log_path = automation_log_path(app).ok()?;
     let _ = reconnect_issue_scheduler(app, state, config, &log_path);
     let running = state
         .processes
@@ -225,10 +232,10 @@ fn refresh_running_scheduler<R: tauri::Runtime>(
         .map(|status| status.state != "stopped")
         .unwrap_or(false);
     if !running {
-        return;
+        return None;
     }
     let app = app.clone();
-    std::thread::spawn(move || {
+    Some(std::thread::spawn(move || {
         let outcome = (|| {
             let state = app.state::<AppState>();
             let config = current_config(&state)?;
@@ -254,7 +261,7 @@ fn refresh_running_scheduler<R: tauri::Runtime>(
             "stdout",
             &message,
         );
-    });
+    }))
 }
 
 /// Serializes writers of `repos.json`: a save can overlap the worker starting.
