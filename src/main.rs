@@ -3627,10 +3627,11 @@ fn open_automation_folder(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_recent_logs(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+fn get_recent_logs(app: tauri::AppHandle, limit: Option<usize>) -> Result<Vec<String>, String> {
     let path = automation_log_path(&app)?;
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    let mut lines = text.lines().rev().take(300).collect::<Vec<_>>();
+    let limit = limit.unwrap_or(300).clamp(1, 20_000);
+    let mut lines = text.lines().rev().take(limit).collect::<Vec<_>>();
     lines.reverse();
     Ok(lines.into_iter().map(str::to_string).collect())
 }
