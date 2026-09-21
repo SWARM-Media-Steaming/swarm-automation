@@ -420,6 +420,129 @@ fn provider_models(id: &str, program: Option<&Path>) -> (Vec<ModelInfo>, bool) {
     (models, detected)
 }
 
+fn supported_effort(model: &ModelInfo, current: &str) -> String {
+    if model.efforts.iter().any(|effort| effort == current) {
+        return current.to_string();
+    }
+    if !model.default_effort.is_empty()
+        && model
+            .efforts
+            .iter()
+            .any(|effort| effort == &model.default_effort)
+    {
+        return model.default_effort.clone();
+    }
+    model
+        .efforts
+        .first()
+        .cloned()
+        .unwrap_or_else(|| current.to_string())
+}
+
+/// Reconciles saved provider, router, and tier selections with model catalogs
+/// reported by the installed CLIs. A catalog is authoritative only when the
+/// CLI actually returned it; fallback catalogs must never overwrite a user's
+/// settings merely because a CLI is missing or temporarily unavailable.
+///
+/// Newly reported models naturally appear in the UI through [`detect`]. When
+/// a saved model has disappeared, the CLI's first (normally default) model is
+/// selected and its reported effort levels are applied. Returns human-readable
+/// descriptions of every repair so callers can decide whether to persist and
+/// reload a running scheduler.
+pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Vec<String> {
+    let mut repairs = Vec::new();
+    for tool in tools
+        .iter()
+        .filter(|tool| tool.models_detected && !tool.models.is_empty())
+    {
+        let Some(provider) = config
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == tool.id)
+        else {
+            continue;
+        };
+        let fallback = &tool.models[0];
+
+        let worker = tool
+            .models
+            .iter()
+            .find(|model| model.value == provider.model)
+            .unwrap_or(fallback);
+        if provider.model != worker.value {
+            repairs.push(format!(
+                "{} worker model '{}' is unavailable; using '{}'.",
+                tool.label, provider.model, worker.value
+            ));
+            provider.model = worker.value.clone();
+        }
+        let effort = supported_effort(worker, &provider.effort);
+        if provider.effort != effort {
+            repairs.push(format!(
+                "{} worker effort '{}' is unavailable for '{}'; using '{}'.",
+                tool.label, provider.effort, provider.model, effort
+            ));
+            provider.effort = effort;
+        }
+
+        let router = tool
+            .models
+            .iter()
+            .find(|model| model.value == provider.router_model)
+            .unwrap_or(fallback);
+        if provider.router_model != router.value {
+            repairs.push(format!(
+                "{} router model '{}' is unavailable; using '{}'.",
+                tool.label, provider.router_model, router.value
+            ));
+            provider.router_model = router.value.clone();
+        }
+        let effort = supported_effort(router, &provider.router_effort);
+        if provider.router_effort != effort {
+            repairs.push(format!(
+                "{} router effort '{}' is unavailable for '{}'; using '{}'.",
+                tool.label, provider.router_effort, provider.router_model, effort
+            ));
+            provider.router_effort = effort;
+        }
+
+        if let Some(tiers) = config.routing_tiers.get_mut(&tool.id) {
+            for tier in tiers {
+                let model = tool
+                    .models
+                    .iter()
+                    .find(|model| model.value == tier.model)
+                    .unwrap_or(fallback);
+                if tier.model != model.value {
+                    repairs.push(format!(
+                        "{} routing tier {}-{} model '{}' is unavailable; using '{}'.",
+                        tool.label,
+                        tier.min_complexity,
+                        tier.max_complexity,
+                        tier.model,
+                        model.value
+                    ));
+                    tier.model = model.value.clone();
+                }
+                let effort = supported_effort(model, &tier.effort);
+                if tier.effort != effort {
+                    repairs.push(format!(
+                        "{} routing tier {}-{} effort '{}' is unavailable for '{}'; using '{}'.",
+                        tool.label,
+                        tier.min_complexity,
+                        tier.max_complexity,
+                        tier.effort,
+                        tier.model,
+                        effort
+                    ));
+                    tier.effort = effort;
+                }
+            }
+        }
+    }
+    repairs
+}
+
 pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
     let provider_bin = |id: &str| {
         config
@@ -633,5 +756,82 @@ mod tests {
             assert!(!models.is_empty(), "{id} needs fallback models");
             assert!(models.iter().all(|model| !model.efforts.is_empty()));
         }
+    }
+
+    #[test]
+    fn live_catalog_repairs_retired_models_and_efforts_everywhere() {
+        let mut config = AppConfig::default();
+        let grok = config
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == "grok")
+            .unwrap();
+        grok.model = "grok-retired".into();
+        grok.effort = "max".into();
+        grok.router_model = "grok-retired".into();
+        grok.router_effort = "max".into();
+        config.routing_tiers.get_mut("grok").unwrap()[0].model = "grok-retired".into();
+        config.routing_tiers.get_mut("grok").unwrap()[0].effort = "max".into();
+        let tools = vec![ToolInfo {
+            id: "grok".into(),
+            label: "Grok Build".into(),
+            required: true,
+            installed: true,
+            path: "/usr/bin/grok".into(),
+            version: "test".into(),
+            authenticated: Some(true),
+            status: "Signed in".into(),
+            installable: false,
+            models: vec![ModelInfo {
+                value: "grok-current".into(),
+                label: "Grok Current".into(),
+                efforts: vec!["low".into(), "medium".into()],
+                default_effort: "medium".into(),
+            }],
+            models_detected: true,
+        }];
+
+        let repairs = reconcile_config_models(&mut config, &tools);
+
+        let grok = config.provider("grok").unwrap();
+        assert_eq!(
+            (grok.model.as_str(), grok.effort.as_str()),
+            ("grok-current", "medium")
+        );
+        assert_eq!(
+            (grok.router_model.as_str(), grok.router_effort.as_str()),
+            ("grok-current", "medium")
+        );
+        assert_eq!(config.routing_tiers["grok"][0].model, "grok-current");
+        assert_eq!(config.routing_tiers["grok"][0].effort, "medium");
+        assert!(repairs.iter().any(|repair| repair.contains("router model")));
+        assert!(repairs
+            .iter()
+            .any(|repair| repair.contains("routing tier 1-3")));
+    }
+
+    #[test]
+    fn fallback_catalog_never_overwrites_saved_models() {
+        let mut config = AppConfig::default();
+        config
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == "grok")
+            .unwrap()
+            .router_model = "grok-private-preview".into();
+        let mut tool = basic_tool("grok", "Grok Build", "grok", true, "");
+        tool.models = vec![ModelInfo {
+            value: "grok-fallback".into(),
+            label: "Grok Fallback".into(),
+            efforts: vec!["low".into()],
+            default_effort: "low".into(),
+        }];
+        tool.models_detected = false;
+
+        assert!(reconcile_config_models(&mut config, &[tool]).is_empty());
+        assert_eq!(
+            config.provider("grok").unwrap().router_model,
+            "grok-private-preview"
+        );
     }
 }

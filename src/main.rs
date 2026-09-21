@@ -430,9 +430,33 @@ fn detect_tools(state: State<'_, AppState>) -> Result<Vec<tools::ToolInfo>, Stri
 
 #[tauri::command]
 async fn detect_tools_background(app: tauri::AppHandle) -> Result<Vec<tools::ToolInfo>, String> {
-    tauri::async_runtime::spawn_blocking(move || detect_tools(app.state()))
+    let mut config = current_config(&app.state())?;
+    let host = config
+        .repositories()
+        .first()
+        .map(repo_host)
+        .unwrap_or_else(|| "github.com".into());
+    let tools = tauri::async_runtime::spawn_blocking(move || tools::detect(&config, &host))
         .await
-        .map_err(|error| format!("Tool detection background task failed: {error}"))?
+        .map_err(|error| format!("Tool detection background task failed: {error}"))?;
+
+    // Installed CLIs are the source of truth for model ids and supported
+    // efforts. Persist repairs so a removed model cannot fail every future
+    // routing cycle, then refresh repos.json for an already-running scheduler.
+    config = current_config(&app.state())?;
+    let repairs = tools::reconcile_config_models(&mut config, &tools);
+    if !repairs.is_empty() {
+        config::save(&app_config_path(&app)?, &config)?;
+        *app.state::<AppState>()
+            .config
+            .lock()
+            .map_err(|_| "Configuration state lock was poisoned".to_string())? = config.clone();
+        let _ = refresh_running_scheduler(&app, &app.state(), &config);
+        for repair in repairs {
+            eprintln!("SWARM model catalog repair: {repair}");
+        }
+    }
+    Ok(tools)
 }
 
 #[tauri::command]

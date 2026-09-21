@@ -2008,6 +2008,10 @@
     state.refreshing.tools = true;
     try {
       state.tools = await invoke("detect_tools_background");
+      // Tool detection also repairs selections retired by a provider. Pull
+      // the persisted result back into the renderer before rebuilding model
+      // dropdowns; never overwrite a form the user is actively editing.
+      if (!state.dirty) state.config = await invoke("get_config");
       renderTools();
       renderReadiness();
     } catch (error) {
