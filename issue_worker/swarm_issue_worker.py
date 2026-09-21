@@ -211,6 +211,23 @@ def run_command(
     return result
 
 
+TRANSIENT_GITHUB_ERROR = re.compile(
+    r"something went wrong while executing your query"
+    r"|HTTP 5\d\d|\b50[0-4]\b|bad gateway|service unavailable|gateway time-?out"
+    r"|timed? ?out|connection (?:reset|refused|closed)|unexpected EOF",
+    re.IGNORECASE,
+)
+
+
+def is_transient_github_error(message: str) -> bool:
+    """Whether a failed `gh` call looks like a GitHub-side hiccup worth retrying.
+
+    GraphQL reports internal failures as a bare "Something went wrong while
+    executing your query" plus a request ID, with no typed error — indistinguishable
+    from a 5xx, and cleared by trying again."""
+    return bool(TRANSIENT_GITHUB_ERROR.search(message))
+
+
 def atomic_write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -2105,18 +2122,59 @@ class Worker:
             )
         )
 
+    def remote_branch_exists_at(self, branch: str, sha: str) -> bool:
+        """Whether `branch` is already on the remote, pointing exactly at `sha`."""
+        listing = self.git(
+            "ls-remote", "--heads", self.config.remote_name, f"refs/heads/{branch}", check=False
+        )
+        return any(
+            line.split("\t")[:2] == [sha, f"refs/heads/{branch}"] for line in listing.splitlines()
+        )
+
+    def gh_retrying_transient(
+        self,
+        arguments: Sequence[str],
+        *,
+        branch: str,
+        base_sha: str,
+        attempts: int = 3,
+    ) -> str | None:
+        """`gh` call that retries GitHub-side hiccups with a short backoff.
+
+        Returns None when a failed attempt nonetheless left `branch` on the
+        remote at `base_sha` — GitHub can create the linked branch and still
+        report an internal error, and retrying then would only fail with
+        "already exists". Anything that is not transient is raised at once."""
+        assert self.choice
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.github.gh(arguments, self.choice.key)
+            except WorkerError as error:
+                if self.remote_branch_exists_at(branch, base_sha):
+                    log(f"GitHub reported an error but branch {branch} exists at {base_sha[:12]}; continuing.")
+                    return None
+                if attempt == attempts or not is_transient_github_error(str(error)):
+                    raise
+                delay = 2 * attempt
+                log(f"GitHub API hiccup linking {branch} (attempt {attempt}/{attempts}); retrying in {delay}s.")
+                time.sleep(delay)
+        raise AssertionError("unreachable")
+
     def create_linked_issue_branch(self, branch: str, base_sha: str) -> None:
         """Create a remote branch through its issue so GitHub tracks the link."""
         assert self.issue and self.choice
-        issue_text = self.github.gh(
+        issue_text = self.gh_retrying_transient(
             [
                 "api",
                 "--method",
                 "GET",
                 f"repos/{self.config.github_repository}/issues/{self.issue.number}",
             ],
-            self.choice.key,
+            branch=branch,
+            base_sha=base_sha,
         )
+        if issue_text is None:
+            return
         try:
             issue_id = str(json.loads(issue_text)["node_id"])
         except (json.JSONDecodeError, KeyError, TypeError) as error:
@@ -2129,7 +2187,7 @@ class Worker:
             "mutation($issueId:ID!,$oid:GitObjectID!,$name:String!){"
             "createLinkedBranch(input:{issueId:$issueId,oid:$oid,name:$name}){issue{id}}}"
         )
-        response_text = self.github.gh(
+        response_text = self.gh_retrying_transient(
             [
                 "api",
                 "graphql",
@@ -2142,8 +2200,11 @@ class Worker:
                 "-f",
                 f"name={branch}",
             ],
-            self.choice.key,
+            branch=branch,
+            base_sha=base_sha,
         )
+        if response_text is None:
+            return
         try:
             linked_issue_id = str(
                 json.loads(response_text)["data"]["createLinkedBranch"]["issue"]["id"]
