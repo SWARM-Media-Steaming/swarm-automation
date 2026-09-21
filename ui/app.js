@@ -16,12 +16,14 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false, branchPushAccess: false },
+    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false, branchPushAccess: false, liveTestRuns: false },
     activeRepoId: "",
     branchOverview: null,
     promotions: [],
     testPlan: null,
     testRuns: null,
+    // repoId -> test runs, for repos whose scheduler is up (Now working panel).
+    liveTestRuns: {},
     testDefinitionDraftOpen: false,
     coverageAudit: null,
     executionHistory: null,
@@ -2041,6 +2043,83 @@
     renderBotPanel();
     renderControls();
     renderReadiness();
+    renderNowWorking();
+  }
+
+  const NOW_WORKING_KINDS = { issue: "Issue", tests: "Tests", ci: "CI/CD" };
+  const NOW_WORKING_PILLS = { running: "Running", paused: "Paused", error: "Failing", ok: "Passing", idle: "Idle" };
+
+  function nowWorkingRepositories() {
+    const configured = new Map((state.config?.repositories || []).map((repo) => [repo.id, repo]));
+    return (state.status?.repos || []).filter((repo) => repo.enabled).map((repo) => ({
+      id: repo.id,
+      name: normalizeRepoRef(repo.githubRepository),
+      uatState: repo.uat?.state || "stopped",
+      monitorActions: Boolean(configured.get(repo.id)?.monitor_actions),
+    }));
+  }
+
+  function renderNowWorking() {
+    const list = byId("now-working-list");
+    if (!list) return;
+    const rows = window.SwarmNowWorking.deriveNowWorking({
+      logs: state.logs,
+      workerState: state.status?.issue?.state || "stopped",
+      repositories: nowWorkingRepositories(),
+      testRuns: state.liveTestRuns,
+    });
+    const active = rows.filter((row) => row.state === "running").length;
+    const count = byId("now-working-count");
+    count.lastChild.textContent = `${active} ACTIVE`;
+    list.replaceChildren();
+    if (!rows.length) {
+      const empty = document.createElement("div");
+      empty.className = "now-working-empty";
+      empty.append(
+        Object.assign(document.createElement("strong"), { textContent: "Nothing is being worked on" }),
+        Object.assign(document.createElement("span"), { textContent: "Start the issue worker or test scheduler and their current work shows up here." }),
+      );
+      list.appendChild(empty);
+      return;
+    }
+    const multiple = (state.config?.repositories || []).length > 1;
+    rows.forEach((row) => {
+      const item = document.createElement("div");
+      item.className = `now-working-row ${row.kind}`;
+      const kind = document.createElement("span");
+      kind.className = "now-working-kind";
+      kind.textContent = NOW_WORKING_KINDS[row.kind] || row.kind;
+      const words = document.createElement("div");
+      words.className = "now-working-words";
+      const title = document.createElement("strong");
+      title.textContent = row.title;
+      const meta = document.createElement("span");
+      const startedAt = row.startedAt ? `since ${new Date(row.startedAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+      meta.textContent = [multiple ? row.repository : "", row.detail, startedAt || (row.since ? `since ${row.since}` : "")].filter(Boolean).join(" · ");
+      words.append(title, meta);
+      const pill = document.createElement("span");
+      pill.className = `status-pill ${row.state}`;
+      pill.textContent = NOW_WORKING_PILLS[row.state] || row.state;
+      item.append(kind, words, pill);
+      list.appendChild(item);
+    });
+  }
+
+  // Test runs are only read for repos whose scheduler is up, since a stopped
+  // scheduler has nothing in flight.
+  async function refreshLiveTestRuns() {
+    if (state.refreshing.liveTestRuns) return;
+    state.refreshing.liveTestRuns = true;
+    try {
+      const live = nowWorkingRepositories().filter((repo) => repo.uatState !== "stopped" && repo.uatState !== "error");
+      const entries = await Promise.all(live.map(async (repo) => {
+        try { return [repo.id, await invoke("get_test_runs_background", { repoId: repo.id })]; } catch (_) { return [repo.id, []]; }
+      }));
+      state.liveTestRuns = Object.fromEntries(entries);
+      renderNowWorking();
+    } finally {
+      state.refreshing.liveTestRuns = false;
+    }
   }
 
   async function refreshStatus({ quiet = false } = {}) {
@@ -2416,6 +2495,7 @@
     });
     if (stayAtBottom) full.scrollTop = full.scrollHeight;
     renderActivity();
+    renderNowWorking();
     byId("log-count").textContent = String(Math.min(entries.length, 999));
   }
 
@@ -3129,7 +3209,7 @@
       // Tool detection and repository inspection run independently. Keeping
       // them out of the startup await path prevents slow CLIs or network-backed
       // Git checks from freezing navigation and configuration editing.
-      void refreshStatus();
+      void refreshStatus().then(() => refreshLiveTestRuns());
       void refreshTools();
       void refreshTestPlan({ quiet: true });
       void refreshBotReadiness({ quiet: true });
@@ -3151,6 +3231,9 @@
           void refreshPromotions({ quiet: true });
         }
       });
+      window.setInterval(() => {
+        if (document.querySelector("#view-overview.active")) void refreshLiveTestRuns();
+      }, 5000);
       window.setInterval(() => {
         if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
       }, 4000);
