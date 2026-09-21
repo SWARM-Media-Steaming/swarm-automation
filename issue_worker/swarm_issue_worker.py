@@ -513,7 +513,7 @@ class ProviderUsage:
     status: 0 = usable, 1 = below the configured minimum, 2 = unavailable
             (not installed, not signed in, or the probe itself failed).
     remaining_percent: headroom left in the provider's most constrained usage
-            window (Grok, which has no cap, reports 100). None when it could
+            window. None when it could
             not be determined.
     detail: a short human-readable breakdown of each usage window (e.g.
             "session 82% / week 95% remaining"). None when unavailable.
@@ -850,16 +850,50 @@ class Worker:
             log("Grok quota unavailable: grok was not found in PATH.")
             return ProviderUsage(2)
         home = Path(os.environ.get("HOME", "~")).expanduser()
-        if not (home / ".grok" / "auth.json").is_file() and not os.environ.get("XAI_API_KEY"):
+        if not (home / ".grok" / "auth.json").is_file():
+            if os.environ.get("XAI_API_KEY"):
+                # Pay-as-you-go API billing has no account allowance to read.
+                log("Grok remaining quota — API-key billing has no account allowance to check.")
+                return ProviderUsage(0, 100.0, "API-key billing; no account allowance to check")
             log("Grok quota unavailable: not signed in (run 'grok login').")
             return ProviderUsage(2)
-        # Grok Build carries no per-session/weekly usage cap for signed-in
-        # accounts (open-sourced mid-2026), so a real rate limit only ever
-        # surfaces at run time and is handled like any other provider failure.
-        # A full 100% headroom keeps the unlimited provider ahead of the
-        # metered ones when choose_provider ranks by remaining usage.
-        log("Grok remaining quota — no usage limits apply to Grok Build.")
-        return ProviderUsage(0, 100.0, "no usage limits apply to Grok Build")
+        # A signed-in grok.com account has a weekly/monthly credit allowance
+        # (the CLI's /usage "Usage limit" tab), read through the local agent.
+        result: subprocess.CompletedProcess[str] | None = None
+        for attempt in range(2):
+            result = run_command(
+                [
+                    self.config.python_bin,
+                    self.config.script_dir / "grok_rate_limits.py",
+                    "--grok-bin",
+                    grok_bin,
+                    "--timeout",
+                    "30",
+                ],
+                check=False,
+            )
+            if result.returncode == 0:
+                break
+            if attempt == 0:
+                log("Grok capacity check did not respond; retrying once.")
+                time.sleep(0.5)
+        assert result is not None
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            reason = f" Details: {detail[-1]}" if detail else ""
+            log(f"Grok quota unavailable after two attempts.{reason}")
+            return ProviderUsage(2)
+        try:
+            limits = json.loads(result.stdout)
+            used = float(limits["usedPercent"])
+            period = str(limits.get("period") or "period")
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            log("Grok quota unavailable: the local usage response was invalid.")
+            return ProviderUsage(2)
+        remaining = max(0.0, min(100.0, 100 - used))
+        log(f"Grok remaining quota — {period}: {remaining:g}%.")
+        below_minimum = remaining < self.config.minimum_remaining_percent
+        return ProviderUsage(1 if below_minimum else 0, remaining, f"{period} {remaining:g}% remaining")
 
     def grok_capacity(self) -> int:
         return self.grok_usage().status
@@ -951,8 +985,7 @@ class Worker:
 
         `remaining` maps each enabled provider that currently has at least
         ``minimum_remaining_percent`` headroom to its most constrained usage
-        window's remaining percentage (Grok, which has no cap, reports 100).
-        Providers below the minimum or whose usage could not be read are absent.
+        window's remaining percentage. Providers below the minimum or whose usage could not be read are absent.
 
         New issue: the provider with the most usage remaining is chosen, so no
         single account is drained before the others. A named preferred provider

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,9 +39,36 @@ class CapacityTestCase(unittest.TestCase):
         with mock.patch.object(assist, "command_available", return_value=True), mock.patch.dict(
             "os.environ", {"HOME": "/nonexistent-home"}, clear=False
         ):
-            result = assist.grok_capacity("grok")
+            os.environ.pop("XAI_API_KEY", None)
+            result = assist.grok_capacity("grok", 10, "python3", ".")
         self.assertFalse(result["available"])
         self.assertIn("signed in", result["detail"])
+
+    def grok_capacity_with(self, output: tuple[int, str], minimum: float = 10):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as scripts:
+            (Path(home) / ".grok").mkdir()
+            (Path(home) / ".grok" / "auth.json").write_text("{}", encoding="utf-8")
+            (Path(scripts) / "grok_rate_limits.py").write_text("# helper\n", encoding="utf-8")
+            with mock.patch.object(assist, "command_available", return_value=True), mock.patch.object(
+                assist, "_run", return_value=output
+            ) as run, mock.patch.dict("os.environ", {"HOME": home}):
+                result = assist.grok_capacity("grok", minimum, "python3", scripts)
+        return result, run
+
+    def test_grok_capacity_uses_the_real_account_allowance(self) -> None:
+        result, run = self.grok_capacity_with((0, json.dumps({"usedPercent": 30.0, "period": "week"})))
+        self.assertEqual(result, {"available": True, "detail": "week 70% remaining"})
+        self.assertIn("--grok-bin", run.call_args.args[0])
+
+        result, _ = self.grok_capacity_with((0, json.dumps({"usedPercent": 96.0, "period": "week"})))
+        self.assertFalse(result["available"])
+        self.assertEqual(result["detail"], "week 4% remaining")
+
+    def test_grok_capacity_is_unavailable_when_usage_cannot_be_read(self) -> None:
+        result, _ = self.grok_capacity_with((1, ""))
+        self.assertFalse(result["available"])
+        result, _ = self.grok_capacity_with((0, "not json"))
+        self.assertFalse(result["available"])
 
     def test_pick_provider_skips_disabled_and_reports_the_first_available(self) -> None:
         providers = [

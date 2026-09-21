@@ -108,13 +108,36 @@ def codex_capacity(bin_path: str, minimum_remaining_percent: float, python_bin: 
     return {"available": available, "detail": f"{remaining:g}% remaining"}
 
 
-def grok_capacity(bin_path: str) -> dict[str, Any]:
+def grok_capacity(
+    bin_path: str, minimum_remaining_percent: float, python_bin: str, script_dir: str
+) -> dict[str, Any]:
     if not command_available(bin_path):
         return {"available": False, "detail": "grok was not found on PATH"}
     home = Path(os.environ.get("HOME", "~")).expanduser()
-    if not (home / ".grok" / "auth.json").is_file() and not os.environ.get("XAI_API_KEY"):
+    if not (home / ".grok" / "auth.json").is_file():
+        if os.environ.get("XAI_API_KEY"):
+            return {"available": True, "detail": "API-key billing; no account allowance to check"}
         return {"available": False, "detail": "not signed in to Grok"}
-    return {"available": True, "detail": "no usage limits apply to Grok Build"}
+    rate_limits_script = Path(script_dir) / "grok_rate_limits.py"
+    if not rate_limits_script.is_file():
+        return {"available": False, "detail": "the Grok usage helper is missing from this build"}
+    returncode, stdout = _run(
+        [python_bin, str(rate_limits_script), "--grok-bin", bin_path, "--timeout", "30"],
+        timeout=35,
+    )
+    if returncode != 0:
+        return {"available": False, "detail": "Grok's local usage check failed"}
+    try:
+        limits = json.loads(stdout)
+        used = float(limits["usedPercent"])
+        period = str(limits.get("period") or "period")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return {"available": False, "detail": "Grok's usage response was invalid"}
+    remaining = max(0.0, min(100.0, 100 - used))
+    return {
+        "available": remaining >= minimum_remaining_percent,
+        "detail": f"{period} {remaining:g}% remaining",
+    }
 
 
 def pick_provider(
@@ -134,7 +157,7 @@ def pick_provider(
         elif key == "codex":
             usage = codex_capacity(provider["bin"], minimum_remaining_percent, python_bin, script_dir)
         elif key == "grok":
-            usage = grok_capacity(provider["bin"])
+            usage = grok_capacity(provider["bin"], minimum_remaining_percent, python_bin, script_dir)
         else:
             continue
         if usage["available"]:

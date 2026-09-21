@@ -818,6 +818,83 @@ class WorkerTestCase(unittest.TestCase):
         # Empty --grok-bin in setUp -> not installed -> unavailable.
         self.assertEqual(self.worker.grok_capacity(), 2)
 
+    def grok_signed_in_home(self) -> dict[str, str]:
+        home = self.root / "grok-home"
+        (home / ".grok").mkdir(parents=True, exist_ok=True)
+        (home / ".grok" / "auth.json").write_text("{}", encoding="utf-8")
+        return {"HOME": str(home)}
+
+    def grok_usage_with(
+        self, results: list[subprocess.CompletedProcess[str]], environment: dict[str, str] | None = None
+    ):
+        environment = environment if environment is not None else self.grok_signed_in_home()
+        with (
+            mock.patch.object(self.worker, "provider_bin", return_value="/test/grok"),
+            mock.patch("swarm_issue_worker.command_available", return_value=True),
+            mock.patch("swarm_issue_worker.run_command", side_effect=results) as run,
+            mock.patch("swarm_issue_worker.time.sleep"),
+            mock.patch.dict("os.environ", environment),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            if "XAI_API_KEY" not in environment:
+                os.environ.pop("XAI_API_KEY", None)  # restored when patch.dict exits
+            usage = self.worker.grok_usage()
+        return usage, run
+
+    @staticmethod
+    def grok_limits(used: float, period: str = "week") -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            ["grok-rate-limits"], 0,
+            stdout=json.dumps({"usedPercent": used, "period": period, "tier": "SuperGrok"}), stderr="",
+        )
+
+    def test_grok_usage_reports_the_real_account_allowance(self) -> None:
+        usage, run = self.grok_usage_with([self.grok_limits(30.0)])
+        self.assertEqual(usage.status, 0)
+        self.assertEqual(usage.remaining_percent, 70.0)
+        self.assertEqual(usage.detail, "week 70% remaining")
+        self.assertIn("grok_rate_limits.py", str(run.call_args.args[0][1]))
+        self.assertIn("/test/grok", run.call_args.args[0])
+
+    def test_grok_usage_below_the_minimum_reserve_is_not_usable(self) -> None:
+        usage, _ = self.grok_usage_with([self.grok_limits(95.0)])
+        self.assertEqual(usage.status, 1)
+        self.assertEqual(usage.remaining_percent, 5.0)
+
+    def test_grok_usage_retries_one_transient_failure(self) -> None:
+        failed = subprocess.CompletedProcess(["grok-rate-limits"], 1, stdout="", stderr="agent timeout")
+        usage, run = self.grok_usage_with([failed, self.grok_limits(10.0, "month")])
+        self.assertEqual(usage.status, 0)
+        self.assertEqual(usage.detail, "month 90% remaining")
+        self.assertEqual(run.call_count, 2)
+
+    def test_grok_usage_is_unavailable_rather_than_assumed_full_when_unreadable(self) -> None:
+        failed = subprocess.CompletedProcess(["grok-rate-limits"], 1, stdout="", stderr="Could not read Grok usage: boom")
+        usage, run = self.grok_usage_with([failed, failed])
+        self.assertEqual(usage.status, 2)
+        self.assertIsNone(usage.remaining_percent)
+        self.assertEqual(run.call_count, 2)
+
+        garbled = subprocess.CompletedProcess(["grok-rate-limits"], 0, stdout="{\"period\": \"week\"}", stderr="")
+        usage, _ = self.grok_usage_with([garbled])
+        self.assertEqual(usage.status, 2)
+
+    def test_grok_usage_with_only_an_api_key_has_no_allowance_to_read(self) -> None:
+        empty_home = self.root / "no-grok-home"
+        empty_home.mkdir()
+        usage, run = self.grok_usage_with([], {"HOME": str(empty_home), "XAI_API_KEY": "test-key"})
+        self.assertEqual(usage.status, 0)
+        self.assertEqual(usage.remaining_percent, 100.0)
+        self.assertIn("API-key", usage.detail)
+        run.assert_not_called()
+
+    def test_grok_usage_requires_sign_in(self) -> None:
+        empty_home = self.root / "no-grok-home"
+        empty_home.mkdir()
+        usage, run = self.grok_usage_with([], {"HOME": str(empty_home)})
+        self.assertEqual(usage.status, 2)
+        run.assert_not_called()
+
     def test_codex_capacity_retries_one_transient_failure(self) -> None:
         failed = subprocess.CompletedProcess(
             ["codex-rate-limits"], 1, stdout="", stderr="temporary app-server timeout"

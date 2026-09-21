@@ -19,12 +19,13 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 7] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 8] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
     "setup_github_bots.py",
     "codex_rate_limits.py",
+    "grok_rate_limits.py",
     "ai_execution_history.py",
     "ai_test_assist.py",
 ];
