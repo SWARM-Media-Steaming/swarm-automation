@@ -20,6 +20,7 @@ import github_app_auth as auth_module
 import install_swarm_issue_cron as runner_module
 import setup_github_bots as setup_module
 from ai_execution_history import (
+    GRADE_POINTS,
     ExecutionHistoryRepository,
     ExecutionHistoryService,
     ExecutionStart,
@@ -27,7 +28,7 @@ from ai_execution_history import (
     main as execution_history_main,
     sanitize_text,
 )
-from dynamic_router import RouterError
+from dynamic_router import PROMPT_GRADES, RouterError
 from swarm_issue_worker import (
     Config,
     ISSUE_COMPLETED_EXIT_CODE,
@@ -2856,6 +2857,69 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(stored["provider_candidates"], ["claude", "codex", "grok"])
         self.assertEqual(stored["router_provider"], "claude")
         self.assertIn("test-driven", stored["provider_reason"])
+
+    def test_prompt_grades_page_lists_only_graded_runs_with_a_summary(self) -> None:
+        self.assertEqual(set(GRADE_POINTS), set(PROMPT_GRADES))
+        database_path = self.state / "grades-history.sqlite3"
+        service_args = dict(
+            repository="octocat/example",
+            issue_url="",
+            issue_body="SECRET BODY",
+            provider="Codex",
+            model="m",
+            effort="high",
+            branch_name="b",
+            application_version="1",
+        )
+        decisions = {
+            1: {"prompt_grade": "A", "grade_reason": "Clear.", "complexity": 3, "fallback": False},
+            2: {"prompt_grade": "C", "grade_reason": "Vague.", "complexity": 6, "fallback": False},
+            3: {"prompt_grade": "", "grade_reason": "router unavailable", "fallback": True},
+            4: None,
+        }
+        for number, decision in decisions.items():
+            ExecutionHistoryService(True, database_path).start(
+                ExecutionStart(
+                    issue_number=number,
+                    issue_title=f"Issue {number}",
+                    routing_decision=decision,
+                    **service_args,
+                ),
+                f"2026-09-2{number}T10:00:00-05:00",
+            )
+        repository = ExecutionHistoryRepository(database_path)
+        page = repository.graded_for_repository("octocat/example")
+        self.assertEqual([r["issue_number"] for r in page["records"]], [2, 1])
+        self.assertEqual(page["total"], 2)
+        self.assertNotIn("original_issue_body", page["records"][0])
+        self.assertEqual(page["records"][0]["routing_decision"]["grade_reason"], "Vague.")
+        summary = page["summary"]
+        self.assertEqual(summary["graded"], 2)
+        self.assertEqual(summary["averagePoints"], 3.0)
+        self.assertEqual(summary["averageGrade"], "B")
+        self.assertEqual(summary["distribution"]["A"], 1)
+        self.assertEqual(summary["distribution"]["C"], 1)
+        self.assertEqual(summary["distribution"]["F"], 0)
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = execution_history_main(
+                ["--db", str(database_path), "--repository", "octocat/example",
+                 "--grades", "--limit", "1", "--offset", "99"]
+            )
+        self.assertEqual(exit_code, 0)
+        cli_page = json.loads(buffer.getvalue())
+        self.assertEqual(cli_page["offset"], 1)
+        self.assertEqual([r["issue_number"] for r in cli_page["records"]], [1])
+
+        missing = io.StringIO()
+        with contextlib.redirect_stdout(missing):
+            execution_history_main(
+                ["--db", str(self.state / "none.sqlite3"), "--repository", "x/y", "--grades"]
+            )
+        empty = json.loads(missing.getvalue())
+        self.assertEqual(empty["total"], 0)
+        self.assertIsNone(empty["summary"]["averagePoints"])
 
     def test_execution_history_migration_adds_routing_decision(self) -> None:
         database_path = self.state / "legacy-history.sqlite3"

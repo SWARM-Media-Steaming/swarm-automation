@@ -1,13 +1,13 @@
 use super::{
     audit_test_coverage, bot_app_slugs_from_config, create_test_definition, decide_bot_push_access,
     detect_test_definition, detect_tools, execution_history_query_args, get_config,
-    get_execution_history, get_test_plan, get_test_runs, inspect_repository,
+    get_execution_history, get_prompt_grades, get_test_plan, get_test_runs, inspect_repository,
     issue_branch_pr_is_visible, mark_permission_primed, needs_promotion, parse_pr_ref,
-    promotion_approval_args, provider_scheduler_arguments, push_access_message,
-    reconcile_integration_for_promotion, refresh_running_scheduler, repo_status_args,
-    repo_worker_args, require_closed_issue, save_config, save_test_input, scheduler_arguments,
-    validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
-    ExecutionHistoryPage, ResolvedProvider,
+    promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
+    push_access_message, reconcile_integration_for_promotion, refresh_running_scheduler,
+    repo_status_args, repo_worker_args, require_closed_issue, save_config, save_test_input,
+    scheduler_arguments, validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState,
+    BranchAheadBehind, ExecutionHistoryPage, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -474,6 +474,42 @@ fn execution_history_lookup_is_safe_before_any_execution_exists() {
     assert_eq!(history.total, 0);
     assert_eq!(history.offset, 0);
     assert_eq!(history.limit, 10);
+}
+
+#[test]
+fn prompt_grades_lookup_is_safe_before_any_execution_exists() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    config.worker_state_dir = test_app
+        ._data_dir
+        .path()
+        .join("worker-state")
+        .to_string_lossy()
+        .into_owned();
+    save_config(app.clone(), app.state(), config).unwrap();
+
+    let grades =
+        get_prompt_grades(app.clone(), app.state(), "octocat__example".into(), None).unwrap();
+    assert!(grades.records.is_empty());
+    assert_eq!(grades.total, 0);
+    assert_eq!(grades.summary.graded, 0);
+    assert_eq!(grades.summary.average_points, None);
+}
+
+#[test]
+fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
+    let args = prompt_grades_query_args(
+        Path::new("ai_execution_history.py"),
+        Path::new("history.sqlite3"),
+        "octocat/example",
+        Some(-4),
+    );
+    assert!(args.contains(&"--grades".to_string()));
+    let position = |flag: &str| args.iter().position(|arg| arg == flag).unwrap();
+    assert_eq!(args[position("--limit") + 1], "10");
+    assert_eq!(args[position("--offset") + 1], "0");
 }
 
 #[test]

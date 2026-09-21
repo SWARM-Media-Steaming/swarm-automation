@@ -25,6 +25,23 @@ PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
 PAGE_SIZE = 10
+# Grade points on a 4.0 scale, best first. Keep the keys in sync with
+# ``PROMPT_GRADES`` in ``dynamic_router.py`` (a test checks this).
+GRADE_POINTS = {
+    "A+": 4.0,
+    "A": 4.0,
+    "A-": 3.7,
+    "B+": 3.3,
+    "B": 3.0,
+    "B-": 2.7,
+    "C+": 2.3,
+    "C": 2.0,
+    "C-": 1.7,
+    "D+": 1.3,
+    "D": 1.0,
+    "D-": 0.7,
+    "F": 0.0,
+}
 _SEARCHABLE_TEXT_COLUMNS = (
     "issue_title",
     "ai_provider",
@@ -459,6 +476,76 @@ class ExecutionHistoryRepository:
         return rows, total, offset, limit
 
 
+    def graded_for_repository(
+        self, repository: str, *, limit: int = PAGE_SIZE, offset: int = 0
+    ) -> dict[str, Any]:
+        """One page of prompt grades, newest first, plus a summary of all of them.
+
+        A row counts as graded when its routing decision carries a real
+        ``prompt_grade`` (routing fallbacks and runs without routing do not).
+        Only the columns the grades view shows are read, so issue bodies and
+        prompts never travel with a grade. Returns
+        ``{records, total, offset, limit, summary}``.
+        """
+        limit = clamp_page_size(limit)
+        offset = clamp_offset(offset)
+        graded: list[dict[str, Any]] = []
+        with self.connect() as database:
+            rows = database.execute(
+                "SELECT issue_number, issue_title, issue_url, attempt_number, started_at, "
+                "ai_provider, model, effort, final_status, routing_decision "
+                "FROM ai_executions WHERE repository = ? AND routing_decision <> '' "
+                "ORDER BY started_at DESC, attempt_number DESC",
+                (repository,),
+            )
+            for row in rows:
+                record = row_to_dict(row)
+                decision = record.get("routing_decision")
+                grade = decision.get("prompt_grade") if isinstance(decision, dict) else ""
+                if grade in GRADE_POINTS:
+                    graded.append(record)
+        total = len(graded)
+        if total and offset >= total:
+            offset = ((total - 1) // limit) * limit
+        elif not total:
+            offset = 0
+        return {
+            "records": graded[offset : offset + limit],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "summary": summarize_grades(
+                [record["routing_decision"]["prompt_grade"] for record in graded]
+            ),
+        }
+
+
+def summarize_grades(grades: list[str]) -> dict[str, Any]:
+    """Distribution, mean grade points, and the letter nearest to that mean."""
+    distribution = {grade: 0 for grade in GRADE_POINTS}
+    for grade in grades:
+        distribution[grade] += 1
+    if not grades:
+        return {
+            "graded": 0,
+            "averagePoints": None,
+            "averageGrade": "",
+            "distribution": distribution,
+        }
+    average = sum(GRADE_POINTS[grade] for grade in grades) / len(grades)
+    # A+ and A share 4.0 points, so a mean can only ever resolve to A.
+    nearest = min(
+        (grade for grade in GRADE_POINTS if grade != "A+"),
+        key=lambda grade: abs(GRADE_POINTS[grade] - average),
+    )
+    return {
+        "graded": len(grades),
+        "averagePoints": round(average, 2),
+        "averageGrade": nearest,
+        "distribution": distribution,
+    }
+
+
 def _serialize_routing(value: Any) -> str:
     if not value:
         return ""
@@ -601,6 +688,10 @@ def main(argv: list[str] | None = None) -> int:
     desktop Feedback view always uses that form so it never receives the
     full history.
 
+    `--grades` instead prints one page of prompt grades (the router's grade
+    of each issue's original prompt, with the reason and complexity) plus a
+    summary of every graded execution — the Feedback view's grades panel.
+
     `--import-from-github` instead scans that repository's full GitHub issue
     backlog (open and closed) and adds a synthetic `imported` row for any
     issue with no existing execution history row, printing a JSON summary
@@ -631,6 +722,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Number of matching executions to skip. Values past the end snap to the last page.",
     )
     parser.add_argument(
+        "--grades",
+        action="store_true",
+        help="Print one page of prompt grades plus a summary of every grade instead.",
+    )
+    parser.add_argument(
         "--search",
         default="",
         help="Case-insensitive match on issue number, title, provider, model, branch, or status.",
@@ -649,6 +745,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": str(error)}))
             return 1
         json.dump(import_missing_issues(repository, repository_name, issues), sys.stdout)
+        return 0
+
+    if args.grades:
+        if not database_path.is_file():
+            json.dump(
+                {**_empty_page(), "summary": summarize_grades([])}, sys.stdout
+            )
+            return 0
+        json.dump(
+            ExecutionHistoryRepository(database_path).graded_for_repository(
+                repository_name,
+                limit=PAGE_SIZE if args.limit is None else args.limit,
+                offset=args.offset,
+            ),
+            sys.stdout,
+        )
         return 0
 
     if not database_path.is_file():

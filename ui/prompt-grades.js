@@ -1,0 +1,46 @@
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === "object" && module.exports) module.exports = api;
+  if (root) root.SwarmPromptGrades = api;
+})(typeof window === "undefined" ? globalThis : window, () => {
+  "use strict";
+
+  // Pure helpers for the Feedback view's prompt-grades panel. Best first; the
+  // order matches the router's allowed grades.
+  const GRADES = ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "D-", "F"];
+
+  // Grade letter -> the shared state vocabulary (.suite-state passed/running/
+  // blocked/failed) so grades reuse the app's existing status colors.
+  function gradeTone(grade) {
+    const letter = String(grade || "").trim().charAt(0).toUpperCase();
+    if (letter === "A") return "passed";
+    if (letter === "B") return "running";
+    if (letter === "C") return "blocked";
+    if (letter === "D" || letter === "F") return "failed";
+    return "";
+  }
+
+  // One bar per grade, in grade order, sized against the most common grade so
+  // the tallest bar always fills the track. Grades nobody earned are kept (at
+  // zero) so the scale never shifts between repositories.
+  function distributionBars(summary) {
+    const counts = (summary && summary.distribution) || {};
+    const largest = Math.max(0, ...GRADES.map((grade) => Number(counts[grade]) || 0));
+    return GRADES.map((grade) => {
+      const count = Number(counts[grade]) || 0;
+      return { grade, count, percent: largest ? Math.round((count / largest) * 100) : 0, tone: gradeTone(grade) };
+    });
+  }
+
+  // "3 of 12 prompts graded B or better"-style headline used under the average.
+  function summaryLine(summary) {
+    const graded = Number(summary && summary.graded) || 0;
+    if (!graded) return "No graded prompts yet.";
+    const counts = summary.distribution || {};
+    const strong = GRADES.filter((grade) => grade[0] === "A" || grade[0] === "B")
+      .reduce((total, grade) => total + (Number(counts[grade]) || 0), 0);
+    return `${strong} of ${graded} graded prompt${graded === 1 ? "" : "s"} earned a B or better.`;
+  }
+
+  return { GRADES, gradeTone, distributionBars, summaryLine };
+});
