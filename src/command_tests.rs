@@ -1,9 +1,9 @@
 use super::{
     audit_test_coverage, bot_app_slugs_from_config, create_test_definition, decide_bot_push_access,
     detect_test_definition, detect_tools, execution_history_query_args, get_config,
-    get_execution_history, get_prompt_grades, get_test_plan, get_test_runs, inspect_repository,
-    issue_branch_pr_is_visible, mark_permission_primed, needs_promotion, parse_pr_ref,
-    promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
+    get_execution_history, get_prompt_grades, get_test_plan, get_test_runs, grant_apps_request,
+    inspect_repository, issue_branch_pr_is_visible, mark_permission_primed, needs_promotion,
+    parse_pr_ref, promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
     push_access_message, reconcile_integration_for_promotion, refresh_running_scheduler,
     repo_status_args, repo_worker_args, require_closed_issue, save_config, save_test_input,
     scheduler_arguments, validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState,
@@ -1033,6 +1033,25 @@ fn push_access_does_not_invent_a_restriction() {
     assert_eq!(decision.state, "unrestricted");
     assert!(!decision.can_grant);
     assert!(decide_bot_push_access(None, &["swarm-claude-bot".to_string()]).state == "unprotected");
+}
+
+#[test]
+fn grant_apps_request_sends_a_bare_json_array_on_stdin() {
+    let apps = vec![
+        "swarm-claude-bot".to_string(),
+        "swarm-codex-bot".to_string(),
+    ];
+    let (args, body) = grant_apps_request("owner/repo", "main", &apps);
+    assert!(args.ends_with(&["--input".to_string(), "-".to_string()]));
+    assert!(args
+        .iter()
+        .any(|arg| arg.ends_with("/branches/main/protection/restrictions/apps")));
+    assert!(!args.iter().any(|arg| arg.contains("apps[]")));
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!(["swarm-claude-bot", "swarm-codex-bot"])
+    );
 }
 
 #[test]

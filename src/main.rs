@@ -3356,6 +3356,10 @@ fn unconfigured_push_access(branch: &str) -> BranchPushAccess {
 
 fn gh_api(gh: &Path, args: &[String]) -> Result<serde_json::Value, String> {
     let (ok, message) = run_capture_owned(gh, args);
+    parse_gh_api_output(ok, message)
+}
+
+fn parse_gh_api_output(ok: bool, message: String) -> Result<serde_json::Value, String> {
     let trimmed = message.trim();
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if !ok {
@@ -3428,7 +3432,18 @@ fn grant_apps_push_access(
     branch: &str,
     apps: &[String],
 ) -> Result<(), String> {
-    let mut args = vec![
+    let (args, body) = grant_apps_request(repository, branch, apps);
+    gh_api_with_input(gh, &args, &body)
+        .map(|_| ())
+        .map_err(|error| format!("Could not update who can push to {branch}: {error}"))
+}
+
+/// The `gh api` arguments and JSON body for replacing a branch's push allow
+/// list of apps. GitHub expects the body to be a bare JSON array of slugs,
+/// so it is sent on stdin instead of as `--field` pairs (which build an
+/// object and are rejected with "is not an array").
+fn grant_apps_request(repository: &str, branch: &str, apps: &[String]) -> (Vec<String>, String) {
+    let args = vec![
         "api".into(),
         "--method".into(),
         "PUT".into(),
@@ -3436,14 +3451,15 @@ fn grant_apps_push_access(
             "{}/restrictions/apps",
             protection_api_path(repository, branch)
         ),
+        "--input".into(),
+        "-".into(),
     ];
-    for slug in apps {
-        args.push("--raw-field".into());
-        args.push(format!("apps[]={slug}"));
-    }
-    gh_api(gh, &args)
-        .map(|_| ())
-        .map_err(|error| format!("Could not update who can push to {branch}: {error}"))
+    (args, serde_json::json!(apps).to_string())
+}
+
+fn gh_api_with_input(gh: &Path, args: &[String], input: &str) -> Result<serde_json::Value, String> {
+    let (ok, message) = run_capture_with_input(gh, args, input);
+    parse_gh_api_output(ok, message)
 }
 
 /// The open `integration -> base` promotion pull request for `repo`, as
@@ -3847,6 +3863,38 @@ fn run_capture_owned(program: &Path, arguments: &[String]) -> (bool, String) {
         .env("PATH", tools::enhanced_path())
         .output()
     {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let message = if stdout.is_empty() { stderr } else { stdout };
+            (output.status.success(), message)
+        }
+        Err(error) => (false, error.to_string()),
+    }
+}
+
+fn run_capture_with_input(program: &Path, arguments: &[String], input: &str) -> (bool, String) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = match Command::new(program)
+        .args(arguments)
+        .env("PATH", tools::enhanced_path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return (false, error.to_string()),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(error) = stdin.write_all(input.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (false, error.to_string());
+        }
+    }
+    match child.wait_with_output() {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
