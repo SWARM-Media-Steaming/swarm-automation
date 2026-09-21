@@ -64,6 +64,7 @@
     },
   };
   const PROVIDER_ORDER = Object.keys(PROVIDER_META);
+  const PREFERRED_PROVIDER_AUTO = "auto";
   const providerLabel = (id) => id === "xai" ? "xAI" : (PROVIDER_META[id]?.label || id);
 
   // Click-to-open help. `html` is a trusted local constant (no user input),
@@ -86,7 +87,7 @@
     },
     "provider-include-exclude": {
       title: "Enabled AI tools",
-      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, choose the preferred tie-breaker, and set the shared minimum quota reserve.</p><p>At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
+      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set the shared minimum quota reserve.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
       links: [],
     },
     "software-update": {
@@ -541,15 +542,6 @@
       });
       effortInput.addEventListener("change", setDirty);
       effortLabel.appendChild(effortInput);
-      const preferredLabel = document.createElement("label");
-      preferredLabel.className = "provider-choice";
-      const preferredInput = document.createElement("input");
-      preferredInput.type = "radio";
-      preferredInput.name = "preferred-provider";
-      preferredInput.className = "provider-preferred";
-      preferredInput.checked = provider.id === config.preferred_provider;
-      preferredInput.addEventListener("change", setDirty);
-      preferredLabel.append(preferredInput, "Preferred provider (tie-breaker)");
       const quotaLabel = document.createElement("label");
       quotaLabel.append("Minimum quota remaining ");
       const quotaWrap = document.createElement("div");
@@ -570,7 +562,7 @@
       suffix.textContent = "%";
       quotaWrap.append(quotaInput, suffix);
       quotaLabel.appendChild(quotaWrap);
-      fields.append(modelLabel, effortLabel, preferredLabel, quotaLabel);
+      fields.append(modelLabel, effortLabel, quotaLabel);
 
       const actions = document.createElement("div");
       actions.className = "provider-actions";
@@ -585,6 +577,66 @@
       card.append(head, badge, fields, actions);
       grid.appendChild(card);
     });
+    renderProviderPreference(config);
+  }
+
+  function preferenceChoice(value, title, detail, { checked = false, disabled = false, auto = false } = {}) {
+    const label = document.createElement("label");
+    label.className = "provider-preference-choice";
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "preferred-provider";
+    input.className = auto ? "provider-preferred provider-preference-auto" : "provider-preferred";
+    input.value = value;
+    input.checked = checked;
+    input.disabled = disabled;
+    input.addEventListener("change", setDirty);
+    const copy = document.createElement("span");
+    const heading = document.createElement("strong");
+    heading.textContent = title;
+    const note = document.createElement("small");
+    note.textContent = detail;
+    copy.append(heading, note);
+    label.append(input, copy);
+    return label;
+  }
+
+  function renderProviderPreference(config) {
+    const host = document.getElementById("provider-preference");
+    if (!host) return;
+    host.replaceChildren();
+    const legend = document.createElement("p");
+    legend.className = "provider-preference-legend";
+    legend.id = "provider-preference-legend";
+    legend.textContent = "Who handles a new issue first";
+    const options = document.createElement("div");
+    options.className = "provider-preference-options";
+    const auto = config.preferred_provider === PREFERRED_PROVIDER_AUTO;
+    options.appendChild(preferenceChoice(
+      PREFERRED_PROVIDER_AUTO,
+      "No preference",
+      "Whoever has the most usage left goes first, so one provider is not used up before the others.",
+      { checked: auto, auto: true },
+    ));
+    providerList(config).forEach((provider) => {
+      const meta = PROVIDER_META[provider.id];
+      options.appendChild(preferenceChoice(
+        provider.id,
+        meta.label,
+        provider.enabled ? "Preferred when remaining usage is tied." : "Turn this provider on to prefer it.",
+        {
+          checked: !auto && provider.id === config.preferred_provider && provider.enabled,
+          disabled: !provider.enabled,
+        },
+      ));
+    });
+    host.append(legend, options);
+    if (!host.querySelector('input[name="preferred-provider"]:checked')) {
+      const fallback = host.querySelector(".provider-preferred:not(.provider-preference-auto):not(:disabled)");
+      const autoInput = host.querySelector(".provider-preference-auto");
+      if (fallback) fallback.checked = true;
+      else if (autoInput) autoInput.checked = true;
+    }
   }
 
   function collectProviders() {
@@ -630,8 +682,8 @@
     next.schedule_days = Array.from(document.querySelectorAll("#days-field input:checked"), (input) => input.value);
     const providers = collectProviders();
     if (providers.length) next.providers = providers;
-    next.preferred_provider = document.querySelector(".provider-preferred:checked")?.closest(".provider-card")?.dataset.provider
-      || next.preferred_provider;
+    const selectedPreference = document.querySelector('input[name="preferred-provider"]:checked')?.value;
+    if (selectedPreference) next.preferred_provider = selectedPreference;
     const minimumQuota = document.querySelector(".provider-minimum-quota")?.value;
     if (minimumQuota !== undefined) next.minimum_remaining_percent = Number(minimumQuota);
     return next;
@@ -2712,8 +2764,23 @@
 
   function onProvidersChanged() {
     setDirty();
-    const enabledPreferred = document.querySelector(".provider-card:not(.excluded) .provider-preferred:checked");
-    if (!enabledPreferred) document.querySelector(".provider-card:not(.excluded) .provider-preferred")?.click();
+    document.querySelectorAll("#provider-cards .provider-card").forEach((card) => {
+      const enabled = card.querySelector(".provider-enabled").checked;
+      const radio = document.querySelector(`.provider-preferred[value="${card.dataset.provider}"]`);
+      if (!radio) return;
+      radio.disabled = !enabled;
+      const note = radio.parentElement?.querySelector("small");
+      if (note) {
+        note.textContent = enabled
+          ? "Preferred when remaining usage is tied."
+          : "Turn this provider on to prefer it.";
+      }
+    });
+    const checked = document.querySelector('input[name="preferred-provider"]:checked');
+    if (!checked || checked.disabled) {
+      const fallback = document.querySelector(".provider-preferred:not(.provider-preference-auto):not(:disabled)");
+      (fallback || document.querySelector(".provider-preference-auto"))?.click();
+    }
     renderWorkerProviderSummary();
     renderReadiness();
   }

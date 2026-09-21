@@ -8,6 +8,11 @@ pub const CONFIG_FILE: &str = "config.json";
 /// rotation order and the order provider cards render in.
 pub const KNOWN_PROVIDERS: [&str; 3] = ["claude", "codex", "grok"];
 
+/// `preferred_provider` value meaning the user has no favorite. A new issue
+/// goes to the enabled provider with the most usage remaining. Exact ties
+/// follow [`KNOWN_PROVIDERS`] order instead of a named provider.
+pub const PREFERRED_PROVIDER_AUTO: &str = "auto";
+
 fn default_true() -> bool {
     true
 }
@@ -125,8 +130,9 @@ pub struct RepoConfig {
     pub ready_label: String,
     pub trusted_followup_authors: Vec<String>,
     pub completion_authors: Vec<String>,
-    /// First provider tried for a fresh issue in this repo. Empty = use the
-    /// global `preferred_provider`.
+    /// Tie-break provider for this repo when remaining usage is equal.
+    /// Empty inherits the global `preferred_provider`. [`PREFERRED_PROVIDER_AUTO`]
+    /// means no favorite: the provider with the most usage remaining is chosen.
     pub preferred_provider: String,
     pub auto_approve: bool,
     /// Compatibility mirror of `auto_approve`. Approval and squash-merging are
@@ -224,8 +230,9 @@ impl RepoConfig {
         }
     }
 
-    /// The provider tried first for this repo (`preferred_provider` when set,
-    /// else the global default).
+    /// Tie-break provider for this repo (`preferred_provider` when set,
+    /// else the global default). [`PREFERRED_PROVIDER_AUTO`] is a real
+    /// selection, not "unset".
     pub fn effective_preferred_provider<'a>(&'a self, global: &'a str) -> &'a str {
         if self.preferred_provider.trim().is_empty() {
             global
@@ -333,7 +340,9 @@ pub struct AppConfig {
     /// `<app-data-dir>/checkouts`; each repo lives in `<root>/<repo id>`.
     pub workspace_root: String,
 
-    /// Global default first provider for a repo that does not override it.
+    /// Global tie-break provider for a repo that does not override it.
+    /// [`PREFERRED_PROVIDER_AUTO`] means no favorite: new work goes to the
+    /// enabled provider with the most usage remaining.
     pub preferred_provider: String,
     /// One entry per known provider.
     #[serde(default)]
@@ -499,10 +508,7 @@ impl AppConfig {
             repo.validate()
                 .map_err(|error| format!("Repository {}: {error}.", repo.label()))?;
             let preferred = repo.effective_preferred_provider(&self.preferred_provider);
-            if !self
-                .enabled_providers()
-                .any(|provider| provider.id == preferred)
-            {
+            if !self.preference_targets_enabled_provider(preferred) {
                 return Err(format!(
                     "Repository {}: preferred provider '{preferred}' is not an enabled provider.",
                     repo.label()
@@ -576,15 +582,22 @@ impl AppConfig {
         if self.enabled_providers().next().is_none() {
             return Err("Enable at least one AI provider.".into());
         }
-        if !self
-            .enabled_providers()
-            .any(|provider| provider.id == self.preferred_provider)
-        {
+        if !self.preference_targets_enabled_provider(&self.preferred_provider) {
             return Err(
                 "The global preferred provider must be one of the enabled providers.".into(),
             );
         }
         Ok(())
+    }
+
+    /// `auto` is always allowed. A named provider must be one of the enabled
+    /// providers so the worker is not pinned to something the user turned off.
+    fn preference_targets_enabled_provider(&self, preferred: &str) -> bool {
+        let preferred = preferred.trim();
+        preferred == PREFERRED_PROVIDER_AUTO
+            || self
+                .enabled_providers()
+                .any(|provider| provider.id == preferred)
     }
 
     pub fn enabled_providers(&self) -> impl Iterator<Item = &ProviderSettings> {
@@ -660,8 +673,9 @@ impl AppConfig {
         self.codex_effort.clear();
         self.claude_bin.clear();
         self.codex_bin.clear();
-        if !KNOWN_PROVIDERS.contains(&self.preferred_provider.as_str()) {
-            self.preferred_provider = "claude".into();
+        match canonicalize_preferred_provider(&self.preferred_provider) {
+            Some(value) if !value.is_empty() => self.preferred_provider = value,
+            _ => self.preferred_provider = "claude".into(),
         }
     }
 
@@ -731,6 +745,9 @@ impl AppConfig {
                 repo.github_host = "github.com".into();
                 // Approval and issue-PR merging are one user-facing operation.
                 repo.auto_merge = repo.auto_approve;
+                if let Some(preferred) = canonicalize_preferred_provider(&repo.preferred_provider) {
+                    repo.preferred_provider = preferred;
+                }
                 kept.push(repo);
             }
         }
@@ -739,6 +756,26 @@ impl AppConfig {
         // Clear transitional scalars regardless of migration path.
         self.profile_name.clear();
     }
+}
+
+/// Normalize a preferred-provider setting.
+///
+/// `Some("")` is "unset" (a repository inherits the global value).
+/// `Some("auto")` and `Some` of a known provider id are canonical selections.
+/// `None` is an unrecognized value, left for validation to reject on a
+/// repository override and replaced with the default on the global setting.
+fn canonicalize_preferred_provider(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Some(String::new());
+    }
+    if trimmed.eq_ignore_ascii_case(PREFERRED_PROVIDER_AUTO) {
+        return Some(PREFERRED_PROVIDER_AUTO.into());
+    }
+    KNOWN_PROVIDERS
+        .iter()
+        .find(|id| id.eq_ignore_ascii_case(trimmed))
+        .map(|id| (*id).to_string())
 }
 
 fn validate_time(value: &str) -> Result<(), String> {
@@ -978,5 +1015,34 @@ mod tests {
             .validate_providers()
             .unwrap_err()
             .contains("model cannot be empty"));
+    }
+
+    #[test]
+    fn auto_preference_is_valid_even_when_only_one_provider_is_enabled() {
+        let mut config = config_with_one_repo();
+        for provider in &mut config.providers {
+            provider.enabled = provider.id == "grok";
+        }
+        config.preferred_provider = "AUTO".into();
+        config.repositories[0].preferred_provider = "Auto".into();
+        config.normalize();
+        assert_eq!(config.preferred_provider, "auto");
+        assert_eq!(config.repositories[0].preferred_provider, "auto");
+        assert!(config.validate().is_ok());
+        assert_eq!(
+            config.repositories[0].effective_preferred_provider("claude"),
+            "auto"
+        );
+
+        config.repositories[0].preferred_provider.clear();
+        assert_eq!(
+            config.repositories[0].effective_preferred_provider(&config.preferred_provider),
+            "auto"
+        );
+        assert!(config.validate().is_ok());
+
+        config.preferred_provider = "not-a-provider".into();
+        config.normalize();
+        assert_eq!(config.preferred_provider, "claude");
     }
 }
