@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -41,6 +41,7 @@ _JSON_COLUMNS = (
     "commit_shas",
     "operational_notes",
     "warnings_errors",
+    "routing_decision",
 )
 
 _SECRET_PATTERNS = (
@@ -131,6 +132,7 @@ class ExecutionStart:
     branch_name: str
     application_version: str
     prompt_template_version: str = PROMPT_TEMPLATE_VERSION
+    routing_decision: dict[str, Any] | None = None
 
 
 class ExecutionHistoryRepository:
@@ -203,7 +205,22 @@ class ExecutionHistoryRepository:
                 )
                 database.execute(
                     "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
-                    (SCHEMA_VERSION,),
+                    (1,),
+                )
+            if 2 not in applied and 2 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(ai_executions)")
+                }
+                if "routing_decision" not in columns:
+                    database.execute(
+                        "ALTER TABLE ai_executions ADD COLUMN routing_decision "
+                        "TEXT NOT NULL DEFAULT ''"
+                    )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (2,),
                 )
 
     def create(self, start: ExecutionStart, started_at: str) -> str:
@@ -221,8 +238,9 @@ class ExecutionHistoryRepository:
                     execution_id, repository, issue_number, issue_url, issue_title,
                     original_issue_body, ai_provider, model, effort, reasoning_config,
                     started_at, branch_name, final_status, attempt_number,
-                    application_version, prompt_template_version, updated_at, operational_notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?, ?, ?, ?)""",
+                    application_version, prompt_template_version, updated_at, operational_notes,
+                    routing_decision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?, ?, ?, ?, ?)""",
                 (
                     execution_id,
                     repository,
@@ -241,6 +259,7 @@ class ExecutionHistoryRepository:
                     sanitize_text(start.prompt_template_version),
                     started_at,
                     json.dumps(["Issue accepted"]),
+                    _serialize_routing(start.routing_decision),
                 ),
             )
         return execution_id
@@ -325,6 +344,7 @@ class ExecutionHistoryRepository:
             "uploaded_record_updated_at",
             "reviewer_feedback",
             "reviewer_feedback_at",
+            "routing_decision",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -333,6 +353,8 @@ class ExecutionHistoryRepository:
         for key, value in fields.items():
             if key in {"files_changed", "commit_shas", "operational_notes", "warnings_errors"}:
                 serialized[key] = json.dumps(sanitize_values(value))
+            elif key == "routing_decision":
+                serialized[key] = _serialize_routing(value)
             elif isinstance(value, str):
                 serialized[key] = sanitize_text(value)
             else:
@@ -437,6 +459,17 @@ class ExecutionHistoryRepository:
         return rows, total, offset, limit
 
 
+def _serialize_routing(value: Any) -> str:
+    if not value:
+        return ""
+    if not isinstance(value, dict):
+        raise ValueError("routing_decision must be an object")
+    cleaned: dict[str, Any] = {}
+    for key, item in value.items():
+        cleaned[str(key)] = sanitize_text(item) if isinstance(item, str) else item
+    return json.dumps(cleaned)
+
+
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     """A `sqlite3.Row` as a plain, JSON-ready dict with JSON text columns decoded."""
     record = dict(row)
@@ -447,6 +480,8 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
                 record[column] = json.loads(raw)
             except ValueError:
                 pass
+    if record.get("routing_decision") == "":
+        record["routing_decision"] = None
     return record
 
 

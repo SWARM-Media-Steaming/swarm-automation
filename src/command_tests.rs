@@ -2,8 +2,9 @@ use super::{
     audit_test_coverage, create_test_definition, detect_test_definition, detect_tools,
     execution_history_query_args, get_config, get_execution_history, get_test_plan, get_test_runs,
     inspect_repository, issue_branch_pr_is_visible, mark_permission_primed, needs_promotion,
-    parse_pr_ref, promotion_approval_args, reconcile_integration_for_promotion, repo_status_args,
-    repo_worker_args, require_closed_issue, save_config, save_test_input, scheduler_arguments,
+    parse_pr_ref, promotion_approval_args, provider_scheduler_arguments,
+    reconcile_integration_for_promotion, repo_status_args, repo_worker_args, require_closed_issue,
+    save_config, save_test_input, scheduler_arguments,
     validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
     ExecutionHistoryPage, ResolvedProvider,
 };
@@ -105,9 +106,31 @@ fn resolved_provider(id: &str, bin: &str) -> ResolvedProvider {
         id: id.into(),
         model: format!("{id}-model"),
         effort: "high".into(),
+        router_model: format!("{id}-router"),
+        router_effort: "low".into(),
         bin: PathBuf::from(bin),
         enabled: true,
     }
+}
+
+#[test]
+fn provider_scheduler_arguments_carry_dynamic_routing_settings() {
+    let mut config = AppConfig::default();
+    config.dynamic_model_routing = false;
+    let providers = vec![resolved_provider("codex", "/usr/bin/false")];
+    let off = provider_scheduler_arguments(&config, &providers);
+    assert!(off.iter().any(|arg| arg == "--no-dynamic-model-routing"));
+    assert!(off.windows(2).any(|pair| pair[0] == "--codex-model" && pair[1] == "codex-model"));
+    assert!(off.windows(2).any(|pair| pair[0] == "--codex-router-model" && pair[1] == "codex-router"));
+    assert!(off.windows(2).any(|pair| pair[0] == "--codex-router-effort" && pair[1] == "low"));
+    let tiers = off.windows(2).find(|pair| pair[0] == "--routing-tiers").unwrap()[1].clone();
+    let parsed: serde_json::Value = serde_json::from_str(&tiers).unwrap();
+    assert_eq!(parsed["codex"][2]["model"], "gpt-5.6-sol");
+
+    config.dynamic_model_routing = true;
+    let on = provider_scheduler_arguments(&config, &providers);
+    assert!(on.iter().any(|arg| arg == "--dynamic-model-routing"));
+    assert!(!on.iter().any(|arg| arg == "--no-dynamic-model-routing"));
 }
 
 #[test]

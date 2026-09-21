@@ -591,17 +591,7 @@ fn start_issue_worker(
     let runner = script_dir.join("install_swarm_issue_cron.py");
 
     let mut arguments = scheduler_arguments(&config, &runner, &python, &git, &repos_file, run_once);
-    for provider in &providers {
-        arguments.extend([format!("--{}-model", provider.id), provider.model.clone()]);
-        arguments.extend([format!("--{}-effort", provider.id), provider.effort.clone()]);
-        arguments.extend([
-            format!("--{}-bin", provider.id),
-            provider.bin.to_string_lossy().into_owned(),
-        ]);
-        if provider.enabled {
-            arguments.extend(["--enabled-provider".into(), provider.id.clone()]);
-        }
-    }
+    arguments.extend(provider_scheduler_arguments(&config, &providers));
     arguments.extend([
         "--minimum-remaining-percent".into(),
         config.minimum_remaining_percent.to_string(),
@@ -638,6 +628,8 @@ struct ResolvedProvider {
     id: String,
     model: String,
     effort: String,
+    router_model: String,
+    router_effort: String,
     bin: PathBuf,
     enabled: bool,
 }
@@ -650,10 +642,54 @@ fn resolve_providers(config: &AppConfig) -> Vec<ResolvedProvider> {
             id: provider.id.clone(),
             model: provider.model.clone(),
             effort: provider.effort.clone(),
+            router_model: provider.router_model.clone(),
+            router_effort: provider.router_effort.clone(),
             bin: tools::find_executable(&provider.id, &provider.bin).unwrap_or_default(),
             enabled: provider.enabled,
         })
         .collect()
+}
+
+/// Provider flags forwarded by the scheduler to every repository worker.
+/// Router settings travel even while dynamic routing is off so a later save
+/// can turn it on without the worker forgetting the configured router.
+fn provider_scheduler_arguments(
+    config: &AppConfig,
+    providers: &[ResolvedProvider],
+) -> Vec<String> {
+    let mut arguments = Vec::new();
+    for provider in providers {
+        arguments.extend([format!("--{}-model", provider.id), provider.model.clone()]);
+        arguments.extend([format!("--{}-effort", provider.id), provider.effort.clone()]);
+        arguments.extend([
+            format!("--{}-router-model", provider.id),
+            provider.router_model.clone(),
+        ]);
+        arguments.extend([
+            format!("--{}-router-effort", provider.id),
+            provider.router_effort.clone(),
+        ]);
+        arguments.extend([
+            format!("--{}-bin", provider.id),
+            provider.bin.to_string_lossy().into_owned(),
+        ]);
+        if provider.enabled {
+            arguments.extend(["--enabled-provider".into(), provider.id.clone()]);
+        }
+    }
+    arguments.push(
+        if config.dynamic_model_routing {
+            "--dynamic-model-routing"
+        } else {
+            "--no-dynamic-model-routing"
+        }
+        .into(),
+    );
+    arguments.extend([
+        "--routing-tiers".into(),
+        serde_json::to_string(&config.routing_tiers).unwrap_or_else(|_| "{}".into()),
+    ]);
+    arguments
 }
 
 /// Builds the test scheduler's view of "can AI help with a gap right now" —
@@ -1145,6 +1181,9 @@ struct AiExecutionRecord {
     reviewer_feedback: String,
     #[serde(default)]
     reviewer_feedback_at: Option<String>,
+    /// Dynamic-routing record for this attempt. Null when routing was off.
+    #[serde(default)]
+    routing_decision: serde_json::Value,
 }
 
 /// Feedback never asks the history CLI for more than this many rows.

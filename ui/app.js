@@ -85,9 +85,14 @@
       html: "<p>Grok can write code for an issue or review work from another provider.</p><ul><li><strong>Switch</strong> — includes or removes Grok from new work.</li><li><strong>Model</strong> — choose the Grok model that should handle work.</li><li><strong>Effort</strong> — choose how hard Grok should think before acting. The choices update for the selected model.</li><li><strong>Install / Sign in</strong> — prepares Grok on this Mac.</li></ul>",
       links: [{ label: "Grok Build docs", url: "https://docs.x.ai/build/overview" }],
     },
+    "dynamic-model-routing": {
+      title: "Dynamic Model Routing",
+      html: "<p><strong>OFF</strong> keeps today’s behavior: you choose the worker model and reasoning effort on each provider card.</p><p><strong>ON</strong> disables those worker selectors and shows <strong>Router model</strong> and <strong>Router effort</strong>. Before an issue is implemented, that router grades the original prompt and SWARM picks the worker model from the configured complexity tiers. The original issue text is not rewritten.</p>",
+      links: [],
+    },
     "provider-include-exclude": {
       title: "Enabled AI tools",
-      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set the shared minimum quota reserve.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
+      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set the shared minimum quota reserve.</p><p><strong>Dynamic Model Routing</strong> grades the original issue and picks that provider’s worker model and reasoning effort from the saved complexity tiers. The card’s router model is what performs the grading. Turn routing off to choose the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
       links: [],
     },
     "software-update": {
@@ -301,6 +306,20 @@
     bindRepositoryForm();
     byId("profile-kicker").textContent = (currentRepo()?.github_repository || "REPOSITORY").toUpperCase();
     renderSummaries();
+    syncDynamicRoutingChrome();
+  }
+
+  function syncDynamicRoutingChrome() {
+    const toggle = byId("dynamic-model-routing");
+    const enabled = Boolean(toggle && toggle.checked);
+    const label = byId("dynamic-routing-state");
+    if (label && window.SwarmDynamicRouting) {
+      label.textContent = window.SwarmDynamicRouting.routingControlState(enabled).statusLabel;
+    }
+    if (!window.SwarmDynamicRouting) return;
+    document.querySelectorAll("#provider-cards .provider-card").forEach((card) => {
+      window.SwarmDynamicRouting.applyRoutingControlState(card, enabled);
+    });
   }
 
   function defaultRepository() {
@@ -441,11 +460,17 @@
     const stored = new Map((config.providers || []).map((p) => [p.id, p]));
     return PROVIDER_ORDER.map((id) => {
       const entry = stored.get(id) || {};
+      const routerDefault = window.SwarmDynamicRouting
+        ? window.SwarmDynamicRouting.defaultRouter(id)
+        : { model: "", effort: "low" };
+      const routerModel = entry.router_model || routerDefault.model;
       return {
         id,
         enabled: entry.enabled !== false,
         model: entry.model || defaultModel(id),
         effort: entry.effort || defaultEffort(id, entry.model || defaultModel(id)),
+        router_model: routerModel,
+        router_effort: entry.router_effort || routerDefault.effort,
         bin: entry.bin || "",
       };
     });
@@ -502,6 +527,7 @@
       const fields = document.createElement("div");
       fields.className = "provider-fields";
       const modelLabel = document.createElement("label");
+      modelLabel.className = "worker-model-label";
       modelLabel.append("Model ");
       const modelReq = document.createElement("span");
       modelReq.className = "req";
@@ -532,7 +558,8 @@
       modelInput.value = provider.model || defaultModel(provider.id);
       modelLabel.appendChild(modelInput);
       const effortLabel = document.createElement("label");
-      effortLabel.textContent = "Effort ";
+      effortLabel.className = "worker-effort-label";
+      effortLabel.append("Reasoning/Effort ");
       const effortInput = document.createElement("select");
       effortInput.className = "provider-effort";
       populateEffortSelect(effortInput, provider.id, modelInput.value, provider.effort);
@@ -542,6 +569,40 @@
       });
       effortInput.addEventListener("change", setDirty);
       effortLabel.appendChild(effortInput);
+      const routingNote = document.createElement("p");
+      routingNote.className = "dynamic-routing-note fine-print";
+      routingNote.textContent = "Worker model and reasoning are chosen for each issue.";
+      const routerModelLabel = document.createElement("label");
+      routerModelLabel.className = "router-model-label";
+      routerModelLabel.append("Router model ");
+      const routerModelInput = document.createElement("select");
+      routerModelInput.className = "provider-router-model";
+      knownModels.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.value;
+        option.textContent = entry.label;
+        routerModelInput.appendChild(option);
+      });
+      if (provider.router_model && !knownModels.some((entry) => entry.value === provider.router_model)) {
+        const option = document.createElement("option");
+        option.value = provider.router_model;
+        option.textContent = `${provider.router_model} (saved)`;
+        routerModelInput.appendChild(option);
+      }
+      routerModelInput.value = provider.router_model || "";
+      routerModelLabel.appendChild(routerModelInput);
+      const routerEffortLabel = document.createElement("label");
+      routerEffortLabel.className = "router-effort-label";
+      routerEffortLabel.append("Router effort ");
+      const routerEffortInput = document.createElement("select");
+      routerEffortInput.className = "provider-router-effort";
+      populateEffortSelect(routerEffortInput, provider.id, routerModelInput.value, provider.router_effort);
+      routerModelInput.addEventListener("change", () => {
+        populateEffortSelect(routerEffortInput, provider.id, routerModelInput.value, routerEffortInput.value);
+        setDirty();
+      });
+      routerEffortInput.addEventListener("change", setDirty);
+      routerEffortLabel.appendChild(routerEffortInput);
       const quotaLabel = document.createElement("label");
       quotaLabel.append("Minimum quota remaining ");
       const quotaWrap = document.createElement("div");
@@ -562,7 +623,7 @@
       suffix.textContent = "%";
       quotaWrap.append(quotaInput, suffix);
       quotaLabel.appendChild(quotaWrap);
-      fields.append(modelLabel, effortLabel, quotaLabel);
+      fields.append(modelLabel, effortLabel, routingNote, routerModelLabel, routerEffortLabel, quotaLabel);
 
       const actions = document.createElement("div");
       actions.className = "provider-actions";
@@ -575,6 +636,9 @@
       actions.appendChild(button("Docs", "secondary-button", () => openUrl(meta.docs)));
 
       card.append(head, badge, fields, actions);
+      if (window.SwarmDynamicRouting) {
+        window.SwarmDynamicRouting.applyRoutingControlState(card, Boolean(config.dynamic_model_routing));
+      }
       grid.appendChild(card);
     });
     renderProviderPreference(config);
@@ -645,6 +709,8 @@
       enabled: card.querySelector(".provider-enabled").checked,
       model: card.querySelector(".provider-model").value.trim(),
       effort: card.querySelector(".provider-effort").value,
+      router_model: card.querySelector(".provider-router-model")?.value.trim() || "",
+      router_effort: card.querySelector(".provider-router-effort")?.value || "",
       bin: document.querySelector(`[data-provider-bin="${card.dataset.provider}"]`)?.value.trim() || "",
     }));
   }
@@ -1426,6 +1492,26 @@
     };
     addSummaryParagraph("Requested work", record.requestedWorkSummary);
     addSummaryParagraph("Changes made", record.changesSummary);
+    const routing = record.routingDecision;
+    if (routing && typeof routing === "object") {
+      if (routing.fallback) {
+        addSummaryParagraph("AI routing", routing.grade_reason || "Fell back to the configured worker model.");
+      } else if (routing.prompt_grade) {
+        const confidence = Number(routing.confidence);
+        const percent = Number.isFinite(confidence) ? `${Math.round(confidence * 100)}% confidence` : "";
+        addSummaryParagraph(
+          "AI routing",
+          [
+            `Grade ${routing.prompt_grade}`,
+            routing.complexity != null ? `complexity ${routing.complexity}/10` : "",
+            routing.selected_model || "",
+            routing.reasoning_effort || "",
+            percent,
+          ].filter(Boolean).join(" · "),
+        );
+        addSummaryParagraph("Prompt grade", routing.grade_reason || "");
+      }
+    }
 
     body.appendChild(rawTextPanel("Original GitHub issue", record.originalIssueBody));
     body.appendChild(rawTextPanel("Effective AI prompt", record.effectivePrompt));
@@ -2814,7 +2900,11 @@
     byId("schedule-mode-select").addEventListener("change", (event) => selectSchedule(event.target.value));
     document.querySelectorAll("[data-config], [data-repo-config], [data-provider-bin], #days-field input").forEach((input) => {
       input.addEventListener("input", () => { setDirty(); renderSummaries(); });
-      input.addEventListener("change", () => { setDirty(); renderSummaries(); });
+      input.addEventListener("change", () => {
+        setDirty();
+        renderSummaries();
+        if (input.id === "dynamic-model-routing") syncDynamicRoutingChrome();
+      });
     });
     document.querySelectorAll("[data-action]").forEach((button) => button.addEventListener("click", () => runAction(button.dataset.action)));
     document.querySelectorAll("[data-log-filter]").forEach((button) => button.addEventListener("click", () => {
