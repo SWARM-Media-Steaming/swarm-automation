@@ -154,7 +154,10 @@ pub struct ProviderSettings {
     /// Reasoning effort for [`Self::router_model`].
     pub router_effort: String,
     /// What this tool is best at. The router weighs it when it picks which
-    /// enabled tool an issue goes to. Ignored while routing is off.
+    /// enabled tool an issue goes to. Ignored while routing is off. The UI no
+    /// longer edits this (the router treats it as advice, which a text box
+    /// implied was a rule): the desktop omits it, so a save always resets it to
+    /// [`provider_strengths_preset`]. It stays in the file for hand-editing.
     pub strengths: String,
     /// Executable path override; empty means auto-detect on PATH.
     pub bin: String,
@@ -1244,6 +1247,19 @@ mod tests {
         assert_eq!(
             decoded.provider("grok").unwrap().strengths,
             provider_strengths_preset("grok")
+        );
+
+        // The desktop UI no longer sends `strengths` at all; a provider saved
+        // without it must come back with the built-in description.
+        let mut from_ui: AppConfig = serde_json::from_str(
+            r#"{"providers":[{"id":"claude","enabled":true,"model":"claude-sonnet-5",
+                "effort":"low","router_model":"claude-haiku-4-5","router_effort":"low","bin":""}]}"#,
+        )
+        .unwrap();
+        from_ui.normalize();
+        assert_eq!(
+            from_ui.provider("claude").unwrap().strengths,
+            provider_strengths_preset("claude")
         );
 
         decoded.routing_tiers.get_mut("claude").unwrap().clear();

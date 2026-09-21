@@ -26,12 +26,10 @@ function card() {
     ".provider-effort": element("provider-effort"),
     ".provider-router-model": element("provider-router-model"),
     ".provider-router-effort": element("provider-router-effort"),
-    ".provider-router-strengths": element("provider-router-strengths"),
     ".worker-model-label": element("worker-model-label"),
     ".worker-effort-label": element("worker-effort-label"),
     ".router-model-label": element("router-model-label"),
     ".router-effort-label": element("router-effort-label"),
-    ".router-strengths-label": element("router-strengths-label"),
     ".dynamic-routing-note": element("dynamic-routing-note"),
   };
   return {
@@ -49,15 +47,6 @@ test("dynamic routing defaults name the inexpensive router for each provider", (
   assert.equal(defaultRouter("grok").model, "grok-4.6");
 });
 
-test("every provider ships a description of what it is best at", () => {
-  ["claude", "codex", "grok"].forEach((id) => {
-    assert.ok(defaultRouter(id).strengths.length > 20, `${id} has no strengths text`);
-  });
-  const texts = ["claude", "codex", "grok"].map((id) => defaultRouter(id).strengths);
-  assert.equal(new Set(texts).size, 3);
-  assert.equal(defaultRouter("unknown").strengths, "");
-});
-
 test("routing off leaves the worker selectors usable and hides the router selectors", () => {
   const state = routingControlState(false);
   assert.equal(state.workerDisabled, false);
@@ -72,8 +61,6 @@ test("routing off leaves the worker selectors usable and hides the router select
   assert.equal(host.nodes[".router-model-label"].hidden, true);
   assert.equal(host.nodes[".router-effort-label"].hidden, true);
   assert.equal(host.nodes[".provider-router-model"].disabled, true);
-  assert.equal(host.nodes[".router-strengths-label"].hidden, true);
-  assert.equal(host.nodes[".provider-router-strengths"].disabled, true);
   assert.equal(host.nodes[".dynamic-routing-note"].hidden, true);
 });
 
@@ -93,8 +80,6 @@ test("routing on disables worker model and effort and shows the router selectors
   assert.equal(host.nodes[".router-effort-label"].hidden, false);
   assert.equal(host.nodes[".provider-router-model"].disabled, false);
   assert.equal(host.nodes[".provider-router-effort"].disabled, false);
-  assert.equal(host.nodes[".router-strengths-label"].hidden, false);
-  assert.equal(host.nodes[".provider-router-strengths"].disabled, false);
   assert.equal(host.nodes[".dynamic-routing-note"].hidden, false);
 });
 
