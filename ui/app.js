@@ -2091,7 +2091,7 @@
       empty.className = "now-working-empty";
       empty.append(
         Object.assign(document.createElement("strong"), { textContent: "Nothing is being worked on" }),
-        Object.assign(document.createElement("span"), { textContent: "Start the issue worker or test scheduler and their current work shows up here." }),
+        Object.assign(document.createElement("span"), { textContent: "Issues, test runs, and CI fixes appear here only while they are in progress." }),
       );
       list.appendChild(empty);
       return;
