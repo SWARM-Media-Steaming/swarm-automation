@@ -22,14 +22,30 @@
 
   // One bar per grade, in grade order, sized against the most common grade so
   // the tallest bar always fills the track. Grades nobody earned are kept (at
-  // zero) so the scale never shifts between repositories.
-  function distributionBars(summary) {
+  // zero) so the scale never shifts between repositories. `selectedGrade`
+  // marks the bar that is currently filtering the list.
+  function distributionBars(summary, selectedGrade) {
     const counts = (summary && summary.distribution) || {};
+    const selected = String(selectedGrade || "");
     const largest = Math.max(0, ...GRADES.map((grade) => Number(counts[grade]) || 0));
     return GRADES.map((grade) => {
       const count = Number(counts[grade]) || 0;
-      return { grade, count, percent: largest ? Math.round((count / largest) * 100) : 0, tone: gradeTone(grade) };
+      return {
+        grade,
+        count,
+        percent: largest ? Math.round((count / largest) * 100) : 0,
+        tone: gradeTone(grade),
+        selected: grade === selected,
+      };
     });
+  }
+
+  // Clicking the active grade again clears the filter. Anything that is not a
+  // real grade leaves the current filter alone.
+  function toggleGrade(current, grade) {
+    const next = String(grade || "");
+    if (!GRADES.includes(next)) return String(current || "");
+    return current === next ? "" : next;
   }
 
   // "3 of 12 prompts graded B or better"-style headline used under the average.
@@ -42,5 +58,5 @@
     return `${strong} of ${graded} graded prompt${graded === 1 ? "" : "s"} earned a B or better.`;
   }
 
-  return { GRADES, gradeTone, distributionBars, summaryLine };
+  return { GRADES, gradeTone, distributionBars, toggleGrade, summaryLine };
 });

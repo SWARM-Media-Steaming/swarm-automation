@@ -178,8 +178,9 @@
               <div class="panel-header"><div><p class="eyebrow">PROMPT GRADES</p><h3>How well were your issues written? <button class="help-dot" data-help="prompt-grades" aria-label="About prompt grades">?</button></h3></div><span id="prompt-grades-count" class="availability">0 graded</span></div>
               <div id="prompt-grades-summary" class="grade-summary hidden">
                 <div class="grade-average"><span>Average grade</span><strong id="prompt-grades-average" class="grade-badge">—</strong><small id="prompt-grades-average-detail"></small></div>
-                <div id="prompt-grades-bars" class="grade-bars" role="img" aria-label="Number of prompts earning each grade"></div>
+                <div id="prompt-grades-bars" class="grade-bars" role="group" aria-label="Filter prompts by grade"></div>
               </div>
+              <label class="execution-search">Search grades<input id="prompt-grades-search" type="search" placeholder="Issue number, title, provider, branch, or status" autocomplete="off" spellcheck="false" aria-controls="prompt-grades-list" /></label>
               <div id="prompt-grades-list" class="execution-list" aria-live="polite"><p class="panel-copy">No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.</p></div>
               <nav id="prompt-grades-pager" class="execution-pager hidden" aria-label="Prompt grade pages"><button type="button" id="prompt-grades-prev" class="secondary-button compact">Previous</button><span id="prompt-grades-page-label">Page 1 of 1</span><button type="button" id="prompt-grades-next" class="secondary-button compact">Next</button></nav>
             </article>

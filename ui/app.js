@@ -33,8 +33,11 @@
     executionHistoryRequest: 0,
     executionHistorySearchTimer: null,
     promptGrades: null,
+    promptGradesSearch: "",
+    promptGradesGrade: "",
     promptGradesOffset: 0,
     promptGradesRequest: 0,
+    promptGradesSearchTimer: null,
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
     botReadiness: {},
     // repoId -> last BranchPushAccess from branch_push_access.
@@ -210,7 +213,7 @@
     },
     "prompt-grades": {
       title: "Prompt grades",
-      html: "<p>When <strong>Dynamic Model Routing</strong> is on, the router grades the original issue before any AI works on it — from <strong>A+</strong> down to <strong>F</strong> — and explains what the issue does well, what is missing, and what would raise the grade. This panel lists those grades for the selected repository, newest first, ten at a time.</p><p>The <strong>average grade</strong> uses a 4.0 scale (A = 4.0, B = 3.0, C = 2.0, D = 1.0, F = 0) across every graded run, and the bars count how many prompts earned each grade. Expand a row to read why it earned its grade, plus the complexity, tool, model, and confidence the router chose.</p><p>Runs without routing, and runs where the router was unavailable, are not graded and do not appear here. An issue that is reworked is graded again, so it can appear more than once. This view only reads the local execution history and never changes issue processing.</p>",
+      html: "<p>When <strong>Dynamic Model Routing</strong> is on, the router grades the original issue before any AI works on it — from <strong>A+</strong> down to <strong>F</strong> — and explains what the issue does well, what is missing, and what would raise the grade. This panel lists those grades for the selected repository, newest first. The list loads ten at a time from the local database, the same way execution history does.</p><p>Search matches issue number, title, provider, model, branch, or status, and Previous and Next fetch another page. Click a bar in the chart, such as <strong>B-</strong>, to show only prompts with that grade. Click the same bar again to clear it. The chart keeps counting every grade in the current search, so another bar can be chosen without clearing the search.</p><p>The <strong>average grade</strong> uses a 4.0 scale (A = 4.0, B = 3.0, C = 2.0, D = 1.0, F = 0) across the graded runs in the current search. Expand a row to read why it earned its grade, plus the complexity, tool, model, and confidence the router chose.</p><p>Runs without routing, and runs where the router was unavailable, are not graded and do not appear here. An issue that is reworked is graded again, so it can appear more than once. This view only reads the local execution history and never changes issue processing.</p>",
       links: [],
     },
     "provider-bins": {
@@ -1787,10 +1790,16 @@
     ].filter(Boolean).join(" · ");
     const bars = byId("prompt-grades-bars");
     bars.replaceChildren();
-    window.SwarmPromptGrades.distributionBars(summary).forEach((bar) => {
-      const column = document.createElement("div");
-      column.className = `grade-bar ${bar.tone}`;
-      column.title = `${bar.count} prompt${bar.count === 1 ? "" : "s"} graded ${bar.grade}`;
+    const selected = state.promptGradesGrade;
+    window.SwarmPromptGrades.distributionBars(summary, selected).forEach((bar) => {
+      const column = document.createElement("button");
+      column.type = "button";
+      column.className = `grade-bar ${bar.tone} ${bar.selected ? "selected" : ""}`.trim();
+      column.dataset.grade = bar.grade;
+      column.setAttribute("aria-pressed", bar.selected ? "true" : "false");
+      const countLabel = `${bar.count} prompt${bar.count === 1 ? "" : "s"} graded ${bar.grade}`;
+      column.title = bar.selected ? `${countLabel}. Click to show every grade.` : countLabel;
+      column.setAttribute("aria-label", bar.selected ? `Clear ${bar.grade} filter` : `Show only ${bar.grade}`);
       const count = document.createElement("span");
       count.className = "grade-bar-count";
       count.textContent = bar.count ? String(bar.count) : "";
@@ -1808,11 +1817,21 @@
     });
   }
 
+  function promptGradesFiltering() {
+    return state.promptGradesSearch.trim().length > 0 || state.promptGradesGrade.length > 0;
+  }
+
+  function promptGradeCountNoun(total, filtering) {
+    if (filtering) return total === 1 ? "match" : "matches";
+    return "graded";
+  }
+
   function renderPromptGrades() {
     const box = byId("prompt-grades-list");
     if (!box) return;
     box.replaceChildren();
     const page = promptGradesView();
+    const filtering = promptGradesFiltering();
     const total = Number(page.total) || 0;
     const limit = Number(page.limit) || 10;
     const offset = Number(page.offset) || 0;
@@ -1820,22 +1839,33 @@
     renderPromptGradeSummary(page.summary);
     const count = byId("prompt-grades-count");
     if (count) {
-      count.textContent = !total || (offset === 0 && records.length >= total)
-        ? `${total} graded`
-        : `Showing ${offset + 1}-${offset + records.length} of ${total} graded`;
+      const noun = promptGradeCountNoun(total, filtering);
+      if (!total || (offset === 0 && records.length >= total)) {
+        count.textContent = `${total} ${noun}`;
+      } else {
+        const start = offset + 1;
+        const end = offset + records.length;
+        count.textContent = `Showing ${start}-${end} of ${total} ${noun}`;
+      }
     }
     const pager = byId("prompt-grades-pager");
     if (pager) {
+      const pageCount = Math.max(1, Math.ceil(total / limit));
+      const pageNumber = Math.floor(offset / limit) + 1;
       pager.classList.toggle("hidden", total <= limit);
-      byId("prompt-grades-page-label").textContent =
-        `Page ${Math.floor(offset / limit) + 1} of ${Math.max(1, Math.ceil(total / limit))}`;
-      byId("prompt-grades-prev").disabled = offset <= 0;
-      byId("prompt-grades-next").disabled = offset + records.length >= total;
+      const label = byId("prompt-grades-page-label");
+      if (label) label.textContent = `Page ${pageNumber} of ${pageCount}`;
+      const prev = byId("prompt-grades-prev");
+      const next = byId("prompt-grades-next");
+      if (prev) prev.disabled = offset <= 0;
+      if (next) next.disabled = offset + records.length >= total;
     }
     if (!records.length) {
       box.appendChild(Object.assign(document.createElement("p"), {
         className: "panel-copy",
-        textContent: "No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.",
+        textContent: filtering
+          ? "No graded prompts match this filter."
+          : "No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.",
       }));
       return;
     }
@@ -1852,10 +1882,15 @@
       renderPromptGrades();
       return;
     }
+    const offset = Math.max(0, Number(state.promptGradesOffset) || 0);
+    const search = state.promptGradesSearch.trim();
+    const grade = state.promptGradesGrade;
     try {
       const page = await invoke("get_prompt_grades_background", {
         repoId: repo.id,
-        offset: Math.max(0, Number(state.promptGradesOffset) || 0),
+        offset,
+        search,
+        grade,
       });
       if (requestId !== state.promptGradesRequest || repo.id !== state.activeRepoId) return;
       state.promptGrades = page;
@@ -2948,11 +2983,16 @@
     state.executionHistory = null;
     state.promptGrades = null;
     state.promptGradesOffset = 0;
+    state.promptGradesSearch = "";
+    state.promptGradesGrade = "";
+    clearTimeout(state.promptGradesSearchTimer);
     state.executionHistoryOffset = 0;
     state.executionHistorySearch = "";
     clearTimeout(state.executionHistorySearchTimer);
     const executionSearch = byId("execution-history-search");
     if (executionSearch) executionSearch.value = "";
+    const gradeSearch = byId("prompt-grades-search");
+    if (gradeSearch) gradeSearch.value = "";
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
@@ -3364,16 +3404,43 @@
       void refreshPromptGrades();
       void refreshExecutionHistory();
     });
+    byId("prompt-grades-bars").addEventListener("click", (event) => {
+      const bar = event.target.closest("[data-grade]");
+      if (!bar) return;
+      state.promptGradesGrade = window.SwarmPromptGrades.toggleGrade(state.promptGradesGrade, bar.dataset.grade);
+      state.promptGradesOffset = 0;
+      void refreshPromptGrades({ quiet: true });
+    });
+    const gradeSearch = byId("prompt-grades-search");
+    const queueGradeSearch = (immediate) => {
+      state.promptGradesSearch = gradeSearch.value;
+      state.promptGradesOffset = 0;
+      clearTimeout(state.promptGradesSearchTimer);
+      if (immediate) {
+        void refreshPromptGrades({ quiet: true });
+        return;
+      }
+      state.promptGradesSearchTimer = setTimeout(() => {
+        state.promptGradesSearchTimer = null;
+        state.promptGradesOffset = 0;
+        void refreshPromptGrades({ quiet: true });
+      }, 300);
+    };
+    gradeSearch.addEventListener("input", () => queueGradeSearch(false));
+    gradeSearch.addEventListener("search", () => queueGradeSearch(true));
     byId("prompt-grades-prev").addEventListener("click", () => {
       const page = promptGradesView();
-      state.promptGradesOffset = Math.max(0, (Number(page.offset) || 0) - (Number(page.limit) || 10));
+      const limit = Number(page.limit) || 10;
+      state.promptGradesOffset = Math.max(0, (Number(page.offset) || 0) - limit);
       void refreshPromptGrades();
     });
     byId("prompt-grades-next").addEventListener("click", () => {
       const page = promptGradesView();
+      const limit = Number(page.limit) || 10;
       const offset = Number(page.offset) || 0;
-      if (offset + page.records.length >= (Number(page.total) || 0)) return;
-      state.promptGradesOffset = offset + (Number(page.limit) || 10);
+      const total = Number(page.total) || 0;
+      if (offset + page.records.length >= total) return;
+      state.promptGradesOffset = offset + limit;
       void refreshPromptGrades();
     });
     byId("import-execution-history").addEventListener("click", () => importExecutionHistory());

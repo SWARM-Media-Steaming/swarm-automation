@@ -1350,12 +1350,22 @@ struct PromptGradesPage {
     summary: PromptGradeSummary,
 }
 
+fn normalize_prompt_grade(grade: Option<String>) -> String {
+    // The history CLI ignores anything that is not a router grade. Cap the
+    // argument so a huge string cannot reach the process argv.
+    grade.unwrap_or_default().trim().chars().take(8).collect()
+}
+
 fn prompt_grades_query_args(
     script: &Path,
     database: &Path,
     repository: &str,
     offset: Option<i64>,
+    search: Option<String>,
+    grade: Option<String>,
 ) -> Vec<String> {
+    // `--limit` is always sent, matching execution history. Omitting it would
+    // still page grades, but the desktop always asks for one page explicitly.
     vec![
         script.to_string_lossy().into_owned(),
         "--db".into(),
@@ -1367,6 +1377,10 @@ fn prompt_grades_query_args(
         EXECUTION_HISTORY_PAGE_SIZE.to_string(),
         "--offset".into(),
         offset.unwrap_or(0).max(0).to_string(),
+        "--search".into(),
+        normalize_execution_history_search(search),
+        "--grade".into(),
+        normalize_prompt_grade(grade),
     ]
 }
 
@@ -1376,6 +1390,8 @@ fn get_prompt_grades<R: tauri::Runtime>(
     state: State<'_, AppState>,
     repo_id: String,
     offset: Option<i64>,
+    search: Option<String>,
+    grade: Option<String>,
 ) -> Result<PromptGradesPage, String> {
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?;
@@ -1393,7 +1409,14 @@ fn get_prompt_grades<R: tauri::Runtime>(
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
     let (ok, raw) = run_capture_owned(
         &python,
-        &prompt_grades_query_args(&script, &database_path, &repo.github_repository, offset),
+        &prompt_grades_query_args(
+            &script,
+            &database_path,
+            &repo.github_repository,
+            offset,
+            search,
+            grade,
+        ),
     );
     if !ok {
         return Err(format!("Prompt grades lookup failed: {raw}"));
@@ -1407,10 +1430,12 @@ async fn get_prompt_grades_background(
     app: tauri::AppHandle,
     repo_id: String,
     offset: Option<i64>,
+    search: Option<String>,
+    grade: Option<String>,
 ) -> Result<PromptGradesPage, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        get_prompt_grades(app.clone(), state, repo_id, offset)
+        get_prompt_grades(app.clone(), state, repo_id, offset, search, grade)
     })
     .await
     .map_err(|error| format!("Prompt grades lookup failed: {error}"))?
