@@ -6,15 +6,15 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, (logging) => {
   "use strict";
 
-  // Derives the "Now working" overview dashboard: one row for each issue the
-  // worker is on right now, each test run in flight, and the latest GitHub
-  // Actions (CI/CD) result. Pure data in, plain rows out, so app.js only has to
-  // render them.
+  // Derives the "Now working" overview dashboard: one row per issue the worker
+  // is on right now, each test run actually in flight, and a CI/CD issue the
+  // worker is fixing. Idle processes and finished checks are omitted — a worker
+  // that is only polling the queue, a scheduler waiting for its next window,
+  // and a pipeline that already passed or failed are not current work.
   //
   // Issues and CI come from replaying the worker's log lines in order — the
   // worker has no structured "current work" channel — and tests come from the
-  // repository's test-run results, because a running test scheduler process is
-  // usually just waiting for its next daily window.
+  // repository's test-run results.
 
   function normalizeRepo(value) {
     return String(value || "").trim().replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
@@ -31,18 +31,8 @@
     repositories.forEach((repo) => {
       if (!["running", "paused"].includes(repo.uatState)) return;
       const run = unfinishedRun(runsByRepo[repo.id]);
-      if (!run) {
-        rows.push({
-          kind: "tests",
-          key: `tests:${repo.id}`,
-          title: "Test scheduler is idle",
-          detail: "Waiting for its next scheduled run. Press Run now to start one immediately.",
-          repository: repo.name,
-          state: repo.uatState === "paused" ? "paused" : "idle",
-          since: "",
-        });
-        return;
-      }
+      // A live scheduler with nothing in flight is waiting, not working.
+      if (!run) return;
       const suites = Array.isArray(run.suites) ? run.suites : [];
       const active = suites.find((suite) => String(suite.state).toLowerCase() === "running");
       const pending = new Set(["running", "ready", "not executed"]);
@@ -65,7 +55,6 @@
   function logRows(logs, repositories, workerState) {
     const known = repositories.map((repo) => normalizeRepo(repo.name)).filter((name) => name.split("/").length === 2);
     const items = new Map();
-    const ci = new Map();
     const repoBySource = new Map();
     let lastStarted = null;
 
@@ -109,7 +98,6 @@
 
       if (/exited with status|process stopped|Ctrl\+C received/i.test(message)) {
         items.clear();
-        ci.clear();
         lastStarted = null;
       } else if (/Starting (?:a worker run|a cycle over)/i.test(message)) {
         clear((item) => item.state === "running");
@@ -153,17 +141,8 @@
       } else if ((match = message.match(/Finished issue #(\d+)/i))) {
         items.delete(`${repository}#${match[1]}`);
         clear((item) => String(item.number) === match[1]);
-        ci.delete(repository);
       } else if (/Returned the clean local checkout/i.test(message)) {
         clear((item) => item.state === "running" && (!repository || item.repository === repository));
-      } else if ((match = message.match(/GitHub Actions on (\S+) are passing/i))) {
-        ci.set(repository, { state: "ok", title: `Pipelines on ${match[1]} are passing`, detail: `Checked at ${entry.time}`, since: entry.time });
-      } else if ((match = message.match(/Failing pipeline\(s\) on (\S+) \((.*?)\)/i))) {
-        ci.set(repository, { state: "error", title: `Pipeline failing on ${match[1]}`, detail: `${match[2]} · a CI failure issue is already open`, since: entry.time });
-      } else if (/Filed CI failure issue/i.test(message)) {
-        ci.set(repository, { state: "error", title: "Pipeline failing — issue filed", detail: "A CI failure issue was filed and is being worked.", since: entry.time });
-      } else if (/Could not check GitHub Actions/i.test(message)) {
-        ci.set(repository, { state: "paused", title: "Could not check GitHub Actions", detail: "The worker continued with the issue queue.", since: entry.time });
       }
     });
 
@@ -181,30 +160,14 @@
           issueNumber: item.number,
         });
       });
-      if (!rows.some((row) => row.kind === "issue" || row.kind === "ci")) {
-        rows.push({
-          kind: "issue",
-          key: "issue:idle",
-          title: workerState === "paused" ? "Issue worker is paused" : "Issue worker is checking the queue",
-          detail: workerState === "paused" ? "Resume it to continue picking up issues." : "No issue is being worked at the moment.",
-          repository: "",
-          state: workerState === "paused" ? "paused" : "idle",
-          since: "",
-        });
-      }
     }
-    return { rows, ci };
+    return rows;
   }
 
   function deriveNowWorking({ logs = [], workerState = "stopped", repositories = [], testRuns = {} } = {}) {
-    const { rows, ci } = logRows(logs, repositories, workerState);
-    const monitored = new Set(repositories.filter((repo) => repo.monitorActions).map((repo) => normalizeRepo(repo.name)));
-    ci.forEach((result, repository) => {
-      const owner = repository || (monitored.size === 1 ? [...monitored][0] : "");
-      if (!monitored.has(owner)) return;
-      rows.push({ kind: "ci", key: `ci-status:${owner}`, repository: owner, ...result });
-    });
-    return [...rows, ...testRows(repositories, testRuns)];
+    // A pipeline the worker is fixing is already a row from "Working CI failure
+    // issue". A finished Actions check is a result, so it is not listed here.
+    return [...logRows(logs, repositories, workerState), ...testRows(repositories, testRuns)];
   }
 
   return { deriveNowWorking };
