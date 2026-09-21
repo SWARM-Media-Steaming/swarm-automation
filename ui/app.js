@@ -2359,7 +2359,7 @@
     if (!match) return null;
     const rawTime = match[1];
     const time = /^\d{9,}$/.test(rawTime)
-      ? new Date(Number(rawTime) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      ? new Date(Number(rawTime) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true })
       : rawTime.slice(0, 5);
     return {
       raw: String(raw),
@@ -2681,7 +2681,7 @@
       return true;
     });
     const full = byId("full-log");
-    const stayAtBottom = full.scrollTop + full.clientHeight >= full.scrollHeight - 28;
+    const stayAtTop = full.scrollTop <= 28;
     full.replaceChildren();
     if (!filtered.length) {
       const empty = document.createElement("p");
@@ -2689,7 +2689,7 @@
       empty.textContent = entries.length ? "No actionable logs match this filter." : "Waiting for actionable output…";
       full.appendChild(empty);
     }
-    filtered.forEach((entry) => {
+    filtered.reverse().forEach((entry) => {
       const line = document.createElement("div");
       line.className = `log-line ${entry.level}`;
       const time = document.createElement("span");
@@ -2707,7 +2707,7 @@
       line.append(time, level, message, source);
       full.appendChild(line);
     });
-    if (stayAtBottom) full.scrollTop = full.scrollHeight;
+    if (stayAtTop) full.scrollTop = 0;
     renderActivity();
     renderNowWorking();
     byId("log-count").textContent = String(Math.min(entries.length, 999));
