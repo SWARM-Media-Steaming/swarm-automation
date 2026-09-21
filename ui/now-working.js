@@ -58,8 +58,8 @@
     const repoBySource = new Map();
     let lastStarted = null;
 
-    const resolveRepo = (source, message) => {
-      const named = message.match(/^([^:\s]+\/[^:\s]+):/)?.[1];
+    const resolveRepo = (source, message, label) => {
+      const named = label || message.match(/^([^:\s]+\/[^:\s]+):/)?.[1];
       return normalizeRepo(named || repoBySource.get(source) || (known.length === 1 ? known[0] : ""));
     };
     const clear = (predicate) => {
@@ -87,13 +87,17 @@
     (logs || []).forEach((raw) => {
       const entry = logging.parseAutomationLog(raw);
       if (!entry || !/issue worker/i.test(entry.source)) return;
-      const { message, source } = entry;
+      const { source } = entry;
+      // Parallel-repo runs prefix each worker line with "[owner/repo] " ahead
+      // of the worker's own timestamp; drop every leading bracket group.
+      const message = entry.message.replace(/^(?:\[[^\]]*\]\s*)+/, "");
+      const label = entry.raw.match(/^\[[^\]]*\] \[.*?\/[^/\]]+\] \[([^\]\s]+\/[^\]\s]+)\]/)?.[1];
       const marker = message.match(/^=== repo:\s*([^\s]+\/[^\s=]+)\s*===$/i)?.[1];
       if (marker) {
         repoBySource.set(source, normalizeRepo(marker));
         return;
       }
-      const repository = resolveRepo(source, message);
+      const repository = resolveRepo(source, message, label);
       let match;
 
       if (/exited with status|process stopped|Ctrl\+C received/i.test(message)) {

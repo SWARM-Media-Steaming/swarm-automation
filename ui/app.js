@@ -9,6 +9,7 @@
     status: null,
     tools: [],
     logs: [],
+    workerLogs: [],
     logFilter: "all",
     logSearch: "",
     activityFilter: "all",
@@ -2272,7 +2273,7 @@
     const list = byId("now-working-list");
     if (!list) return;
     const rows = window.SwarmNowWorking.deriveNowWorking({
-      logs: state.logs,
+      logs: state.workerLogs,
       workerState: state.status?.issue?.state || "stopped",
       repositories: nowWorkingRepositories(),
       testRuns: state.liveTestRuns,
@@ -2342,6 +2343,10 @@
     } finally {
       state.refreshing.status = false;
     }
+  }
+
+  function isWorkerLog(raw) {
+    return /^\[[^\]]*\] \[issue worker[^\]]*\/[^/\]]+\]/i.test(String(raw));
   }
 
   function formatLog(event) {
@@ -3426,10 +3431,19 @@
       renderWorkerProviderSummary();
       setDirty(false);
       state.logs = await invoke("get_recent_logs");
+      // "Now working" replays the worker's own lines, so it keeps a separate,
+      // deeper history: chatty test output must not push a long-running
+      // issue's start line out of the 1000-line display buffer.
+      state.workerLogs = (await invoke("get_recent_logs", { limit: 5000 })).filter(isWorkerLog);
       renderLogs();
       await listen("automation-log", (event) => {
-        state.logs.push(formatLog(event.payload));
+        const line = formatLog(event.payload);
+        state.logs.push(line);
         if (state.logs.length > 1000) state.logs.splice(0, state.logs.length - 1000);
+        if (isWorkerLog(line)) {
+          state.workerLogs.push(line);
+          if (state.workerLogs.length > 5000) state.workerLogs.splice(0, state.workerLogs.length - 5000);
+        }
         renderLogs();
       });
       await listen("update-available", (event) => showUpdateBanner(event.payload));
