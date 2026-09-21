@@ -108,7 +108,12 @@
     },
     "auto-approve-merge": {
       title: "Approve & merge automatically",
-      html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention. This never merges the AI integration branch into <code>main</code>.</p>",
+      html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention.</p><p><strong>Automatically merge <code>ai-main</code> into <code>main</code></strong> is off by default. When on, the worker also opens (or reuses) the <code>ai-main</code> → <code>main</code> pull request after issue PRs land, has another provider’s bot approve it, and merges it — so everything the app has finished lands on <code>main</code> immediately. It needs issue PR merging on, and a promotion with conflicts stays open for a person to resolve. Leave it off to keep <code>main</code> a human decision.</p>",
+      links: [],
+    },
+    "ci-monitoring": {
+      title: "Monitor GitHub Actions",
+      html: "<p><strong>Monitor GitHub Actions</strong> is off by default. When on, each worker run first checks the newest GitHub Actions run of every workflow on the AI integration branch (<code>ai-main</code>).</p><p>If a pipeline is failing and nothing tracks it yet, the worker files one issue — labelled <code>bug</code> and <code>ci-failure</code>, assigned to the configured assignee, with the failing runs and the tail of their logs — and works it in that same run, like any other issue.</p><p>That issue is handled once: the worker does not also pick it up from the regular queue in that run, and it files nothing new while a CI-failure issue for the branch is open or was already filed for the same commit. Runs still in progress and cancelled runs are ignored. If GitHub cannot be read, the worker logs it and carries on with the normal queue.</p>",
       links: [],
     },
     "parallel-repo-workers": {
@@ -198,6 +203,7 @@
     ["Protected branch flow", "delivery-mode"],
     ["Repositories ready to promote", "promotion-queue"],
     ["Pull request automation", "auto-approve-merge"],
+    ["Monitor GitHub Actions", "ci-monitoring"],
     ["One worker per repository", "parallel-repo-workers"],
     ["Minimum quota remaining", "quota-threshold"],
     ["Test scheduler", "uat-suite"],
@@ -312,6 +318,8 @@
       preferred_provider: "",
       auto_approve: true,
       auto_merge: true,
+      auto_promote: false,
+      monitor_actions: false,
       require_issue_tests: false,
       allow_environment_only_summary: false,
       repo_dir: "",

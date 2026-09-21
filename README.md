@@ -86,12 +86,34 @@ Issue pull requests target `ai-main`; automatic approval and merging are both
 off by default. An issue
 branch cannot merge while its linked GitHub issue is open. After a person closes
 the issue, the Repository view can squash-merge its PR and delete the branch; an
-auto-merge profile performs the same reconciliation on a later cycle. Nothing
-in the worker commits or pushes to `main`. A person can create or merge the
+auto-merge profile performs the same reconciliation on a later cycle. The
+worker never commits or pushes to `main` directly. By default a person creates
+or merges the `ai-main` → `main` promotion; the per-repository **Automatically
+merge `ai-main` into `main`** toggle (off by default, next to the issue-PR
+merging toggle on the Repository page) instead has the worker open, approve
+(with another provider's bot), and merge that promotion PR itself after issue
+PRs land, so finished work rolls up into `main` immediately. A promotion with
+conflicts stays open for a person, and a failed promotion never affects the
+issue's own delivery. A person can also create or merge the
 `ai-main` → `main` promotion pull request from the Overview or Repository view.
 The Overview's explicit **Merge to Main** action first reconciles `main` into
 `ai-main`, obtains a configured bot approval, and completes the promotion
 through GitHub's pull-request protections.
+
+### Monitoring GitHub Actions
+
+The per-repository **Monitor GitHub Actions and fix failing pipelines** toggle
+(off by default, on the Repository page) makes each worker run first look at the
+newest Actions run of every workflow on `ai-main`. If one failed (failure,
+timed out, or failed to start; in-progress and cancelled runs are ignored) and no
+CI-failure issue is already tracking it, the worker files one issue — labelled
+`bug` and `ci-failure`, assigned to the configured assignee, listing the failing
+runs and the tail of their logs — and works it in that same run through the
+normal start/complete/quota comments and delivery. The regular queue does not
+also select that issue in that run, and nothing new is filed while a
+`ci-failure` issue for the branch is open or was already filed for the same
+head commit. Runs are read with the operator's own `gh` sign-in; if they cannot
+be read, the worker logs it and carries on with the normal queue.
 
 ## Repository layout
 

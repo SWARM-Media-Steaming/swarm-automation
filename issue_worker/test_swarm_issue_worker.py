@@ -1054,6 +1054,244 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(result, merge_sha)
         self.assertEqual(gh.call_args_list[0].args[0][:2], ["pr", "merge"])
 
+    def promotion_worker(self, promote: bool = True, ahead: bool = True) -> Worker:
+        """An auto-approving worker whose `origin/ai-main` is (optionally) one
+        commit ahead of `origin/main`."""
+        argv = self._worker_argv(auto=True) + (["--auto-promote"] if promote else [])
+        if ahead:
+            self.git("switch", "-q", "ai-main")
+            (self.repo / "tracked.txt").write_text("base\nai work\n", encoding="utf-8")
+            self.git("commit", "-q", "-am", "ai work #1")
+            self.git("push", "-q", "origin", "ai-main")
+            self.git("switch", "-q", "main")
+        return Worker(Config.from_args(build_parser().parse_args(argv)))
+
+    def test_auto_promote_opens_approves_and_merge_commits_the_integration_pr(self) -> None:
+        worker = self.promotion_worker()
+        pr_url = "https://example.invalid/pull/200"
+        with (
+            mock.patch.object(
+                worker.github, "gh", side_effect=["[]", pr_url + "\n", "3" * 40, ""]
+            ) as gh,
+            mock.patch.object(worker, "approve_pull_request") as approve,
+        ):
+            result = worker.auto_promote_integration_branch("claude")
+        self.assertEqual(result, pr_url)
+        commands = [call.args[0] for call in gh.call_args_list]
+        self.assertEqual(commands[1][:2], ["pr", "create"])
+        self.assertEqual(commands[1][commands[1].index("--base") + 1], "main")
+        self.assertEqual(commands[1][commands[1].index("--head") + 1], "ai-main")
+        self.assertEqual(commands[3][:2], ["pr", "merge"])
+        self.assertIn("--merge", commands[3])
+        self.assertNotIn("--squash", commands[3])
+        self.assertIn("--match-head-commit", commands[3])
+        approve.assert_called_once()
+        self.assertEqual(approve.call_args.args[:2], (pr_url, "claude"))
+
+    def test_auto_promote_reuses_an_open_already_approved_pr(self) -> None:
+        worker = self.promotion_worker()
+        pr_url = "https://example.invalid/pull/201"
+        listing = json.dumps(
+            [{"url": pr_url, "headRefOid": "3" * 40, "mergeable": "MERGEABLE",
+              "reviewDecision": "APPROVED"}]
+        )
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=[listing, "3" * 40, ""]) as gh,
+            mock.patch.object(worker, "approve_pull_request") as approve,
+        ):
+            self.assertEqual(worker.auto_promote_integration_branch("codex"), pr_url)
+        approve.assert_not_called()
+        self.assertNotIn(["pr", "create"], [call.args[0][:2] for call in gh.call_args_list])
+
+    def test_auto_promote_leaves_a_conflicting_promotion_pr_open(self) -> None:
+        worker = self.promotion_worker()
+        listing = json.dumps(
+            [{"url": "https://example.invalid/pull/202", "headRefOid": "3" * 40,
+              "mergeable": "CONFLICTING", "reviewDecision": ""}]
+        )
+        with (
+            mock.patch.object(worker.github, "gh", return_value=listing) as gh,
+            mock.patch.object(worker, "approve_pull_request") as approve,
+        ):
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        approve.assert_not_called()
+        self.assertNotIn(["pr", "merge"], [call.args[0][:2] for call in gh.call_args_list])
+
+    def test_auto_promote_does_nothing_when_the_toggle_is_off(self) -> None:
+        worker = self.promotion_worker(promote=False)
+        with mock.patch.object(worker.github, "gh") as gh:
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        gh.assert_not_called()
+
+    def test_auto_promote_does_nothing_when_issue_pr_merging_is_off(self) -> None:
+        worker = self.promotion_worker()
+        worker.config = dataclasses.replace(worker.config, auto_approve=False)
+        with mock.patch.object(worker.github, "gh") as gh:
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        gh.assert_not_called()
+
+    def test_auto_promote_does_nothing_when_integration_is_not_ahead(self) -> None:
+        worker = self.promotion_worker(ahead=False)
+        with mock.patch.object(worker.github, "gh") as gh:
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        gh.assert_not_called()
+
+    def test_auto_promote_failure_is_logged_not_raised(self) -> None:
+        worker = self.promotion_worker()
+        with mock.patch.object(worker.github, "gh", side_effect=WorkerError("gh failed")):
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+
+    def test_start_of_run_sweep_picks_an_enabled_provider_for_promotion(self) -> None:
+        worker = self.promotion_worker()
+        keys = [spec.key for spec in worker.config.providers]
+        for enabled_keys, expected in (
+            (keys, worker.config.preferred_provider),
+            ([keys[-1]], keys[-1]),
+            ([], None),
+        ):
+            worker.config = dataclasses.replace(
+                worker.config,
+                providers=tuple(
+                    dataclasses.replace(spec, enabled=spec.key in enabled_keys)
+                    for spec in worker.config.providers
+                ),
+            )
+            with mock.patch.object(worker, "promote_integration_branch", return_value=None) as promote:
+                worker.auto_promote_integration_branch()
+            if expected is None:
+                promote.assert_not_called()
+            else:
+                promote.assert_called_once_with(expected)
+
+    def monitor_worker(self, monitor: bool = True) -> Worker:
+        argv = self._worker_argv(auto=False) + (["--monitor-actions"] if monitor else [])
+        return Worker(Config.from_args(build_parser().parse_args(argv)))
+
+    @staticmethod
+    def pipeline_run(name: str, conclusion: str, created: str, sha: str = "a" * 40,
+                     status: str = "completed") -> dict[str, object]:
+        return {
+            "databaseId": abs(hash((name, created))) % 100000, "workflowName": name,
+            "status": status, "conclusion": conclusion, "headSha": sha,
+            "url": f"https://example.invalid/runs/{name}", "event": "push", "createdAt": created,
+        }
+
+    def monitor_gh(self, runs: list[dict[str, object]], issues: list[dict[str, str]] | None = None,
+                   created_url: str = "https://example.invalid/issues/300"):
+        def fake(arguments, provider=None, input_text=None):
+            if arguments[:2] == ["run", "list"]:
+                return json.dumps(runs)
+            if arguments[:2] == ["run", "view"]:
+                return "step output\nboom\n"
+            if arguments[:2] == ["issue", "list"]:
+                return json.dumps(issues or [])
+            if arguments[:2] == ["issue", "create"]:
+                return created_url + "\n"
+            return ""
+        return fake
+
+    def test_monitor_actions_is_off_by_default_and_toggled_by_flag(self) -> None:
+        self.assertFalse(build_parser().parse_args([]).monitor_actions)
+        self.assertTrue(build_parser().parse_args(["--monitor-actions"]).monitor_actions)
+        self.assertFalse(build_parser().parse_args(["--monitor-actions", "--no-monitor-actions"]).monitor_actions)
+
+    def test_monitor_does_nothing_when_the_toggle_is_off(self) -> None:
+        worker = self.monitor_worker(monitor=False)
+        with mock.patch.object(worker.github, "gh") as gh:
+            self.assertIsNone(worker.monitor_repository_actions())
+        gh.assert_not_called()
+
+    def test_monitor_files_a_labelled_assigned_issue_for_a_failing_pipeline(self) -> None:
+        worker = self.monitor_worker()
+        runs = [self.pipeline_run("Build", "failure", "2026-09-21T10:00:00Z", "b" * 40),
+                self.pipeline_run("Lint", "success", "2026-09-21T09:00:00Z")]
+        fake = self.monitor_gh(runs)
+        with mock.patch.object(worker.github, "gh", side_effect=fake) as gh:
+            issue = worker.monitor_repository_actions()
+        assert issue is not None
+        self.assertEqual((issue.number, issue.ci_monitor), (300, True))
+        create = next(c for c in gh.call_args_list if c.args[0][:2] == ["issue", "create"])
+        arguments = create.args[0]
+        self.assertEqual(arguments[arguments.index("--assignee") + 1], worker.config.github_assignee)
+        labels = [arguments[i + 1] for i, part in enumerate(arguments) if part == "--label"]
+        self.assertEqual(labels, ["bug", "ci-failure"])
+        body = create.args[2]
+        self.assertIn("swarm-issue-worker:ci-failure:branch:ai-main;sha:" + "b" * 40, body)
+        self.assertIn("Build", body)
+        self.assertIn("boom", body)
+        self.assertNotIn("Lint", body)
+        self.assertEqual(issue.labels, ["bug", "ci-failure"])
+
+    def test_monitor_ignores_healthy_running_and_superseded_failures(self) -> None:
+        worker = self.monitor_worker()
+        runs = [
+            self.pipeline_run("Build", "success", "2026-09-21T11:00:00Z"),
+            self.pipeline_run("Build", "failure", "2026-09-21T10:00:00Z"),  # superseded
+            self.pipeline_run("Test", "", "2026-09-21T11:00:00Z", status="in_progress"),
+            self.pipeline_run("Test", "failure", "2026-09-21T10:00:00Z"),  # verdict pending
+            self.pipeline_run("Deploy", "cancelled", "2026-09-21T11:00:00Z"),
+        ]
+        with mock.patch.object(worker.github, "gh", side_effect=self.monitor_gh(runs)) as gh:
+            self.assertIsNone(worker.monitor_repository_actions())
+        self.assertNotIn(["issue", "create"], [c.args[0][:2] for c in gh.call_args_list])
+
+    def test_monitor_does_not_refile_while_an_issue_is_open_or_for_the_same_commit(self) -> None:
+        worker = self.monitor_worker()
+        runs = [self.pipeline_run("Build", "failure", "2026-09-21T10:00:00Z", "b" * 40)]
+        marker = "<!-- swarm-issue-worker:ci-failure:branch:ai-main;sha:{} -->"
+        for issues in (
+            [{"state": "OPEN", "body": marker.format("c" * 40)}],   # open, older commit
+            [{"state": "CLOSED", "body": marker.format("b" * 40)}],  # closed, same commit
+        ):
+            with mock.patch.object(worker.github, "gh", side_effect=self.monitor_gh(runs, issues)) as gh:
+                self.assertIsNone(worker.monitor_repository_actions())
+            self.assertNotIn(["issue", "create"], [c.args[0][:2] for c in gh.call_args_list])
+
+    def test_monitor_refiles_for_a_new_failure_after_the_old_issue_was_closed(self) -> None:
+        worker = self.monitor_worker()
+        runs = [self.pipeline_run("Build", "failure", "2026-09-21T10:00:00Z", "b" * 40)]
+        issues = [
+            {"state": "CLOSED", "body": "<!-- swarm-issue-worker:ci-failure:branch:ai-main;sha:" + "c" * 40 + " -->"},
+            {"state": "OPEN", "body": "<!-- swarm-issue-worker:ci-failure:branch:other;sha:" + "d" * 40 + " -->"},
+        ]
+        with mock.patch.object(worker.github, "gh", side_effect=self.monitor_gh(runs, issues)):
+            self.assertIsNotNone(worker.monitor_repository_actions())
+
+    def test_monitor_skips_dry_runs_and_interrupted_issues(self) -> None:
+        runs = [self.pipeline_run("Build", "failure", "2026-09-21T10:00:00Z")]
+        dry = Worker(Config.from_args(build_parser().parse_args(
+            self._worker_argv(auto=False) + ["--monitor-actions", "--dry-run"])))
+        with mock.patch.object(dry.github, "gh", side_effect=self.monitor_gh(runs)) as gh:
+            self.assertIsNone(dry.monitor_repository_actions())
+        self.assertNotIn(["issue", "create"], [c.args[0][:2] for c in gh.call_args_list])
+        busy = self.monitor_worker()
+        busy.in_progress_file.write_text("{}", encoding="utf-8")
+        with mock.patch.object(busy.github, "gh") as gh:
+            self.assertIsNone(busy.monitor_repository_actions())
+        gh.assert_not_called()
+
+    def test_monitor_failure_is_logged_and_never_blocks_the_queue(self) -> None:
+        worker = self.monitor_worker()
+        with mock.patch.object(worker.github, "gh", side_effect=WorkerError("HTTP 403")):
+            self.assertIsNone(worker.monitor_repository_actions())
+
+    def test_run_works_the_monitor_issue_without_also_selecting_it(self) -> None:
+        worker = self.monitor_worker()
+        filed = IssueContext(number=300, title="Fix CI", body="", labels=["bug"],
+                             url="https://example.invalid/issues/300", ci_monitor=True)
+        with (
+            mock.patch.object(worker, "deliver_pending"),
+            mock.patch.object(worker, "reconcile_issue_pull_requests"),
+            mock.patch.object(worker, "prepare_paused_resume", return_value=False),
+            mock.patch.object(worker, "monitor_repository_actions", return_value=filed),
+            mock.patch.object(worker, "select_issue") as select,
+            mock.patch.object(worker, "run_selected_issue", return_value=10) as run_issue,
+        ):
+            self.assertEqual(worker.run(), 10)
+        select.assert_not_called()
+        run_issue.assert_called_once()
+        self.assertIs(worker.issue, filed)
+
     def test_issue_pr_merge_comments_without_closing_the_issue(self) -> None:
         worker = self.pr_worker()
         merge_sha = "5" * 40
@@ -1781,6 +2019,8 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(args.require_bot_auth)
         self.assertFalse(args.auto_approve)
         self.assertFalse(args.auto_merge)
+        self.assertFalse(args.auto_promote)
+        self.assertTrue(build_parser().parse_args(["--auto-promote"]).auto_promote)
         # delivery-mode / merge-method were removed with the integration model.
         with self.assertRaises(SystemExit):
             build_parser().parse_args(["--delivery-mode", "pull-request"])
