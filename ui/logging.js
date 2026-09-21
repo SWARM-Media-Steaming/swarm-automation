@@ -10,7 +10,7 @@
     if (!match) return null;
     const rawTime = match[1];
     const time = /^\d{9,}$/.test(rawTime)
-      ? new Date(Number(rawTime) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      ? new Date(Number(rawTime) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true })
       : rawTime.slice(0, 5);
     return {
       raw: String(raw),
