@@ -1152,6 +1152,84 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("oid=" + "1" * 40, mutation_args)
         self.assertIn("name=ai/codex/issue-419", mutation_args)
 
+    def linked_branch_worker(self, number: int) -> None:
+        self.worker.issue = IssueContext(number, "Linked branch", "", [], f"https://example.invalid/{number}")
+        self.worker.choice = ProviderChoice("Claude", "test", "high", "session")
+
+    def test_linked_branch_retries_transient_graphql_error(self) -> None:
+        self.linked_branch_worker(111)
+        issue_id = "I_kwDOExample"
+        flaky = WorkerError(
+            "Command failed (gh api graphql): gh: Something went wrong while executing "
+            "your query on 2026-09-21T15:13:32Z. Please include `C391:3DF102` when reporting this issue."
+        )
+        with (
+            mock.patch("swarm_issue_worker.time.sleep") as sleep,
+            mock.patch.object(self.worker, "remote_branch_exists_at", return_value=False),
+            mock.patch.object(
+                self.worker.github,
+                "gh",
+                side_effect=[
+                    json.dumps({"node_id": issue_id}),
+                    flaky,
+                    json.dumps({"data": {"createLinkedBranch": {"issue": {"id": issue_id}}}}),
+                ],
+            ) as github,
+        ):
+            self.worker.create_linked_issue_branch("ai/claude/issue-111", "1" * 40)
+
+        self.assertEqual(github.call_count, 3)
+        sleep.assert_called_once()
+
+    def test_linked_branch_accepts_branch_created_despite_graphql_error(self) -> None:
+        self.linked_branch_worker(111)
+        issue_id = "I_kwDOExample"
+        flaky = WorkerError("gh: Something went wrong while executing your query")
+        with (
+            mock.patch("swarm_issue_worker.time.sleep") as sleep,
+            mock.patch.object(self.worker, "remote_branch_exists_at", return_value=True),
+            mock.patch.object(
+                self.worker.github, "gh", side_effect=[json.dumps({"node_id": issue_id}), flaky]
+            ) as github,
+        ):
+            self.worker.create_linked_issue_branch("ai/claude/issue-111", "1" * 40)
+
+        self.assertEqual(github.call_count, 2)
+        sleep.assert_not_called()
+
+    def test_linked_branch_gives_up_after_repeated_transient_errors(self) -> None:
+        self.linked_branch_worker(111)
+        flaky = WorkerError("gh: Something went wrong while executing your query")
+        with (
+            mock.patch("swarm_issue_worker.time.sleep"),
+            mock.patch.object(self.worker, "remote_branch_exists_at", return_value=False),
+            mock.patch.object(
+                self.worker.github,
+                "gh",
+                side_effect=[json.dumps({"node_id": "I_x"}), flaky, flaky, flaky],
+            ) as github,
+        ):
+            with self.assertRaisesRegex(WorkerError, "Something went wrong"):
+                self.worker.create_linked_issue_branch("ai/claude/issue-111", "1" * 40)
+
+        self.assertEqual(github.call_count, 4)
+
+    def test_linked_branch_does_not_retry_permanent_errors(self) -> None:
+        self.linked_branch_worker(111)
+        denied = WorkerError("gh: Resource not accessible by integration (HTTP 403)")
+        with (
+            mock.patch("swarm_issue_worker.time.sleep") as sleep,
+            mock.patch.object(self.worker, "remote_branch_exists_at", return_value=False),
+            mock.patch.object(
+                self.worker.github, "gh", side_effect=[json.dumps({"node_id": "I_x"}), denied]
+            ) as github,
+        ):
+            with self.assertRaisesRegex(WorkerError, "not accessible"):
+                self.worker.create_linked_issue_branch("ai/claude/issue-111", "1" * 40)
+
+        self.assertEqual(github.call_count, 2)
+        sleep.assert_not_called()
+
     def test_fresh_github_branch_is_created_from_the_issue(self) -> None:
         worker = self.pr_worker()
         worker.issue = IssueContext(420, "Linked branch", "", [], "https://example.invalid/420")
