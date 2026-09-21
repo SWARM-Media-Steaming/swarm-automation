@@ -108,7 +108,7 @@
     },
     "auto-approve-merge": {
       title: "Approve & merge automatically",
-      html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention. This never merges the AI integration branch into <code>main</code>.</p>",
+      html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention.</p><p><strong>Automatically merge <code>ai-main</code> into <code>main</code></strong> is off by default. When on, the worker also opens (or reuses) the <code>ai-main</code> → <code>main</code> pull request after issue PRs land, has another provider’s bot approve it, and merges it — so everything the app has finished lands on <code>main</code> immediately. It needs issue PR merging on, and a promotion with conflicts stays open for a person to resolve. Leave it off to keep <code>main</code> a human decision.</p>",
       links: [],
     },
     "parallel-repo-workers": {
@@ -312,6 +312,7 @@
       preferred_provider: "",
       auto_approve: true,
       auto_merge: true,
+      auto_promote: false,
       require_issue_tests: false,
       allow_environment_only_summary: false,
       repo_dir: "",

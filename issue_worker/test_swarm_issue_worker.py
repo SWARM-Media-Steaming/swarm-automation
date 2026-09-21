@@ -1054,6 +1054,115 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(result, merge_sha)
         self.assertEqual(gh.call_args_list[0].args[0][:2], ["pr", "merge"])
 
+    def promotion_worker(self, promote: bool = True, ahead: bool = True) -> Worker:
+        """An auto-approving worker whose `origin/ai-main` is (optionally) one
+        commit ahead of `origin/main`."""
+        argv = self._worker_argv(auto=True) + (["--auto-promote"] if promote else [])
+        if ahead:
+            self.git("switch", "-q", "ai-main")
+            (self.repo / "tracked.txt").write_text("base\nai work\n", encoding="utf-8")
+            self.git("commit", "-q", "-am", "ai work #1")
+            self.git("push", "-q", "origin", "ai-main")
+            self.git("switch", "-q", "main")
+        return Worker(Config.from_args(build_parser().parse_args(argv)))
+
+    def test_auto_promote_opens_approves_and_merge_commits_the_integration_pr(self) -> None:
+        worker = self.promotion_worker()
+        pr_url = "https://example.invalid/pull/200"
+        with (
+            mock.patch.object(
+                worker.github, "gh", side_effect=["[]", pr_url + "\n", "3" * 40, ""]
+            ) as gh,
+            mock.patch.object(worker, "approve_pull_request") as approve,
+        ):
+            result = worker.auto_promote_integration_branch("claude")
+        self.assertEqual(result, pr_url)
+        commands = [call.args[0] for call in gh.call_args_list]
+        self.assertEqual(commands[1][:2], ["pr", "create"])
+        self.assertEqual(commands[1][commands[1].index("--base") + 1], "main")
+        self.assertEqual(commands[1][commands[1].index("--head") + 1], "ai-main")
+        self.assertEqual(commands[3][:2], ["pr", "merge"])
+        self.assertIn("--merge", commands[3])
+        self.assertNotIn("--squash", commands[3])
+        self.assertIn("--match-head-commit", commands[3])
+        approve.assert_called_once()
+        self.assertEqual(approve.call_args.args[:2], (pr_url, "claude"))
+
+    def test_auto_promote_reuses_an_open_already_approved_pr(self) -> None:
+        worker = self.promotion_worker()
+        pr_url = "https://example.invalid/pull/201"
+        listing = json.dumps(
+            [{"url": pr_url, "headRefOid": "3" * 40, "mergeable": "MERGEABLE",
+              "reviewDecision": "APPROVED"}]
+        )
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=[listing, "3" * 40, ""]) as gh,
+            mock.patch.object(worker, "approve_pull_request") as approve,
+        ):
+            self.assertEqual(worker.auto_promote_integration_branch("codex"), pr_url)
+        approve.assert_not_called()
+        self.assertNotIn(["pr", "create"], [call.args[0][:2] for call in gh.call_args_list])
+
+    def test_auto_promote_leaves_a_conflicting_promotion_pr_open(self) -> None:
+        worker = self.promotion_worker()
+        listing = json.dumps(
+            [{"url": "https://example.invalid/pull/202", "headRefOid": "3" * 40,
+              "mergeable": "CONFLICTING", "reviewDecision": ""}]
+        )
+        with (
+            mock.patch.object(worker.github, "gh", return_value=listing) as gh,
+            mock.patch.object(worker, "approve_pull_request") as approve,
+        ):
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        approve.assert_not_called()
+        self.assertNotIn(["pr", "merge"], [call.args[0][:2] for call in gh.call_args_list])
+
+    def test_auto_promote_does_nothing_when_the_toggle_is_off(self) -> None:
+        worker = self.promotion_worker(promote=False)
+        with mock.patch.object(worker.github, "gh") as gh:
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        gh.assert_not_called()
+
+    def test_auto_promote_does_nothing_when_issue_pr_merging_is_off(self) -> None:
+        worker = self.promotion_worker()
+        worker.config = dataclasses.replace(worker.config, auto_approve=False)
+        with mock.patch.object(worker.github, "gh") as gh:
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        gh.assert_not_called()
+
+    def test_auto_promote_does_nothing_when_integration_is_not_ahead(self) -> None:
+        worker = self.promotion_worker(ahead=False)
+        with mock.patch.object(worker.github, "gh") as gh:
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        gh.assert_not_called()
+
+    def test_auto_promote_failure_is_logged_not_raised(self) -> None:
+        worker = self.promotion_worker()
+        with mock.patch.object(worker.github, "gh", side_effect=WorkerError("gh failed")):
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+
+    def test_start_of_run_sweep_picks_an_enabled_provider_for_promotion(self) -> None:
+        worker = self.promotion_worker()
+        keys = [spec.key for spec in worker.config.providers]
+        for enabled_keys, expected in (
+            (keys, worker.config.preferred_provider),
+            ([keys[-1]], keys[-1]),
+            ([], None),
+        ):
+            worker.config = dataclasses.replace(
+                worker.config,
+                providers=tuple(
+                    dataclasses.replace(spec, enabled=spec.key in enabled_keys)
+                    for spec in worker.config.providers
+                ),
+            )
+            with mock.patch.object(worker, "promote_integration_branch", return_value=None) as promote:
+                worker.auto_promote_integration_branch()
+            if expected is None:
+                promote.assert_not_called()
+            else:
+                promote.assert_called_once_with(expected)
+
     def test_issue_pr_merge_comments_without_closing_the_issue(self) -> None:
         worker = self.pr_worker()
         merge_sha = "5" * 40
@@ -1703,6 +1812,8 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(args.require_bot_auth)
         self.assertFalse(args.auto_approve)
         self.assertFalse(args.auto_merge)
+        self.assertFalse(args.auto_promote)
+        self.assertTrue(build_parser().parse_args(["--auto-promote"]).auto_promote)
         # delivery-mode / merge-method were removed with the integration model.
         with self.assertRaises(SystemExit):
             build_parser().parse_args(["--delivery-mode", "pull-request"])

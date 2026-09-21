@@ -97,7 +97,7 @@ fn default_providers() -> Vec<ProviderSettings> {
 
 /// One monitored GitHub repository. The AI worker clones it into a managed
 /// workspace, cuts issue branches from `integration_branch`, and never lets
-/// code reach `base_branch` without a human.
+/// code reach `base_branch` without a human — unless `auto_promote` is on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepoConfig {
@@ -130,8 +130,13 @@ pub struct RepoConfig {
     pub preferred_provider: String,
     pub auto_approve: bool,
     /// Compatibility mirror of `auto_approve`. Approval and squash-merging are
-    /// one UI operation; `base_branch` is never touched automatically.
+    /// one UI operation; `base_branch` is only touched by `auto_promote`.
     pub auto_merge: bool,
+    /// Automatically roll `integration_branch` up into `base_branch` (approve
+    /// and merge the promotion PR) after issue PRs land. Off by default — the
+    /// human-owned branch is otherwise only ever changed by a person. Needs
+    /// `auto_approve` (the worker ignores it otherwise).
+    pub auto_promote: bool,
     /// Ask the AI to add or update UAT and integration tests for each issue.
     pub require_issue_tests: bool,
     /// Let the AI return a summary without code when the issue is caused by
@@ -180,6 +185,7 @@ impl Default for RepoConfig {
             preferred_provider: String::new(),
             auto_approve: true,
             auto_merge: true,
+            auto_promote: false,
             require_issue_tests: false,
             allow_environment_only_summary: false,
             repo_dir: String::new(),
@@ -828,6 +834,10 @@ mod tests {
         assert_eq!(repo.github_host, "github.com", "only supported host");
         assert!(repo.require_bot_auth, "bot authentication defaults on");
         assert!(repo.auto_approve, "automatic PR approval defaults on");
+        assert!(
+            !repo.auto_promote,
+            "promotion into the base branch defaults off"
+        );
         assert!(repo.auto_merge, "approval also enables issue PR merging");
         assert!(!repo.require_issue_tests);
         assert!(!repo.allow_environment_only_summary);
