@@ -467,6 +467,171 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(json.loads(buffer.getvalue()), [])
 
+        page_buffer = io.StringIO()
+        with contextlib.redirect_stdout(page_buffer):
+            page_exit = execution_history_main(
+                [
+                    "--db", str(missing),
+                    "--repository", "octocat/example",
+                    "--limit", "10",
+                    "--offset", "30",
+                    "--search", "widget",
+                ]
+            )
+        self.assertEqual(page_exit, 0)
+        self.assertEqual(
+            json.loads(page_buffer.getvalue()),
+            {"records": [], "total": 0, "offset": 0, "limit": 10},
+        )
+
+    def test_execution_history_page_fetches_ten_records_and_filters_in_sqlite(self) -> None:
+        database_path = self.state / "history.sqlite3"
+        repository = ExecutionHistoryRepository(database_path)
+        for number in range(1, 26):
+            title = f"Issue {number}"
+            if number == 7:
+                title = "100% done"
+            elif number == 8:
+                title = "a_b"
+            elif number == 9:
+                title = "axb"
+            repository.import_issue(
+                "octocat/example",
+                {
+                    "number": number,
+                    "title": title,
+                    "url": f"https://github.com/octocat/example/issues/{number}",
+                    "body": "secret-body-token",
+                    "state": "open",
+                    "createdAt": f"2026-01-01T00:00:{number:02d}Z",
+                },
+                "2026-09-14T09:00:00-05:00",
+            )
+        repository.import_issue(
+            "octocat/other",
+            {
+                "number": 1,
+                "title": "Ship widget",
+                "url": "https://github.com/octocat/other/issues/1",
+                "body": "",
+                "state": "open",
+                "createdAt": "2026-03-01T00:00:00Z",
+            },
+            "2026-09-14T09:00:00-05:00",
+        )
+        service = ExecutionHistoryService(True, database_path)
+        service.start(
+            ExecutionStart(
+                repository="octocat/example",
+                issue_number=40,
+                issue_url="https://github.com/octocat/example/issues/40",
+                issue_title="Ship widget",
+                issue_body="secret-body-token",
+                provider="Codex",
+                model="test-model",
+                effort="high",
+                branch_name="ai/codex/issue-40",
+                application_version="1.2.3",
+            ),
+            "2026-02-01T00:00:00Z",
+        )
+        service.update("2026-02-01T00:05:00Z", final_status="completed")
+
+        first, total, offset, limit = repository.page_for_repository(
+            "octocat/example", search="", limit=100, offset=0
+        )
+        self.assertEqual(total, 26)
+        self.assertEqual(limit, 10)
+        self.assertEqual(offset, 0)
+        self.assertEqual(len(first), 10)
+        self.assertEqual(
+            [row["issue_number"] for row in first],
+            [40, 25, 24, 23, 22, 21, 20, 19, 18, 17],
+        )
+        self.assertTrue(all(row["repository"] == "octocat/example" for row in first))
+
+        second, second_total, second_offset, _ = repository.page_for_repository(
+            "octocat/example", search="", limit=10, offset=10
+        )
+        self.assertEqual(second_total, 26)
+        self.assertEqual(second_offset, 10)
+        self.assertEqual(len(second), 10)
+        self.assertEqual([row["issue_number"] for row in second], list(range(16, 6, -1)))
+        self.assertTrue(set(row["issue_number"] for row in first).isdisjoint(
+            row["issue_number"] for row in second
+        ))
+
+        last, _, last_offset, _ = repository.page_for_repository(
+            "octocat/example", search="", limit=10, offset=1000
+        )
+        self.assertEqual(last_offset, 20)
+        self.assertEqual([row["issue_number"] for row in last], list(range(6, 0, -1)))
+
+        widgets, widget_total, _, _ = repository.page_for_repository(
+            "octocat/example", search="WIDGET", limit=10, offset=0
+        )
+        self.assertEqual(widget_total, 1)
+        self.assertEqual(widgets[0]["issue_number"], 40)
+
+        by_provider, provider_total, _, _ = repository.page_for_repository(
+            "octocat/example", search="codex", limit=10, offset=0
+        )
+        self.assertEqual(provider_total, 1)
+        self.assertEqual(by_provider[0]["issue_number"], 40)
+
+        by_status, status_total, _, _ = repository.page_for_repository(
+            "octocat/example", search="completed", limit=10, offset=0
+        )
+        self.assertEqual(status_total, 1)
+        self.assertEqual(by_status[0]["final_status"], "completed")
+
+        by_number, number_total, _, _ = repository.page_for_repository(
+            "octocat/example", search="40", limit=10, offset=0
+        )
+        self.assertEqual(number_total, 1)
+        self.assertEqual(by_number[0]["issue_title"], "Ship widget")
+
+        literal_percent, percent_total, _, _ = repository.page_for_repository(
+            "octocat/example", search="100%", limit=10, offset=0
+        )
+        self.assertEqual(percent_total, 1)
+        self.assertEqual(literal_percent[0]["issue_number"], 7)
+        any_percent, any_percent_total, _, _ = repository.page_for_repository(
+            "octocat/example", search="%", limit=10, offset=0
+        )
+        self.assertEqual(any_percent_total, 1)
+
+        literal_underscore, underscore_total, _, _ = repository.page_for_repository(
+            "octocat/example", search="a_b", limit=10, offset=0
+        )
+        self.assertEqual(underscore_total, 1)
+        self.assertEqual(literal_underscore[0]["issue_number"], 8)
+
+        body_only, body_total, _, _ = repository.page_for_repository(
+            "octocat/example", search="secret-body-token", limit=10, offset=0
+        )
+        self.assertEqual(body_total, 0)
+        self.assertEqual(body_only, [])
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = execution_history_main(
+                [
+                    "--db", str(database_path),
+                    "--repository", "octocat/example",
+                    "--limit", "10",
+                    "--offset", "0",
+                    "--search", "widget",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["limit"], 10)
+        self.assertEqual(len(payload["records"]), 1)
+        self.assertEqual(payload["records"][0]["issue_number"], 40)
+        self.assertNotIn("octocat/other", buffer.getvalue())
+
     def test_execution_history_sanitizes_credentials(self) -> None:
         token = "ghp_abcdefghijklmnopqrstuvwxyz123456"
         cleaned = sanitize_text(f"Authorization: Bearer {token}\napi_key={token}")

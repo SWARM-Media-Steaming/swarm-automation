@@ -16,7 +16,7 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false, executionHistory: false },
+    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false },
     activeRepoId: "",
     branchOverview: null,
     promotions: [],
@@ -26,6 +26,9 @@
     coverageAudit: null,
     executionHistory: null,
     executionHistorySearch: "",
+    executionHistoryOffset: 0,
+    executionHistoryRequest: 0,
+    executionHistorySearchTimer: null,
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
     botReadiness: {},
     botReadinessPoll: null,
@@ -188,7 +191,7 @@
     },
     "execution-history": {
       title: "Execution history",
-      html: "<p>Every AI issue execution for the selected repository, newest first — grouped by issue, with every attempt. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
+      html: "<p>Every AI issue execution for the selected repository, newest first. The list loads ten at a time from the local database. Search matches issue number, title, provider, branch, or status, and Previous and Next fetch another page. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
       links: [],
     },
     "provider-bins": {
@@ -1396,25 +1399,55 @@
     return item;
   }
 
-  function executionMatchesSearch(record, term) {
-    if (!term) return true;
-    const haystack = [record.issueNumber, record.issueTitle, record.aiProvider, record.model, record.branchName, record.finalStatus]
-      .map((value) => String(value ?? "").toLowerCase());
-    return haystack.some((value) => value.includes(term));
+  function executionHistoryView() {
+    const page = state.executionHistory;
+    if (!page || !Array.isArray(page.records)) {
+      return { records: [], total: 0, offset: 0, limit: 10 };
+    }
+    return page;
+  }
+
+  function executionCountNoun(total, searching) {
+    if (searching) return total === 1 ? "match" : "matches";
+    return total === 1 ? "execution" : "executions";
   }
 
   function renderExecutionHistory() {
     const box = byId("execution-history-list");
     if (!box) return;
     box.replaceChildren();
-    const all = Array.isArray(state.executionHistory) ? state.executionHistory : [];
-    byId("execution-history-count").textContent = `${all.length} execution${all.length === 1 ? "" : "s"}`;
-    const term = state.executionHistorySearch.trim().toLowerCase();
-    const records = all.filter((record) => executionMatchesSearch(record, term));
+    const page = executionHistoryView();
+    const searching = state.executionHistorySearch.trim().length > 0;
+    const total = Number(page.total) || 0;
+    const limit = Number(page.limit) || 10;
+    const offset = Number(page.offset) || 0;
+    const records = page.records;
+    const count = byId("execution-history-count");
+    if (count) {
+      if (!total || (offset === 0 && records.length >= total)) {
+        count.textContent = `${total} ${executionCountNoun(total, searching)}`;
+      } else {
+        const start = offset + 1;
+        const end = offset + records.length;
+        count.textContent = `Showing ${start}-${end} of ${total} ${executionCountNoun(total, searching)}`;
+      }
+    }
+    const pager = byId("execution-history-pager");
+    if (pager) {
+      const pageCount = Math.max(1, Math.ceil(total / limit));
+      const pageNumber = Math.floor(offset / limit) + 1;
+      pager.classList.toggle("hidden", total <= limit);
+      const label = byId("execution-history-page-label");
+      if (label) label.textContent = `Page ${pageNumber} of ${pageCount}`;
+      const prev = byId("execution-history-prev");
+      const next = byId("execution-history-next");
+      if (prev) prev.disabled = offset <= 0;
+      if (next) next.disabled = offset + records.length >= total;
+    }
     if (!records.length) {
       box.appendChild(Object.assign(document.createElement("p"), {
         className: "panel-copy",
-        textContent: all.length
+        textContent: searching
           ? "No executions match this search."
           : "No AI executions recorded yet. Turn on “Store AI execution history” in Advanced, then run an issue.",
       }));
@@ -1425,20 +1458,29 @@
 
   async function refreshExecutionHistory({ quiet = false } = {}) {
     const repo = currentRepo();
+    const requestId = state.executionHistoryRequest + 1;
+    state.executionHistoryRequest = requestId;
     if (!repo) {
-      state.executionHistory = [];
+      state.executionHistory = { records: [], total: 0, offset: 0, limit: 10 };
+      state.executionHistoryOffset = 0;
       renderExecutionHistory();
       return;
     }
-    if (state.refreshing.executionHistory) return;
-    state.refreshing.executionHistory = true;
+    const offset = Math.max(0, Number(state.executionHistoryOffset) || 0);
+    const search = state.executionHistorySearch.trim();
     try {
-      state.executionHistory = await invoke("get_execution_history_background", { repoId: repo.id });
-      if (repo.id === state.activeRepoId) renderExecutionHistory();
+      const page = await invoke("get_execution_history_background", {
+        repoId: repo.id,
+        offset,
+        search,
+      });
+      if (requestId !== state.executionHistoryRequest || repo.id !== state.activeRepoId) return;
+      state.executionHistory = page;
+      state.executionHistoryOffset = Number(page.offset) || 0;
+      renderExecutionHistory();
     } catch (error) {
+      if (requestId !== state.executionHistoryRequest) return;
       if (!quiet) showToast(errorText(error), "error");
-    } finally {
-      state.refreshing.executionHistory = false;
     }
   }
 
@@ -2334,6 +2376,11 @@
     state.coverageAudit = null;
     state.testDefinitionDraftOpen = false;
     state.executionHistory = null;
+    state.executionHistoryOffset = 0;
+    state.executionHistorySearch = "";
+    clearTimeout(state.executionHistorySearchTimer);
+    const executionSearch = byId("execution-history-search");
+    if (executionSearch) executionSearch.value = "";
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
@@ -2720,9 +2767,37 @@
     byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
     byId("refresh-execution-history").addEventListener("click", () => refreshExecutionHistory());
     byId("import-execution-history").addEventListener("click", () => importExecutionHistory());
-    byId("execution-history-search").addEventListener("input", (event) => {
-      state.executionHistorySearch = event.target.value;
-      renderExecutionHistory();
+    const executionSearch = byId("execution-history-search");
+    const queueExecutionSearch = (immediate) => {
+      state.executionHistorySearch = executionSearch.value;
+      state.executionHistoryOffset = 0;
+      clearTimeout(state.executionHistorySearchTimer);
+      if (immediate) {
+        void refreshExecutionHistory({ quiet: true });
+        return;
+      }
+      state.executionHistorySearchTimer = setTimeout(() => {
+        state.executionHistorySearchTimer = null;
+        state.executionHistoryOffset = 0;
+        void refreshExecutionHistory({ quiet: true });
+      }, 300);
+    };
+    executionSearch.addEventListener("input", () => queueExecutionSearch(false));
+    executionSearch.addEventListener("search", () => queueExecutionSearch(true));
+    byId("execution-history-prev").addEventListener("click", () => {
+      const page = executionHistoryView();
+      const limit = Number(page.limit) || 10;
+      state.executionHistoryOffset = Math.max(0, (Number(page.offset) || 0) - limit);
+      void refreshExecutionHistory();
+    });
+    byId("execution-history-next").addEventListener("click", () => {
+      const page = executionHistoryView();
+      const limit = Number(page.limit) || 10;
+      const offset = Number(page.offset) || 0;
+      const total = Number(page.total) || 0;
+      if (offset + page.records.length >= total) return;
+      state.executionHistoryOffset = offset + limit;
+      void refreshExecutionHistory();
     });
     byId("detect-test-definition").addEventListener("click", detectTestDefinition);
     byId("save-test-definition").addEventListener("click", saveTestDefinition);
