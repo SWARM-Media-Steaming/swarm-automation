@@ -24,7 +24,7 @@
         "Precise bug fixes, test-driven changes, and long autonomous edit-run-verify loops where the work is checked by running it.",
     },
     grok: {
-      model: "grok-4.3",
+      model: "grok-4.6",
       effort: "low",
       strengths:
         "Fast turnarounds on well-scoped changes, scripting and configuration work, and quick orientation in unfamiliar code.",

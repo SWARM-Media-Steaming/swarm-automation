@@ -46,7 +46,7 @@ test("dynamic routing defaults name the inexpensive router for each provider", (
   assert.equal(defaultRouter("claude").model, "claude-haiku-4-5");
   assert.equal(defaultRouter("claude").effort, "low");
   assert.equal(defaultRouter("codex").model, "gpt-5.6-luna");
-  assert.equal(defaultRouter("grok").model, "grok-4.3");
+  assert.equal(defaultRouter("grok").model, "grok-4.6");
 });
 
 test("every provider ships a description of what it is best at", () => {

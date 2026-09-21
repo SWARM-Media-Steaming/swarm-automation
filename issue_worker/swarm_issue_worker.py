@@ -70,6 +70,15 @@ QUOTA_RE = re.compile(
     r"limit (?:has been )?reached|hit your .*limit|resets? at|insufficient_quota",
     re.IGNORECASE,
 )
+# A provider CLI refusing the model name it was given (a routing tier or saved
+# setting naming a model this account does not have) — as opposed to failing
+# while working. Grok: `Couldn't set model 'x': ... "unknown model id"`.
+MODEL_REJECTED_RE = re.compile(
+    r"unknown model id|couldn'?t set model|(?:unknown|invalid|unsupported|unrecognized) model|"
+    r"issue with the selected model|"
+    r"model[^\n]{0,80}(?:not found|does not exist|is not supported|not available)",
+    re.IGNORECASE,
+)
 COMMIT_MARKER_RE = re.compile(r"swarm-issue-worker:commit:([0-9a-f]{40})")
 THROUGH_COMMENT_RE = re.compile(r"through-comment:([0-9]+)")
 ENVIRONMENT_ONLY_MARKER_RE = re.compile(
@@ -2643,7 +2652,47 @@ class Worker:
         }.get(self.choice.key)
         if runner is None:
             raise WorkerError(f"No runner for provider {self.choice.name}")
-        return runner(prompt, env)
+        status = runner(prompt, env)
+        if status != 0 and self.fall_back_from_rejected_model():
+            status = runner(prompt, env)
+        return status
+
+    def fall_back_from_rejected_model(self) -> bool:
+        """When the AI CLI rejected the model itself, switch to the provider's
+        configured model and effort so the run can go ahead.
+
+        A routing tier or an old saved setting can name a model this account
+        does not offer (e.g. Grok's `unknown model id`). Failing then only
+        repeats every cycle — the model is pinned in the issue's state — so
+        the configured pair, which the operator set and the app validated, is
+        used instead, once, and remembered in the state. Returns whether a
+        retry is worth making."""
+        assert self.choice
+        spec = self.config.spec(self.choice.key)
+        if spec is None or (spec.model, spec.effort) == (self.choice.model, self.choice.effort):
+            return False
+        combined = ""
+        for path in (self.ai_output_file, self.ai_diagnostic_file):
+            if path.exists():
+                combined += path.read_text(encoding="utf-8", errors="replace")
+        if not MODEL_REJECTED_RE.search(combined):
+            return False
+        message = (
+            f"{self.choice.name} does not offer model '{self.choice.model}'; retrying with the "
+            f"configured '{spec.model}' at effort '{spec.effort}'. Fix the routing tier or "
+            "setting that names it."
+        )
+        log(f"WARNING: {message}")
+        self.history.warning(message, iso_timestamp())
+        self.choice.model = spec.model
+        self.choice.effort = spec.effort
+        if not self.choice.resume:
+            # The failed attempt may already have claimed its session id.
+            fresh_session = self.new_session_id(spec)
+            if fresh_session:
+                self.choice.session_id = fresh_session
+        self.update_state_for_choice(self.choice)
+        return True
 
     def _run_claude(self, prompt: str, env: dict[str, str]) -> int:
         assert self.choice

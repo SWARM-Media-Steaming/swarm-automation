@@ -63,7 +63,7 @@ _DEFAULT_TIER_ROWS: dict[str, tuple[tuple[int, int, str, str], ...]] = {
         (9, 10, "gpt-6-astra", "xhigh"),
     ),
     "grok": (
-        (1, 3, "grok-4.3", "low"),
+        (1, 3, "grok-4.6", "low"),
         (4, 6, "grok-4.6", "medium"),
         (7, 8, "grok-4.6", "high"),
         (9, 10, "grok-4.6", "xhigh"),
@@ -72,7 +72,7 @@ _DEFAULT_TIER_ROWS: dict[str, tuple[tuple[int, int, str, str], ...]] = {
 _DEFAULT_ROUTER = {
     "claude": ("claude-haiku-4-5", "low"),
     "codex": ("gpt-5.6-luna", "low"),
-    "grok": ("grok-4.3", "low"),
+    "grok": ("grok-4.6", "low"),
 }
 
 # What each AI tool tends to be good at. The router weighs these when it picks

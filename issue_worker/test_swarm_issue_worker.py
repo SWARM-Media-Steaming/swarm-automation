@@ -46,6 +46,7 @@ from swarm_issue_worker import (
     bump_minor_in_version_text,
     parse_version_file,
     is_merge_blocked_by_policy,
+    MODEL_REJECTED_RE,
 )
 
 
@@ -816,6 +817,92 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(state["ai_tool"], "Codex")
         self.assertEqual(state["branch_name"], "ai/claude/issue-143")
         self.assertFalse(state["session_started"])
+
+    # ---- a provider CLI rejecting the model it was told to use ------------
+
+    GROK_UNKNOWN_MODEL = (
+        '{"type":"error","message":"Couldn\'t set model \'grok-4.3\': Invalid params: '
+        '\\"unknown model id\\". Run \'grok models\' to see available models."}\n'
+        "Error: Couldn't set model 'grok-4.3': Invalid params: \"unknown model id\".\n"
+    )
+
+    def model_run_worker(self, model: str = "grok-4.3", effort: str = "low"):
+        self.worker.write_state(self.paused_state(141))
+        self.worker.choice = ProviderChoice("Grok", model, effort, "old-session")
+        return self.worker
+
+    def run_ai_with(self, worker, outcomes: list[tuple[int, str]]) -> tuple[int, list[tuple[str, str, str]], str]:
+        """Drive run_ai with scripted (status, diagnostic text) attempts."""
+        calls: list[tuple[str, str, str]] = []
+
+        def fake_grok(prompt: str, env: dict[str, str]) -> int:
+            calls.append((worker.choice.model, worker.choice.effort, worker.choice.session_id))
+            status, diagnostic = outcomes[len(calls) - 1]
+            worker.ai_diagnostic_file.write_text(diagnostic, encoding="utf-8")
+            if status == 0:
+                worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return status
+
+        output = io.StringIO()
+        with mock.patch.object(worker, "_run_grok", side_effect=fake_grok), contextlib.redirect_stdout(output):
+            status = worker.run_ai("prompt")
+        return status, calls, output.getvalue()
+
+    def test_model_rejection_pattern_matches_the_real_grok_error_but_not_ordinary_failures(self) -> None:
+        self.assertTrue(MODEL_REJECTED_RE.search(self.GROK_UNKNOWN_MODEL))
+        for rejected in (
+            "There's an issue with the selected model (claude-foo). It may not exist",
+            "Error: unsupported model 'x'",
+            "model gpt-9 does not exist or you do not have access to it",
+        ):
+            self.assertTrue(MODEL_REJECTED_RE.search(rejected), rejected)
+        for ordinary in (
+            "usage limit reached, resets at 5pm",
+            "HTTP 502 Bad Gateway",
+            "tests failed: 3 assertions",
+            "Grok model call timed out",
+        ):
+            self.assertFalse(MODEL_REJECTED_RE.search(ordinary), ordinary)
+
+    def test_a_rejected_model_falls_back_to_the_configured_model_and_retries_once(self) -> None:
+        worker = self.model_run_worker()
+        spec = worker.config.spec("grok")
+        self.assertNotEqual(spec.model, "grok-4.3")
+
+        status, calls, output = self.run_ai_with(
+            worker, [(1, self.GROK_UNKNOWN_MODEL), (0, "")]
+        )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], ("grok-4.3", "low", "old-session"))
+        self.assertEqual(calls[1][:2], (spec.model, spec.effort))
+        self.assertNotEqual(calls[1][2], "old-session")
+        self.assertIn("does not offer model 'grok-4.3'", output)
+        state = worker.read_state()
+        self.assertEqual((state["model"], state["effort"]), (spec.model, spec.effort))
+
+    def test_a_failure_that_is_not_a_model_rejection_is_not_retried(self) -> None:
+        worker = self.model_run_worker()
+        status, calls, _ = self.run_ai_with(worker, [(1, "HTTP 502 Bad Gateway")])
+        self.assertEqual(status, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(worker.choice.model, "grok-4.3")
+
+    def test_nothing_to_fall_back_to_when_the_configured_model_was_the_one_rejected(self) -> None:
+        spec = self.worker.config.spec("grok")
+        worker = self.model_run_worker(spec.model, spec.effort)
+        status, calls, _ = self.run_ai_with(worker, [(1, self.GROK_UNKNOWN_MODEL)])
+        self.assertEqual(status, 1)
+        self.assertEqual(len(calls), 1)
+
+    def test_the_fallback_is_tried_once_not_in_a_loop(self) -> None:
+        worker = self.model_run_worker()
+        status, calls, _ = self.run_ai_with(
+            worker, [(1, self.GROK_UNKNOWN_MODEL), (1, self.GROK_UNKNOWN_MODEL)]
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(len(calls), 2)
 
     def test_grok_capacity_reflects_install_and_sign_in(self) -> None:
         # Empty --grok-bin in setUp -> not installed -> unavailable.
@@ -2477,7 +2564,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(self.worker.config.spec("claude").router_model, "claude-haiku-4-5")
         self.assertEqual(self.worker.config.spec("codex").router_model, "gpt-5.6-luna")
         self.assertEqual(self.worker.config.spec("codex").router_effort, "low")
-        self.assertEqual(self.worker.config.spec("grok").router_model, "grok-4.3")
+        self.assertEqual(self.worker.config.spec("grok").router_model, "grok-4.6")
         self.worker.issue = IssueContext(501, "Manual", "ORIGINAL", [], "https://example.invalid/501")
         self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "")
         with mock.patch("swarm_issue_worker.run_provider_router") as router:

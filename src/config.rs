@@ -73,7 +73,7 @@ fn router_preset(id: &str) -> (&str, &str) {
     match id {
         "claude" => ("claude-haiku-4-5", "low"),
         "codex" => ("gpt-5.6-luna", "low"),
-        "grok" => ("grok-4.3", "low"),
+        "grok" => ("grok-4.6", "low"),
         _ => ("", "low"),
     }
 }
@@ -128,7 +128,7 @@ pub fn default_routing_tiers() -> HashMap<String, Vec<RoutingTier>> {
         (
             "grok".into(),
             vec![
-                routing_tier(1, 3, "grok-4.3", "low"),
+                routing_tier(1, 3, "grok-4.6", "low"),
                 routing_tier(4, 6, "grok-4.6", "medium"),
                 routing_tier(7, 8, "grok-4.6", "high"),
                 routing_tier(9, 10, "grok-4.6", "xhigh"),
@@ -1211,7 +1211,7 @@ mod tests {
             "claude-haiku-4-5"
         );
         assert_eq!(config.provider("codex").unwrap().router_effort, "low");
-        assert_eq!(config.provider("grok").unwrap().router_model, "grok-4.3");
+        assert_eq!(config.provider("grok").unwrap().router_model, "grok-4.6");
         assert_eq!(
             config.provider("codex").unwrap().strengths,
             provider_strengths_preset("codex")

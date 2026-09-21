@@ -98,7 +98,7 @@ class DynamicRouterTest(unittest.TestCase):
             ("codex", 6): ("gpt-5.6-terra", "medium"),
             ("codex", 7): ("gpt-5.6-sol", "high"),
             ("codex", 9): ("gpt-6-astra", "xhigh"),
-            ("grok", 3): ("grok-4.3", "low"),
+            ("grok", 3): ("grok-4.6", "low"),
             ("grok", 4): ("grok-4.6", "medium"),
             ("grok", 8): ("grok-4.6", "high"),
             ("grok", 10): ("grok-4.6", "xhigh"),
@@ -221,7 +221,7 @@ class DynamicRouterTest(unittest.TestCase):
             "grok",
         )
         self.assertEqual(decision["confidence"], 0.91)
-        self.assertEqual(decision["selected_model"], "grok-4.3")
+        self.assertEqual(decision["selected_model"], "grok-4.6")
 
     def test_prompt_offers_every_tool_and_does_not_rewrite_the_issue(self) -> None:
         prompt = build_router_prompt(
