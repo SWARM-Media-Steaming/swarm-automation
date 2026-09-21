@@ -490,8 +490,15 @@ fn prompt_grades_lookup_is_safe_before_any_execution_exists() {
         .into_owned();
     save_config(app.clone(), app.state(), config).unwrap();
 
-    let grades =
-        get_prompt_grades(app.clone(), app.state(), "octocat__example".into(), None).unwrap();
+    let grades = get_prompt_grades(
+        app.clone(),
+        app.state(),
+        "octocat__example".into(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     assert!(grades.records.is_empty());
     assert_eq!(grades.total, 0);
     assert_eq!(grades.summary.graded, 0);
@@ -505,11 +512,34 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
         Path::new("history.sqlite3"),
         "octocat/example",
         Some(-4),
+        Some("  Widget  ".into()),
+        Some(" B- ".into()),
     );
     assert!(args.contains(&"--grades".to_string()));
-    let position = |flag: &str| args.iter().position(|arg| arg == flag).unwrap();
-    assert_eq!(args[position("--limit") + 1], "10");
-    assert_eq!(args[position("--offset") + 1], "0");
+    let value_after = |flag: &str| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .map(|index| args[index + 1].as_str())
+    };
+    assert_eq!(value_after("--limit"), Some("10"));
+    assert_eq!(value_after("--offset"), Some("0"));
+    assert_eq!(value_after("--search"), Some("Widget"));
+    assert_eq!(value_after("--grade"), Some("B-"));
+
+    let unfiltered = prompt_grades_query_args(
+        Path::new("ai_execution_history.py"),
+        Path::new("history.sqlite3"),
+        "octocat/example",
+        None,
+        None,
+        None,
+    );
+    assert!(unfiltered
+        .windows(2)
+        .any(|pair| pair[0] == "--search" && pair[1].is_empty()));
+    assert!(unfiltered
+        .windows(2)
+        .any(|pair| pair[0] == "--grade" && pair[1].is_empty()));
 }
 
 #[test]
