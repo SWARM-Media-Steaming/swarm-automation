@@ -199,7 +199,7 @@
     },
     "execution-history": {
       title: "Execution history",
-      html: "<p>Every AI issue execution for the selected repository, newest first. The list loads ten at a time from the local database. Search matches issue number, title, provider, branch, or status, and Previous and Next fetch another page. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
+      html: "<p>Every AI issue execution for the selected repository, newest first. The list loads ten at a time from the local database. Each row shows the AI tool, model, and effort level used. Search matches issue number, title, provider, branch, or status, and Previous and Next fetch another page. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
       links: [],
     },
     "provider-bins": {
@@ -1477,13 +1477,23 @@
     title.textContent = `#${record.issueNumber} ${record.issueTitle || ""}`.trim();
     const meta = document.createElement("small");
     meta.textContent = [
-      record.aiProvider,
-      record.model,
-      record.effort,
       record.attemptNumber ? `Attempt ${record.attemptNumber}` : "",
       record.startedAt ? `Started ${formatIsoTimestamp(record.startedAt)}` : "",
     ].filter(Boolean).join(" · ");
     head.append(title, meta);
+    const tagging = document.createElement("div");
+    tagging.className = "execution-tagging";
+    [["AI tool", record.aiProvider], ["Model", record.model], ["Effort", record.effort]].forEach(([label, value]) => {
+      const cell = document.createElement("div");
+      cell.className = "execution-tag";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const text = document.createElement("strong");
+      text.textContent = value || "—";
+      text.title = value || "Not recorded";
+      cell.append(name, text);
+      tagging.appendChild(cell);
+    });
     const tally = document.createElement("div");
     tally.className = "execution-tally";
     const statusMeta = executionStatusMeta(record.finalStatus);
@@ -1491,7 +1501,7 @@
     badge.className = `suite-state ${statusMeta.cls}`.trim();
     badge.textContent = statusMeta.label;
     tally.appendChild(badge);
-    summary.append(head, tally);
+    summary.append(head, tagging, tally);
     item.appendChild(summary);
 
     const body = document.createElement("div");
