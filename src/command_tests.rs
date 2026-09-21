@@ -1,13 +1,13 @@
 use super::{
-    audit_test_coverage, create_test_definition, detect_test_definition, detect_tools,
-    execution_history_query_args, get_config, get_execution_history, get_test_plan, get_test_runs,
-    inspect_repository, issue_branch_pr_is_visible, mark_permission_primed, needs_promotion,
-    bot_app_slugs_from_config, decide_bot_push_access, parse_pr_ref, promotion_approval_args,
-    provider_scheduler_arguments, push_access_message, reconcile_integration_for_promotion,
-    repo_status_args, repo_worker_args, require_closed_issue, save_config, save_test_input,
-    scheduler_arguments,
-    validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
-    ExecutionHistoryPage, ResolvedProvider,
+    audit_test_coverage, bot_app_slugs_from_config, create_test_definition, decide_bot_push_access,
+    detect_test_definition, detect_tools, execution_history_query_args, get_config,
+    get_execution_history, get_test_plan, get_test_runs, inspect_repository,
+    issue_branch_pr_is_visible, mark_permission_primed, needs_promotion, parse_pr_ref,
+    promotion_approval_args, provider_scheduler_arguments, push_access_message,
+    reconcile_integration_for_promotion, repo_status_args, repo_worker_args, require_closed_issue,
+    save_config, save_test_input, scheduler_arguments, validate_worker_script_dir,
+    write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind, ExecutionHistoryPage,
+    ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -116,15 +116,27 @@ fn resolved_provider(id: &str, bin: &str) -> ResolvedProvider {
 
 #[test]
 fn provider_scheduler_arguments_carry_dynamic_routing_settings() {
-    let mut config = AppConfig::default();
-    config.dynamic_model_routing = false;
+    let mut config = AppConfig {
+        dynamic_model_routing: false,
+        ..AppConfig::default()
+    };
     let providers = vec![resolved_provider("codex", "/usr/bin/false")];
     let off = provider_scheduler_arguments(&config, &providers);
     assert!(off.iter().any(|arg| arg == "--no-dynamic-model-routing"));
-    assert!(off.windows(2).any(|pair| pair[0] == "--codex-model" && pair[1] == "codex-model"));
-    assert!(off.windows(2).any(|pair| pair[0] == "--codex-router-model" && pair[1] == "codex-router"));
-    assert!(off.windows(2).any(|pair| pair[0] == "--codex-router-effort" && pair[1] == "low"));
-    let tiers = off.windows(2).find(|pair| pair[0] == "--routing-tiers").unwrap()[1].clone();
+    assert!(off
+        .windows(2)
+        .any(|pair| pair[0] == "--codex-model" && pair[1] == "codex-model"));
+    assert!(off
+        .windows(2)
+        .any(|pair| pair[0] == "--codex-router-model" && pair[1] == "codex-router"));
+    assert!(off
+        .windows(2)
+        .any(|pair| pair[0] == "--codex-router-effort" && pair[1] == "low"));
+    let tiers = off
+        .windows(2)
+        .find(|pair| pair[0] == "--routing-tiers")
+        .unwrap()[1]
+        .clone();
     let parsed: serde_json::Value = serde_json::from_str(&tiers).unwrap();
     assert_eq!(parsed["codex"][2]["model"], "gpt-5.6-sol");
 
@@ -921,7 +933,10 @@ fn push_access_adds_missing_bots_and_keeps_existing_people() {
     );
     assert_eq!(
         decision.missing,
-        vec!["swarm-claude-bot".to_string(), "swarm-codex-bot".to_string()]
+        vec![
+            "swarm-claude-bot".to_string(),
+            "swarm-codex-bot".to_string()
+        ]
     );
     let message = push_access_message("main", &decision);
     assert!(message.contains("DotNetRockStar"), "{message}");
@@ -936,10 +951,7 @@ fn push_access_is_already_allowed_when_every_bot_is_listed() {
             "apps": [{"slug": "swarm-claude-bot"}]
         }
     });
-    let decision = decide_bot_push_access(
-        Some(&protection),
-        &["swarm-claude-bot".to_string()],
-    );
+    let decision = decide_bot_push_access(Some(&protection), &["swarm-claude-bot".to_string()]);
     assert_eq!(decision.state, "allowed");
     assert!(!decision.can_grant);
     assert!(decision.missing.is_empty());
