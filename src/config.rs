@@ -137,6 +137,10 @@ pub struct RepoConfig {
     /// human-owned branch is otherwise only ever changed by a person. Needs
     /// `auto_approve` (the worker ignores it otherwise).
     pub auto_promote: bool,
+    /// Watch the latest GitHub Actions runs on `integration_branch`. When a
+    /// pipeline is failing and nothing tracks it yet, the worker files a
+    /// labelled, assigned issue and works it in that same run. Off by default.
+    pub monitor_actions: bool,
     /// Ask the AI to add or update UAT and integration tests for each issue.
     pub require_issue_tests: bool,
     /// Let the AI return a summary without code when the issue is caused by
@@ -186,6 +190,7 @@ impl Default for RepoConfig {
             auto_approve: true,
             auto_merge: true,
             auto_promote: false,
+            monitor_actions: false,
             require_issue_tests: false,
             allow_environment_only_summary: false,
             repo_dir: String::new(),
@@ -838,6 +843,7 @@ mod tests {
             !repo.auto_promote,
             "promotion into the base branch defaults off"
         );
+        assert!(!repo.monitor_actions, "Actions monitoring defaults off");
         assert!(repo.auto_merge, "approval also enables issue PR merging");
         assert!(!repo.require_issue_tests);
         assert!(!repo.allow_environment_only_summary);

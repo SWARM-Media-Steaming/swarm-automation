@@ -134,6 +134,18 @@ SUMMARY_INSTRUCTION = (
 )
 ENVIRONMENT_ONLY_MARKER = "SWARM_ENVIRONMENT_ONLY"
 
+# CI monitoring (``--monitor-actions``). Issues the worker files for a failing
+# pipeline carry CI_FAILURE_LABEL and a hidden marker in the body; both are how
+# a later run recognizes that this failure was already reported.
+CI_FAILURE_LABEL = "ci-failure"
+CI_FAILURE_LABELS: tuple[tuple[str, str, str], ...] = (
+    ("bug", "D73A4A", "Something isn't working"),
+    (CI_FAILURE_LABEL, "B60205", "Filed by SWARM when the repository's Actions pipeline is failing"),
+)
+CI_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure"})
+CI_LOG_EXCERPT_CHARS = 3000
+CI_ISSUE_MARKER_RE = re.compile(r"swarm-issue-worker:ci-failure:branch:([^;\s]+);sha:([0-9a-f]{40})")
+
 
 class WorkerError(RuntimeError):
     pass
@@ -270,6 +282,7 @@ class Config:
     auto_approve: bool
     auto_merge: bool
     auto_promote: bool
+    monitor_actions: bool
     require_issue_tests: bool
     allow_environment_only_summary: bool
     branch_prefix: str
@@ -315,6 +328,7 @@ class Config:
             auto_approve=args.auto_approve,
             auto_merge=args.auto_merge,
             auto_promote=args.auto_promote,
+            monitor_actions=args.monitor_actions,
             require_issue_tests=args.require_issue_tests,
             allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
@@ -423,6 +437,9 @@ class IssueContext:
     previous_completion_comment: dict[str, Any] | None = None
     followup_comments: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     trigger_comment_id: int | None = None
+    # True for the issue filed by the CI monitor and handed straight to this
+    # run, so it is never also picked up by ``select_issue`` in the same pass.
+    ci_monitor: bool = False
 
 
 @dataclasses.dataclass
@@ -2871,6 +2888,15 @@ class Worker:
             self.auto_promote_integration_branch(self.choice.key)
         return pr_url, branch, delivered_sha
 
+    def default_provider(self) -> str | None:
+        """The preferred enabled provider (else the first enabled one), used for
+        GitHub actions that happen outside any provider's own work-round."""
+        enabled = [spec.key for spec in self.config.enabled_specs]
+        if not enabled:
+            return None
+        preferred = self.config.preferred_provider.lower()
+        return preferred if preferred in enabled else enabled[0]
+
     def auto_promote_integration_branch(self, provider: str | None = None) -> str | None:
         """Best-effort roll-up of `integration_branch` into `base_branch`.
 
@@ -2886,12 +2912,9 @@ class Worker:
         """
         if not (self.config.auto_promote and self.config.auto_approve) or self.config.dry_run:
             return None
+        provider = provider or self.default_provider()
         if provider is None:
-            enabled = [spec.key for spec in self.config.enabled_specs]
-            if not enabled:
-                return None
-            preferred = self.config.preferred_provider.lower()
-            provider = preferred if preferred in enabled else enabled[0]
+            return None
         try:
             return self.promote_integration_branch(provider)
         except WorkerError as error:
@@ -3162,6 +3185,8 @@ class Worker:
                 f"Selected issue #{self.issue.number} for rework after GitHub follow-up comment "
                 f"{self.issue.trigger_comment_id}: {self.issue.title}"
             )
+        elif self.issue.ci_monitor:
+            log(f"Working CI failure issue #{self.issue.number} filed by the Actions monitor: {self.issue.title}")
         else:
             log(f"Selected oldest unprocessed assigned issue: #{self.issue.number} {self.issue.title}")
 
@@ -3350,6 +3375,225 @@ class Worker:
         self.finalize_issue(completion, output)
         return ISSUE_COMPLETED_EXIT_CODE
 
+    def latest_pipeline_runs(self) -> list[dict[str, Any]]:
+        """The newest Actions run of each workflow on the integration branch,
+        newest first. Read with the operator's own `gh` sign-in, like the issue
+        queue, so the bot apps need no extra Actions permission."""
+        listing = json.loads(
+            self.github.gh(
+                [
+                    "run",
+                    "list",
+                    "--repo",
+                    self.config.github_repository,
+                    "--branch",
+                    self.config.integration_branch,
+                    "--limit",
+                    "50",
+                    "--json",
+                    "databaseId,workflowName,status,conclusion,headSha,url,event,createdAt",
+                ]
+            )
+            or "[]"
+        )
+        latest: dict[str, dict[str, Any]] = {}
+        for run in sorted(listing, key=lambda item: str(item.get("createdAt") or ""), reverse=True):
+            latest.setdefault(str(run.get("workflowName") or ""), run)
+        return sorted(latest.values(), key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+
+    def failing_pipeline_runs(self) -> list[dict[str, Any]]:
+        # A workflow whose newest run is still queued or running has no verdict
+        # yet, so it is neither failing nor healthy this tick.
+        return [
+            run
+            for run in self.latest_pipeline_runs()
+            if str(run.get("status") or "").lower() == "completed"
+            and str(run.get("conclusion") or "").lower() in CI_FAILED_CONCLUSIONS
+            and SHA_RE.fullmatch(str(run.get("headSha") or ""))
+        ]
+
+    def ci_failure_reported(self, head_sha: str) -> bool:
+        """True when this failure needs no new issue: an issue for the branch is
+        still open (it is being, or is about to be, worked), or one was already
+        filed for this exact head commit (a person closed it; do not refile)."""
+        listing = json.loads(
+            self.github.gh(
+                [
+                    "issue",
+                    "list",
+                    "--repo",
+                    self.config.github_repository,
+                    "--label",
+                    CI_FAILURE_LABEL,
+                    "--state",
+                    "all",
+                    "--limit",
+                    "100",
+                    "--json",
+                    "state,body",
+                ]
+            )
+            or "[]"
+        )
+        for issue in listing:
+            match = CI_ISSUE_MARKER_RE.search(str(issue.get("body") or ""))
+            if not match or match.group(1) != self.config.integration_branch:
+                continue
+            if str(issue.get("state") or "").upper() == "OPEN" or match.group(2) == head_sha:
+                return True
+        return False
+
+    def ci_failure_run_excerpt(self, run: dict[str, Any]) -> str:
+        try:
+            log_text = self.github.gh(
+                [
+                    "run",
+                    "view",
+                    str(run["databaseId"]),
+                    "--repo",
+                    self.config.github_repository,
+                    "--log-failed",
+                ]
+            )
+        except (WorkerError, KeyError):
+            return ""
+        return log_text.strip()[-CI_LOG_EXCERPT_CHARS:].replace("```", "'''")
+
+    def render_ci_failure_issue(self, failing: list[dict[str, Any]]) -> tuple[str, str]:
+        integ = self.config.integration_branch
+        sha = str(failing[0]["headSha"])
+        names = [str(run.get("workflowName") or "workflow") for run in failing]
+        title = f"Fix failing CI on {integ}: {', '.join(names)}"
+        if len(title) > 120:
+            title = title[:117].rstrip() + "..."
+        lines = [
+            f"<!-- swarm-issue-worker:ci-failure:branch:{integ};sha:{sha} -->",
+            f"The most recent GitHub Actions run of {len(failing)} workflow(s) on `{integ}` "
+            "failed. This issue was filed automatically because CI monitoring is enabled for "
+            "this repository.",
+            "",
+            "## Failing pipelines",
+        ]
+        for index, run in enumerate(failing):
+            lines.append(
+                f"- **{run.get('workflowName') or 'workflow'}** — {run.get('conclusion')} "
+                f"({run.get('event')}) on `{str(run['headSha'])[:7]}`: {run.get('url')}"
+            )
+            excerpt = self.ci_failure_run_excerpt(run) if index < 3 else ""
+            if excerpt:
+                lines += [
+                    "",
+                    "<details><summary>Failed step output (tail)</summary>",
+                    "",
+                    "```",
+                    excerpt,
+                    "```",
+                    "</details>",
+                    "",
+                ]
+        lines += [
+            "",
+            "## Task",
+            "Find the root cause of the failure and fix it so the pipeline passes again. Fix the "
+            "underlying problem: do not disable, skip, or delete the failing workflow or tests to "
+            "make it green. If the failure is caused only by the environment (missing secrets, "
+            "runner or external-service outage), do not change code and say so.",
+        ]
+        return title, "\n".join(lines) + "\n"
+
+    def ensure_label(self, name: str, color: str, description: str, provider: str) -> None:
+        try:
+            self.github.gh(
+                [
+                    "label",
+                    "create",
+                    name,
+                    "--repo",
+                    self.config.github_repository,
+                    "--color",
+                    color,
+                    "--description",
+                    description,
+                ],
+                provider,
+            )
+        except WorkerError as error:
+            if "already exists" not in str(error).lower():
+                raise
+
+    def monitor_repository_actions(self) -> IssueContext | None:
+        """File — and hand straight to this run — an issue for a failing pipeline.
+
+        Runs only when `--monitor-actions` is on. When the newest Actions run of
+        any workflow on the integration branch failed and no CI-failure issue is
+        already open (or was already filed for that commit), it creates one,
+        labelled and assigned like any other worker issue, and returns it so
+        this same run works it. The caller then skips `select_issue`, and a later
+        run treats the open issue as tracked, so the failure is never worked
+        twice. Best-effort: a problem here is logged and never blocks the
+        regular queue.
+        """
+        if not self.config.monitor_actions:
+            return None
+        if self.in_progress_file.exists():
+            return None  # an interrupted issue resumes first
+        try:
+            failing = self.failing_pipeline_runs()
+            if not failing:
+                log(f"GitHub Actions on {self.config.integration_branch} are passing.")
+                return None
+            names = ", ".join(str(run.get("workflowName")) for run in failing)
+            if self.ci_failure_reported(str(failing[0]["headSha"])):
+                log(
+                    f"Failing pipeline(s) on {self.config.integration_branch} ({names}) "
+                    "already have an issue."
+                )
+                return None
+            if self.config.dry_run:
+                log(f"Dry run: would file a CI failure issue for {names}.")
+                return None
+            provider = self.default_provider()
+            if provider is None:
+                log("No enabled provider is available to file a CI failure issue.")
+                return None
+            title, body = self.render_ci_failure_issue(failing)
+            for label, color, description in CI_FAILURE_LABELS:
+                self.ensure_label(label, color, description, provider)
+            output = self.github.gh(
+                [
+                    "issue",
+                    "create",
+                    "--repo",
+                    self.config.github_repository,
+                    "--title",
+                    title,
+                    "--body-file",
+                    "-",
+                    "--assignee",
+                    self.config.github_assignee,
+                    *[part for label, _, _ in CI_FAILURE_LABELS for part in ("--label", label)],
+                ],
+                provider,
+                body,
+            )
+        except (WorkerError, ValueError) as error:
+            log(f"Could not check GitHub Actions; continuing with the issue queue: {error}")
+            return None
+        url = output.strip().splitlines()[-1] if output.strip() else ""
+        match = re.search(r"/issues/([0-9]+)$", url)
+        if not match:
+            log(f"GitHub did not return an issue URL for the CI failure issue: {output.strip()!r}")
+            return None
+        log(f"Filed CI failure issue {url}.")
+        return IssueContext(
+            number=int(match.group(1)),
+            title=title,
+            body=body,
+            labels=[label for label, _, _ in CI_FAILURE_LABELS],
+            url=url,
+            ci_monitor=True,
+        )
+
     def run(self) -> int:
         with PidLock(self.lock_dir, "worker"):
             for executable, label in (
@@ -3363,7 +3607,9 @@ class Worker:
             self.reconcile_issue_pull_requests()
             if self.prepare_paused_resume():
                 return 0
-            self.issue = self.select_issue()
+            # A CI failure issue the monitor just filed is worked directly by
+            # this run, so the regular queue must not also select it.
+            self.issue = self.monitor_repository_actions() or self.select_issue()
             if not self.issue:
                 return 0
             try:
@@ -3472,6 +3718,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-promote",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_AUTO_PROMOTE", False),
+    )
+    parser.add_argument(
+        "--monitor-actions",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_MONITOR_ACTIONS", False),
     )
     parser.add_argument(
         "--require-issue-tests",
