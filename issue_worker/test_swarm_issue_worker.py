@@ -45,6 +45,7 @@ from swarm_issue_worker import (
     resolve_preferred_provider,
     bump_minor_in_version_text,
     parse_version_file,
+    is_merge_blocked_by_policy,
 )
 
 
@@ -1410,6 +1411,116 @@ class WorkerTestCase(unittest.TestCase):
             self.assertIsNone(worker.auto_promote_integration_branch("claude"))
         approve.assert_not_called()
         self.assertNotIn(["pr", "merge"], [call.args[0][:2] for call in gh.call_args_list])
+
+    POLICY_ERROR = (
+        "Command failed (/opt/homebrew/bin/gh pr merge https://example.invalid/pull/64 --merge): "
+        "X Pull request Example/repo#64 is not mergeable: the base branch policy prohibits the merge."
+    )
+
+    def blocked_merge_gh(self, pr_url: str, comments: str = ""):
+        """gh side effects for: no open PR, create, head sha, merge refused, then the comment calls."""
+        return [
+            "[]", pr_url + "\n", "3" * 40, WorkerError(self.POLICY_ERROR),
+            comments, "",
+        ]
+
+    def test_detects_a_merge_refused_by_branch_protection(self) -> None:
+        self.assertTrue(is_merge_blocked_by_policy(self.POLICY_ERROR))
+        self.assertTrue(is_merge_blocked_by_policy("GH006: Protected branch update failed"))
+        self.assertFalse(is_merge_blocked_by_policy("Command failed: gh: HTTP 502 Bad Gateway"))
+        self.assertFalse(is_merge_blocked_by_policy("Pull request has merge conflicts"))
+
+    def test_a_promotion_blocked_by_branch_protection_is_recorded_and_commented_once(self) -> None:
+        worker = self.promotion_worker()
+        pr_url = "https://example.invalid/pull/64"
+        output = io.StringIO()
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.blocked_merge_gh(pr_url)) as gh,
+            mock.patch.object(worker, "approve_pull_request"),
+            contextlib.redirect_stdout(output),
+        ):
+            result = worker.auto_promote_integration_branch("claude")
+
+        self.assertIsNone(result)
+        commands = [call.args[0] for call in gh.call_args_list]
+        self.assertEqual([c[:2] for c in commands], [["pr", "list"], ["pr", "create"], ["pr", "view"], ["pr", "merge"], ["pr", "view"], ["pr", "comment"]])
+        comment = gh.call_args_list[-1]
+        self.assertIn(f"swarm-issue-worker:promotion-blocked:pr:{pr_url}", comment.args[2])
+        self.assertIn("needs to merge it", comment.args[2])
+        record = json.loads(worker.promotion_blocked_file().read_text(encoding="utf-8"))
+        self.assertEqual((record["pr_url"], record["head_sha"]), (pr_url, "3" * 40))
+        self.assertIn("needs a manual merge", output.getvalue())
+        self.assertNotIn("Could not promote", output.getvalue())
+
+    def test_a_blocked_promotion_pr_is_left_alone_until_its_head_changes(self) -> None:
+        worker = self.promotion_worker()
+        pr_url = "https://example.invalid/pull/64"
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.blocked_merge_gh(pr_url)),
+            mock.patch.object(worker, "approve_pull_request"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            worker.auto_promote_integration_branch("claude")
+
+        # Next cycle: same PR, same head -> no approval, no merge attempt, no noise.
+        same = json.dumps([{"url": pr_url, "headRefOid": "3" * 40, "mergeable": "MERGEABLE", "reviewDecision": ""}])
+        output = io.StringIO()
+        with (
+            mock.patch.object(worker.github, "gh", return_value=same) as gh,
+            mock.patch.object(worker, "approve_pull_request") as approve,
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        self.assertEqual([call.args[0][:2] for call in gh.call_args_list], [["pr", "list"]])
+        approve.assert_not_called()
+        self.assertEqual(output.getvalue(), "")
+
+        # New commits on ai-main change the head, so the merge is tried again
+        # (and, being blocked again, the PR is not commented on twice).
+        moved = json.dumps([{"url": pr_url, "headRefOid": "4" * 40, "mergeable": "MERGEABLE", "reviewDecision": ""}])
+        marker = f"<!-- swarm-issue-worker:promotion-blocked:pr:{pr_url} -->"
+        with (
+            mock.patch.object(
+                worker.github, "gh",
+                side_effect=[moved, "4" * 40, WorkerError(self.POLICY_ERROR), marker + "\nearlier comment"],
+            ) as gh,
+            mock.patch.object(worker, "approve_pull_request") as approve,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        approve.assert_called_once()
+        self.assertNotIn(["pr", "comment"], [call.args[0][:2] for call in gh.call_args_list])
+        record = json.loads(worker.promotion_blocked_file().read_text(encoding="utf-8"))
+        self.assertEqual(record["head_sha"], "4" * 40)
+
+    def test_other_merge_failures_are_still_reported_and_not_recorded(self) -> None:
+        worker = self.promotion_worker()
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                worker.github, "gh",
+                side_effect=["[]", "https://example.invalid/pull/65\n", "3" * 40, WorkerError("gh: HTTP 502 Bad Gateway")],
+            ),
+            mock.patch.object(worker, "approve_pull_request"),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        self.assertIn("Could not promote", output.getvalue())
+        self.assertFalse(worker.promotion_blocked_file().exists())
+
+    def test_a_failed_pr_comment_does_not_undo_the_blocked_record(self) -> None:
+        worker = self.promotion_worker()
+        pr_url = "https://example.invalid/pull/66"
+        gh_effects = ["[]", pr_url + "\n", "3" * 40, WorkerError(self.POLICY_ERROR), WorkerError("comment failed")]
+        output = io.StringIO()
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=gh_effects),
+            mock.patch.object(worker, "approve_pull_request"),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertIsNone(worker.auto_promote_integration_branch("claude"))
+        self.assertTrue(worker.promotion_blocked_file().exists())
+        self.assertIn("could not comment", output.getvalue())
 
     def test_auto_promote_does_nothing_when_the_toggle_is_off(self) -> None:
         worker = self.promotion_worker(promote=False)

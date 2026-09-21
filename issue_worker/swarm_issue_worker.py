@@ -547,6 +547,18 @@ def author_matches(login: str, allowed: Iterable[str]) -> bool:
     return normalize_author(login) in {normalize_author(name) for name in allowed}
 
 
+# `gh pr merge` refuses with this when branch protection reserves merges to
+# specific people (or a bypass list) and the bot is not one of them. Retrying
+# cannot help; only a human with merge access can.
+MERGE_BLOCKED_BY_POLICY = re.compile(
+    r"base branch policy prohibits the merge|protected branch", re.IGNORECASE
+)
+
+
+def is_merge_blocked_by_policy(message: str) -> bool:
+    return bool(MERGE_BLOCKED_BY_POLICY.search(message))
+
+
 # Product versioning (see .claude/rules/versioning.md): a repository opts in by
 # tracking a `VERSION` file holding `MAJOR.MINOR.PATCH` as of the commit that
 # last changed it. CI adds one patch per later commit; the only thing the
@@ -3441,6 +3453,10 @@ class Worker:
         if listing:
             pull_request = listing[0]
             pr_url = str(pull_request["url"])
+            if self.promotion_is_blocked(pr_url, str(pull_request.get("headRefOid") or "")):
+                # A human already has this one; do not re-approve or retry a
+                # merge branch protection will keep refusing.
+                return None
         else:
             output = self.github.gh(
                 [
@@ -3486,21 +3502,99 @@ class Worker:
         ).strip()
         if not SHA_RE.fullmatch(head_sha):
             raise WorkerError(f"GitHub returned no head commit for {pr_url}")
-        self.github.gh(
-            [
-                "pr",
-                "merge",
-                pr_url,
-                "--repo",
-                self.config.github_repository,
-                "--merge",
-                "--match-head-commit",
-                head_sha,
-            ],
-            provider,
-        )
+        try:
+            self.github.gh(
+                [
+                    "pr",
+                    "merge",
+                    pr_url,
+                    "--repo",
+                    self.config.github_repository,
+                    "--merge",
+                    "--match-head-commit",
+                    head_sha,
+                ],
+                provider,
+            )
+        except WorkerError as error:
+            if not is_merge_blocked_by_policy(str(error)):
+                raise
+            self.record_promotion_blocked(pr_url, head_sha, provider)
+            return None
         log(f"Promoted {integ} into {base} via {pr_url}.")
         return pr_url
+
+    def promotion_blocked_file(self) -> Path:
+        return self.state / "promotion-blocked.json"
+
+    def promotion_is_blocked(self, pr_url: str, head_sha: str) -> bool:
+        """Whether this exact promotion PR (at this head commit) was already found
+        to need a manual merge. A new commit on `integration_branch` changes the
+        head, so the merge is tried again."""
+        if not head_sha:
+            return False
+        try:
+            record = read_json(self.promotion_blocked_file())
+        except (OSError, ValueError):
+            return False
+        return (
+            isinstance(record, dict)
+            and record.get("pr_url") == pr_url
+            and record.get("head_sha") == head_sha
+        )
+
+    def record_promotion_blocked(self, pr_url: str, head_sha: str, provider: str) -> None:
+        """Remember that branch protection stops the bot merging `pr_url`, say so
+        once on the PR, and log it once — instead of failing the same way every
+        cycle."""
+        base = self.config.base_branch
+        integ = self.config.integration_branch
+        atomic_write_json(
+            self.promotion_blocked_file(),
+            {"pr_url": pr_url, "head_sha": head_sha, "recorded_at": iso_timestamp()},
+        )
+        log(
+            f"Promotion PR {pr_url} needs a manual merge: branch protection on {base} does not "
+            "let the automation merge it. Left open; it will not be retried until "
+            f"{integ} changes."
+        )
+        marker = f"<!-- swarm-issue-worker:promotion-blocked:pr:{pr_url} -->"
+        try:
+            existing = self.github.gh(
+                [
+                    "pr",
+                    "view",
+                    pr_url,
+                    "--repo",
+                    self.config.github_repository,
+                    "--json",
+                    "comments",
+                    "--jq",
+                    ".comments[].body",
+                ],
+                provider,
+            )
+            if marker in existing:
+                return
+            self.github.gh(
+                [
+                    "pr",
+                    "comment",
+                    pr_url,
+                    "--repo",
+                    self.config.github_repository,
+                    "--body-file",
+                    "-",
+                ],
+                provider,
+                f"{marker}\n"
+                f"🤖 **{provider.capitalize()} Bot** approved this pull request but cannot merge it: "
+                f"the branch protection rules on `{base}` do not allow the automation to.\n\n"
+                f"A maintainer with merge access needs to merge it. The worker leaves it open and "
+                f"will not retry until `{integ}` gets new commits.\n",
+            )
+        except WorkerError as error:
+            log(f"WARNING: could not comment on {pr_url} about the blocked promotion: {error}")
 
     def merge_pull_request(
         self,
