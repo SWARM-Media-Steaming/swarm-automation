@@ -31,6 +31,9 @@ jobs:
       - name: Issue-worker Python tests
         working-directory: issue_worker
         run: python3 -m unittest test_swarm_issue_worker
+      - name: Release-version script tests
+        working-directory: scripts
+        run: python3 -m unittest test_compute_version
 
   # File a tracked issue when CI breaks on main or ai-main, so SWARM
   # Automation picks it up (assigned to the worker's configured assignee,
@@ -95,6 +98,15 @@ jobs:
   # action appends each platform's artifacts (and latest.json entry) to the
   # one release that tag names, so a mismatched version per job would split
   # a single publish across multiple releases instead.
+  #
+  # The version comes from the VERSION file and git history, never from
+  # Cargo.toml (whose version is only a placeholder): VERSION holds the
+  # version of the commit that last changed it, and every later commit on the
+  # branch adds one to the patch (scripts/compute_version.py). Minor and
+  # major change only by editing VERSION. That makes every publish a strictly
+  # greater plain semver, so the updater's "is this newer?" check needs no
+  # build-metadata workaround. `ai-main` publishes betas as
+  # `<version>-beta.<run>` (always prerelease).
   compute-version:
     needs: [test]
     if: success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ai-main')
@@ -105,47 +117,27 @@ jobs:
       prerelease: ${{ steps.compute.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The patch number counts commits, so a shallow clone cannot work.
+          fetch-depth: 0
       - id: compute
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          base="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           if [ "${{ github.ref }}" = "refs/heads/ai-main" ]; then
-            # A run number never repeats, so this is unique by construction —
-            # no need to check for an existing beta of the same base version.
-            version="${base}-beta.${RUN_NUMBER}"
+            channel=beta
             prerelease=true
           else
-            # main publishes every time too. If the base version hasn't
-            # moved since the last published main release, append build
-            # metadata so the tag (and GitHub Release) is never a duplicate.
-            existing="$(gh release list --repo "$REPO" --json tagName,isPrerelease \
-              --jq '.[] | select(.isPrerelease == false) | .tagName' \
-              | grep -E "^v${base}(\+main\.[0-9]+)?$" || true)"
-            if [ -n "$existing" ]; then
-              version="${base}+main.${RUN_NUMBER}"
-            else
-              version="${base}"
-            fi
+            channel=stable
             prerelease=false
           fi
+          version="$(python3 scripts/compute_version.py --channel "$channel" --run-number "$RUN_NUMBER")"
+          echo "Publishing v$version (prerelease=$prerelease)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
-  # NOTE for whoever revisits this: semver build metadata (the `+main.<n>`
-  # suffix) is explicitly ignored in version-precedence comparisons per the
-  # semver spec, which tauri-plugin-updater's comparator follows. Two
-  # `0.1.0+main.4` / `0.1.0+main.5` releases likely compare as *equal*, so
-  # the "notify"/"Automatically" startup check may never fire between two
-  # main pushes that didn't bump the base Cargo.toml version. This was
-  # flagged rather than silently worked around per the issue that added
-  # this workflow (#90) — if that turns out to be a real problem in
-  # practice, the fallback discussed there is requiring main publishes to
-  # only happen on an actual version bump instead of every push.
   release:
     needs: [compute-version]
     strategy:

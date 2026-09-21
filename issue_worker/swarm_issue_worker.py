@@ -547,6 +547,46 @@ def author_matches(login: str, allowed: Iterable[str]) -> bool:
     return normalize_author(login) in {normalize_author(name) for name in allowed}
 
 
+# Product versioning (see .claude/rules/versioning.md): a repository opts in by
+# tracking a `VERSION` file holding `MAJOR.MINOR.PATCH` as of the commit that
+# last changed it. CI adds one patch per later commit; the only thing the
+# worker ever writes is a minor bump, and only for an issue a trusted user
+# labelled `minor`.
+VERSION_FILE = "VERSION"
+MINOR_VERSION_LABEL = "minor"
+VERSION_LINE_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+
+def _version_entry_lines(text: str) -> list[int]:
+    return [
+        index
+        for index, line in enumerate(text.splitlines())
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def parse_version_file(text: str) -> tuple[int, int, int] | None:
+    """`(major, minor, patch)` from a VERSION file, or None when it is not
+    exactly one `MAJOR.MINOR.PATCH` line (blank lines and `#` comments are
+    ignored)."""
+    entries = _version_entry_lines(text)
+    if len(entries) != 1:
+        return None
+    match = VERSION_LINE_RE.match(text.splitlines()[entries[0]].strip())
+    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
+def bump_minor_in_version_text(text: str) -> str:
+    """The same file with its version line raised to the next minor
+    (`0.1.9` -> `0.2.0`), leaving comments untouched."""
+    parsed = parse_version_file(text)
+    if parsed is None:
+        raise WorkerError(f"{VERSION_FILE} is not a single MAJOR.MINOR.PATCH line")
+    lines = text.splitlines()
+    lines[_version_entry_lines(text)[0]] = f"{parsed[0]}.{parsed[1] + 1}.0"
+    return "\n".join(lines) + "\n"
+
+
 def extract_completion_metadata(
     comments: Iterable[dict[str, Any]], completion_authors: set[str]
 ) -> dict[str, Any] | None:
@@ -2247,6 +2287,11 @@ class Worker:
                 "external services, or infrastructure state, do not write code. Provide the requested "
                 f"summary and put {ENVIRONMENT_ONLY_MARKER} on its own final line."
             )
+        if self.uses_version_file():
+            lines.append(
+                f"Do not edit the `{VERSION_FILE}` file: the worker manages the product version, and any "
+                "edit you make to it is discarded."
+            )
         lines.append(SUMMARY_INSTRUCTION)
         if recovery_dirty:
             lines.append(
@@ -3001,8 +3046,103 @@ class Worker:
         self.update_state(attempt_start_sha=run_start, branch_name=expected)
         return run_start, recovery_mode, candidate, recovery_dirty
 
+    def uses_version_file(self, revision: str = "HEAD") -> bool:
+        """Whether this repository has opted into the VERSION scheme."""
+        return self.git_ok("cat-file", "-e", f"{revision}:{VERSION_FILE}")
+
+    def version_at(self, revision: str) -> tuple[int, int, int] | None:
+        result = run_command(
+            [self.config.git_bin, "-C", self.config.repo_dir, "show", f"{revision}:{VERSION_FILE}"],
+            check=False,
+        )
+        return parse_version_file(result.stdout) if result.returncode == 0 else None
+
+    def minor_bump_requested_by_trusted_user(self) -> bool:
+        """The issue carries the `minor` label AND a trusted user applied it.
+        Anyone with triage access can label an issue, so who applied the most
+        recent `minor` label is checked against the trusted authors."""
+        assert self.issue
+        if MINOR_VERSION_LABEL not in {label.lower() for label in self.issue.labels}:
+            return False
+        events = self.github.api_list(
+            f"repos/{self.config.github_repository}/issues/{self.issue.number}/events"
+        )
+        applied = [
+            event
+            for event in events
+            if event.get("event") == "labeled"
+            and str((event.get("label") or {}).get("name") or "").lower() == MINOR_VERSION_LABEL
+        ]
+        if not applied:
+            return False
+        actor = str((applied[-1].get("actor") or {}).get("login") or "")
+        if author_matches(actor, self.trusted_followup_authors):
+            return True
+        log(
+            f"Ignoring the '{MINOR_VERSION_LABEL}' label on issue #{self.issue.number}: it was "
+            f"applied by @{actor or 'an unknown user'}, who is not a trusted author."
+        )
+        return False
+
+    def changes_besides_version(self, run_start: str) -> bool:
+        """Whether the run changed anything other than VERSION, committed or not."""
+        committed = not self.git_ok(
+            "diff", "--quiet", run_start, "HEAD", "--", ".", f":(exclude){VERSION_FILE}"
+        )
+        uncommitted = any(
+            line[3:].strip() != VERSION_FILE for line in self.worktree_status().splitlines()
+        )
+        return committed or uncommitted
+
+    def enforce_version_policy(self, run_start: str) -> None:
+        """Keep VERSION changes to labelled issues (see versioning.md).
+
+        Only the worker writes VERSION: an edit the AI made on its own —
+        committed or not — is put back to what the run started with, and an
+        issue a trusted user labelled `minor` gets the next minor, once per
+        release (skipped when the branch already carries a bump that
+        `base_branch` does not have yet). Nothing happens in a repository
+        without a VERSION file, or when the AI changed nothing else.
+        """
+        assert self.issue
+        if not self.uses_version_file(run_start):
+            return
+        changed_elsewhere = self.changes_besides_version(run_start)
+        if not self.git_ok("diff", "--quiet", run_start, "--", VERSION_FILE):
+            self.git("checkout", run_start, "--", VERSION_FILE)
+            log(f"Discarded an AI edit to {VERSION_FILE}; only the worker changes the version.")
+        if not changed_elsewhere or not self.minor_bump_requested_by_trusted_user():
+            return
+        current = self.version_at(run_start)
+        if current is None:
+            log(f"WARNING: {VERSION_FILE} is not a single MAJOR.MINOR.PATCH line; not bumping the minor.")
+            return
+        released = self.version_at(f"{self.config.remote_name}/{self.config.base_branch}")
+        if released is None:
+            log(
+                f"{VERSION_FILE} is not on {self.config.base_branch} yet, so there is no release to "
+                "measure against; not bumping the minor."
+            )
+            return
+        if current[:2] > released[:2]:
+            log(
+                f"The minor was already bumped to {current[0]}.{current[1]} since the last release on "
+                f"{self.config.base_branch}; one bump per release, so issue #{self.issue.number} adds none."
+            )
+            return
+        path = Path(self.config.repo_dir) / VERSION_FILE
+        bumped = bump_minor_in_version_text(path.read_text(encoding="utf-8"))
+        path.write_text(bumped, encoding="utf-8")
+        new = parse_version_file(bumped)
+        assert new is not None
+        log(
+            f"Issue #{self.issue.number} is labelled '{MINOR_VERSION_LABEL}': "
+            f"{VERSION_FILE} {current[0]}.{current[1]}.{current[2]} -> {new[0]}.{new[1]}.{new[2]}."
+        )
+
     def commit_completed_work(self, run_start: str) -> str:
         assert self.issue and self.choice
+        self.enforce_version_policy(run_start)
         if not self.worktree_status():
             return self.git("rev-parse", "HEAD")
         app_owned = self.app_owned_untracked_paths()

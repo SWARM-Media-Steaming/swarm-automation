@@ -169,8 +169,16 @@ each suite's own `requirements`, not to this tool.
 
 Every push to `main` runs `.github/workflows/release.yml`: it runs the Rust and
 Python test suites and, when they pass, builds a signed `.app` and publishes it
-to GitHub Releases as `automation-v0.1.<n>` (the patch number is the commit
-count). The app reads that feed and can update itself in place — **AI
+to GitHub Releases as `v<version>`. Pushes to `ai-main` publish
+`v<version>-beta.<run>` pre-releases.
+
+The version is computed, not hand-edited. `VERSION` holds the version as of the
+commit that last changed it, and every later commit on the branch adds one to
+the patch (`0.1.1` → `0.1.2` → …; a promotion merge counts once). A minor bump
+happens when a trusted author labels an issue `minor`; a major is a deliberate
+human commit. See `.claude/rules/versioning.md`.
+
+The app reads that feed and can update itself in place — **AI
 Configuration is unrelated; the control is under Advanced → Software update**
 with three modes:
 

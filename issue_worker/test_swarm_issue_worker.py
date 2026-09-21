@@ -43,6 +43,8 @@ from swarm_issue_worker import (
     is_worker_comment,
     priority_rank,
     resolve_preferred_provider,
+    bump_minor_in_version_text,
+    parse_version_file,
 )
 
 
@@ -2025,6 +2027,155 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertFalse(worker.in_progress_file.exists())
         self.assertTrue((self.repo / "scratch.txt").is_file())
+
+    # ---- product versioning (VERSION file, `minor` label) ------------------
+
+    def version_repo(self, main_version: str = "0.1.5", ai_main_version: str | None = None) -> None:
+        """Track a VERSION file on main and ai-main (optionally further ahead on ai-main)."""
+        (self.repo / "VERSION").write_text(f"# product version\n{main_version}\n", encoding="utf-8")
+        self.git("add", "VERSION")
+        self.git("commit", "-q", "-m", "Add VERSION")
+        self.git("push", "-q", "origin", "main")
+        self.git("branch", "-f", "ai-main", "main")
+        if ai_main_version:
+            self.git("switch", "-q", "ai-main")
+            (self.repo / "VERSION").write_text(f"# product version\n{ai_main_version}\n", encoding="utf-8")
+            self.git("commit", "-q", "-am", "Bump minor")
+            self.git("switch", "-q", "main")
+        self.git("push", "-q", "-f", "origin", "ai-main")
+
+    def labelled_issue_worker(self, labels: list[str], number: int = 501):
+        worker = self.pr_worker()
+        worker.issue = IssueContext(number, "Versioned work", "", labels, f"https://example.invalid/{number}")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+        run_start, _, _, _ = worker.prepare_repository()
+        return worker, run_start
+
+    @staticmethod
+    def label_events(actor: str, label: str = "minor") -> list[dict[str, object]]:
+        return [
+            {"event": "labeled", "label": {"name": "other"}, "actor": {"login": "someone"}},
+            {"event": "labeled", "label": {"name": label}, "actor": {"login": actor}},
+        ]
+
+    def committed_files(self) -> list[str]:
+        return self.git("show", "--name-only", "--format=", "HEAD").splitlines()
+
+    def test_version_file_helpers(self) -> None:
+        self.assertEqual(parse_version_file("# c\n\n0.1.9\n"), (0, 1, 9))
+        for bad in ("", "0.1\n", "v0.1.1\n", "0.1.1\n0.1.2\n", "0.1.1-beta\n", "# only a comment\n"):
+            self.assertIsNone(parse_version_file(bad), repr(bad))
+        self.assertEqual(bump_minor_in_version_text("# c\n0.1.9\n"), "# c\n0.2.0\n")
+        self.assertEqual(bump_minor_in_version_text("1.4.22"), "1.5.0\n")
+        with self.assertRaises(WorkerError):
+            bump_minor_in_version_text("nonsense\n")
+
+    def test_minor_label_from_a_trusted_user_bumps_the_minor_once(self) -> None:
+        self.version_repo("0.1.5")
+        worker, run_start = self.labelled_issue_worker(["minor", "enhancement"])
+        (self.repo / "feature.txt").write_text("new\n", encoding="utf-8")
+        with mock.patch.object(worker.github, "api_list", return_value=self.label_events("DotNetRockStar")) as api:
+            committed = worker.commit_completed_work(run_start)
+
+        self.assertNotEqual(committed, run_start)
+        self.assertEqual(sorted(self.committed_files()), ["VERSION", "feature.txt"])
+        self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "# product version\n0.2.0\n")
+        self.assertIn("issues/501/events", api.call_args.args[0])
+
+    def test_minor_label_applied_by_an_untrusted_user_is_ignored(self) -> None:
+        self.version_repo("0.1.5")
+        worker, run_start = self.labelled_issue_worker(["minor"])
+        (self.repo / "feature.txt").write_text("new\n", encoding="utf-8")
+        output = io.StringIO()
+        with (
+            mock.patch.object(worker.github, "api_list", return_value=self.label_events("drive-by-user")),
+            contextlib.redirect_stdout(output),
+        ):
+            worker.commit_completed_work(run_start)
+
+        self.assertEqual(self.committed_files(), ["feature.txt"])
+        self.assertIn("not a trusted author", output.getvalue())
+
+    def test_no_minor_label_means_no_bump_and_no_api_call(self) -> None:
+        self.version_repo("0.1.5")
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        (self.repo / "fix.txt").write_text("fix\n", encoding="utf-8")
+        with mock.patch.object(worker.github, "api_list") as api:
+            worker.commit_completed_work(run_start)
+        api.assert_not_called()
+        self.assertEqual(self.committed_files(), ["fix.txt"])
+
+    def test_minor_label_alone_does_not_create_a_commit(self) -> None:
+        self.version_repo("0.1.5")
+        worker, run_start = self.labelled_issue_worker(["minor"])
+        with mock.patch.object(worker.github, "api_list", return_value=self.label_events("DotNetRockStar")) as api:
+            committed = worker.commit_completed_work(run_start)
+        self.assertEqual(committed, run_start)
+        api.assert_not_called()
+        self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "# product version\n0.1.5\n")
+
+    def test_only_one_minor_bump_per_release(self) -> None:
+        # ai-main already carries 0.2.0 that main (0.1.5) has not shipped yet.
+        self.version_repo("0.1.5", ai_main_version="0.2.0")
+        worker, run_start = self.labelled_issue_worker(["minor"])
+        self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "# product version\n0.2.0\n")
+        (self.repo / "feature.txt").write_text("new\n", encoding="utf-8")
+        output = io.StringIO()
+        with (
+            mock.patch.object(worker.github, "api_list", return_value=self.label_events("DotNetRockStar")),
+            contextlib.redirect_stdout(output),
+        ):
+            worker.commit_completed_work(run_start)
+        self.assertEqual(self.committed_files(), ["feature.txt"])
+        self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "# product version\n0.2.0\n")
+        self.assertIn("one bump per release", output.getvalue())
+
+    def test_an_ai_edit_to_version_is_discarded_without_the_label(self) -> None:
+        self.version_repo("0.1.5")
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        (self.repo / "VERSION").write_text("# product version\n9.9.9\n", encoding="utf-8")
+        (self.repo / "fix.txt").write_text("fix\n", encoding="utf-8")
+        worker.commit_completed_work(run_start)
+        self.assertEqual(self.committed_files(), ["fix.txt"])
+        self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "# product version\n0.1.5\n")
+
+    def test_a_version_edit_the_ai_already_committed_is_put_back(self) -> None:
+        self.version_repo("0.1.5")
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        (self.repo / "VERSION").write_text("# product version\n9.9.9\n", encoding="utf-8")
+        (self.repo / "fix.txt").write_text("fix\n", encoding="utf-8")
+        self.git("add", "--all")
+        self.git("commit", "-q", "-m", "[claude] Fix it and bump the version (#501)")
+        committed = worker.commit_completed_work(run_start)
+        self.assertNotEqual(committed, run_start)
+        self.assertEqual(self.git("show", "HEAD:VERSION"), self.git("show", f"{run_start}:VERSION"))
+        self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "# product version\n0.1.5\n")
+        self.assertEqual(self.git("diff", run_start, "HEAD", "--name-only"), "fix.txt")
+
+    def test_an_edit_to_version_alone_leaves_nothing_to_commit(self) -> None:
+        self.version_repo("0.1.5")
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        (self.repo / "VERSION").write_text("# product version\n9.9.9\n", encoding="utf-8")
+        self.assertEqual(worker.commit_completed_work(run_start), run_start)
+        self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "# product version\n0.1.5\n")
+
+    def test_repositories_without_a_version_file_are_left_alone(self) -> None:
+        worker, run_start = self.labelled_issue_worker(["minor"])
+        (self.repo / "feature.txt").write_text("new\n", encoding="utf-8")
+        with mock.patch.object(worker.github, "api_list") as api:
+            worker.commit_completed_work(run_start)
+        api.assert_not_called()
+        self.assertEqual(self.committed_files(), ["feature.txt"])
+        self.assertFalse((self.repo / "VERSION").exists())
+
+    def test_prompt_tells_the_ai_not_to_edit_version_when_the_repo_has_one(self) -> None:
+        self.version_repo("0.1.5")
+        worker, _ = self.labelled_issue_worker(["bug"], number=502)
+        self.assertIn("Do not edit the `VERSION` file", worker.build_prompt(False, "", False))
+
+    def test_prompt_does_not_mention_version_when_the_repo_has_none(self) -> None:
+        worker, _ = self.labelled_issue_worker(["bug"], number=503)
+        self.assertNotIn("`VERSION`", worker.build_prompt(False, "", False))
 
     def test_issue_commit_leaves_the_untracked_swarm_draft_out(self) -> None:
         worker = self.pr_worker()
