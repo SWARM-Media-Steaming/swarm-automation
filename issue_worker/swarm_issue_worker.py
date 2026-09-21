@@ -47,8 +47,10 @@ if str(SCRIPT_HOME) not in sys.path:
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
 from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
 from dynamic_router import (
+    RouterCandidate,
     RouterError,
     build_router_prompt,
+    default_provider_strengths,
     default_router_effort,
     default_router_model,
     fallback_routing_decision,
@@ -289,6 +291,9 @@ class ProviderSpec:
     effort: str
     router_model: str
     router_effort: str
+    # Operator-editable description of what this tool is best at. The router
+    # weighs it when choosing which enabled tool receives an issue.
+    strengths: str
     bin: str | None
     enabled: bool       # in the rotation for new work
 
@@ -301,6 +306,7 @@ class ProviderSpec:
             effort=getattr(args, f"{key}_effort"),
             router_model=getattr(args, f"{key}_router_model"),
             router_effort=getattr(args, f"{key}_router_effort"),
+            strengths=getattr(args, f"{key}_router_strengths", "") or default_provider_strengths(key),
             bin=getattr(args, f"{key}_bin") or None,
             enabled=key in set(args.enabled_provider or KNOWN_PROVIDER_KEYS),
         )
@@ -709,6 +715,12 @@ class Worker:
         # it for a fresh run, reused by post_started_comment so the start notice
         # doesn't probe /usage a second time.
         self.start_usage: ProviderUsage | None = None
+        # Usage probe for every enabled provider taken while selecting one for
+        # a fresh run, plus the resulting best-first order. The dynamic router
+        # picks the AI tool out of that order, so it never hands an issue to a
+        # provider that has no capacity this pass.
+        self.provider_usages: dict[str, ProviderUsage] = {}
+        self.provider_priority: tuple[str, ...] = ()
         self.history = ExecutionHistoryService(
             config.ai_execution_history_enabled,
             config.execution_history_db,
@@ -1050,23 +1062,8 @@ class Worker:
         provider is only reused when nothing else has capacity.
         """
         specs = {spec.name: spec for spec in self.config.enabled_specs}
-        order_index = {spec.name: index for index, spec in enumerate(self.config.enabled_specs)}
-        preferred_key = self.preferred_provider_key()
-        preferred = next(
-            (spec.name for spec in self.config.enabled_specs if spec.key == preferred_key),
-            "",
-        )
-        candidates = [name for name in specs if name in remaining]
-        candidates.sort(
-            key=lambda name: (
-                -(remaining[name] if remaining[name] is not None else float("-inf")),
-                name != preferred,
-                order_index[name],
-            )
-        )
+        candidates = self.provider_priority_order(previous_ai, remaining)
         previous = (previous_ai or "").capitalize()
-        if previous in candidates and len(candidates) > 1:
-            candidates = [name for name in candidates if name != previous] + [previous]
         if not candidates:
             return None
         name = candidates[0]
@@ -1086,6 +1083,37 @@ class Worker:
             effort=spec.effort,
             session_id=self.new_session_id(spec),
         )
+
+    def provider_priority_order(
+        self, previous_ai: str, remaining: dict[str, float | None]
+    ) -> list[str]:
+        """Enabled provider names that have capacity, best candidate first.
+
+        Most usage remaining wins, a named preferred provider breaks exact
+        ties, and the provider that completed the previous pass is pushed to
+        the back so a follow-up gets an independent reviewer. Both
+        ``choose_provider`` and the dynamic router work from this one order.
+        """
+        order_index = {spec.name: index for index, spec in enumerate(self.config.enabled_specs)}
+        preferred_key = self.preferred_provider_key()
+        preferred = next(
+            (spec.name for spec in self.config.enabled_specs if spec.key == preferred_key),
+            "",
+        )
+        candidates = [
+            spec.name for spec in self.config.enabled_specs if spec.name in remaining
+        ]
+        candidates.sort(
+            key=lambda name: (
+                -(remaining[name] if remaining[name] is not None else float("-inf")),
+                name != preferred,
+                order_index[name],
+            )
+        )
+        previous = (previous_ai or "").capitalize()
+        if previous in candidates and len(candidates) > 1:
+            candidates = [name for name in candidates if name != previous] + [previous]
+        return candidates
 
     def choose_handoff_provider(self, previous_choice: ProviderChoice, reason: str) -> ProviderChoice | None:
         """Pick a different enabled provider for an already-owned issue branch.
@@ -1662,34 +1690,101 @@ class Worker:
                 return
         self.apply_dynamic_routing()
 
+    def ensure_bot_auth(self) -> None:
+        """Fail early when the chosen provider cannot act as its GitHub App.
+
+        Called again after dynamic routing hands the issue to a different AI
+        tool, so the replacement is verified the same way the original was.
+        """
+        assert self.choice
+        if not self.config.require_bot_auth:
+            return
+        if not self.apps.configured(self.choice.key):
+            raise WorkerError(
+                f"Bot auth is required, but {self.choice.name} has no entry in {self.config.github_apps_config}"
+            )
+        # Resolve the installation for this repository's owner now, so a
+        # missing install fails here with a clear message instead of an
+        # opaque GraphQL permissions error partway through branch setup.
+        try:
+            self.apps.verify_installation(self.choice.key)
+        except RuntimeError as error:
+            log(
+                f"ERROR: GitHub App for {self.choice.name} cannot act on "
+                f"{self.config.github_repository}: {error}"
+            )
+            raise WorkerError(str(error)) from error
+
+    def routing_candidates(self) -> list[RouterCandidate]:
+        """Enabled AI tools the router may hand this issue to, best first.
+
+        Only tools with capacity this pass are offered, so a routing decision
+        can always be honoured. Once a branch is already owned (an in-progress
+        attempt) the tool is fixed and routing may still choose the model and
+        effort, but not a different tool.
+        """
+        assert self.choice
+        if self.in_progress_file.exists():
+            keys = [self.choice.key]
+        else:
+            keys = [name.lower() for name in self.provider_priority]
+            if not keys:
+                keys = [spec.key for spec in self.config.enabled_specs]
+            if self.choice.key not in keys:
+                keys.insert(0, self.choice.key)
+        candidates: list[RouterCandidate] = []
+        for key in keys:
+            spec = self.config.spec(key)
+            tiers = tuple(self.config.routing_tiers.get(key, ()))
+            if spec is None or not tiers:
+                continue
+            usage = self.provider_usages.get(spec.name)
+            candidates.append(
+                RouterCandidate(
+                    key=spec.key,
+                    name=spec.name,
+                    tiers=tiers,
+                    strengths=spec.strengths,
+                    usage_remaining=usage.remaining_percent if usage else None,
+                )
+            )
+        return candidates
+
     def apply_dynamic_routing(self) -> None:
         assert self.choice and self.issue
-        spec = self.config.require_spec(self.choice.key)
+        host = self.config.require_spec(self.choice.key)
         fallback_model = self.choice.model
         fallback_effort = self.choice.effort
         original_body = self.issue.body
-        prompt = build_router_prompt(
-            title=self.issue.title,
-            body=original_body,
-            labels=list(self.issue.labels),
-            provider=spec.key,
-            tiers=self.config.routing_tiers.get(spec.key, ()),
-        )
+        candidates = self.routing_candidates()
+        previous_provider = (self.issue.previous_ai or "").lower()
+        rework = self.issue.work_type == "followup"
         try:
+            prompt = build_router_prompt(
+                title=self.issue.title,
+                body=original_body,
+                labels=list(self.issue.labels),
+                candidates=candidates,
+                previous_provider=previous_provider,
+                rework=rework,
+            )
             raw = run_provider_router(
-                provider=spec.key,
-                bin_path=spec.bin or "",
-                model=spec.router_model,
-                effort=spec.router_effort,
+                provider=host.key,
+                bin_path=host.bin or "",
+                model=host.router_model,
+                effort=host.router_effort,
                 prompt=prompt,
                 cwd=self.config.repo_dir,
             )
             decision = resolve_routing_decision(
-                spec.key,
                 raw,
-                self.config.routing_tiers,
-                router_model=spec.router_model,
-                router_effort=spec.router_effort,
+                candidates,
+                default_provider=host.key,
+                router_provider=host.key,
+                router_model=host.router_model,
+                router_effort=host.router_effort,
+                previous_provider=previous_provider,
+                rework=rework,
             )
         except RouterError as error:
             log(
@@ -1697,21 +1792,18 @@ class Worker:
                 f"{fallback_model} / {fallback_effort}."
             )
             self.routing = fallback_routing_decision(
-                provider=spec.key,
+                provider=host.key,
+                provider_name=host.name,
                 model=fallback_model,
                 effort=fallback_effort,
                 reason=str(error),
-                router_model=spec.router_model,
-                router_effort=spec.router_effort,
+                router_model=host.router_model,
+                router_effort=host.router_effort,
+                router_provider=host.key,
+                candidates=[candidate.key for candidate in candidates],
             )
         else:
-            self.choice.model = str(decision["selected_model"])
-            self.choice.effort = str(decision["reasoning_effort"])
-            self.routing = decision
-            log(
-                f"Dynamic routing selected {self.choice.model} with effort {self.choice.effort} "
-                f"(grade {decision['prompt_grade']}, complexity {decision['complexity']}/10)."
-            )
+            self.adopt_routing_decision(decision)
         self.issue.body = original_body
         if self.in_progress_file.exists():
             self.update_state(
@@ -1719,6 +1811,38 @@ class Worker:
                 effort=self.choice.effort,
                 routing_decision=self.routing,
             )
+
+    def adopt_routing_decision(self, decision: dict[str, Any]) -> None:
+        """Apply a validated decision: the AI tool first, then model and effort."""
+        assert self.choice
+        selected = str(decision.get("provider") or self.choice.key)
+        if selected != self.choice.key:
+            spec = self.config.require_spec(selected)
+            reason = str(decision.get("provider_reason") or "").strip()
+            log(
+                f"Dynamic routing hands this issue to {spec.name} instead of {self.choice.name}"
+                + (f": {reason}" if reason else ".")
+            )
+            self.choice = ProviderChoice(
+                name=spec.name,
+                model=spec.model,
+                effort=spec.effort,
+                session_id=self.new_session_id(spec),
+            )
+            self.start_usage = self.provider_usages.get(spec.name)
+            self.ensure_bot_auth()
+        override = str(decision.get("provider_override_reason") or "").strip()
+        if override:
+            log(override)
+        self.choice.model = str(decision["selected_model"])
+        self.choice.effort = str(decision["reasoning_effort"])
+        self.routing = decision
+        log(
+            f"Dynamic routing selected {self.choice.name} {self.choice.model} with effort "
+            f"{self.choice.effort} (grade {decision['prompt_grade']}, complexity "
+            f"{decision['complexity']}/10, confidence "
+            f"{int(round(float(decision.get('confidence') or 0) * 100))}%)."
+        )
 
     def start_execution_history(self) -> None:
         assert self.issue and self.choice
@@ -3809,6 +3933,10 @@ class Worker:
                 for name, usage in usages.items()
                 if usage.usable
             }
+            self.provider_usages = usages
+            self.provider_priority = tuple(
+                self.provider_priority_order(self.issue.previous_ai, remaining)
+            )
             self.choice = self.choose_provider(self.issue.previous_ai, remaining)
             if not self.choice:
                 enabled = ", ".join(spec.name for spec in self.config.enabled_specs) or "no provider"
@@ -3821,25 +3949,13 @@ class Worker:
             self.start_usage = usages.get(self.choice.name)
 
         assert self.choice
-        if self.config.require_bot_auth:
-            if not self.apps.configured(self.choice.key):
-                raise WorkerError(
-                    f"Bot auth is required, but {self.choice.name} has no entry in {self.config.github_apps_config}"
-                )
-            # Resolve the installation for this repository's owner now, so a
-            # missing install fails here with a clear message instead of an
-            # opaque GraphQL permissions error partway through branch setup.
-            try:
-                self.apps.verify_installation(self.choice.key)
-            except RuntimeError as error:
-                log(
-                    f"ERROR: GitHub App for {self.choice.name} cannot act on "
-                    f"{self.config.github_repository}: {error}"
-                )
-                raise WorkerError(str(error)) from error
+        self.ensure_bot_auth()
         if self.config.dry_run:
             if self.config.dynamic_model_routing and not self.choice.resume:
-                log("Dry run: dynamic model routing is enabled and would grade this issue before execution.")
+                log(
+                    "Dry run: dynamic model routing is enabled and would grade this issue, then "
+                    "choose the AI tool, model, and reasoning effort before execution."
+                )
             log(f"Dry run complete: would run {self.choice.name} for {self.issue.url}.")
             return 0
 
@@ -3860,11 +3976,17 @@ class Worker:
                 iso_timestamp(),
             )
         elif self.routing:
-            self.history.note(
-                f"Dynamic routing selected {self.choice.model} with effort {self.choice.effort}; "
-                f"prompt grade {self.routing.get('prompt_grade')}.",
-                iso_timestamp(),
+            note = (
+                f"Dynamic routing selected {self.choice.name} {self.choice.model} with effort "
+                f"{self.choice.effort}; prompt grade {self.routing.get('prompt_grade')}."
             )
+            provider_reason = str(self.routing.get("provider_reason") or "").strip()
+            if provider_reason:
+                note += f" Why {self.choice.name}: {provider_reason}"
+            override = str(self.routing.get("provider_override_reason") or "").strip()
+            if override:
+                note += f" {override}"
+            self.history.note(note, iso_timestamp())
         self.history.update(iso_timestamp(), final_status="preparing_repository")
         run_start, recovery_mode, candidate, recovery_dirty = self.prepare_repository()
         # save_new_state may have created/replaced state after history started.
@@ -4280,6 +4402,13 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument(
             f"--{_key}-router-effort",
             default=env_value(f"SWARM_{_key.upper()}_ROUTER_EFFORT", default_router_effort(_key)),
+        )
+        parser.add_argument(
+            f"--{_key}-router-strengths",
+            default=env_value(
+                f"SWARM_{_key.upper()}_ROUTER_STRENGTHS", default_provider_strengths(_key)
+            ),
+            help=f"What {_key} is best at, weighed when the router picks an AI tool.",
         )
         parser.add_argument(
             f"--{_key}-bin",

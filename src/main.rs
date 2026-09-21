@@ -631,6 +631,7 @@ struct ResolvedProvider {
     effort: String,
     router_model: String,
     router_effort: String,
+    strengths: String,
     bin: PathBuf,
     enabled: bool,
 }
@@ -645,6 +646,7 @@ fn resolve_providers(config: &AppConfig) -> Vec<ResolvedProvider> {
             effort: provider.effort.clone(),
             router_model: provider.router_model.clone(),
             router_effort: provider.router_effort.clone(),
+            strengths: provider.strengths.clone(),
             bin: tools::find_executable(&provider.id, &provider.bin).unwrap_or_default(),
             enabled: provider.enabled,
         })
@@ -666,6 +668,10 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
         arguments.extend([
             format!("--{}-router-effort", provider.id),
             provider.router_effort.clone(),
+        ]);
+        arguments.extend([
+            format!("--{}-router-strengths", provider.id),
+            provider.strengths.clone(),
         ]);
         arguments.extend([
             format!("--{}-bin", provider.id),
