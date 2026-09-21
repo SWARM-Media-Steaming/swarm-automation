@@ -632,6 +632,10 @@ fn repo_worker_args_carries_per_repo_branch_config() {
         args.contains(&"--no-auto-promote".to_string()),
         "promotion into the human-owned branch is off unless asked for"
     );
+    assert!(
+        args.contains(&"--no-monitor-actions".to_string()),
+        "Actions monitoring is off unless asked for"
+    );
     assert!(args.contains(&"--no-require-issue-tests".to_string()));
     assert!(args.contains(&"--no-allow-environment-only-summary".to_string()));
     // The old delivery/merge flags are gone.
@@ -648,6 +652,17 @@ fn repo_worker_args_enables_auto_promote_only_when_configured() {
     let args = args_for(&repo);
     assert!(args.contains(&"--auto-promote".to_string()));
     assert!(!args.contains(&"--no-auto-promote".to_string()));
+}
+
+#[test]
+fn repo_worker_args_enables_monitor_actions_only_when_configured() {
+    let repo = RepoConfig {
+        monitor_actions: true,
+        ..repo("octocat/example")
+    };
+    let args = args_for(&repo);
+    assert!(args.contains(&"--monitor-actions".to_string()));
+    assert!(!args.contains(&"--no-monitor-actions".to_string()));
 }
 
 #[test]

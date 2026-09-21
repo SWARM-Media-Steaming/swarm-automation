@@ -100,6 +100,21 @@ The Overview's explicit **Merge to Main** action first reconciles `main` into
 `ai-main`, obtains a configured bot approval, and completes the promotion
 through GitHub's pull-request protections.
 
+### Monitoring GitHub Actions
+
+The per-repository **Monitor GitHub Actions and fix failing pipelines** toggle
+(off by default, on the Repository page) makes each worker run first look at the
+newest Actions run of every workflow on `ai-main`. If one failed (failure,
+timed out, or failed to start; in-progress and cancelled runs are ignored) and no
+CI-failure issue is already tracking it, the worker files one issue — labelled
+`bug` and `ci-failure`, assigned to the configured assignee, listing the failing
+runs and the tail of their logs — and works it in that same run through the
+normal start/complete/quota comments and delivery. The regular queue does not
+also select that issue in that run, and nothing new is filed while a
+`ci-failure` issue for the branch is open or was already filed for the same
+head commit. Runs are read with the operator's own `gh` sign-in; if they cannot
+be read, the worker logs it and carries on with the normal queue.
+
 ## Repository layout
 
 ```

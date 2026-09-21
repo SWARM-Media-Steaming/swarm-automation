@@ -724,6 +724,12 @@ fn repo_worker_args(
             "--no-auto-promote"
         }
         .into(),
+        if repo.monitor_actions {
+            "--monitor-actions"
+        } else {
+            "--no-monitor-actions"
+        }
+        .into(),
         if repo.require_issue_tests {
             "--require-issue-tests"
         } else {
