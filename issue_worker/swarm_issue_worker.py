@@ -7,8 +7,10 @@ shell worker so an upgrade can resume existing active and quota-paused runs.
 
 Providers are an open set (see ``KNOWN_PROVIDERS`` / ``ProviderSpec``): among
 whichever providers are enabled for the flow, a new issue goes to the one with
-the most usage remaining (so no account is drained before the others), while a
-follow-up review pass prefers a *different* provider than the previous one,
+the most usage remaining (so no account is drained before the others). A named
+``--preferred-provider`` wins only when remaining usage is tied. ``auto`` means
+the user has no favorite, so those ties follow the default provider order.
+A follow-up review pass prefers a *different* provider than the previous one,
 falling back to the same one only when it is the only one with capacity.
 
 All AI work happens on an integration branch (``--integration-branch``, default
@@ -100,6 +102,9 @@ KNOWN_PROVIDERS: tuple[tuple[str, str], ...] = (
 )
 KNOWN_PROVIDER_KEYS: tuple[str, ...] = tuple(key for key, _ in KNOWN_PROVIDERS)
 KNOWN_PROVIDER_NAMES: tuple[str, ...] = tuple(name for _, name in KNOWN_PROVIDERS)
+# No named favorite. New issues go to the provider with the most usage
+# remaining; exact ties follow KNOWN_PROVIDERS order.
+PREFERRED_PROVIDER_AUTO = "auto"
 BRANCH_PROVIDER_KEYS: tuple[str, ...] = tuple(
     "xai" if key == "grok" else key for key in KNOWN_PROVIDER_KEYS
 )
@@ -911,6 +916,14 @@ class Worker:
         # own thread id which run_ai captures from the first JSON event.
         return str(uuid.uuid4()) if spec.key in ("claude", "grok") else ""
 
+    def preferred_provider_key(self) -> str | None:
+        """Named tie-break provider, or None for ``auto`` / a provider that is off."""
+        key = self.config.preferred_provider.lower()
+        if key == PREFERRED_PROVIDER_AUTO:
+            return None
+        enabled = {spec.key for spec in self.config.enabled_specs}
+        return key if key in enabled else None
+
     def choose_provider(
         self, previous_ai: str, remaining: dict[str, float | None]
     ) -> ProviderChoice | None:
@@ -922,7 +935,9 @@ class Worker:
         Providers below the minimum or whose usage could not be read are absent.
 
         New issue: the provider with the most usage remaining is chosen, so no
-        single account is drained before the others.
+        single account is drained before the others. A named preferred provider
+        wins only an exact tie. ``auto`` (no preference) breaks those ties by
+        the default provider order instead.
 
         Follow-up (``previous_ai`` set): the provider that completed the previous
         pass is pushed to the back so the follow-up gets an independent
@@ -931,7 +946,11 @@ class Worker:
         """
         specs = {spec.name: spec for spec in self.config.enabled_specs}
         order_index = {spec.name: index for index, spec in enumerate(self.config.enabled_specs)}
-        preferred = self.config.preferred_provider.capitalize()
+        preferred_key = self.preferred_provider_key()
+        preferred = next(
+            (spec.name for spec in self.config.enabled_specs if spec.key == preferred_key),
+            "",
+        )
         candidates = [name for name in specs if name in remaining]
         candidates.sort(
             key=lambda name: (
@@ -971,7 +990,8 @@ class Worker:
         original provider's session.
         """
         specs = {spec.key: spec for spec in self.config.enabled_specs if spec.name != previous_choice.name}
-        order = [self.config.preferred_provider]
+        preferred = self.preferred_provider_key()
+        order = [preferred] if preferred else []
         order += [spec.key for spec in self.config.enabled_specs if spec.key not in order]
         replacement_spec = None
         for key in order:
@@ -2280,7 +2300,7 @@ class Worker:
         candidates = [s.key for s in self.config.enabled_specs if s.key != implementing_provider]
         if not candidates:
             return implementing_provider
-        preferred = self.config.preferred_provider.lower()
+        preferred = self.preferred_provider_key()
         return preferred if preferred in candidates else candidates[0]
 
     def provider_environment(self) -> dict[str, str]:
@@ -2576,8 +2596,8 @@ class Worker:
 
     def integration_push_environment(self, provider: str | None = None) -> dict[str, str]:
         """Bot env for pushing — the preferred provider's bot when configured,
-        else the current provider's, else empty."""
-        for key in (provider, self.config.preferred_provider, getattr(self.choice, "key", "")):
+        else the current provider's, else empty. ``auto`` is not a bot identity."""
+        for key in (provider, self.preferred_provider_key(), getattr(self.choice, "key", "")):
             if key and self.apps.configured(key):
                 return self.apps.bot_environment(key)
         return {}
@@ -3004,8 +3024,7 @@ class Worker:
         enabled = [spec.key for spec in self.config.enabled_specs]
         if not enabled:
             return None
-        preferred = self.config.preferred_provider.lower()
-        return preferred if preferred in enabled else enabled[0]
+        return self.preferred_provider_key() or enabled[0]
 
     def auto_promote_integration_branch(self, provider: str | None = None) -> str | None:
         """Best-effort roll-up of `integration_branch` into `base_branch`.
@@ -3797,8 +3816,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--preferred-provider",
-        choices=KNOWN_PROVIDER_KEYS,
+        choices=(*KNOWN_PROVIDER_KEYS, PREFERRED_PROVIDER_AUTO),
         default=env_value("SWARM_PREFERRED_PROVIDER", "claude").lower(),
+        help="Named tie-break provider, or 'auto' to always prefer the most usage remaining.",
     )
     parser.add_argument("--dry-run", action="store_true", default=env_bool("SWARM_ISSUE_WORKER_DRY_RUN"))
     parser.add_argument("--gh-bin", default=env_value("GH_BIN", executable_default("gh")))
@@ -3874,6 +3894,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_preferred_provider(preferred: str, enabled: Iterable[str]) -> str:
+    """Keep ``auto``. A named provider that is not enabled falls back to the
+    first known provider that is."""
+    preferred = preferred.lower()
+    enabled_set = set(enabled)
+    if preferred == PREFERRED_PROVIDER_AUTO or preferred in enabled_set:
+        return preferred
+    return next(key for key in KNOWN_PROVIDER_KEYS if key in enabled_set)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not 0 <= args.minimum_remaining_percent <= 100:
@@ -3883,13 +3913,13 @@ def main(argv: list[str] | None = None) -> int:
     enabled = set(args.enabled_provider or KNOWN_PROVIDER_KEYS)
     if not enabled:
         raise WorkerError("At least one --enabled-provider is required")
-    if args.preferred_provider not in enabled:
-        fallback = next(key for key in KNOWN_PROVIDER_KEYS if key in enabled)
+    resolved_preferred = resolve_preferred_provider(args.preferred_provider, enabled)
+    if resolved_preferred != args.preferred_provider:
         log(
             f"Preferred provider '{args.preferred_provider}' is not enabled; "
-            f"using '{fallback}' as the first choice."
+            f"using '{resolved_preferred}' as the tie-breaker."
         )
-        args.preferred_provider = fallback
+        args.preferred_provider = resolved_preferred
     config = Config.from_args(args)
     return Worker(config).run()
 

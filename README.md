@@ -20,7 +20,8 @@ The application can:
   **Grok Build** — giving each new issue to whichever included provider has the
   most usage remaining, and handing follow-up comments to a different agent than
   the one that did the previous pass; include/exclude each provider with a
-  switch on its card, and pick which one wins ties;
+  switch on its card. Choose **No preference** when you do not care who goes
+  first, or pick one provider to win ties when remaining usage is equal;
 - monitor multiple GitHub repositories in one scheduler, with an independent
   managed clone, assignee, branch policy, bot identities, and test scheduler for
   each repository;
