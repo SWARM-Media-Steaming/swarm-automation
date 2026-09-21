@@ -94,7 +94,7 @@ jobs:
           fi
 
   # Computed once and shared by every platform in the `release` matrix below
-  # so macOS/Windows/Linux publish under the identical tag/version — tauri-
+  # so macOS and Linux publish under the identical tag/version — tauri-
   # action appends each platform's artifacts (and latest.json entry) to the
   # one release that tag names, so a mismatched version per job would split
   # a single publish across multiple releases instead.
@@ -148,8 +148,9 @@ jobs:
             args: ''
           - platform: ubuntu-22.04
             args: ''
-          - platform: windows-latest
-            args: ''
+          # Windows is left out for now: the app supervises processes through
+          # Unix signals (libc::SIGKILL etc. in src/processes.rs), so it does
+          # not compile there yet. Add `windows-latest` back once it does.
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
