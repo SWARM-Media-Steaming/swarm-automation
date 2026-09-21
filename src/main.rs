@@ -653,10 +653,7 @@ fn resolve_providers(config: &AppConfig) -> Vec<ResolvedProvider> {
 /// Provider flags forwarded by the scheduler to every repository worker.
 /// Router settings travel even while dynamic routing is off so a later save
 /// can turn it on without the worker forgetting the configured router.
-fn provider_scheduler_arguments(
-    config: &AppConfig,
-    providers: &[ResolvedProvider],
-) -> Vec<String> {
+fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvider]) -> Vec<String> {
     let mut arguments = Vec::new();
     for provider in providers {
         arguments.extend([format!("--{}-model", provider.id), provider.model.clone()]);
@@ -2948,7 +2945,12 @@ fn grant_bot_branch_push(
     if !current.can_grant {
         return Ok(current);
     }
-    grant_apps_push_access(&gh, &repo.github_repository, &repo.base_branch, &current.apps)?;
+    grant_apps_push_access(
+        &gh,
+        &repo.github_repository,
+        &repo.base_branch,
+        &current.apps,
+    )?;
     inspect_bot_branch_push(&gh, &repo)
 }
 
@@ -3088,7 +3090,10 @@ fn decide_bot_push_access(
             can_grant: false,
         };
     };
-    let Some(restrictions) = protection.get("restrictions").filter(|value| !value.is_null()) else {
+    let Some(restrictions) = protection
+        .get("restrictions")
+        .filter(|value| !value.is_null())
+    else {
         return PushAccessDecision {
             state: "unrestricted",
             apps: Vec::new(),
@@ -3251,14 +3256,8 @@ fn read_branch_protection(
     repository: &str,
     branch: &str,
 ) -> Result<Option<serde_json::Value>, String> {
-    let value = gh_api(
-        gh,
-        &[
-            "api".into(),
-            protection_api_path(repository, branch),
-        ],
-    )
-    .map_err(|error| format!("Could not read branch protection for {branch}: {error}"))?;
+    let value = gh_api(gh, &["api".into(), protection_api_path(repository, branch)])
+        .map_err(|error| format!("Could not read branch protection for {branch}: {error}"))?;
     if value.is_null() {
         Ok(None)
     } else {
@@ -3303,15 +3302,18 @@ fn grant_apps_push_access(
         "api".into(),
         "--method".into(),
         "PUT".into(),
-        format!("{}/restrictions/apps", protection_api_path(repository, branch)),
+        format!(
+            "{}/restrictions/apps",
+            protection_api_path(repository, branch)
+        ),
     ];
     for slug in apps {
         args.push("--raw-field".into());
         args.push(format!("apps[]={slug}"));
     }
-    gh_api(gh, &args).map(|_| ()).map_err(|error| {
-        format!("Could not update who can push to {branch}: {error}")
-    })
+    gh_api(gh, &args)
+        .map(|_| ())
+        .map_err(|error| format!("Could not update who can push to {branch}: {error}"))
 }
 
 /// The open `integration -> base` promotion pull request for `repo`, as
