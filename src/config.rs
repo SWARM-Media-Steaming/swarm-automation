@@ -48,6 +48,71 @@ pub fn repo_slug(github_repository: &str) -> String {
         .collect()
 }
 
+/// One complexity band for dynamic model routing. The worker model and effort
+/// for a score come from the band that contains it. Keep these defaults in
+/// sync with `issue_worker/dynamic_router.py`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoutingTier {
+    pub min_complexity: u8,
+    pub max_complexity: u8,
+    pub model: String,
+    pub effort: String,
+}
+
+fn routing_tier(min: u8, max: u8, model: &str, effort: &str) -> RoutingTier {
+    RoutingTier {
+        min_complexity: min,
+        max_complexity: max,
+        model: model.into(),
+        effort: effort.into(),
+    }
+}
+
+/// Suggested router model and its reasoning effort for one provider.
+fn router_preset(id: &str) -> (&str, &str) {
+    match id {
+        "claude" => ("claude-haiku-4-5", "low"),
+        "codex" => ("gpt-5.6-luna", "low"),
+        "grok" => ("grok-4.3", "low"),
+        _ => ("", "low"),
+    }
+}
+
+/// Built-in complexity bands. An empty saved table is filled from this on
+/// normalize so the mapping stays in config instead of being scattered
+/// through the worker.
+pub fn default_routing_tiers() -> HashMap<String, Vec<RoutingTier>> {
+    HashMap::from([
+        (
+            "claude".into(),
+            vec![
+                routing_tier(1, 3, "claude-haiku-4-5", "low"),
+                routing_tier(4, 6, "claude-sonnet-5", "medium"),
+                routing_tier(7, 8, "claude-opus-5", "high"),
+                routing_tier(9, 10, "claude-opus-5", "max"),
+            ],
+        ),
+        (
+            "codex".into(),
+            vec![
+                routing_tier(1, 3, "gpt-5.6-luna", "low"),
+                routing_tier(4, 6, "gpt-5.6-terra", "medium"),
+                routing_tier(7, 8, "gpt-5.6-sol", "high"),
+                routing_tier(9, 10, "gpt-6-astra", "xhigh"),
+            ],
+        ),
+        (
+            "grok".into(),
+            vec![
+                routing_tier(1, 3, "grok-4.3", "low"),
+                routing_tier(4, 6, "grok-4.6", "medium"),
+                routing_tier(7, 8, "grok-4.6", "high"),
+                routing_tier(9, 10, "grok-4.6", "xhigh"),
+            ],
+        ),
+    ])
+}
+
 /// Per-provider settings. One entry per id in [`KNOWN_PROVIDERS`]. `enabled`
 /// is the "include this provider in the flow" switch; a disabled provider is
 /// never selected by the worker and drops out of the readiness checks and the
@@ -59,6 +124,11 @@ pub struct ProviderSettings {
     pub enabled: bool,
     pub model: String,
     pub effort: String,
+    /// Model that grades an issue and picks a worker model when dynamic
+    /// routing is on. Ignored while routing is off.
+    pub router_model: String,
+    /// Reasoning effort for [`Self::router_model`].
+    pub router_effort: String,
     /// Executable path override; empty means auto-detect on PATH.
     pub bin: String,
 }
@@ -70,6 +140,8 @@ impl Default for ProviderSettings {
             enabled: true,
             model: String::new(),
             effort: "high".into(),
+            router_model: String::new(),
+            router_effort: "low".into(),
             bin: String::new(),
         }
     }
@@ -83,11 +155,14 @@ impl ProviderSettings {
             "grok" => ("grok-4.6", "low"),
             _ => ("", "high"),
         };
+        let (router_model, router_effort) = router_preset(id);
         Self {
             id: id.into(),
             enabled: true,
             model: model.into(),
             effort: effort.into(),
+            router_model: router_model.into(),
+            router_effort: router_effort.into(),
             bin: String::new(),
         }
     }
@@ -348,6 +423,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub providers: Vec<ProviderSettings>,
 
+    /// When on, the issue worker asks the configured router model to grade
+    /// each new issue and then runs the worker model from [`Self::routing_tiers`].
+    /// Off preserves the manually selected worker model and effort.
+    pub dynamic_model_routing: bool,
+    /// Per-provider complexity bands. Empty until [`Self::normalize`] fills
+    /// the built-in table, which a saved config can replace.
+    pub routing_tiers: HashMap<String, Vec<RoutingTier>>,
+
     pub minimum_remaining_percent: u8,
     /// One issue worker per repository, running at the same time, instead of a
     /// single worker that visits each repository in turn. Faster when several
@@ -446,6 +529,8 @@ impl Default for AppConfig {
             workspace_root: String::new(),
             preferred_provider: "claude".into(),
             providers: default_providers(),
+            dynamic_model_routing: false,
+            routing_tiers: default_routing_tiers(),
             minimum_remaining_percent: 10,
             parallel_repo_workers: false,
             ai_execution_history_enabled: false,
@@ -520,6 +605,7 @@ impl AppConfig {
         }
 
         self.validate_providers()?;
+        self.validate_routing()?;
         if !matches!(
             self.schedule_mode.as_str(),
             "continuous" | "daily" | "weekdays" | "custom" | "manual"
@@ -590,6 +676,53 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Dynamic routing is optional. While it is on, every enabled provider
+    /// needs a router model and tiers that cover complexity 1 through 10 so
+    /// the worker never has to invent a model.
+    fn validate_routing(&self) -> Result<(), String> {
+        if !self.dynamic_model_routing {
+            return Ok(());
+        }
+        for provider in self.enabled_providers() {
+            if provider.router_model.trim().is_empty() {
+                return Err(format!(
+                    "{} router model cannot be empty while dynamic model routing is on.",
+                    provider_label(&provider.id),
+                ));
+            }
+            let Some(tiers) = self.routing_tiers.get(&provider.id) else {
+                return Err(format!(
+                    "{} has no dynamic routing tiers.",
+                    provider_label(&provider.id),
+                ));
+            };
+            let mut covered = [false; 11];
+            for tier in tiers {
+                if tier.min_complexity == 0
+                    || tier.max_complexity > 10
+                    || tier.min_complexity > tier.max_complexity
+                    || tier.model.trim().is_empty()
+                    || tier.effort.trim().is_empty()
+                {
+                    return Err(format!(
+                        "{} routing tiers must use complexity 1–10 and name a model and effort.",
+                        provider_label(&provider.id),
+                    ));
+                }
+                for score in tier.min_complexity..=tier.max_complexity {
+                    covered[score as usize] = true;
+                }
+            }
+            if (1..=10).any(|score| !covered[score as usize]) {
+                return Err(format!(
+                    "{} routing tiers must cover complexity 1 through 10.",
+                    provider_label(&provider.id),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// `auto` is always allowed. A named provider must be one of the enabled
     /// providers so the worker is not pinned to something the user turned off.
     fn preference_targets_enabled_provider(&self, preferred: &str) -> bool {
@@ -618,6 +751,7 @@ impl AppConfig {
     /// transitional fields so they never round-trip.
     pub fn normalize(&mut self) {
         self.normalize_providers();
+        self.normalize_routing();
         self.normalize_repositories();
         // "off" was removed: every config that had it silently becomes
         // "notify" rather than failing validation on load.
@@ -647,17 +781,17 @@ impl AppConfig {
             self.providers = vec![
                 ProviderSettings {
                     id: "claude".into(),
-                    enabled: true,
                     model: legacy(&self.claude_model, "claude"),
                     effort: legacy_effort(&self.claude_effort, "claude"),
                     bin: std::mem::take(&mut self.claude_bin),
+                    ..ProviderSettings::preset("claude")
                 },
                 ProviderSettings {
                     id: "codex".into(),
-                    enabled: true,
                     model: legacy(&self.codex_model, "codex"),
                     effort: legacy_effort(&self.codex_effort, "codex"),
                     bin: std::mem::take(&mut self.codex_bin),
+                    ..ProviderSettings::preset("codex")
                 },
                 ProviderSettings::preset("grok"),
             ];
@@ -665,6 +799,15 @@ impl AppConfig {
         for id in KNOWN_PROVIDERS {
             if self.provider(id).is_none() {
                 self.providers.push(ProviderSettings::preset(id));
+            }
+        }
+        for provider in &mut self.providers {
+            let (router_model, router_effort) = router_preset(&provider.id);
+            if provider.router_model.trim().is_empty() {
+                provider.router_model = router_model.into();
+            }
+            if provider.router_effort.trim().is_empty() {
+                provider.router_effort = router_effort.into();
             }
         }
         self.claude_model.clear();
@@ -676,6 +819,15 @@ impl AppConfig {
         match canonicalize_preferred_provider(&self.preferred_provider) {
             Some(value) if !value.is_empty() => self.preferred_provider = value,
             _ => self.preferred_provider = "claude".into(),
+        }
+    }
+
+    fn normalize_routing(&mut self) {
+        for (id, tiers) in default_routing_tiers() {
+            let slot = self.routing_tiers.entry(id).or_default();
+            if slot.is_empty() {
+                *slot = tiers;
+            }
         }
     }
 
@@ -1015,6 +1167,54 @@ mod tests {
             .validate_providers()
             .unwrap_err()
             .contains("model cannot be empty"));
+    }
+
+    #[test]
+    fn dynamic_routing_defaults_off_and_persists_router_settings() {
+        let mut config = config_with_one_repo();
+        config.normalize();
+        assert!(!config.dynamic_model_routing);
+        assert_eq!(
+            config.provider("claude").unwrap().router_model,
+            "claude-haiku-4-5"
+        );
+        assert_eq!(config.provider("codex").unwrap().router_effort, "low");
+        assert_eq!(config.provider("grok").unwrap().router_model, "grok-4.3");
+        let codex_tiers = &config.routing_tiers["codex"];
+        assert!(codex_tiers.iter().any(|tier| {
+            tier.model == "gpt-5.6-sol" && tier.min_complexity == 7 && tier.effort == "high"
+        }));
+        assert!(config.validate().is_ok());
+
+        config.dynamic_model_routing = true;
+        config.provider_mut("grok").unwrap().router_model = "grok-4.6".into();
+        config.provider_mut("grok").unwrap().router_effort = "low".into();
+        let encoded = serde_json::to_string(&config).unwrap();
+        let mut decoded: AppConfig = serde_json::from_str(&encoded).unwrap();
+        decoded.normalize();
+        assert!(decoded.dynamic_model_routing);
+        assert_eq!(decoded.provider("grok").unwrap().router_model, "grok-4.6");
+        assert!(decoded.validate().is_ok());
+
+        decoded.routing_tiers.get_mut("claude").unwrap().clear();
+        decoded.normalize();
+        assert_eq!(decoded.routing_tiers["claude"].len(), 4);
+        decoded.routing_tiers.get_mut("claude").unwrap().pop();
+        assert!(decoded
+            .validate()
+            .unwrap_err()
+            .contains("cover complexity 1 through 10"));
+
+        let mut older: AppConfig =
+            serde_json::from_str(r#"{"dynamic_model_routing": false}"#).unwrap();
+        assert!(!older.dynamic_model_routing);
+        assert!(older.providers.is_empty());
+        older.normalize();
+        assert_eq!(
+            older.provider("claude").unwrap().router_model,
+            "claude-haiku-4-5"
+        );
+        assert_eq!(older.routing_tiers["codex"][2].model, "gpt-5.6-sol");
     }
 
     #[test]

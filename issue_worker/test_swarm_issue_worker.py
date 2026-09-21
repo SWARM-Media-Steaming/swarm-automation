@@ -8,6 +8,7 @@ import datetime as dt
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -26,6 +27,7 @@ from ai_execution_history import (
     main as execution_history_main,
     sanitize_text,
 )
+from dynamic_router import RouterError
 from swarm_issue_worker import (
     Config,
     ISSUE_COMPLETED_EXIT_CODE,
@@ -80,6 +82,9 @@ class WorkerTestCase(unittest.TestCase):
             "--auto-approve" if auto else "--no-auto-approve",
             "--auto-merge" if auto else "--no-auto-merge",
             "--no-require-bot-auth",
+            "--no-dynamic-model-routing",
+            "--routing-tiers",
+            "",
         ]
 
     def tearDown(self) -> None:
@@ -1984,8 +1989,229 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("**Codex Bot** started working on this issue", body)
         self.assertIn("- Model: `test-model`", body)
         self.assertIn("- Branch: `ai/codex/issue-407`", body)
+        self.assertNotIn("SWARM AI Routing", body)
         self.assertTrue(is_worker_comment({"body": body}))
         self.assertTrue(self.worker.read_state()["started_comment_posted"])
+
+    def _routing_payload(self, **overrides: object) -> str:
+        payload: dict[str, object] = {
+            "task_type": "debugging",
+            "complexity": 7,
+            "risk": "medium",
+            "context_requirement": "large",
+            "selected_model": "gpt-5.6-luna",
+            "reasoning_effort": "low",
+            "confidence": 0.91,
+            "prompt_grade": "B+",
+            "grade_reason": "Clear objective and context, but acceptance criteria are incomplete.",
+        }
+        payload.update(overrides)
+        return json.dumps(payload)
+
+    def test_dynamic_routing_defaults_off_and_keeps_the_manual_model(self) -> None:
+        self.assertFalse(self.worker.config.dynamic_model_routing)
+        self.assertEqual(self.worker.config.spec("claude").router_model, "claude-haiku-4-5")
+        self.assertEqual(self.worker.config.spec("codex").router_model, "gpt-5.6-luna")
+        self.assertEqual(self.worker.config.spec("codex").router_effort, "low")
+        self.assertEqual(self.worker.config.spec("grok").router_model, "grok-4.3")
+        self.worker.issue = IssueContext(501, "Manual", "ORIGINAL", [], "https://example.invalid/501")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "")
+        with mock.patch("swarm_issue_worker.run_provider_router") as router:
+            self.worker.maybe_apply_dynamic_routing()
+        router.assert_not_called()
+        self.assertIsNone(self.worker.routing)
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
+        self.assertEqual(self.worker.choice.effort, "medium")
+        self.assertEqual(self.worker.issue.body, "ORIGINAL")
+
+    def test_dynamic_routing_selects_the_tier_and_leaves_the_worker_prompt_unchanged(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        body = "Keep this sentence exactly.\nAcceptance: the toggle persists."
+        self.worker.issue = IssueContext(502, "Route me", body, ["enhancement"], "https://example.invalid/502")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-502")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        before = self.worker.build_prompt(False, "", False)
+        with mock.patch("swarm_issue_worker.run_provider_router", return_value=self._routing_payload()) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        router.assert_called_once()
+        self.assertIn(body, router.call_args.kwargs["prompt"])
+        self.assertEqual(self.worker.issue.body, body)
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
+        self.assertEqual(self.worker.choice.effort, "high")
+        self.assertFalse(self.worker.routing["fallback"])
+        self.assertEqual(self.worker.build_prompt(False, "", False), before)
+        self.assertEqual(self.worker.read_state()["model"], "gpt-5.6-sol")
+        self.assertEqual(self.worker.read_state()["routing_decision"]["prompt_grade"], "B+")
+
+    def test_dynamic_routing_falls_back_and_still_posts_the_configured_model(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        body = "ORIGINAL ISSUE"
+        self.worker.issue = IssueContext(503, "Fallback", body, [], "https://example.invalid/503")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-503")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            side_effect=RouterError("router returned an empty response"),
+        ):
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
+        self.assertEqual(self.worker.choice.effort, "medium")
+        self.assertTrue(self.worker.routing["fallback"])
+        self.assertEqual(self.worker.issue.body, body)
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_started_comment()
+        notice = github.call_args.args[2]
+        self.assertIn("SWARM AI Routing", notice)
+        self.assertIn("fell back", notice)
+        self.assertIn("Selected Model: GPT-5.6 Luna", notice)
+        self.assertIn("router returned an empty response", notice)
+
+    def test_dynamic_routing_comment_reports_the_grade_without_rewriting_the_issue(self) -> None:
+        self.worker.issue = IssueContext(504, "Graded", "ORIGINAL", [], "https://example.invalid/504")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-sol", "high", "session-504")
+        self.worker.routing = json.loads(self._routing_payload())
+        self.worker.routing.update(
+            {
+                "provider": "codex",
+                "selected_model": "gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "fallback": False,
+            }
+        )
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_started_comment()
+        notice = github.call_args.args[2]
+        self.assertIn("Prompt Grade: B+", notice)
+        self.assertIn("Complexity: 7/10", notice)
+        self.assertIn("Selected Model: GPT-5.6 Sol", notice)
+        self.assertIn("Reasoning: High", notice)
+        self.assertIn("Routing Confidence: 91%", notice)
+        self.assertIn("acceptance criteria are incomplete", notice)
+        self.assertEqual(self.worker.issue.body, "ORIGINAL")
+
+    def test_dynamic_routing_does_not_reroute_a_resumed_session(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(505, "Resume", "ORIGINAL", [], "https://example.invalid/505")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-505", resume=True)
+        with mock.patch("swarm_issue_worker.run_provider_router") as router:
+            self.worker.maybe_apply_dynamic_routing()
+        router.assert_not_called()
+        self.assertIsNone(self.worker.routing)
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
+
+    def test_invalid_routing_tier_json_is_rejected(self) -> None:
+        with self.assertRaises(WorkerError):
+            Config.from_args(build_parser().parse_args(self._worker_argv(auto=False) + ["--routing-tiers", "{"]))
+
+    def test_execution_history_stores_the_routing_decision(self) -> None:
+        database_path = self.state / "routing-history.sqlite3"
+        decision = {
+            "provider": "codex",
+            "task_type": "debugging",
+            "complexity": 7,
+            "risk": "medium",
+            "context_requirement": "large",
+            "selected_model": "gpt-5.6-sol",
+            "reasoning_effort": "high",
+            "confidence": 0.91,
+            "prompt_grade": "B+",
+            "grade_reason": "Clear objective and context, but acceptance criteria are incomplete.",
+            "fallback": False,
+        }
+        service = ExecutionHistoryService(True, database_path)
+        execution_id = service.start(
+            ExecutionStart(
+                repository="octocat/example",
+                issue_number=506,
+                issue_url="https://github.com/octocat/example/issues/506",
+                issue_title="Route",
+                issue_body="ORIGINAL",
+                provider="Codex",
+                model="gpt-5.6-sol",
+                effort="high",
+                branch_name="ai/codex/issue-506",
+                application_version="1.2.3",
+                routing_decision=decision,
+            ),
+            "2026-09-21T10:00:00-05:00",
+        )
+        repository = ExecutionHistoryRepository(database_path)
+        with repository.connect() as database:
+            row = database.execute(
+                "SELECT model, effort, routing_decision, original_issue_body FROM ai_executions "
+                "WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+        assert row is not None
+        self.assertEqual(row["model"], "gpt-5.6-sol")
+        self.assertEqual(row["effort"], "high")
+        self.assertEqual(row["original_issue_body"], "ORIGINAL")
+        self.assertEqual(json.loads(row["routing_decision"])["prompt_grade"], "B+")
+
+    def test_execution_history_migration_adds_routing_decision(self) -> None:
+        database_path = self.state / "legacy-history.sqlite3"
+        connection = sqlite3.connect(database_path)
+        connection.executescript(
+            """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO schema_migrations(version) VALUES (1);
+            CREATE TABLE ai_executions (
+                execution_id TEXT PRIMARY KEY,
+                repository TEXT NOT NULL,
+                issue_number INTEGER NOT NULL,
+                issue_url TEXT NOT NULL DEFAULT '',
+                issue_title TEXT NOT NULL,
+                original_issue_body TEXT NOT NULL,
+                effective_prompt TEXT NOT NULL DEFAULT '',
+                ai_provider TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                effort TEXT NOT NULL DEFAULT '',
+                reasoning_config TEXT NOT NULL DEFAULT '{}',
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                duration_seconds REAL,
+                requested_work_summary TEXT NOT NULL DEFAULT '',
+                changes_summary TEXT NOT NULL DEFAULT '',
+                files_changed TEXT NOT NULL DEFAULT '[]',
+                branch_name TEXT NOT NULL DEFAULT '',
+                commit_shas TEXT NOT NULL DEFAULT '[]',
+                pull_request_number INTEGER,
+                pull_request_url TEXT NOT NULL DEFAULT '',
+                operational_notes TEXT NOT NULL DEFAULT '[]',
+                warnings_errors TEXT NOT NULL DEFAULT '[]',
+                final_status TEXT NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                application_version TEXT NOT NULL DEFAULT '',
+                prompt_template_version TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                uploaded_at TEXT,
+                upload_status TEXT NOT NULL DEFAULT 'never_uploaded',
+                upload_error TEXT NOT NULL DEFAULT '',
+                uploaded_record_updated_at TEXT,
+                reviewer_feedback TEXT NOT NULL DEFAULT '',
+                reviewer_feedback_at TEXT,
+                UNIQUE(repository, issue_number, attempt_number)
+            );
+            """
+        )
+        connection.commit()
+        connection.close()
+        repository = ExecutionHistoryRepository(database_path)
+        with repository.connect() as database:
+            columns = {row[1] for row in database.execute("PRAGMA table_info(ai_executions)")}
+            versions = {row[0] for row in database.execute("SELECT version FROM schema_migrations")}
+        self.assertIn("routing_decision", columns)
+        self.assertIn(2, versions)
 
     def test_start_comment_reports_provider_usage_remaining(self) -> None:
         self.worker.issue = IssueContext(410, "Usage notice", "", [], "https://example.invalid/410")

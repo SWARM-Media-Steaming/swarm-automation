@@ -46,6 +46,17 @@ if str(SCRIPT_HOME) not in sys.path:
 
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
 from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
+from dynamic_router import (
+    RouterError,
+    build_router_prompt,
+    default_router_effort,
+    default_router_model,
+    fallback_routing_decision,
+    format_routing_notice,
+    load_routing_tiers,
+    resolve_routing_decision,
+    run_provider_router,
+)
 
 
 ISSUE_COMPLETED_EXIT_CODE = 10
@@ -276,6 +287,8 @@ class ProviderSpec:
     name: str           # "Claude" | "Codex" | "Grok"
     model: str
     effort: str
+    router_model: str
+    router_effort: str
     bin: str | None
     enabled: bool       # in the rotation for new work
 
@@ -286,6 +299,8 @@ class ProviderSpec:
             name=name,
             model=getattr(args, f"{key}_model"),
             effort=getattr(args, f"{key}_effort"),
+            router_model=getattr(args, f"{key}_router_model"),
+            router_effort=getattr(args, f"{key}_router_effort"),
             bin=getattr(args, f"{key}_bin") or None,
             enabled=key in set(args.enabled_provider or KNOWN_PROVIDER_KEYS),
         )
@@ -303,6 +318,8 @@ class Config:
     ready_label: str
     minimum_remaining_percent: float
     providers: tuple[ProviderSpec, ...]
+    dynamic_model_routing: bool
+    routing_tiers: dict[str, tuple[Any, ...]]
     preferred_provider: str
     dry_run: bool
     gh_bin: str
@@ -349,6 +366,8 @@ class Config:
             providers=tuple(
                 ProviderSpec.from_args(args, key, name) for key, name in KNOWN_PROVIDERS
             ),
+            dynamic_model_routing=bool(args.dynamic_model_routing),
+            routing_tiers=_routing_tiers_from_args(args.routing_tiers),
             preferred_provider=args.preferred_provider,
             dry_run=args.dry_run,
             gh_bin=args.gh_bin,
@@ -632,6 +651,7 @@ class Worker:
         self.github = GitHubClient(config, self.apps)
         self.choice: ProviderChoice | None = None
         self.issue: IssueContext | None = None
+        self.routing: dict[str, Any] | None = None
         self.quota_resume_ready = False
         # Remaining-usage snapshot for the chosen provider taken while selecting
         # it for a fresh run, reused by post_started_comment so the start notice
@@ -1383,6 +1403,8 @@ class Worker:
                 f"- Branch: `{self.expected_branch()}`\n"
                 f"- {self.choice.name} usage remaining: {self.format_usage_snapshot(usage_at_start)}\n"
             )
+            if self.routing:
+                body += "\n" + format_routing_notice(self.routing) + "\n"
             self.github.gh(
                 [
                     "issue",
@@ -1503,30 +1525,115 @@ class Worker:
         ]
 
     def save_new_state(self, issue: IssueContext, choice: ProviderChoice, base_sha: str) -> None:
-        self.write_state(
-            {
-                "issue_number": issue.number,
-                "issue_title": issue.title,
-                "issue_url": issue.url,
-                "base_sha": base_sha,
-                "branch_name": self.expected_branch(),
-                "work_type": issue.work_type,
-                "previous_commit_sha": issue.previous_commit_sha,
-                "previous_ai": issue.previous_ai,
-                "previous_completion_comment": issue.previous_completion_comment,
-                "followup_comments": issue.followup_comments,
-                "trigger_comment_id": issue.trigger_comment_id,
-                "ai_tool": choice.name,
-                "model": choice.model,
-                "effort": choice.effort,
-                "session_id": choice.session_id,
-                "session_comment_id": issue.trigger_comment_id or 0,
-                "status": "active",
-                "quota_pause_count": 0,
-                "started_at": iso_timestamp(),
-                "execution_id": self.history.execution_id,
-            }
+        state = {
+            "issue_number": issue.number,
+            "issue_title": issue.title,
+            "issue_url": issue.url,
+            "base_sha": base_sha,
+            "branch_name": self.expected_branch(),
+            "work_type": issue.work_type,
+            "previous_commit_sha": issue.previous_commit_sha,
+            "previous_ai": issue.previous_ai,
+            "previous_completion_comment": issue.previous_completion_comment,
+            "followup_comments": issue.followup_comments,
+            "trigger_comment_id": issue.trigger_comment_id,
+            "ai_tool": choice.name,
+            "model": choice.model,
+            "effort": choice.effort,
+            "session_id": choice.session_id,
+            "session_comment_id": issue.trigger_comment_id or 0,
+            "status": "active",
+            "quota_pause_count": 0,
+            "started_at": iso_timestamp(),
+            "execution_id": self.history.execution_id,
+        }
+        if self.routing:
+            state["routing_decision"] = self.routing
+        self.write_state(state)
+
+    def maybe_apply_dynamic_routing(self) -> None:
+        """Grade a new attempt and apply the configured complexity tier.
+
+        Resumed sessions keep the model they already started with. A retry of
+        an attempt that already recorded a decision reuses it. The original
+        issue text is not modified.
+        """
+        assert self.choice and self.issue
+        if not self.config.dynamic_model_routing or self.choice.resume:
+            self.routing = None
+            return
+        if self.in_progress_file.exists():
+            state = self.read_state()
+            stored = state.get("routing_decision")
+            if (
+                isinstance(stored, dict)
+                and stored.get("provider") == self.choice.key
+                and stored.get("selected_model")
+            ):
+                self.choice.model = str(state.get("model") or stored["selected_model"])
+                self.choice.effort = str(state.get("effort") or stored.get("reasoning_effort") or self.choice.effort)
+                self.routing = stored
+                log("Reusing the routing decision already recorded for this attempt.")
+                return
+        self.apply_dynamic_routing()
+
+    def apply_dynamic_routing(self) -> None:
+        assert self.choice and self.issue
+        spec = self.config.require_spec(self.choice.key)
+        fallback_model = self.choice.model
+        fallback_effort = self.choice.effort
+        original_body = self.issue.body
+        prompt = build_router_prompt(
+            title=self.issue.title,
+            body=original_body,
+            labels=list(self.issue.labels),
+            provider=spec.key,
+            tiers=self.config.routing_tiers.get(spec.key, ()),
         )
+        try:
+            raw = run_provider_router(
+                provider=spec.key,
+                bin_path=spec.bin or "",
+                model=spec.router_model,
+                effort=spec.router_effort,
+                prompt=prompt,
+                cwd=self.config.repo_dir,
+            )
+            decision = resolve_routing_decision(
+                spec.key,
+                raw,
+                self.config.routing_tiers,
+                router_model=spec.router_model,
+                router_effort=spec.router_effort,
+            )
+        except RouterError as error:
+            log(
+                f"Dynamic routing failed ({error}); using configured "
+                f"{fallback_model} / {fallback_effort}."
+            )
+            self.routing = fallback_routing_decision(
+                provider=spec.key,
+                model=fallback_model,
+                effort=fallback_effort,
+                reason=str(error),
+                router_model=spec.router_model,
+                router_effort=spec.router_effort,
+            )
+        else:
+            self.choice.model = str(decision["selected_model"])
+            self.choice.effort = str(decision["reasoning_effort"])
+            self.routing = decision
+            log(
+                f"Dynamic routing selected {self.choice.model} with effort {self.choice.effort} "
+                f"(grade {decision['prompt_grade']}, complexity {decision['complexity']}/10)."
+            )
+        self.issue.body = original_body
+        if self.in_progress_file.exists():
+            self.update_state(
+                model=self.choice.model,
+                effort=self.choice.effort,
+                routing_decision=self.routing,
+            )
 
     def start_execution_history(self) -> None:
         assert self.issue and self.choice
@@ -1549,6 +1656,7 @@ class Worker:
                 branch_name=branch,
                 application_version=self.config.application_version,
                 prompt_template_version=PROMPT_TEMPLATE_VERSION,
+                routing_decision=self.routing,
             ),
             iso_timestamp(),
         )
@@ -3374,13 +3482,6 @@ class Worker:
             self.start_usage = usages.get(self.choice.name)
 
         assert self.choice
-        if self.choice.resume:
-            log(
-                f"Pinned {self.choice.name} model {self.choice.model} session {self.choice.session_id} "
-                f"with effort {self.choice.effort} for this continuation."
-            )
-        else:
-            log(f"Selected {self.choice.name} model {self.choice.model} with effort {self.choice.effort} for this run.")
         if self.config.require_bot_auth:
             if not self.apps.configured(self.choice.key):
                 raise WorkerError(
@@ -3398,10 +3499,33 @@ class Worker:
                 )
                 raise WorkerError(str(error)) from error
         if self.config.dry_run:
+            if self.config.dynamic_model_routing and not self.choice.resume:
+                log("Dry run: dynamic model routing is enabled and would grade this issue before execution.")
             log(f"Dry run complete: would run {self.choice.name} for {self.issue.url}.")
             return 0
 
+        self.maybe_apply_dynamic_routing()
+        if self.choice.resume:
+            log(
+                f"Pinned {self.choice.name} model {self.choice.model} session {self.choice.session_id} "
+                f"with effort {self.choice.effort} for this continuation."
+            )
+        else:
+            log(f"Selected {self.choice.name} model {self.choice.model} with effort {self.choice.effort} for this run.")
+
         self.start_execution_history()
+        if self.routing and self.routing.get("fallback"):
+            self.history.warning(
+                "Dynamic routing fell back to the configured worker model: "
+                f"{self.routing.get('grade_reason') or 'router unavailable'}",
+                iso_timestamp(),
+            )
+        elif self.routing:
+            self.history.note(
+                f"Dynamic routing selected {self.choice.model} with effort {self.choice.effort}; "
+                f"prompt grade {self.routing.get('prompt_grade')}.",
+                iso_timestamp(),
+            )
         self.history.update(iso_timestamp(), final_status="preparing_repository")
         run_start, recovery_mode, candidate, recovery_dirty = self.prepare_repository()
         # save_new_state may have created/replaced state after history started.
@@ -3753,6 +3877,13 @@ def executable_default(name: str) -> str:
     return shutil.which(name) or ""
 
 
+def _routing_tiers_from_args(raw: str) -> dict[str, tuple[Any, ...]]:
+    try:
+        return load_routing_tiers(raw)
+    except ValueError as error:
+        raise WorkerError(str(error)) from error
+
+
 def build_parser() -> argparse.ArgumentParser:
     script_dir = SCRIPT_HOME
     home = Path.home()
@@ -3804,6 +3935,14 @@ def build_parser() -> argparse.ArgumentParser:
             default=env_value(f"SWARM_{_key.upper()}_EFFORT", _provider_effort_defaults[_key]),
         )
         parser.add_argument(
+            f"--{_key}-router-model",
+            default=env_value(f"SWARM_{_key.upper()}_ROUTER_MODEL", default_router_model(_key)),
+        )
+        parser.add_argument(
+            f"--{_key}-router-effort",
+            default=env_value(f"SWARM_{_key.upper()}_ROUTER_EFFORT", default_router_effort(_key)),
+        )
+        parser.add_argument(
             f"--{_key}-bin",
             default=env_value(f"{_key.upper()}_BIN", executable_default(_key)),
         )
@@ -3819,6 +3958,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(*KNOWN_PROVIDER_KEYS, PREFERRED_PROVIDER_AUTO),
         default=env_value("SWARM_PREFERRED_PROVIDER", "claude").lower(),
         help="Named tie-break provider, or 'auto' to always prefer the most usage remaining.",
+    )
+    parser.add_argument(
+        "--dynamic-model-routing",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_DYNAMIC_MODEL_ROUTING", False),
+        help="Grade each new issue and choose the worker model from the routing tiers.",
+    )
+    parser.add_argument(
+        "--routing-tiers",
+        default=env_value("SWARM_ROUTING_TIERS", ""),
+        help="JSON object of per-provider complexity tiers. Empty uses the built-in table.",
     )
     parser.add_argument("--dry-run", action="store_true", default=env_bool("SWARM_ISSUE_WORKER_DRY_RUN"))
     parser.add_argument("--gh-bin", default=env_value("GH_BIN", executable_default("gh")))

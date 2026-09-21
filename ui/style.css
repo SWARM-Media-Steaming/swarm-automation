@@ -249,6 +249,8 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .provider-preference-choice:has(input:checked) { border-color: rgba(141,112,255,.55); }
 .provider-preference-choice:has(input:disabled) { opacity: .45; cursor: not-allowed; }
 .provider-preference-choice:has(input:disabled) input { cursor: not-allowed; }
+.dynamic-routing-panel { margin: 0 0 16px; }
+.dynamic-routing-panel .toggle strong { letter-spacing: .04em; }
 .provider-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); gap: 14px; margin-bottom: 22px; }
 .provider-card { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 12px; padding: 17px; display: flex; flex-direction: column; gap: 12px; }
 .provider-card.excluded { opacity: .55; }
@@ -260,6 +262,9 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .provider-card.excluded .provider-badge { color: var(--muted-2); }
 .provider-fields { display: grid; gap: 10px; }
 .provider-fields label { font-size: 9px; }
+.provider-fields label.is-disabled { opacity: .5; }
+.provider-fields select:disabled { cursor: not-allowed; }
+.dynamic-routing-note { margin: 0; }
 .provider-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: auto; }
 .provider-actions button { padding: 7px 11px; font-size: 9px; }
 
