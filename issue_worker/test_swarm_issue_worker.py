@@ -1561,6 +1561,93 @@ class WorkerTestCase(unittest.TestCase):
             self.git("branch", "--format=%(refname:short)").splitlines(),
         )
 
+    def test_untracked_swarm_draft_does_not_block_new_issue_work(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(57, "Reference ROMs", "", [], "https://example.invalid/57")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+        (self.repo / ".swarm").mkdir()
+        draft = self.repo / ".swarm" / "tests.json"
+        draft.write_text('{"version": 1}\n', encoding="utf-8")
+
+        run_start, recovery, _, dirty = worker.prepare_repository()
+
+        self.assertFalse(recovery)
+        self.assertFalse(dirty)
+        self.assertEqual(run_start, self.git("rev-parse", "ai-main"))
+        self.assertEqual(self.git("branch", "--show-current"), "ai/claude/issue-57")
+        self.assertEqual(draft.read_text(encoding="utf-8"), '{"version": 1}\n')
+        self.assertEqual(self.git("status", "--porcelain"), "?? .swarm/")
+        self.assertNotIn(".swarm/tests.json", self.git("ls-files").splitlines())
+
+    def test_tracked_swarm_edit_still_defers_new_issue_work(self) -> None:
+        (self.repo / ".swarm").mkdir()
+        definition = self.repo / ".swarm" / "tests.json"
+        definition.write_text('{"version": 1}\n', encoding="utf-8")
+        self.git("add", ".swarm/tests.json")
+        self.git("commit", "-q", "-m", "track the test definition")
+        definition.write_text('{"version": 1, "changed": true}\n', encoding="utf-8")
+        worker = self.pr_worker()
+        worker.issue = IssueContext(58, "Should wait", "", [], "https://example.invalid/58")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+
+        with self.assertRaises(SystemExit) as raised:
+            worker.prepare_repository()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertFalse(worker.in_progress_file.exists())
+        self.assertEqual(self.git("branch", "--show-current"), "main")
+        self.assertIn("changed", definition.read_text(encoding="utf-8"))
+
+    def test_other_untracked_file_still_defers_new_issue_work(self) -> None:
+        (self.repo / "scratch.txt").write_text("not the app draft\n", encoding="utf-8")
+        worker = self.pr_worker()
+        worker.issue = IssueContext(60, "Should wait", "", [], "https://example.invalid/60")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+
+        with self.assertRaises(SystemExit) as raised:
+            worker.prepare_repository()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertFalse(worker.in_progress_file.exists())
+        self.assertTrue((self.repo / "scratch.txt").is_file())
+
+    def test_issue_commit_leaves_the_untracked_swarm_draft_out(self) -> None:
+        worker = self.pr_worker()
+        worker.issue = IssueContext(59, "Commit beside draft", "", [], "https://example.invalid/59")
+        worker.choice = ProviderChoice("Claude", "test", "high", "session")
+        run_start, _, _, _ = worker.prepare_repository()
+        (self.repo / "completed.txt").write_text("done\n", encoding="utf-8")
+        draft = self.repo / ".swarm" / "tests.json"
+        draft.parent.mkdir()
+        draft.write_text('{"version": 1}\n', encoding="utf-8")
+
+        committed = worker.commit_completed_work(run_start)
+
+        self.assertNotEqual(committed, run_start)
+        committed_files = self.git("show", "--name-only", "--format=", "HEAD").splitlines()
+        self.assertEqual(committed_files, ["completed.txt"])
+        self.assertEqual(draft.read_text(encoding="utf-8"), '{"version": 1}\n')
+        self.assertEqual(self.git("status", "--porcelain"), "?? .swarm/")
+        self.assertEqual(worker.worktree_status(), "")
+
+    def test_pause_stash_leaves_the_untracked_swarm_draft_in_place(self) -> None:
+        self.git("switch", "-q", "-c", "ai/claude/issue-101")
+        self.worker.write_state(self.paused_state())
+        (self.repo / "tracked.txt").write_text("base\npaused change\n", encoding="utf-8")
+        draft = self.repo / ".swarm" / "tests.json"
+        draft.parent.mkdir()
+        draft.write_text('{"version": 1}\n', encoding="utf-8")
+
+        self.worker.suspend_paused()
+
+        self.assertEqual(draft.read_text(encoding="utf-8"), '{"version": 1}\n')
+        self.assertEqual(self.git("status", "--porcelain"), "?? .swarm/")
+        self.assertEqual((self.repo / "tracked.txt").read_text(encoding="utf-8"), "base\n")
+        paused_file = self.worker.paused_dir / "101.json"
+        self.worker.restore_paused(paused_file)
+        self.assertIn("paused change", (self.repo / "tracked.txt").read_text(encoding="utf-8"))
+        self.assertEqual(draft.read_text(encoding="utf-8"), '{"version": 1}\n')
+
     def test_worker_commits_uncommitted_completed_work_with_the_tool_prefix(self) -> None:
         worker = self.pr_worker()
         worker.issue = IssueContext(403, "Commit completed files", "", [], "https://example.invalid/403")

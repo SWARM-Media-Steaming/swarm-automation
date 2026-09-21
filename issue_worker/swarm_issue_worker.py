@@ -105,6 +105,16 @@ BRANCH_PROVIDER_KEYS: tuple[str, ...] = tuple(
 )
 
 
+def app_owned_untracked_line(line: str) -> bool:
+    """True when a porcelain line is an untracked path under ``.swarm/``."""
+    if not line.startswith("?? "):
+        return False
+    path = line[3:]
+    if path.startswith('"') and path.endswith('"') and len(path) >= 2:
+        path = path[1:-1]
+    return path == ".swarm" or path.startswith(".swarm/")
+
+
 def ai_tool_key(provider_key: str) -> str:
     """Stable identifier used in Git branch names and commit subjects."""
     return "xai" if provider_key == "grok" else provider_key
@@ -634,6 +644,30 @@ class Worker:
             [self.config.git_bin, "-C", self.config.repo_dir, *arguments], env=env, check=check
         ).stdout.strip()
 
+    def worktree_status(self) -> str:
+        """Porcelain lines that are real checkout work.
+
+        The desktop app writes an untracked test-definition draft under
+        ``.swarm/``. That draft must not block a new issue and must not be
+        committed onto an issue branch. A change to a file Git already tracks
+        under ``.swarm/`` still counts.
+        """
+        lines = [
+            line
+            for line in self.git("status", "--porcelain").splitlines()
+            if line and not app_owned_untracked_line(line)
+        ]
+        return "\n".join(lines)
+
+    def app_owned_untracked_paths(self) -> list[str]:
+        return [
+            path
+            for path in self.git(
+                "ls-files", "--others", "--exclude-standard", "-z", "--", ".swarm", check=False
+            ).split("\0")
+            if path
+        ]
+
     def git_ok(self, *arguments: str) -> bool:
         return run_command(
             [self.config.git_bin, "-C", self.config.repo_dir, *arguments], check=False
@@ -1046,10 +1080,22 @@ class Worker:
         if paused_file.exists():
             raise WorkerError(f"A quota-paused state already exists for issue #{issue_number}: {paused_file}")
         stash_oid = ""
-        if self.git("status", "--porcelain"):
-            self.git("stash", "push", "--include-untracked", "--message", f"swarm issue worker paused #{issue_number}")
+        if self.worktree_status():
+            # Leave the app's untracked .swarm/ draft in place. Stashing it
+            # would hide the test definition for every other issue that runs
+            # while this one is paused.
+            self.git(
+                "stash",
+                "push",
+                "--include-untracked",
+                "--message",
+                f"swarm issue worker paused #{issue_number}",
+                "--",
+                ".",
+                ":(exclude).swarm",
+            )
             stash_oid = self.git("rev-parse", "refs/stash")
-            if self.git("status", "--porcelain"):
+            if self.worktree_status():
                 raise WorkerError(f"Could not shelve all work for quota-paused issue #{issue_number}")
         attempt = str(state.get("attempt_start_sha") or "")
         candidate = str(state.get("candidate_sha") or "")
@@ -1070,7 +1116,7 @@ class Worker:
         atomic_write_json(paused_file, state)
         self.in_progress_file.unlink()
         integ = self.config.integration_branch
-        if self.git("branch", "--show-current") != integ and not self.git("status", "--porcelain"):
+        if self.git("branch", "--show-current") != integ and not self.worktree_status():
             self.git("switch", integ, check=False)
         log(f"Shelved quota-paused issue #{issue_number}; other ready issues may now run.")
 
@@ -1079,7 +1125,7 @@ class Worker:
             raise WorkerError("Cannot restore a quota-paused issue while another issue is active")
         state = read_json(paused_file)
         self.validate_paused_state(state)
-        if self.git("status", "--porcelain"):
+        if self.worktree_status():
             raise WorkerError("Repository must be clean before restoring a quota-paused issue")
         branch = str(
             state.get("branch_name")
@@ -2414,10 +2460,10 @@ class Worker:
             self.git("branch", base, f"{remote}/{base}")
         current = self.git("branch", "--show-current")
         if current != base:
-            if self.git("status", "--porcelain"):
+            if self.worktree_status():
                 raise WorkerError(f"Cannot synchronize {base} while the checkout is dirty on {current}")
             self.git("switch", base)
-        if self.git("status", "--porcelain"):
+        if self.worktree_status():
             raise WorkerError(f"Cannot synchronize dirty {base}")
         remote_base = self.git("rev-parse", f"{remote}/{base}")
         self.git("merge", "--ff-only", f"{remote}/{base}", check=False)
@@ -2446,7 +2492,7 @@ class Worker:
                 self.git("branch", integ, base)
                 log(f"Created integration branch {integ} from {base}.")
         if self.git("branch", "--show-current") != integ:
-            if self.git("status", "--porcelain"):
+            if self.worktree_status():
                 raise WorkerError(f"Cannot switch to {integ}: the checkout is dirty")
             self.git("switch", integ)
         # Catch the integration branch up with any pushed changes to itself.
@@ -2579,11 +2625,11 @@ class Worker:
         integ = self.config.integration_branch
         if not state_exists:
             if current_branch not in (integ, self.config.base_branch):
-                if self.git("status", "--porcelain"):
+                if self.worktree_status():
                     raise WorkerError("Repository has changes on a work branch with no recovery state")
                 if not self.git_ok("switch", integ):
                     self.git("switch", self.config.base_branch)
-            if self.git("status", "--porcelain"):
+            if self.worktree_status():
                 log("Repository has uncommitted changes unrelated to a saved attempt; deferring new issue work.")
                 raise SystemExit(0)
             if self.issue.work_type == "followup":
@@ -2656,7 +2702,7 @@ class Worker:
                     self.create_linked_issue_branch(expected, str(state["base_sha"]))
                     self.update_state(branch_linked=True)
             if current_branch != expected:
-                if self.git("status", "--porcelain"):
+                if self.worktree_status():
                     raise WorkerError(f"Repository must be on saved issue branch {expected} before recovery")
                 if self.git_ok("show-ref", "--verify", f"refs/heads/{expected}"):
                     self.git("switch", expected)
@@ -2708,13 +2754,13 @@ class Worker:
                     candidate = run_start
                     self.update_state(candidate_sha=candidate)
                 log(f"Verifying commit {candidate} as recovered implementation for issue #{self.issue.number}.")
-            if self.git("status", "--porcelain"):
+            if self.worktree_status():
                 recovery_dirty = True
                 log(f"Preserving uncommitted work while recovering issue #{self.issue.number}.")
             elif not candidate:
                 log(f"Retrying issue #{self.issue.number} from its original clean base commit.")
         else:
-            if self.git("status", "--porcelain"):
+            if self.worktree_status():
                 log("Repository has uncommitted changes unrelated to a saved attempt; deferring new issue work.")
                 raise SystemExit(0)
             if not self.in_progress_file.exists():
@@ -2724,9 +2770,12 @@ class Worker:
 
     def commit_completed_work(self, run_start: str) -> str:
         assert self.issue and self.choice
-        if not self.git("status", "--porcelain"):
+        if not self.worktree_status():
             return self.git("rev-parse", "HEAD")
+        app_owned = self.app_owned_untracked_paths()
         self.git("add", "--all")
+        if app_owned:
+            self.git("reset", "-q", "--", *app_owned)
         if self.git_ok("diff", "--cached", "--quiet"):
             raise WorkerError(
                 f"Issue #{self.issue.number} left worktree changes that Git could not stage"
@@ -2751,7 +2800,7 @@ class Worker:
             env=self.provider_environment(),
         )
         committed = self.git("rev-parse", "HEAD")
-        if self.git("status", "--porcelain"):
+        if self.worktree_status():
             raise WorkerError(
                 f"Issue #{self.issue.number} still has uncommitted changes after worker commit"
             )
@@ -2828,7 +2877,7 @@ class Worker:
 
     def return_to_integration_branch(self, branch: str) -> str:
         integ = self.config.integration_branch
-        if self.git("status", "--porcelain"):
+        if self.worktree_status():
             raise WorkerError("Cannot finish PR delivery while the issue branch is dirty")
         self.git("fetch", self.config.remote_name, check=False)
         if self.git("branch", "--show-current") != integ:
@@ -3408,7 +3457,7 @@ class Worker:
             self.ai_output_file.write_text(output, encoding="utf-8")
             log(f"Accepted commit {completion} as recovered implementation for issue #{self.issue.number}.")
         elif environment_only:
-            if self.git("status", "--porcelain"):
+            if self.worktree_status():
                 raise WorkerError(
                     f"{self.choice.name} reported an environmental issue but left uncommitted changes"
                 )
@@ -3429,7 +3478,7 @@ class Worker:
         self.validate_new_commit_messages(run_start, completion)
         self.history.note("Repository changes and commit validation completed", iso_timestamp())
         self.history.update(iso_timestamp(), final_status="validated")
-        if self.git("status", "--porcelain"):
+        if self.worktree_status():
             raise WorkerError(
                 f"Issue #{self.issue.number} cannot be delivered with uncommitted changes"
             )
