@@ -3983,6 +3983,9 @@ class Worker:
             provider_reason = str(self.routing.get("provider_reason") or "").strip()
             if provider_reason:
                 note += f" Why {self.choice.name}: {provider_reason}"
+            complexity_reason = str(self.routing.get("complexity_reason") or "").strip()
+            if complexity_reason:
+                note += f" Complexity {self.routing.get('complexity')}/10: {complexity_reason}"
             override = str(self.routing.get("provider_override_reason") or "").strip()
             if override:
                 note += f" {override}"

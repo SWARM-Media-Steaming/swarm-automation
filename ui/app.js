@@ -1539,7 +1539,11 @@
           `Why ${routing.provider_name || routing.provider || "this tool"}`,
           [routing.provider_reason || "", routing.provider_override_reason || ""].filter(Boolean).join(" "),
         );
-        addSummaryParagraph("Prompt grade", routing.grade_reason || "");
+        addSummaryParagraph(`Why grade ${routing.prompt_grade}`, routing.grade_reason || "");
+        addSummaryParagraph(
+          routing.complexity != null ? `How complexity ${routing.complexity}/10 was determined` : "Complexity",
+          [routing.complexity_reason || "", routing.tier_explanation || ""].filter(Boolean).join(" "),
+        );
       }
     }
 
