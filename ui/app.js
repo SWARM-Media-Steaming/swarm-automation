@@ -37,6 +37,8 @@
     promptGradesRequest: 0,
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
     botReadiness: {},
+    // repoId -> last BranchPushAccess from branch_push_access.
+    branchPushAccess: {},
     botReadinessPoll: null,
     pendingUpdate: null,
   };
@@ -277,7 +279,10 @@
       section.classList.toggle("active", section.id === `view-${view}`);
     });
     byId("page-title").textContent = pageTitles[view] || pageTitles.overview;
-    if (view === "overview") void refreshPromotions({ quiet: true });
+    if (view === "overview") {
+      void refreshPromotions({ quiet: true });
+      void refreshBranchPushAccess({ quiet: true });
+    }
     if (view === "repository") void refreshBranches({ quiet: true });
     if (view === "debug") void refreshTools({ quiet: true });
     if (view === "scheduler") void refreshTestPlan({ quiet: true });
@@ -2025,6 +2030,8 @@
   };
 
   function renderBranchPushAccess(status) {
+    if (status && state.activeRepoId) state.branchPushAccess[state.activeRepoId] = status;
+    renderReadiness();
     const pill = byId("branch-push-access-pill");
     const copy = byId("branch-push-access-copy");
     const button = byId("grant-bot-push-access");
@@ -2213,12 +2220,30 @@
       : botList && botList.length
         ? botSummary.text
         : repoStatus?.botConfigExists ? "Credentials found" : "Setup needed";
+    const promoteRequired = Boolean(currentRepo()?.auto_promote);
+    const pushAccess = state.branchPushAccess[state.activeRepoId];
+    // A branch that does not restrict pushes lets the bots merge already.
+    const promoteBlocked = promoteRequired && pushAccess?.state === "missing";
+    const promoteDetail = !promoteRequired
+      ? "Not enabled"
+      : promoteBlocked
+        ? `Not configured — allow bots to merge into ${pushAccess.branch}`
+        : pushAccess?.state === "unconfigured" ? "Set up GitHub Apps first"
+        : pushAccess?.state === "error" ? "Could not check"
+        : pushAccess ? "Configured" : "Checking…";
     const checks = [
       ["GitHub CLI", Boolean(gh && toolReady(gh)), gh?.status || "Not detected"],
       ["AI provider", ais.some(toolReady), ais.some(toolReady) ? "Signed in" : "Sign in required"],
       ["Bot identities", botsReady, botsDetail],
       ["Worker runtime", repoStatus?.workerAvailable, repoStatus?.workerAvailable ? "Available" : "Unavailable"],
     ];
+    if (promoteRequired) {
+      checks.splice(3, 0, [
+        "Bots can merge into main",
+        ["allowed", "unrestricted", "unprotected"].includes(pushAccess?.state),
+        promoteDetail,
+      ]);
+    }
     const list = byId("readiness-list");
     list.replaceChildren();
     checks.forEach(([label, ready, detail]) => {
