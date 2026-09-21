@@ -97,6 +97,11 @@
             </article>
           </div>
 
+          <article class="panel now-working-panel" id="now-working-panel">
+            <div class="panel-header"><div><p class="eyebrow">RIGHT NOW</p><h3>Now working</h3></div><span id="now-working-count" class="live-label"><span></span>0 ACTIVE</span></div>
+            <div id="now-working-list" class="now-working-list" aria-live="polite"></div>
+          </article>
+
           <article class="panel promotion-panel hidden" id="promotion-panel">
             <div class="panel-header"><div><p class="eyebrow">PROMOTION QUEUE</p><h3>Repositories ready to promote <button class="help-dot" data-help="promotion-queue" aria-label="About the promotion queue">?</button></h3></div><span class="live-label"><span></span>AUTO-REFRESH</span></div>
             <p class="panel-copy">These repositories have AI integration work ahead of the human-owned branch. Create a PR for review, or reconcile the branches and complete the approved promotion automatically.</p>
@@ -256,6 +261,7 @@
 
     <script src="dynamic-routing-ui.js"></script>
     <script src="logging.js"></script>
+    <script src="now-working.js"></script>
     <script src="test-inputs.js"></script>
     <script src="version.js"></script>
     <script src="app.js"></script>
