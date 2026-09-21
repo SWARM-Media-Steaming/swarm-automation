@@ -141,6 +141,7 @@
           <div class="section-intro"><div><p class="eyebrow">AI CONFIGURATION</p><h2>Providers, identities, and protected delivery</h2><p>Choose which providers can take work, who should handle a new issue first, and how finished work reaches the protected integration branch.</p></div></div>
           <div class="section-heading"><div><p class="eyebrow">PROVIDERS</p><h2>Enabled AI tools <button class="help-dot" data-help="provider-include-exclude" aria-label="About providers">?</button></h2></div></div>
           <div id="provider-preference" class="provider-preference" role="radiogroup" aria-label="Who handles a new issue first"></div>
+          <article class="panel dynamic-routing-panel"><div class="panel-header"><div><label class="toggle"><input id="dynamic-model-routing" type="checkbox" data-config="dynamic_model_routing" /><span></span>Dynamic Model Routing: <strong id="dynamic-routing-state">OFF</strong></label></div><button class="help-dot" type="button" data-help="dynamic-model-routing" aria-label="About dynamic model routing">?</button></div><p class="panel-copy">When this is on, SWARM grades each issue and chooses the worker model and reasoning effort. You choose the router model instead. When it is off, you keep choosing both yourself.</p></article>
           <div id="provider-cards" class="provider-card-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div>
           <div class="settings-grid">
             <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">PROTECTED FLOW</p><h3>AI branch delivery <button class="help-dot" data-help="delivery-mode" aria-label="About branch delivery">?</button></h3></div></div><div class="form-grid three"><label>Human-owned branch <span class="req">*</span><input data-repo-config="base_branch" required /></label><label>AI integration branch <span class="req">*</span><input data-repo-config="integration_branch" required /></label><label>Git remote <span class="req">*</span><input data-repo-config="remote_name" required /></label><label>Issue branch prefix <input data-repo-config="branch_prefix" /></label></div><div class="inline-note"><span>ⓘ</span><p>Defaults are <code>main</code>, <code>ai-main</code>, <code>origin</code>, and <code>ai</code>.</p></div></article>
@@ -247,6 +248,7 @@
       </div>
     </div>
 
+    <script src="dynamic-routing-ui.js"></script>
     <script src="logging.js"></script>
     <script src="test-inputs.js"></script>
     <script src="version.js"></script>
