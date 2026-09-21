@@ -10,8 +10,11 @@
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
-          <div><strong>SWARM</strong><small>Automation</small></div>
+          <div class="brand-lockup">
+            <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+            <div><strong>SWARM</strong><small>Automation</small></div>
+          </div>
+          <span id="app-version-label" class="app-version"></span>
         </div>
         <nav aria-label="Application sections">
           <button class="nav-item active" data-view-target="overview"><span class="nav-icon">⌂</span>Overview</button>
@@ -24,7 +27,7 @@
           <button class="nav-item" data-view-target="help"><span class="nav-icon">?</span>Help</button>
         </nav>
         <div class="sidebar-foot">
-          <div class="machine-state"><span class="pulse-dot"></span><span>Runs on this Mac</span><span id="app-version-label" class="app-version"></span></div>
+          <div class="machine-state"><span class="pulse-dot"></span><span>Runs on this Mac</span></div>
           <button id="hide-button" class="quiet-button">Hide to menu bar</button>
         </div>
       </aside>
@@ -245,6 +248,7 @@
 
     <script src="logging.js"></script>
     <script src="test-inputs.js"></script>
+    <script src="version.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
