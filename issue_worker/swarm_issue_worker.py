@@ -85,6 +85,16 @@ THROUGH_COMMENT_RE = re.compile(r"through-comment:([0-9]+)")
 ENVIRONMENT_ONLY_MARKER_RE = re.compile(
     r"swarm-issue-worker:environment-only:issue:[0-9]+;provider:[a-z0-9_-]+"
 )
+NEEDS_INPUT_MARKER_RE = re.compile(
+    r"swarm-issue-worker:needs-input:issue:[0-9]+;provider:([a-z0-9_-]+)"
+)
+NEEDS_INPUT_LABEL = "AI Needs Input"
+NEEDS_INPUT_MARKER = "SWARM_NEEDS_INPUT"
+QUESTION_ANSWER_MARKER_RE = re.compile(
+    r"swarm-issue-worker:question-answer:issue:[0-9]+;provider:([a-z0-9_-]+)"
+)
+QUESTION_LABEL = "Question"
+QUESTION_ANSWER_MARKER = "SWARM_QUESTION_ANSWER"
 
 # Issue priority, honored when choosing which assigned issue to work next.
 # Lower rank sorts first (Urgent before High before Medium before Low). An issue
@@ -151,17 +161,41 @@ def ai_tool_key(provider_key: str) -> str:
 # completion comment. Built from the full known set so an old comment still
 # resolves even if that provider is currently excluded from the flow.
 PREVIOUS_AI_RE = re.compile(
-    r"(?:Completed|Reworked) by \*\*(" + "|".join(re.escape(n) for n in KNOWN_PROVIDER_NAMES) + r")\*\*"
+    r"(?:Completed|Reworked|Input requested|Answered) by \*\*("
+    + "|".join(re.escape(n) for n in KNOWN_PROVIDER_NAMES)
+    + r")\*\*"
 )
 AUTOPILOT_INSTRUCTION = (
-    "This is an unattended autopilot run. Do not ask the user questions, request confirmation, "
-    "or pause for interactive input. Resolve ambiguity from the issue and repository, make "
-    "reasonable safe assumptions, and implement the approach you recommend. If several valid "
-    "approaches exist, choose the best maintainable option yourself. Only report a blocker when "
-    "required credentials, authority, or external information are genuinely unavailable."
+    "This is an unattended autopilot run. Resolve ambiguity from the issue and repository, make "
+    "reasonable safe assumptions, and complete the issue using the approach you recommend. Never ask about "
+    "preferences, implementation choices, or anything you can safely decide yourself. If several "
+    "valid approaches exist, choose the best maintainable option yourself. Ask for user input only "
+    "when continuing is genuinely impossible without credentials, authority, an external action, "
+    "or information that is not available to you."
+)
+NEEDS_INPUT_INSTRUCTION = (
+    f"If and only if you are completely blocked on required user input, make no repository changes "
+    f"and put {NEEDS_INPUT_MARKER} on its own final line. Before that marker, use exactly these "
+    "Markdown headings: '## Action required', '## Summary', '## Recommendations', and "
+    "'## Step-by-step guide'. Under Action required, ask one clear question or name the exact user "
+    "action needed and state the exact reply that will resume work. Under Summary, explain why AI "
+    "cannot continue without it. Under Recommendations, give your preferred course and explicitly "
+    "warn the user not to put passwords, tokens, private keys, or other sensitive information in "
+    "the issue whenever credentials are involved. Under Step-by-step guide, provide concrete "
+    "numbered instructions when setup or an external action is required; otherwise write '- None.'"
+)
+QUESTION_INSTRUCTION = (
+    f"This issue is labelled {QUESTION_LABEL}. Answer the question; do not edit files, create "
+    "commits, or propose a code change as completed work. You may inspect the repository and use "
+    "read-only commands to ground the answer. Use exactly these Markdown headings: '## Answer', "
+    "'## Evidence', and '## Recommendations'. Be direct under Answer, cite the relevant repository "
+    "evidence under Evidence, and put practical next steps under Recommendations (or '- None.' if "
+    f"there are none). Put {QUESTION_ANSWER_MARKER} on its own final line."
 )
 SUMMARY_INSTRUCTION = (
-    "Your final response is shown in the terminal and posted to GitHub as rendered Markdown. "
+    f"Unless you are returning {NEEDS_INPUT_MARKER} or {QUESTION_ANSWER_MARKER}, your final response "
+    "is shown in the terminal "
+    "and posted to GitHub as rendered Markdown. "
     "Keep it concise and use exactly these headings: '## Summary', '## Changes', "
     "'## Verification', and '## Operational notes'. Under Summary, state the outcome and the "
     "problem resolved in one short paragraph. Under Changes and Verification, use short bullets. "
@@ -629,6 +663,50 @@ def extract_completion_metadata(
     return matches[-1] if matches else None
 
 
+def extract_needs_input_metadata(
+    comments: Iterable[dict[str, Any]], completion_authors: set[str]
+) -> dict[str, Any] | None:
+    """Return the newest authenticated input request posted by a worker."""
+    allowed_completion = {normalize_author(name) for name in completion_authors}
+    matches = []
+    for comment in sorted(comments, key=lambda item: int(item.get("id", 0))):
+        body = str(comment.get("body") or "")
+        author = str((comment.get("user") or {}).get("login") or "")
+        marker = NEEDS_INPUT_MARKER_RE.search(body)
+        if marker and normalize_author(author) in allowed_completion:
+            matches.append(
+                {
+                    "provider": marker.group(1),
+                    "comment_id": int(comment["id"]),
+                    "author": author,
+                    "comment": comment,
+                }
+            )
+    return matches[-1] if matches else None
+
+
+def extract_question_answer_metadata(
+    comments: Iterable[dict[str, Any]], completion_authors: set[str]
+) -> dict[str, Any] | None:
+    """Return the newest authenticated no-code answer posted by a worker."""
+    allowed_completion = {normalize_author(name) for name in completion_authors}
+    matches = []
+    for comment in sorted(comments, key=lambda item: int(item.get("id", 0))):
+        body = str(comment.get("body") or "")
+        author = str((comment.get("user") or {}).get("login") or "")
+        marker = QUESTION_ANSWER_MARKER_RE.search(body)
+        if marker and normalize_author(author) in allowed_completion:
+            matches.append(
+                {
+                    "provider": marker.group(1),
+                    "comment_id": int(comment["id"]),
+                    "author": author,
+                    "comment": comment,
+                }
+            )
+    return matches[-1] if matches else None
+
+
 def extract_followup_metadata(
     comments: Iterable[dict[str, Any]],
     trusted_followup_authors: set[str],
@@ -641,13 +719,29 @@ def extract_followup_metadata(
     for comment in ordered:
         body = str(comment.get("body") or "")
         author = str((comment.get("user") or {}).get("login") or "")
-        if COMMIT_MARKER_RE.search(body) and normalize_author(author) in allowed_completion:
+        if (
+            COMMIT_MARKER_RE.search(body)
+            or NEEDS_INPUT_MARKER_RE.search(body)
+            or QUESTION_ANSWER_MARKER_RE.search(body)
+        ) and normalize_author(author) in allowed_completion:
             completion_comments.append(comment)
     if not completion_comments:
         return None
     completion = completion_comments[-1]
     body = str(completion.get("body") or "")
     commit_match = COMMIT_MARKER_RE.search(body)
+    if not commit_match:
+        # An input request may follow an earlier code completion. Preserve that
+        # commit as useful review context, but allow an initial no-code request
+        # to resume without inventing a commit requirement.
+        prior_commits = [
+            COMMIT_MARKER_RE.search(str(item.get("body") or ""))
+            for item in ordered
+            if int(item.get("id", 0)) < int(completion["id"])
+            and normalize_author(str((item.get("user") or {}).get("login") or ""))
+            in allowed_completion
+        ]
+        commit_match = next((match for match in reversed(prior_commits) if match), None)
     ai_match = PREVIOUS_AI_RE.search(body)
     through_match = THROUGH_COMMENT_RE.search(body)
     processed_through = int(through_match.group(1)) if through_match else int(completion["id"])
@@ -2021,7 +2115,23 @@ class Worker:
         )
 
     def record_completed_from_comments(self, issue_number: int, comments: list[dict[str, Any]]) -> bool:
+        waiting = extract_needs_input_metadata(comments, self.completion_authors)
+        answered = extract_question_answer_metadata(comments, self.completion_authors)
         metadata = extract_completion_metadata(comments, self.completion_authors)
+        newest_code_id = int(metadata["comment_id"]) if metadata else -1
+        newest_no_code = max(
+            (item for item in (waiting, answered) if item),
+            key=lambda item: int(item["comment_id"]),
+            default=None,
+        )
+        if newest_no_code and int(newest_no_code["comment_id"]) > newest_code_id:
+            self.record_completed(issue_number)
+            self.clear_in_progress(issue_number)
+            if newest_no_code is waiting:
+                log(f"Issue #{issue_number} is waiting for trusted user input.")
+            else:
+                log(f"Question issue #{issue_number} has an authenticated AI answer.")
+            return True
         if not metadata:
             return False
         commit_sha = str(metadata["commit_sha"])
@@ -2103,7 +2213,8 @@ class Worker:
             )
             if not metadata:
                 continue
-            if not SHA_RE.fullmatch(str(metadata["previous_commit_sha"])):
+            previous_commit = str(metadata["previous_commit_sha"])
+            if previous_commit and not SHA_RE.fullmatch(previous_commit):
                 raise WorkerError(
                     f"Latest completion on issue #{number} has no valid completion commit"
                 )
@@ -2397,17 +2508,24 @@ class Worker:
     ) -> str:
         assert self.issue and self.choice
         issue = self.issue
+        question_issue = QUESTION_LABEL.lower() in {label.lower() for label in issue.labels}
         state = self.read_state()
         lines: list[str] = []
         if self.choice.resume:
             comments = self.load_resume_comments(issue.number, int(state.get("session_comment_id", 0)))
+            continuation = (
+                f"Continue answering the question with read-only inspection on {self.expected_branch()}. "
+                "Do not modify the repository, commit, or push."
+                if question_issue else
+                "Inspect and preserve work already present in the repository, finish the implementation "
+                f"and foreground verification on {self.expected_branch()}. Do not switch branches, push, or "
+                "ask for interactive input. The worker will commit any completed changes you leave uncommitted."
+            )
             lines.extend(
                 [
                     f"Continue the existing unattended session for GitHub issue #{issue.number} "
                     f"({issue.title}) from exactly where the previous turn stopped when usage became unavailable.",
-                    "Inspect and preserve work already present in the repository, finish the implementation "
-                    f"and foreground verification on {self.expected_branch()}. Do not switch branches, push, or "
-                    "ask for interactive input. The worker will commit any completed changes you leave uncommitted.",
+                    continuation,
                 ]
             )
             if comments:
@@ -2421,6 +2539,21 @@ class Worker:
                 log(f"Adding trusted issue comments through comment {comments[-1]['id']} to the resumed session.")
                 self.update_state(session_comment_id=int(comments[-1]["id"]))
         else:
+            task_instruction = (
+                f"Answer this issue's question using evidence from {self.config.repo_dir}. Follow repository "
+                f"instructions and remain on {self.expected_branch()}. Use read-only inspection as needed, but "
+                "do not modify the repository, commit, or push."
+                if question_issue
+                else
+                f"Implement this issue in {self.config.repo_dir}. Follow repository instructions, run relevant "
+                f"tests, and remain on {self.expected_branch()} (branched from "
+                f"{self.config.integration_branch}; the pull request targets "
+                f"{self.config.integration_branch}, never {self.config.base_branch}). You may commit, but do "
+                f"not push. Prefix every commit subject with `[{ai_tool_key(self.choice.key)}]` and include #{issue.number} "
+                f"(e.g. `[claude] Fix the parser (#42)`). The worker will commit anything you leave "
+                "uncommitted. Run verification commands in the foreground; do not return while tests or "
+                "builds are still running."
+            )
             lines.extend(
                 [
                     "Issue title:",
@@ -2435,23 +2568,21 @@ class Worker:
                     ", ".join(issue.labels) or "none",
                     "",
                     AUTOPILOT_INSTRUCTION,
-                    f"Implement this issue in {self.config.repo_dir}. Follow repository instructions, run relevant "
-                    f"tests, and remain on {self.expected_branch()} (branched from "
-                    f"{self.config.integration_branch}; the pull request targets "
-                    f"{self.config.integration_branch}, never {self.config.base_branch}). You may commit, but do "
-                    f"not push. Prefix every commit subject with `[{ai_tool_key(self.choice.key)}]` and include #{issue.number} "
-                    "(e.g. `[claude] Fix the parser (#42)`). The worker will commit anything you leave "
-                    "uncommitted. Run verification commands in the foreground; do not return while tests or "
-                    "builds are still running.",
+                    task_instruction,
                 ]
             )
             if issue.work_type == "followup":
                 lines.extend(
                     [
                         "\nFollow-up rework context:",
-                        "This issue was previously worked, but new GitHub comments indicate that it needs another "
-                        "pass. Treat them as refinement or defect feedback. Reinspect the implementation, make the "
-                        f"additional fix, and verify it. The worker will create a commit if needed.",
+                        (
+                            "This question was previously answered, but new GitHub comments request another pass. "
+                            "Treat them as clarification or additional questions and answer them without changing code."
+                            if question_issue else
+                            "This issue was previously worked, but new GitHub comments indicate that it needs another "
+                            "pass. Treat them as refinement or defect feedback. Reinspect the implementation, make the "
+                            "additional fix, and verify it. The worker will create a commit if needed."
+                        ),
                     ]
                 )
                 if issue.previous_ai and self.choice.name != issue.previous_ai:
@@ -2460,21 +2591,33 @@ class Worker:
                         "independent second-provider review; challenge prior assumptions and use issue comments and "
                         "repository evidence as the source of truth."
                     )
-                previous_show = self.git(
-                    "show", "--no-ext-diff", "--format=fuller", "--stat", "--summary", issue.previous_commit_sha
-                )
+                if issue.previous_commit_sha:
+                    previous_show = self.git(
+                        "show", "--no-ext-diff", "--format=fuller", "--stat", "--summary", issue.previous_commit_sha
+                    )
+                    lines.extend(
+                        [
+                            "\nPrevious completion commit and change summary:",
+                            previous_show,
+                            f"\nInspect the complete previous patch with: git show --no-ext-diff {issue.previous_commit_sha}",
+                        ]
+                    )
+                else:
+                    previous_body = str((issue.previous_completion_comment or {}).get("body") or "")
+                    lines.append(
+                        "\nThe previous pass answered this question without changing code."
+                        if QUESTION_ANSWER_MARKER_RE.search(previous_body)
+                        else "\nThe previous pass made no code change because it was waiting for required user input."
+                    )
                 lines.extend(
                     [
-                        "\nPrevious completion commit and change summary:",
-                        previous_show,
-                        f"\nInspect the complete previous patch with: git show --no-ext-diff {issue.previous_commit_sha}",
                         "\nPrevious worker completion comment:",
                         self.format_comment(issue.previous_completion_comment or {}),
                         "\nNew GitHub follow-up comments to address, in order:",
                     ]
                 )
                 lines.extend(self.format_comment(comment) for comment in issue.followup_comments)
-        if self.config.require_issue_tests:
+        if self.config.require_issue_tests and not question_issue:
             lines.append(
                 "Also add or update UAT and integration tests that cover this issue. If the repository "
                 "does not have a relevant test layer, say why under Verification."
@@ -2485,6 +2628,9 @@ class Worker:
                 "external services, or infrastructure state, do not write code. Provide the requested "
                 f"summary and put {ENVIRONMENT_ONLY_MARKER} on its own final line."
             )
+        if question_issue:
+            lines.append(QUESTION_INSTRUCTION)
+        lines.append(NEEDS_INPUT_INSTRUCTION)
         if self.uses_version_file():
             lines.append(
                 f"Do not edit the `{VERSION_FILE}` file: the worker manages the product version, and any "
@@ -2510,6 +2656,22 @@ class Worker:
         if not self.config.allow_environment_only_summary:
             return False, output
         pattern = rf"^\s*{re.escape(ENVIRONMENT_ONLY_MARKER)}\s*$\n?"
+        if not re.search(pattern, output, re.MULTILINE):
+            return False, output
+        cleaned = re.sub(pattern, "", output, flags=re.MULTILINE).rstrip() + "\n"
+        return True, cleaned
+
+    @staticmethod
+    def ai_reported_needs_input(output: str) -> tuple[bool, str]:
+        pattern = rf"^\s*{re.escape(NEEDS_INPUT_MARKER)}\s*$\n?"
+        if not re.search(pattern, output, re.MULTILINE):
+            return False, output
+        cleaned = re.sub(pattern, "", output, flags=re.MULTILINE).rstrip() + "\n"
+        return True, cleaned
+
+    @staticmethod
+    def ai_reported_question_answer(output: str) -> tuple[bool, str]:
+        pattern = rf"^\s*{re.escape(QUESTION_ANSWER_MARKER)}\s*$\n?"
         if not re.search(pattern, output, re.MULTILINE):
             return False, output
         cleaned = re.sub(pattern, "", output, flags=re.MULTILINE).rstrip() + "\n"
@@ -4074,6 +4236,112 @@ class Worker:
         self.clear_in_progress(self.issue.number)
         log(f"Finished issue #{self.issue.number} with {self.choice.name}: environment-only summary posted.")
 
+    def finalize_needs_input(self, ai_output: str) -> None:
+        """Pause an impossible-to-continue issue until a trusted user replies."""
+        assert self.issue and self.choice
+        marker_fields = (
+            f"swarm-issue-worker:needs-input:issue:{self.issue.number};"
+            f"provider:{self.choice.key}"
+        )
+        if self.issue.trigger_comment_id:
+            marker_fields += f";through-comment:{self.issue.trigger_comment_id}"
+        marker = f"<!-- {marker_fields} -->"
+        body = (
+            f"{marker}\n# 🤖 AI needs your input\n\n"
+            "Work is paused because the AI cannot continue safely without the requested user "
+            "answer or external action. This status is reserved for genuine blockers, not normal "
+            "implementation choices.\n\n"
+            f"{ai_output or '(No captured AI explanation was available.)'}\n"
+            "## How to resume\n\n"
+            "Complete the action above or answer the question in **one new comment**. Only replies "
+            "from a configured trusted follow-up author resume automation. Do not put passwords, "
+            "tokens, private keys, or other sensitive information in this issue.\n"
+        )
+        existing = any(marker in str(comment.get("body") or "") for comment in self.comments(self.issue.number))
+        if not existing:
+            log(f"Posting the required-input question to GitHub issue #{self.issue.number}.")
+            self.github.gh(
+                [
+                    "issue", "comment", str(self.issue.number), "--repo",
+                    self.config.github_repository, "--body-file", "-",
+                ],
+                self.choice.key,
+                body,
+            )
+        self.ensure_label(
+            NEEDS_INPUT_LABEL,
+            "D93F0B",
+            "AI work is blocked and requires a trusted user's answer or action",
+            self.choice.key,
+        )
+        label_arguments = [
+            "issue", "edit", str(self.issue.number), "--repo", self.config.github_repository,
+            "--add-label", NEEDS_INPUT_LABEL,
+        ]
+        if self.config.ready_label.lower() in {label.lower() for label in self.issue.labels}:
+            label_arguments.extend(["--remove-label", self.config.ready_label])
+        self.github.gh(label_arguments, self.choice.key)
+        self.record_completed(self.issue.number)
+        self.history.note("Execution paused for required trusted-user input", iso_timestamp())
+        self.finish_execution_history("awaiting_input", ai_output)
+        self.clear_in_progress(self.issue.number)
+        log(f"Issue #{self.issue.number} is labelled '{NEEDS_INPUT_LABEL}' and waiting for user input.")
+
+    def finalize_question_answer(self, ai_output: str) -> None:
+        """Post a no-code answer for an issue explicitly labelled Question."""
+        assert self.issue and self.choice
+        marker_fields = (
+            f"swarm-issue-worker:question-answer:issue:{self.issue.number};"
+            f"provider:{self.choice.key}"
+        )
+        if self.issue.trigger_comment_id:
+            marker_fields += f";through-comment:{self.issue.trigger_comment_id}"
+        marker = f"<!-- {marker_fields} -->"
+        body = (
+            f"{marker}\n# 🤖 AI answer\n\n"
+            f"Answered by **{self.choice.name}** after the normal pre-flight grading and routing flow. "
+            "No repository changes were made.\n\n"
+            f"{ai_output or '(No captured AI answer was available.)'}"
+        )
+        existing = any(marker in str(comment.get("body") or "") for comment in self.comments(self.issue.number))
+        if not existing:
+            log(f"Posting the AI answer to GitHub question issue #{self.issue.number}.")
+            self.github.gh(
+                [
+                    "issue", "comment", str(self.issue.number), "--repo",
+                    self.config.github_repository, "--body-file", "-",
+                ],
+                self.choice.key,
+                body,
+            )
+        if self.config.ready_label.lower() in {label.lower() for label in self.issue.labels}:
+            self.github.gh(
+                [
+                    "issue", "edit", str(self.issue.number), "--repo", self.config.github_repository,
+                    "--remove-label", self.config.ready_label,
+                ],
+                self.choice.key,
+            )
+        self.record_completed(self.issue.number)
+        self.history.note("Question answered without repository changes", iso_timestamp())
+        self.finish_execution_history("answered", ai_output)
+        self.clear_in_progress(self.issue.number)
+        log(f"Finished question issue #{self.issue.number} with a no-code answer from {self.choice.name}.")
+
+    def clear_needs_input_label(self) -> None:
+        """Remove the waiting label when a trusted response starts a follow-up."""
+        assert self.issue and self.choice
+        if NEEDS_INPUT_LABEL.lower() not in {label.lower() for label in self.issue.labels}:
+            return
+        self.github.gh(
+            [
+                "issue", "edit", str(self.issue.number), "--repo", self.config.github_repository,
+                "--remove-label", NEEDS_INPUT_LABEL,
+            ],
+            self.choice.key,
+        )
+        log(f"Trusted input received; removed '{NEEDS_INPUT_LABEL}' from issue #{self.issue.number}.")
+
     def run_selected_issue(self) -> int:
         assert self.issue
         if self.issue.work_type == "followup":
@@ -4156,6 +4424,8 @@ class Worker:
             return 0
 
         self.maybe_apply_dynamic_routing()
+        if self.issue.work_type == "followup":
+            self.clear_needs_input_label()
         if self.choice.resume:
             log(
                 f"Pinned {self.choice.name} model {self.choice.model} session {self.choice.session_id} "
@@ -4247,10 +4517,41 @@ class Worker:
             raise WorkerError(
                 f"{self.choice.name} changed branches; refusing to commit outside {self.expected_branch()}"
             )
+        needs_input, output = self.ai_reported_needs_input(output)
+        question_answer, output = self.ai_reported_question_answer(output)
+        question_issue = QUESTION_LABEL.lower() in {label.lower() for label in self.issue.labels}
+        if question_answer and not question_issue:
+            raise WorkerError(
+                f"{self.choice.name} returned a question answer for an issue without the '{QUESTION_LABEL}' label"
+            )
+        if question_issue:
+            if self.git("rev-parse", "HEAD") != run_start or self.worktree_status():
+                raise WorkerError(
+                    f"{self.choice.name} changed the repository while answering a '{QUESTION_LABEL}' issue; "
+                    "question issues must remain code-free"
+                )
+            if not question_answer and not needs_input:
+                raise WorkerError(
+                    f"{self.choice.name} did not return {QUESTION_ANSWER_MARKER} or a genuine input request "
+                    f"for this '{QUESTION_LABEL}' issue"
+                )
         after = self.commit_completed_work(run_start)
         completion = after
         recovered = False
         environment_only, output = self.ai_reported_environment_only(output)
+        if needs_input:
+            if after != run_start or self.worktree_status():
+                raise WorkerError(
+                    f"{self.choice.name} requested user input but also left repository changes; "
+                    "refusing to publish an ambiguous partial result"
+                )
+            self.ai_output_file.write_text(output, encoding="utf-8")
+            self.finalize_needs_input(output)
+            return ISSUE_COMPLETED_EXIT_CODE
+        if question_answer:
+            self.ai_output_file.write_text(output, encoding="utf-8")
+            self.finalize_question_answer(output)
+            return ISSUE_COMPLETED_EXIT_CODE
         if after != run_start:
             pass
         elif recovery_mode and candidate and re.search(r"^\s*SWARM_RECOVERY_COMPLETE\s*$", output, re.MULTILINE):

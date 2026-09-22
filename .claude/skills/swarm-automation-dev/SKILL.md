@@ -120,6 +120,38 @@ have both) is a real way to introduce drift — the router prompt and the
 saved config would disagree about that provider's defaults. Model
 descriptions are the one exception: Python-only by design, see above.
 
+## Issue outcomes and no-code flows
+
+Every assigned issue, including one labelled `Question`, goes through the
+normal provider capacity check and optional dynamic pre-flight grading/router
+before its work prompt is built. Do not short-circuit routing based on labels.
+After routing, the issue type constrains the selected worker's allowed outcome:
+
+- Normal issues are unattended/autonomous. The AI resolves ordinary ambiguity,
+  chooses the best maintainable approach, changes code, verifies it, and uses
+  the usual commit/PR/`Ready For Testing` delivery flow. It must not ask the
+  user about preferences or implementation choices.
+- An issue labelled `Question` is a strict no-code task. The AI may inspect the
+  repository with read-only commands, but must post a grounded answer using
+  `SWARM_QUESTION_ANSWER`; it may not edit files or create a commit, and the
+  worker must not apply `Ready For Testing`. A trusted follow-up comment may
+  request clarification even though the answer has no commit.
+- `SWARM_NEEDS_INPUT` is the narrow escape hatch for any issue type when work is
+  genuinely impossible without credentials, authority, unavailable external
+  information, or an external action only the user can perform. The issue is
+  labelled `AI Needs Input` (and has `Ready For Testing` removed), receives one
+  explicit action/question plus separate Summary, Recommendations, and
+  Step-by-step guide sections, and remains dormant until a configured trusted
+  follow-up author comments. Never request secrets in an issue; tell the user
+  where to configure them and ask for a non-sensitive confirmation such as
+  `done`.
+
+Both no-code outcomes are durable GitHub lifecycle states with authenticated,
+idempotent HTML markers. Selection and follow-up parsing must support them
+without requiring a previous commit SHA. See
+`.claude/rules/issue-lifecycle-comments.md` before changing their comment,
+label, cursor, or resumption behavior.
+
 ## Test suite
 
 `src/command_tests.rs` (registered from `src/main.rs` via `#[path]`)

@@ -43,6 +43,8 @@ from swarm_issue_worker import (
     build_parser,
     extract_completion_metadata,
     extract_followup_metadata,
+    extract_needs_input_metadata,
+    extract_question_answer_metadata,
     is_worker_comment,
     priority_rank,
     resolve_preferred_provider,
@@ -163,6 +165,97 @@ class WorkerTestCase(unittest.TestCase):
         assert followup is not None
         self.assertEqual(followup["trigger_comment_id"], 103)
         self.assertEqual([item["id"] for item in followup["followup_comments"]], [103])
+
+    def test_required_input_reply_resumes_without_a_previous_commit(self) -> None:
+        comments = [
+            {
+                "id": 300,
+                "created_at": "2026-09-22T13:00:00Z",
+                "user": {"login": "swarm-claude-bot[bot]"},
+                "body": (
+                    "<!-- swarm-issue-worker:needs-input:issue:157;provider:claude -->\n"
+                    "Input requested by **Claude**.\n\n## Action required\nConfigure signing."
+                ),
+            },
+            {
+                "id": 301,
+                "created_at": "2026-09-22T14:00:00Z",
+                "user": {"login": "DotNetRockStar"},
+                "body": "Signing secrets configured. Please continue.",
+            },
+        ]
+        completion_authors = {"swarm-claude-bot"}
+        waiting = extract_needs_input_metadata(comments, completion_authors)
+        assert waiting is not None
+        self.assertEqual(waiting["provider"], "claude")
+
+        followup = extract_followup_metadata(comments, {"DotNetRockStar"}, completion_authors)
+        assert followup is not None
+        self.assertEqual(followup["previous_commit_sha"], "")
+        self.assertEqual(followup["previous_ai"], "Claude")
+        self.assertEqual(followup["trigger_comment_id"], 301)
+        self.assertEqual([item["id"] for item in followup["followup_comments"]], [301])
+
+    def test_required_input_marker_is_durable_completed_state(self) -> None:
+        comments = [{
+            "id": 310,
+            "user": {"login": "DotNetRockStar"},
+            "body": (
+                "<!-- swarm-issue-worker:needs-input:issue:157;provider:claude -->\n"
+                "Input requested by **Claude**."
+            ),
+        }]
+        with mock.patch.object(self.worker, "clear_in_progress") as clear:
+            self.assertTrue(self.worker.record_completed_from_comments(157, comments))
+        self.assertIn(157, self.worker.completed_numbers())
+        clear.assert_called_once_with(157)
+
+    def test_old_input_request_does_not_hide_a_later_unlanded_commit(self) -> None:
+        comments = [
+            {
+                "id": 310,
+                "user": {"login": "DotNetRockStar"},
+                "body": (
+                    "<!-- swarm-issue-worker:needs-input:issue:157;provider:claude -->\n"
+                    "Input requested by **Claude**."
+                ),
+            },
+            {
+                "id": 311,
+                "user": {"login": "DotNetRockStar"},
+                "body": "<!-- swarm-issue-worker:commit:" + "1" * 40 + " -->\nReworked by **Claude**.",
+            },
+        ]
+        self.assertFalse(self.worker.record_completed_from_comments(157, comments))
+        self.assertNotIn(157, self.worker.completed_numbers())
+
+    def test_question_answer_can_receive_a_trusted_followup_without_a_commit(self) -> None:
+        comments = [
+            {
+                "id": 320,
+                "created_at": "2026-09-22T13:00:00Z",
+                "user": {"login": "swarm-codex-bot[bot]"},
+                "body": (
+                    "<!-- swarm-issue-worker:question-answer:issue:159;provider:codex -->\n"
+                    "Answered by **Codex**.\n\n## Answer\nYes."
+                ),
+            },
+            {
+                "id": 321,
+                "created_at": "2026-09-22T14:00:00Z",
+                "user": {"login": "DotNetRockStar"},
+                "body": "Can you clarify why?",
+            },
+        ]
+        completion_authors = {"swarm-codex-bot"}
+        answer = extract_question_answer_metadata(comments, completion_authors)
+        assert answer is not None
+        self.assertEqual(answer["provider"], "codex")
+        followup = extract_followup_metadata(comments, {"DotNetRockStar"}, completion_authors)
+        assert followup is not None
+        self.assertEqual(followup["previous_commit_sha"], "")
+        self.assertEqual(followup["previous_ai"], "Codex")
+        self.assertEqual(followup["trigger_comment_id"], 321)
 
     def test_followup_author_matches_bot_login_without_suffix(self) -> None:
         # Operators list the CI bot as ``github-actions`` but the API reports it
@@ -744,6 +837,138 @@ class WorkerTestCase(unittest.TestCase):
         body = github.call_args.args[2]
         self.assertIn("environment-only", body)
         self.assertNotIn("SWARM_ENVIRONMENT_ONLY", body)
+
+    def test_required_input_posts_clear_question_and_uses_waiting_label(self) -> None:
+        self.worker.issue = IssueContext(
+            157, "Signing failure", "Body", ["Ready For Testing"], "https://example.invalid/157"
+        )
+
+        def fake_run_ai(_prompt: str) -> int:
+            self.worker.ai_output_file.write_text(
+                "## Action required\nConfigure the signing secrets and reply `done`.\n\n"
+                "## Summary\nPublishing cannot sign artifacts without the private key.\n\n"
+                "## Recommendations\nDo not paste the private key into this issue.\n\n"
+                "## Step-by-step guide\n1. Open repository secrets.\n2. Add both values.\n\n"
+                "SWARM_NEEDS_INPUT\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with (
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
+            mock.patch.object(
+                self.worker, "maybe_apply_dynamic_routing", wraps=self.worker.maybe_apply_dynamic_routing
+            ) as routing,
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = self.worker.run_selected_issue()
+
+        self.assertEqual(status, ISSUE_COMPLETED_EXIT_CODE)
+        routing.assert_called_once_with()
+        self.assertIn(157, self.worker.completed_numbers())
+        self.assertFalse(self.worker.in_progress_file.exists())
+        bodies = [call.args[2] for call in github.call_args_list if len(call.args) > 2]
+        self.assertEqual(len(bodies), 1)
+        body = bodies[0]
+        self.assertIn("# 🤖 AI needs your input", body)
+        self.assertIn("## Action required", body)
+        self.assertIn("## Summary", body)
+        self.assertIn("## Recommendations", body)
+        self.assertIn("## Step-by-step guide", body)
+        self.assertIn("## How to resume", body)
+        self.assertNotIn("SWARM_NEEDS_INPUT", body)
+        flattened = [part for call in github.call_args_list for part in call.args[0]]
+        self.assertIn("AI Needs Input", flattened)
+        edit = next(call.args[0] for call in github.call_args_list if call.args[0][0:2] == ["issue", "edit"])
+        self.assertIn("--remove-label", edit)
+        self.assertIn("Ready For Testing", edit)
+
+    def test_trusted_reply_removes_needs_input_label_before_rework(self) -> None:
+        self.worker.issue = IssueContext(
+            158, "Continue", "Body", ["AI Needs Input"], "https://example.invalid/158",
+            work_type="followup", trigger_comment_id=401,
+        )
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session")
+        with mock.patch.object(self.worker.github, "gh", return_value="") as github:
+            self.worker.clear_needs_input_label()
+        arguments = github.call_args.args[0]
+        self.assertEqual(arguments[0:2], ["issue", "edit"])
+        self.assertIn("--remove-label", arguments)
+        self.assertIn("AI Needs Input", arguments)
+
+    def test_question_label_runs_ai_but_posts_answer_without_code_or_ready_label(self) -> None:
+        self.worker.issue = IssueContext(
+            159, "How does routing work?", "Explain model selection.",
+            ["Question", "Ready For Testing"], "https://example.invalid/159",
+        )
+        captured_prompt = ""
+
+        def fake_run_ai(prompt: str) -> int:
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            self.worker.ai_output_file.write_text(
+                "## Answer\nThe router selects a provider, then configured tiers select the model.\n\n"
+                "## Evidence\n`resolve_routing_decision` applies the tier table.\n\n"
+                "## Recommendations\n- None.\n\nSWARM_QUESTION_ANSWER\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with (
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
+            mock.patch.object(
+                self.worker, "maybe_apply_dynamic_routing", wraps=self.worker.maybe_apply_dynamic_routing
+            ) as routing,
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = self.worker.run_selected_issue()
+
+        self.assertEqual(status, ISSUE_COMPLETED_EXIT_CODE)
+        routing.assert_called_once_with()
+        self.assertIn("This issue is labelled Question", captured_prompt)
+        self.assertIn("do not edit files", captured_prompt)
+        bodies = [call.args[2] for call in github.call_args_list if len(call.args) > 2]
+        self.assertEqual(len(bodies), 1)
+        self.assertIn("# 🤖 AI answer", bodies[0])
+        self.assertIn("## Answer", bodies[0])
+        self.assertNotIn("SWARM_QUESTION_ANSWER", bodies[0])
+        flattened = [part for call in github.call_args_list for part in call.args[0]]
+        self.assertNotIn("--add-label", flattened)
+        self.assertIn("--remove-label", flattened)
+        self.assertIn("Ready For Testing", flattened)
+
+    def test_question_label_rejects_repository_changes(self) -> None:
+        self.worker.issue = IssueContext(
+            160, "Question with accidental edit", "Explain this.", ["question"],
+            "https://example.invalid/160",
+        )
+
+        def fake_run_ai(_prompt: str) -> int:
+            (self.repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
+            self.worker.ai_output_file.write_text(
+                "## Answer\nAn answer.\n\n## Evidence\nEvidence.\n\n"
+                "## Recommendations\n- None.\n\nSWARM_QUESTION_ANSWER\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with (
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
+            mock.patch.object(self.worker.github, "gh", return_value=""),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaisesRegex(WorkerError, "question issues must remain code-free"):
+                self.worker.run_selected_issue()
 
     def test_environment_only_followup_marker_records_trigger_comment(self) -> None:
         self.worker.issue = IssueContext(

@@ -3,10 +3,10 @@
 Anyone reading a GitHub issue worked by `issue_worker/swarm_issue_worker.py`
 must be able to tell, from the issue thread alone and without reading logs,
 what state the AI's work on it is currently in. That means posting one
-comment at each of the transitions below — never silently starting,
+comment at each applicable transition below — never silently starting,
 stopping, or finishing work — and every provider (Claude, Codex, Grok, and
 any added later) posting in the same shape, so a reader never has to learn
-a second format depending on who picked the issue up. The four required
+a second format depending on who picked the issue up. The required
 transitions, and the code that must keep producing them:
 
 1. **Started** — `post_started_comment`, the moment a provider begins a
@@ -21,6 +21,13 @@ transitions, and the code that must keep producing them:
    later picked back up (not one of the original four the user asked for,
    but the natural counterpart to #3 and already implemented — keep it in
    sync with the same rules below).
+5. **AI needs input** — `finalize_needs_input`, only when credentials,
+   authority, unavailable external information, or an external user action
+   makes autonomous progress impossible. Apply `AI Needs Input`, remove
+   `Ready For Testing`, and wait for a trusted-author comment.
+6. **Question answered** — `finalize_question_answer`, for issues labelled
+   `Question`. Post a grounded no-code answer and never apply `Ready For
+   Testing`.
 
 ### Each comment is idempotent via an HTML marker
 
@@ -89,11 +96,49 @@ Work paused because **<Provider>** no longer has sufficient usage available.
 ...
 ```
 
+**AI needs input** (`finalize_needs_input`):
+```
+<!-- swarm-issue-worker:needs-input:issue:<n>;provider:<key>[;through-comment:<id>] -->
+# 🤖 AI needs your input
+
+## Action required
+<one exact action or question and the reply that resumes work>
+
+## Summary
+<why AI cannot continue autonomously>
+
+## Recommendations
+<preferred course, including a warning not to post secrets when applicable>
+
+## Step-by-step guide
+<concrete numbered setup/action instructions, or "- None.">
+
+## How to resume
+<trusted-author and sensitive-information reminder>
+```
+
+**Question answered** (`finalize_question_answer`):
+```
+<!-- swarm-issue-worker:question-answer:issue:<n>;provider:<key>[;through-comment:<id>] -->
+# 🤖 AI answer
+
+Answered by **<Provider>** after the normal pre-flight grading and routing flow.
+No repository changes were made.
+
+## Answer
+...
+## Evidence
+...
+## Recommendations
+...
+```
+
 ### What must never happen
 
-- A work-round finishing without one of "Reworked"/"Completed" landing on
-  the issue — silence on the issue after real work is indistinguishable
-  from the worker having crashed or never run.
+- A work-round finishing without one terminal comment—"Reworked"/"Completed",
+  "AI needs your input", "AI answer", or a quota pause—landing on the issue.
+  Silence after real work is indistinguishable from the worker having crashed
+  or never run.
 - A "Reworked"/"Completed" comment whose `Commit:`/marker `sha` is not the
   commit this work-round actually produced (see `issue-branch-delivery.md`
   for the specific failure mode this guards against).
@@ -105,3 +150,10 @@ Work paused because **<Provider>** no longer has sufficient usage available.
   visibly different phrasing/structure for what is conceptually the same
   event. Extend the templates above rather than inventing a parallel
   format when adding a provider or a new transition.
+- A `Question` issue changing repository state or receiving `Ready For
+  Testing`; pre-flight grading and routing still run, but its worker pass is
+  answer-only.
+- Treating normal ambiguity as `AI Needs Input`. That state is reserved for
+  genuine impossibility, and only a trusted-author comment after its marker
+  may resume the issue. Automated CI comments may add evidence but are not a
+  user answer unless explicitly configured as trusted.
