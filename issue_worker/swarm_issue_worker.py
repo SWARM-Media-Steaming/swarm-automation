@@ -425,6 +425,7 @@ class Config:
     monitor_actions: bool
     require_issue_tests: bool
     adversarial_uat_enabled: bool
+    update_claude_assets_enabled: bool
     allow_environment_only_summary: bool
     branch_prefix: str
     base_branch: str
@@ -476,6 +477,7 @@ class Config:
             monitor_actions=args.monitor_actions,
             require_issue_tests=args.require_issue_tests,
             adversarial_uat_enabled=args.adversarial_uat_enabled,
+            update_claude_assets_enabled=args.update_claude_assets_enabled,
             allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
             base_branch=args.base_branch,
@@ -3007,6 +3009,13 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 "Do not edit, disable, or retire tests under tests/adversarial/ or suites with "
                 "origin=adversarial in .swarm/tests.json. Dispute incorrect expectations with "
                 "issue/spec evidence; only a fresh tester may adjudicate them."
+            )
+        if self.config.update_claude_assets_enabled and not question_issue:
+            lines.append(
+                "Also update any Claude skill relevant to this issue, and where appropriate within the "
+                "repository, any Claude agent, rule, workflow, or CLAUDE.md file, so they stay accurate for "
+                "the change you are making. Skip this if nothing in the repository's Claude configuration is "
+                "affected."
             )
         if self.config.allow_environment_only_summary:
             lines.append(
@@ -5668,6 +5677,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--adversarial-uat-enabled",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_ADVERSARIAL_UAT_ENABLED", False),
+    )
+    parser.add_argument(
+        "--update-claude-assets-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_UPDATE_CLAUDE_ASSETS_ENABLED", False),
     )
     parser.add_argument(
         "--allow-environment-only-summary",

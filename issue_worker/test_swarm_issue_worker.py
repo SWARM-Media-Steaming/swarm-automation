@@ -398,6 +398,7 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.config,
             require_issue_tests=True,
             allow_environment_only_summary=True,
+            update_claude_assets_enabled=True,
         )
         self.worker.issue = IssueContext(141, "Policy prompt", "Body", [], "https://example.invalid/141")
         self.worker.choice = ProviderChoice("Codex", "test-model", "high", "")
@@ -408,7 +409,24 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("add or update UAT and integration tests", prompt)
         self.assertIn("SWARM_ENVIRONMENT_ONLY", prompt)
         self.assertIn("do not write code", prompt)
+        self.assertIn("update any Claude skill relevant to this issue", prompt)
+        self.assertIn("CLAUDE.md", prompt)
         self.assertNotIn("Issue images:", prompt)
+
+    def test_update_claude_assets_toggle_is_off_for_question_issues(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config,
+            update_claude_assets_enabled=True,
+        )
+        self.worker.issue = IssueContext(
+            142, "Policy prompt", "Body", ["Question"], "https://example.invalid/142"
+        )
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+
+        prompt = self.worker.build_prompt(False, "", False)
+
+        self.assertNotIn("update any Claude skill relevant to this issue", prompt)
 
     def test_prompt_includes_images_pasted_on_the_issue_and_follow_up(self) -> None:
         from issue_images import IssueImage
