@@ -49,6 +49,7 @@ from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT
 from dynamic_router import (
     RouterCandidate,
     RouterError,
+    RoutingTier,
     build_router_prompt,
     default_provider_strengths,
     default_router_effort,
@@ -75,7 +76,7 @@ QUOTA_RE = re.compile(
 # while working. Grok: `Couldn't set model 'x': ... "unknown model id"`.
 MODEL_REJECTED_RE = re.compile(
     r"unknown model id|couldn'?t set model|(?:unknown|invalid|unsupported|unrecognized) model|"
-    r"issue with the selected model|"
+    r"issue with the selected model|requires usage credits|"
     r"model[^\n]{0,80}(?:not found|does not exist|is not supported|not available)",
     re.IGNORECASE,
 )
@@ -1757,7 +1758,9 @@ class Worker:
             )
             raise WorkerError(str(error)) from error
 
-    def routing_candidates(self) -> list[RouterCandidate]:
+    def routing_candidates(
+        self, excluded_models: set[tuple[str, str]] | None = None
+    ) -> list[RouterCandidate]:
         """Enabled AI tools the router may hand this issue to, best first.
 
         Only tools with capacity this pass are offered, so a routing decision
@@ -1774,10 +1777,25 @@ class Worker:
                 keys = [spec.key for spec in self.config.enabled_specs]
             if self.choice.key not in keys:
                 keys.insert(0, self.choice.key)
+        excluded = excluded_models or set()
         candidates: list[RouterCandidate] = []
         for key in keys:
             spec = self.config.spec(key)
-            tiers = tuple(self.config.routing_tiers.get(key, ()))
+            tiers: list[RoutingTier] = []
+            for tier in self.config.routing_tiers.get(key, ()):
+                if (key, tier.model) not in excluded:
+                    tiers.append(tier)
+                elif spec is not None and (key, spec.model) not in excluded:
+                    # Keep every complexity band covered, but substitute the
+                    # validated configured model for the one just rejected.
+                    tiers.append(
+                        RoutingTier(
+                            tier.min_complexity,
+                            tier.max_complexity,
+                            spec.model,
+                            spec.effort,
+                        )
+                    )
             if spec is None or not tiers:
                 continue
             usage = self.provider_usages.get(spec.name)
@@ -1785,20 +1803,22 @@ class Worker:
                 RouterCandidate(
                     key=spec.key,
                     name=spec.name,
-                    tiers=tiers,
+                    tiers=tuple(tiers),
                     strengths=spec.strengths,
                     usage_remaining=usage.remaining_percent if usage else None,
                 )
             )
         return candidates
 
-    def apply_dynamic_routing(self) -> None:
+    def apply_dynamic_routing(
+        self, excluded_models: set[tuple[str, str]] | None = None
+    ) -> None:
         assert self.choice and self.issue
         host = self.config.require_spec(self.choice.key)
         fallback_model = self.choice.model
         fallback_effort = self.choice.effort
         original_body = self.issue.body
-        candidates = self.routing_candidates()
+        candidates = self.routing_candidates(excluded_models)
         previous_provider = (self.issue.previous_ai or "").lower()
         rework = self.issue.work_type == "followup"
         try:
@@ -2686,29 +2706,124 @@ class Worker:
         if runner is None:
             raise WorkerError(f"No runner for provider {self.choice.name}")
         status = runner(prompt, env)
-        if status != 0 and self.fall_back_from_rejected_model():
+        if status != 0 and self.recover_from_rejected_model():
+            runner = {
+                "claude": self._run_claude,
+                "codex": self._run_codex,
+                "grok": self._run_grok,
+            }.get(self.choice.key)
+            if runner is None:
+                raise WorkerError(f"No runner for provider {self.choice.name}")
+            env = os.environ.copy()
+            env.update(self.provider_environment())
             status = runner(prompt, env)
         return status
 
-    def fall_back_from_rejected_model(self) -> bool:
-        """When the AI CLI rejected the model itself, switch to the provider's
-        configured model and effort so the run can go ahead.
+    def recover_from_rejected_model(self) -> bool:
+        """When the AI CLI rejects a model, re-evaluate the live routing choice.
 
         A routing tier or an old saved setting can name a model this account
         does not offer (e.g. Grok's `unknown model id`). Failing then only
-        repeats every cycle — the model is pinned in the issue's state — so
-        the configured pair, which the operator set and the app validated, is
-        used instead, once, and remembered in the state. Returns whether a
-        retry is worth making."""
+        repeats every cycle because the model is pinned in the issue's state.
+        Dynamic routing is therefore run again immediately with the rejected
+        model excluded. Without dynamic routing, the configured pair remains
+        the bounded one-time fallback. Returns whether one retry is useful."""
         assert self.choice
         spec = self.config.spec(self.choice.key)
-        if spec is None or (spec.model, spec.effort) == (self.choice.model, self.choice.effort):
+        if spec is None:
             return False
         combined = ""
         for path in (self.ai_output_file, self.ai_diagnostic_file):
             if path.exists():
                 combined += path.read_text(encoding="utf-8", errors="replace")
         if not MODEL_REJECTED_RE.search(combined):
+            return False
+        rejected = {
+            "provider": self.choice.key,
+            "provider_name": self.choice.name,
+            "model": self.choice.model,
+            "effort": self.choice.effort,
+        }
+        requires_usage_credits = bool(
+            re.search(r"requires usage credits", combined, re.IGNORECASE)
+        )
+        provider_message = next(
+            (
+                line.strip()[:500]
+                for line in combined.splitlines()
+                if MODEL_REJECTED_RE.search(line)
+            ),
+            "The provider rejected the selected model.",
+        )
+        if self.config.dynamic_model_routing and self.issue is not None:
+            # Give a router failure a known-good fallback; otherwise the
+            # fallback would reuse the rejected model still held in choice.
+            self.choice.model = spec.model
+            self.choice.effort = spec.effort
+            self.choice.resume = False
+            self.choice.session_id = self.new_session_id(spec)
+            previous_routing = dict(self.routing or {})
+            rejection_reason = (
+                " because it requires usage credits" if requires_usage_credits else ""
+            )
+            log(
+                f"{rejected['provider_name']} rejected model '{rejected['model']}'"
+                f"{rejection_reason}; re-running pre-flight routing immediately with that model "
+                "excluded."
+            )
+            self.routing = None
+            self.apply_dynamic_routing(
+                {(str(rejected["provider"]), str(rejected["model"]))}
+            )
+            if (self.choice.key, self.choice.model) == (
+                rejected["provider"],
+                rejected["model"],
+            ):
+                return False
+            re_evaluation = {
+                "timestamp": iso_timestamp(),
+                "trigger": "model_requires_usage_credits"
+                if requires_usage_credits
+                else "model_rejected",
+                "original_provider": rejected["provider"],
+                "original_model": rejected["model"],
+                "original_effort": rejected["effort"],
+                "provider_message": provider_message,
+                "configuration": (
+                    "Models requiring separate usage credits are unavailable in the current "
+                    "account/configuration."
+                    if requires_usage_credits
+                    else "The selected model was rejected by the provider."
+                ),
+                "replacement_provider": self.choice.key,
+                "replacement_model": self.choice.model,
+                "replacement_effort": self.choice.effort,
+                "previous_routing_decision": previous_routing,
+            }
+            assert self.routing is not None
+            self.routing["re_evaluation"] = re_evaluation
+            if self.in_progress_file.exists():
+                self.update_state_for_choice(self.choice)
+                self.update_state(
+                    routing_decision=self.routing,
+                    routing_re_evaluation=re_evaluation,
+                )
+            reason = (
+                "the provider required separate usage credits that current configuration does "
+                "not allow"
+                if requires_usage_credits
+                else "the provider rejected that model"
+            )
+            message = (
+                f"Pre-flight routing originally selected {rejected['provider_name']} "
+                f"{rejected['model']} at {rejected['effort']} effort, but {reason}; real-time "
+                f"re-evaluation selected {self.choice.name} {self.choice.model} at "
+                f"{self.choice.effort} effort."
+            )
+            log(f"WARNING: {message}")
+            self.history.warning(message, str(re_evaluation["timestamp"]))
+            return True
+        if (spec.model, spec.effort) == (self.choice.model, self.choice.effort):
             return False
         message = (
             f"{self.choice.name} does not offer model '{self.choice.model}'; retrying with the "
@@ -2719,11 +2834,10 @@ class Worker:
         self.history.warning(message, iso_timestamp())
         self.choice.model = spec.model
         self.choice.effort = spec.effort
-        if not self.choice.resume:
-            # The failed attempt may already have claimed its session id.
-            fresh_session = self.new_session_id(spec)
-            if fresh_session:
-                self.choice.session_id = fresh_session
+        # The failed attempt may already have claimed its session id. A model
+        # change must start clean rather than resuming that rejected session.
+        self.choice.resume = False
+        self.choice.session_id = self.new_session_id(spec)
         self.update_state_for_choice(self.choice)
         return True
 

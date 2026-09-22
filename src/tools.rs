@@ -431,7 +431,11 @@ fn fallback_models(id: &str) -> Vec<ModelInfo> {
 /// catalog's "first" model that [`reconcile_config_models`] repairs an
 /// unavailable saved selection into. A saved selection that already points
 /// at such a model is therefore itself repaired away on the next detect.
-fn provider_models(id: &str, program: Option<&Path>, allow_credit_models: bool) -> (Vec<ModelInfo>, bool) {
+fn provider_models(
+    id: &str,
+    program: Option<&Path>,
+    allow_credit_models: bool,
+) -> (Vec<ModelInfo>, bool) {
     let discovered = program
         .map(|program| discover_models(id, program))
         .unwrap_or_default();
@@ -612,8 +616,11 @@ pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
     for tool in &mut tools {
         if crate::config::KNOWN_PROVIDERS.contains(&tool.id.as_str()) {
             let program = tool.installed.then(|| PathBuf::from(&tool.path));
-            (tool.models, tool.models_detected) =
-                provider_models(&tool.id, program.as_deref(), config.allow_usage_credit_models);
+            (tool.models, tool.models_detected) = provider_models(
+                &tool.id,
+                program.as_deref(),
+                config.allow_usage_credit_models,
+            );
         }
         match tool.id.as_str() {
             "gh" if tool.installed => {
@@ -808,7 +815,9 @@ mod tests {
   --model <model>   Provide an alias (e.g. 'fable', 'opus', or 'sonnet').
 ";
         let models = parse_claude_models(help);
-        assert!(models.iter().any(|model| model.value == "fable" && model.requires_usage_credits));
+        assert!(models
+            .iter()
+            .any(|model| model.value == "fable" && model.requires_usage_credits));
 
         let discovered = models.clone();
         let filtered: Vec<_> = discovered
@@ -862,7 +871,9 @@ mod tests {
         assert!(config.routing_tiers["claude"]
             .iter()
             .all(|tier| tier.model == "opus"));
-        assert!(repairs.iter().any(|repair| repair.contains("worker model 'fable' is unavailable")));
+        assert!(repairs
+            .iter()
+            .any(|repair| repair.contains("worker model 'fable' is unavailable")));
     }
 
     #[test]

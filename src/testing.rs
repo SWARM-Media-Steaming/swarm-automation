@@ -3315,7 +3315,7 @@ mod tests {
         fs::create_dir(workspace.path().join(".swarm")).unwrap();
         fs::write(
             definition_path(workspace.path()),
-            r#"{"version":1,"suites":[{"id":"unit","name":"Unit","command":["true"]},{"id":"tv","name":"TV","command":["true"],"requirements":{"files":["connected-fire-tv.marker"],"devices":[{"type":"fireTv"}]}}]}"#,
+            r#"{"version":1,"suites":[{"id":"unit","name":"Unit","command":["true"]},{"id":"tv","name":"TV","command":["true"],"requirements":{"files":["connected-fire-tv.marker"]}}]}"#,
         )
         .unwrap();
         let plan = build_plan(

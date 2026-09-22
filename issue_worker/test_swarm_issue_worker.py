@@ -855,6 +855,7 @@ class WorkerTestCase(unittest.TestCase):
             "There's an issue with the selected model (claude-foo). It may not exist",
             "Error: unsupported model 'x'",
             "model gpt-9 does not exist or you do not have access to it",
+            "Fable 5.1 requires usage credits. Switch to another model to continue.",
         ):
             self.assertTrue(MODEL_REJECTED_RE.search(rejected), rejected)
         for ordinary in (
@@ -882,6 +883,83 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("does not offer model 'grok-4.3'", output)
         state = worker.read_state()
         self.assertEqual((state["model"], state["effort"]), (spec.model, spec.effort))
+
+    def test_a_credit_only_model_is_rerouted_immediately_and_audited(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, dynamic_model_routing=True
+        )
+        self.worker.issue = IssueContext(
+            157, "Credit-only model", "ORIGINAL", [], "https://example.invalid/157"
+        )
+        self.worker.choice = ProviderChoice(
+            "Claude", "fable", "high", "old-session", resume=True
+        )
+        self.worker.routing = {
+            "provider": "claude",
+            "selected_model": "fable",
+            "reasoning_effort": "high",
+        }
+        self.worker.save_new_state(
+            self.worker.issue, self.worker.choice, self.base_sha
+        )
+        calls: list[tuple[str, str, str]] = []
+
+        def fake_claude(prompt: str, env: dict[str, str]) -> int:
+            calls.append(
+                (
+                    self.worker.choice.model,
+                    self.worker.choice.effort,
+                    self.worker.choice.session_id,
+                )
+            )
+            if len(calls) == 1:
+                self.worker.ai_output_file.write_text(
+                    "Fable 5.1 requires usage credits. Switch to another model to continue.\n",
+                    encoding="utf-8",
+                )
+                return 1
+            self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return 0
+
+        routed = self._routing_payload(
+            selected_provider="claude", selected_model="fable"
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                self.worker, "_run_claude", side_effect=fake_claude
+            ),
+            mock.patch(
+                "swarm_issue_worker.run_provider_router", return_value=routed
+            ) as router,
+            contextlib.redirect_stdout(output),
+        ):
+            status = self.worker.run_ai("prompt")
+
+        self.assertEqual(status, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], ("fable", "high", "old-session"))
+        self.assertNotEqual(calls[1][0], "fable")
+        self.assertNotEqual(calls[1][2], "old-session")
+        router.assert_called_once()
+        self.assertNotIn("fable", router.call_args.kwargs["prompt"].lower())
+        state = self.worker.read_state()
+        audit = state["routing_re_evaluation"]
+        self.assertEqual(audit["trigger"], "model_requires_usage_credits")
+        self.assertEqual(audit["original_model"], "fable")
+        self.assertIn("requires usage credits", audit["provider_message"])
+        self.assertIn("current account/configuration", audit["configuration"])
+        self.assertEqual(audit["replacement_model"], calls[1][0])
+        self.assertEqual(
+            audit["previous_routing_decision"]["selected_model"], "fable"
+        )
+        self.assertEqual(
+            state["routing_decision"]["re_evaluation"], audit
+        )
+        self.assertEqual(state["session_id"], calls[1][2])
+        self.assertFalse(state["session_started"])
+        self.assertIn("originally selected Claude fable", output.getvalue())
+        self.assertIn("required separate usage credits", output.getvalue())
 
     def test_a_failure_that_is_not_a_model_rejection_is_not_retried(self) -> None:
         worker = self.model_run_worker()
