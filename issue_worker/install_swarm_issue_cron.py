@@ -29,6 +29,12 @@ PROVIDER_UNAVAILABLE_EXIT_CODE = 12
 BEGIN_MARKER = "# BEGIN SWARM ISSUE WORKER"
 END_MARKER = "# END SWARM ISSUE WORKER"
 WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+# "Run now" pressed while this scheduler is already running: the desktop app
+# drops this file in the state directory instead of starting a second
+# scheduler (the runner lock would refuse it). Seeing it, the scheduler stops
+# waiting, scans every repository immediately, and restarts its timer from the
+# end of that cycle.
+RUN_NOW_REQUEST_FILE = "run-now.request"
 
 
 def timestamp() -> str:
@@ -78,6 +84,7 @@ class Runner:
             else self.state_dir / "cron.log"
         )
         self.lock_dir = self.state_dir / "runner.lock"
+        self.run_now_path = self.state_dir / RUN_NOW_REQUEST_FILE
         self.worker = Path(args.worker).expanduser().resolve()
         self.acquired_lock = False
         self.stop_requested = False
@@ -542,9 +549,37 @@ class Runner:
                 log_stream.write(prefix + line)
                 log_stream.flush()
 
+    def clear_run_now_request(self) -> None:
+        """Drop a request left over from an earlier scheduler: the cycle this
+        one is about to run already satisfies it, and honouring it later would
+        spend a cycle nobody asked for."""
+        try:
+            self.run_now_path.unlink(missing_ok=True)
+        except OSError as error:
+            self.log(f"WARNING: could not clear {self.run_now_path}: {error}")
+
+    def run_now_requested(self) -> bool:
+        """True once per "Run now" the desktop app asked for while this
+        scheduler was waiting. The request is removed as it is read, so one
+        click cuts exactly one wait short."""
+        try:
+            if not self.run_now_path.exists():
+                return False
+            self.run_now_path.unlink(missing_ok=True)
+        except OSError as error:
+            self.log(f"WARNING: could not read {self.run_now_path}: {error}")
+            return False
+        self.log(
+            "Run now requested: scanning every repository immediately; the timer for the "
+            "next check restarts when this cycle finishes."
+        )
+        return True
+
     def sleep(self) -> None:
         deadline = time.monotonic() + self.args.interval_seconds
         while not self.stop_requested and time.monotonic() < deadline:
+            if self.run_now_requested():
+                return
             time.sleep(min(1, deadline - time.monotonic()))
 
     def scheduled_days(self) -> frozenset[int]:
@@ -574,6 +609,8 @@ class Runner:
         target = self.next_scheduled_run()
         self.log(f"Next scheduled issue-worker check: {target:%A, %Y-%m-%d at %H:%M %Z}.")
         while not self.stop_requested:
+            if self.run_now_requested():
+                return True
             remaining = (target - dt.datetime.now().astimezone()).total_seconds()
             if remaining <= 0:
                 return True
@@ -660,6 +697,7 @@ class Runner:
         if not self.acquire_lock():
             return 0
         atexit.register(self.release_lock)
+        self.clear_run_now_request()
 
         def stop(_signum: int, _frame: object) -> None:
             self.stop_requested = True

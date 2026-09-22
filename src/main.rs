@@ -652,6 +652,60 @@ fn start_issue_worker(
     )
 }
 
+/// The file a running scheduler polls for an immediate scan, matching
+/// `RUN_NOW_REQUEST_FILE` in `install_swarm_issue_cron.py`.
+fn run_now_request_path(config: &AppConfig) -> PathBuf {
+    PathBuf::from(&config.worker_state_dir).join("run-now.request")
+}
+
+/// "Run now" pressed while the scheduler is already running. Starting a second
+/// scheduler is not an option — the runner lock would refuse it — so this
+/// leaves a request the running one picks up: it abandons whatever wait it is
+/// in (the poll interval, or a daily/weekday window), scans every enabled
+/// repository immediately, and restarts its timer from the end of that cycle.
+#[tauri::command]
+fn request_issue_scan<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let config = current_config(&state)?;
+    let log_path = automation_log_path(&app)?;
+    reconnect_issue_scheduler(&app, &state, &config, &log_path)?;
+    let status = state
+        .processes
+        .status(&app, "issue", "Issue worker scheduler", &log_path)?;
+    match status.state.as_str() {
+        "running" => {}
+        "paused" => {
+            return Err(
+                "The issue worker is paused. Resume it before asking for an immediate scan.".into(),
+            )
+        }
+        _ => {
+            return Err(
+                "The issue worker is not running. Use Run now to start a single cycle.".into(),
+            )
+        }
+    }
+    let request_path = run_now_request_path(&config);
+    if let Some(parent) = request_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&request_path, "requested by the SWARM Automation app\n")
+        .map_err(|error| format!("Could not ask the worker to scan now: {error}"))?;
+    processes::emit_log(
+        &app,
+        &log_path,
+        "Issue worker scheduler",
+        "system",
+        "Run now: asked the running scheduler to scan every repository immediately.",
+    );
+    Ok(
+        "Scanning every repository now; the timer for the next check restarts after this cycle."
+            .into(),
+    )
+}
+
 /// A provider with its executable resolved to a concrete path (empty when the
 /// CLI is not installed / not on PATH). `enabled` mirrors the config switch —
 /// the worker is handed every known provider's details so it can still resume
@@ -4212,6 +4266,7 @@ fn main() {
             get_automation_status,
             get_automation_status_background,
             start_issue_worker,
+            request_issue_scan,
             start_uat_scheduler,
             get_test_plan,
             get_test_plan_background,
