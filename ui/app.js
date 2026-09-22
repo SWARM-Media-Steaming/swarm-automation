@@ -105,12 +105,12 @@
     },
     "dynamic-model-routing": {
       title: "Dynamic Model Routing",
-      html: "<p><strong>OFF</strong> keeps today’s behavior: you choose the worker model and reasoning effort on each provider card.</p><p><strong>ON</strong> disables those worker selectors and shows <strong>Router model</strong> and <strong>Router effort</strong>. Before an issue is implemented, that router grades the original prompt, then picks which enabled AI tool runs it — weighing each tool’s remaining usage and a built-in summary of what it tends to be good at — and takes the worker model and reasoning effort from that tool’s complexity tiers. The original issue text is not rewritten.</p><p>The chosen tool, why it was chosen, the grade, and the routing confidence are posted on the issue when work starts and stored with the run in AI history. A rework goes to a different tool than the previous pass unless the router is clearly confident the same one is the better choice.</p><p><strong>Use models requiring usage credits</strong> (off by default) controls whether a model that draws on a separate usage-credit balance, rather than the account's normal plan allowance, can ever be picked as a worker, router, or tier model — manually or by SWARM's own catalog repair. Leave it off unless you know usage credits are provisioned for the account running this app.</p>",
+      html: "<p><strong>OFF</strong> keeps today’s behavior: you choose the worker model and reasoning effort on each provider card.</p><p><strong>ON</strong> disables those worker selectors and shows <strong>Router model</strong> and <strong>Router effort</strong>. Before an issue is implemented, that router grades the original prompt, then picks which enabled AI tool runs it — weighing each tool’s remaining usage and a built-in summary of what it tends to be good at — and chooses the worker model and reasoning effort itself, from the full catalog of models that tool offers. The saved complexity tiers stay as your reference, and are still what runs if the router ever names a model that does not exist. The original issue text is not rewritten.</p><p>The chosen tool, why it was chosen, the grade, and the routing confidence are posted on the issue when work starts and stored with the run in AI history. A rework goes to a different tool than the previous pass unless the router is clearly confident the same one is the better choice.</p><p><strong>Optimize routing for cost</strong> (off by default) decides how the router weighs price. On, it favors the least expensive model that can plausibly do the work and only escalates to a stronger one when the graded risk is high. Off, it picks whichever model best fits the task and ignores cost — which is not the same as always picking the most capable model.</p><p><strong>Use models requiring usage credits</strong> (off by default) controls whether a model that draws on a separate usage-credit balance, rather than the account's normal plan allowance, can ever be picked as a worker, router, or tier model — manually or by SWARM's own catalog repair. Leave it off unless you know usage credits are provisioned for the account running this app.</p>",
       links: [],
     },
     "provider-include-exclude": {
       title: "Enabled AI tools",
-      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set the shared minimum quota reserve.</p><p><strong>Dynamic Model Routing</strong> grades the original issue, picks which enabled provider handles it, and takes that provider’s worker model and reasoning effort from the saved complexity tiers. The card’s router model performs the grading; to tell the providers apart it uses each one’s remaining usage and a built-in summary of what it tends to be good at. Turn routing off to choose the provider order and the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
+      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set the shared minimum quota reserve.</p><p><strong>Dynamic Model Routing</strong> grades the original issue, picks which enabled provider handles it, and chooses that provider’s worker model and reasoning effort from the models it offers. The card’s router model performs the grading; to tell the providers apart it uses each one’s remaining usage and a built-in summary of what it tends to be good at. Turn routing off to choose the provider order and the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
       links: [],
     },
     "software-update": {
@@ -321,6 +321,20 @@
     }
   }
 
+  // A checkbox carrying data-checked-value/data-unchecked-value stores a
+  // two-value string instead of a boolean (routing_optimization). The mapping
+  // lives in dynamic-routing-ui.js so it can be unit tested; this keeps the
+  // generic [data-config] loops working even if that script has not loaded.
+  function valuedToggle() {
+    return (
+      window.SwarmDynamicRouting || {
+        valuedToggleChecked: (value, checkedValue) => String(value ?? "") === String(checkedValue ?? ""),
+        valuedToggleValue: (checked, checkedValue, uncheckedValue) =>
+          checked ? String(checkedValue ?? "") : String(uncheckedValue ?? ""),
+      }
+    );
+  }
+
   function bindConfig(config) {
     renderProviderCards(config);
     providerList(config).forEach((provider) => {
@@ -332,7 +346,9 @@
     document.querySelectorAll("[data-config]").forEach((input) => {
       const key = input.dataset.config;
       const value = config[key];
-      if (input.type === "checkbox") input.checked = Boolean(value);
+      if (input.type === "checkbox" && input.dataset.checkedValue !== undefined) {
+        input.checked = valuedToggle().valuedToggleChecked(value, input.dataset.checkedValue);
+      } else if (input.type === "checkbox") input.checked = Boolean(value);
       else if (input.dataset.list !== undefined) input.value = Array.isArray(value) ? value.join(", ") : "";
       else input.value = value ?? "";
     });
@@ -781,7 +797,13 @@
     const next = { ...state.config };
     document.querySelectorAll("[data-config]").forEach((input) => {
       const key = input.dataset.config;
-      if (input.type === "checkbox") next[key] = input.checked;
+      if (input.type === "checkbox" && input.dataset.checkedValue !== undefined) {
+        next[key] = valuedToggle().valuedToggleValue(
+          input.checked,
+          input.dataset.checkedValue,
+          input.dataset.uncheckedValue,
+        );
+      } else if (input.type === "checkbox") next[key] = input.checked;
       else if (input.dataset.list !== undefined) {
         next[key] = input.value.split(",").map((value) => value.trim()).filter(Boolean);
       } else if (input.type === "number" || key === "uat_hour") {

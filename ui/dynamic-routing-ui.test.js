@@ -1,6 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { defaultRouter, routingControlState, applyRoutingControlState } = require("./dynamic-routing-ui.js");
+const {
+  defaultRouter,
+  routingControlState,
+  applyRoutingControlState,
+  valuedToggleChecked,
+  valuedToggleValue,
+} = require("./dynamic-routing-ui.js");
 
 function element(className) {
   return {
@@ -90,4 +96,18 @@ test("turning routing back off restores the worker selectors", () => {
   assert.equal(host.nodes[".provider-model"].disabled, false);
   assert.equal(host.nodes[".worker-model-label"].classList.contains("is-disabled"), false);
   assert.equal(host.nodes[".router-model-label"].hidden, true);
+});
+
+test("a two-value checkbox is ticked only for its checked value", () => {
+  assert.equal(valuedToggleChecked("cost", "cost"), true);
+  assert.equal(valuedToggleChecked("best", "cost"), false);
+  // A config written before the setting existed must not read as ticked.
+  assert.equal(valuedToggleChecked(undefined, "cost"), false);
+  assert.equal(valuedToggleChecked("", "cost"), false);
+});
+
+test("a two-value checkbox saves a string, never a boolean", () => {
+  assert.equal(valuedToggleValue(true, "cost", "best"), "cost");
+  assert.equal(valuedToggleValue(false, "cost", "best"), "best");
+  assert.notEqual(typeof valuedToggleValue(true, "cost", "best"), "boolean");
 });
