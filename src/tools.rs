@@ -10,6 +10,24 @@ pub struct ModelInfo {
     pub label: String,
     pub efforts: Vec<String>,
     pub default_effort: String,
+    /// True when this model draws on a separate usage-credit balance instead
+    /// of the account's normal plan allowance (e.g. Claude's `fable` alias).
+    /// Set from [`requires_usage_credits`] once the raw catalog is parsed;
+    /// individual `parse_*_models` functions leave it `false`.
+    #[serde(default)]
+    pub requires_usage_credits: bool,
+}
+
+/// Model slugs/aliases known to draw on a separate usage-credit balance
+/// rather than the account's normal plan allowance. Maintained by hand, the
+/// same way as `_MODEL_DESCRIPTIONS` in `issue_worker/dynamic_router.py`:
+/// nothing in a CLI's own output says "this needs credits", so an operator
+/// has to name the ones that do here as they're discovered running a model
+/// that comes back with "requires usage credits".
+const USAGE_CREDIT_MODELS: &[&str] = &["fable"];
+
+fn requires_usage_credits(value: &str) -> bool {
+    USAGE_CREDIT_MODELS.contains(&value)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,6 +268,7 @@ fn parse_claude_models(help: &str) -> Vec<ModelInfo> {
         .into_iter()
         .map(|value| ModelInfo {
             label: format!("Claude {} (latest)", display_model_name(&value)),
+            requires_usage_credits: requires_usage_credits(&value),
             value,
             efforts: efforts.clone(),
             default_effort: String::new(),
@@ -285,6 +304,7 @@ fn parse_codex_models(output: &str) -> Vec<ModelInfo> {
                     .as_str()
                     .unwrap_or_default()
                     .to_string(),
+                requires_usage_credits: false,
             })
         })
         .collect()
@@ -304,6 +324,7 @@ fn parse_grok_models(output: &str) -> Vec<ModelInfo> {
             // help do not enumerate supported values.
             efforts: Vec::new(),
             default_effort: String::new(),
+            requires_usage_credits: false,
         })
         .collect()
 }
@@ -396,13 +417,21 @@ fn fallback_models(id: &str) -> Vec<ModelInfo> {
             label: display_model_name(value),
             efforts: Vec::new(),
             default_effort: default_effort.into(),
+            requires_usage_credits: false,
         })
         .collect()
 }
 
 /// Models for a provider: what the installed CLI reports, else the fallback.
 /// Returns whether the list came from the CLI.
-fn provider_models(id: &str, program: Option<&Path>) -> (Vec<ModelInfo>, bool) {
+///
+/// When `allow_credit_models` is false, any model that draws on a separate
+/// usage-credit balance ([`requires_usage_credits`]) is dropped from the
+/// list entirely — it can then never be offered in a dropdown, nor be the
+/// catalog's "first" model that [`reconcile_config_models`] repairs an
+/// unavailable saved selection into. A saved selection that already points
+/// at such a model is therefore itself repaired away on the next detect.
+fn provider_models(id: &str, program: Option<&Path>, allow_credit_models: bool) -> (Vec<ModelInfo>, bool) {
     let discovered = program
         .map(|program| discover_models(id, program))
         .unwrap_or_default();
@@ -415,6 +444,19 @@ fn provider_models(id: &str, program: Option<&Path>) -> (Vec<ModelInfo>, bool) {
     for model in &mut models {
         if model.efforts.is_empty() {
             model.efforts = fallback_efforts(id);
+        }
+        model.requires_usage_credits = requires_usage_credits(&model.value);
+    }
+    if !allow_credit_models {
+        let without_credit_models: Vec<_> = models
+            .iter()
+            .filter(|model| !model.requires_usage_credits)
+            .cloned()
+            .collect();
+        // A known provider always needs at least one offerable model; never
+        // filter down to nothing even if every reported model needs credits.
+        if !without_credit_models.is_empty() {
+            models = without_credit_models;
         }
     }
     (models, detected)
@@ -570,7 +612,8 @@ pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
     for tool in &mut tools {
         if crate::config::KNOWN_PROVIDERS.contains(&tool.id.as_str()) {
             let program = tool.installed.then(|| PathBuf::from(&tool.path));
-            (tool.models, tool.models_detected) = provider_models(&tool.id, program.as_deref());
+            (tool.models, tool.models_detected) =
+                provider_models(&tool.id, program.as_deref(), config.allow_usage_credit_models);
         }
         match tool.id.as_str() {
             "gh" if tool.installed => {
@@ -751,11 +794,75 @@ mod tests {
     #[test]
     fn providers_without_a_catalog_still_get_dropdown_options() {
         for id in crate::config::KNOWN_PROVIDERS {
-            let (models, detected) = provider_models(id, None);
+            let (models, detected) = provider_models(id, None, false);
             assert!(!detected, "{id} has no CLI to read");
             assert!(!models.is_empty(), "{id} needs fallback models");
             assert!(models.iter().all(|model| !model.efforts.is_empty()));
         }
+    }
+
+    #[test]
+    fn credit_models_are_dropped_unless_allowed() {
+        let help = "\
+  --effort <level>  Effort level (low, medium, high, xhigh, max)
+  --model <model>   Provide an alias (e.g. 'fable', 'opus', or 'sonnet').
+";
+        let models = parse_claude_models(help);
+        assert!(models.iter().any(|model| model.value == "fable" && model.requires_usage_credits));
+
+        let discovered = models.clone();
+        let filtered: Vec<_> = discovered
+            .into_iter()
+            .filter(|model| !model.requires_usage_credits)
+            .collect();
+        assert!(!filtered.iter().any(|model| model.value == "fable"));
+        assert!(filtered.iter().any(|model| model.value == "opus"));
+    }
+
+    #[test]
+    fn reconcile_heals_a_saved_credit_model_once_credits_are_disallowed() {
+        // Simulates the live incident: a saved selection of "fable" (from
+        // before the toggle existed, or from a run with it turned on) must
+        // be repaired away once `allow_usage_credit_models` is off and the
+        // catalog handed to reconcile no longer offers it.
+        let mut config = AppConfig::default();
+        for provider in &mut config.providers {
+            if provider.id == "claude" {
+                provider.model = "fable".into();
+                provider.router_model = "fable".into();
+            }
+        }
+        for tier in config.routing_tiers.get_mut("claude").unwrap() {
+            tier.model = "fable".into();
+        }
+        let mut tool = basic_tool("claude", "Claude Code", "claude", true, "");
+        tool.models = vec![
+            ModelInfo {
+                value: "opus".into(),
+                label: "Claude Opus (latest)".into(),
+                efforts: vec!["low".into(), "high".into()],
+                default_effort: String::new(),
+                requires_usage_credits: false,
+            },
+            ModelInfo {
+                value: "sonnet".into(),
+                label: "Claude Sonnet (latest)".into(),
+                efforts: vec!["low".into(), "high".into()],
+                default_effort: String::new(),
+                requires_usage_credits: false,
+            },
+        ];
+        tool.models_detected = true;
+
+        let repairs = reconcile_config_models(&mut config, &[tool]);
+
+        let claude = config.provider("claude").unwrap();
+        assert_eq!(claude.model, "opus");
+        assert_eq!(claude.router_model, "opus");
+        assert!(config.routing_tiers["claude"]
+            .iter()
+            .all(|tier| tier.model == "opus"));
+        assert!(repairs.iter().any(|repair| repair.contains("worker model 'fable' is unavailable")));
     }
 
     #[test]
@@ -787,6 +894,7 @@ mod tests {
                 label: "Grok Current".into(),
                 efforts: vec!["low".into(), "medium".into()],
                 default_effort: "medium".into(),
+                requires_usage_credits: false,
             }],
             models_detected: true,
         }];
@@ -825,6 +933,7 @@ mod tests {
             label: "Grok Fallback".into(),
             efforts: vec!["low".into()],
             default_effort: "low".into(),
+            requires_usage_credits: false,
         }];
         tool.models_detected = false;
 

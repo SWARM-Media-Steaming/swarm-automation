@@ -462,6 +462,15 @@ pub struct AppConfig {
     /// Per-provider complexity bands. Empty until [`Self::normalize`] fills
     /// the built-in table, which a saved config can replace.
     pub routing_tiers: HashMap<String, Vec<RoutingTier>>,
+    /// Off by default: a model that draws on a separate usage-credit balance
+    /// (e.g. Claude's `fable` alias) is left out of every catalog offered to
+    /// the worker model, router model, and routing tiers — for manual
+    /// selection and for [`crate::tools::reconcile_config_models`]'s
+    /// automatic repair alike — so nothing can silently start spending
+    /// credits the account may not have. Turning this on makes those models
+    /// selectable again.
+    #[serde(default)]
+    pub allow_usage_credit_models: bool,
 
     pub minimum_remaining_percent: u8,
     /// One issue worker per repository, running at the same time, instead of a
@@ -563,6 +572,7 @@ impl Default for AppConfig {
             providers: default_providers(),
             dynamic_model_routing: false,
             routing_tiers: default_routing_tiers(),
+            allow_usage_credit_models: false,
             minimum_remaining_percent: 10,
             parallel_repo_workers: false,
             ai_execution_history_enabled: false,
