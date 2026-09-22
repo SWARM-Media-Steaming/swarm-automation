@@ -2664,6 +2664,60 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIsNone(self.worker.routing)
         self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
 
+    def test_dynamic_routing_reuses_a_retried_attempts_decision_when_still_valid(self) -> None:
+        # A prior cycle for this issue picked a real tier ("gpt-5.6-sol"),
+        # then the worker process exited (e.g. transient failure) before
+        # delivering anything. The retry that follows must resume the exact
+        # same model rather than asking the router again.
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        issue = IssueContext(508, "Retry", "ORIGINAL", [], "https://example.invalid/508")
+        self.worker.issue = issue
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-508")
+        self.worker.routing = json.loads(
+            self._routing_payload(selected_provider="codex", selected_model="gpt-5.6-sol", reasoning_effort="high")
+        )
+        self.worker.routing.update({"provider": "codex", "fallback": False})
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-sol", "high", "session-508")
+        self.worker.save_new_state(issue, self.worker.choice, self.base_sha)
+
+        # A fresh worker process picks up the retry with the plain configured
+        # model, exactly as the scheduler restarts it.
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-508")
+        with mock.patch("swarm_issue_worker.run_provider_router") as router:
+            self.worker.maybe_apply_dynamic_routing()
+        router.assert_not_called()
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
+        self.assertEqual(self.worker.choice.effort, "high")
+
+    def test_dynamic_routing_reroutes_a_retried_attempts_decision_the_catalog_no_longer_offers(self) -> None:
+        # Regression for the live "fable requires usage credits" incident:
+        # a prior cycle fell back to a model the catalog has since dropped
+        # (retired, or repaired away because it needs usage credits the
+        # account doesn't have). The retry must not keep replaying that
+        # stale pick forever — it should re-route against the current,
+        # healed configuration instead.
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        issue = IssueContext(509, "Stale fallback", "ORIGINAL", [], "https://example.invalid/509")
+        self.worker.issue = issue
+        self.worker.routing = json.loads(
+            self._routing_payload(selected_provider="claude", selected_model="fable", reasoning_effort="high")
+        )
+        self.worker.routing.update({"provider": "claude", "fallback": True})
+        self.worker.choice = ProviderChoice("Claude", "fable", "high", "session-509")
+        self.worker.save_new_state(issue, self.worker.choice, self.base_sha)
+
+        # A fresh worker process picks up the retry; the configured model has
+        # since been healed back to a real one by the desktop app.
+        self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5", "low", "session-509")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(selected_provider="claude"),
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        router.assert_called_once()
+        self.assertNotEqual(self.worker.choice.model, "fable")
+        self.assertFalse(self.worker.routing["fallback"])
+
     def test_dynamic_routing_hands_the_issue_to_the_tool_that_suits_it(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
         self.worker.issue = IssueContext(506, "Route the tool", "ORIGINAL", [], "https://example.invalid/506")

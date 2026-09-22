@@ -1677,7 +1677,11 @@ class Worker:
         """Grade a new attempt and apply the configured complexity tier.
 
         Resumed sessions keep the model they already started with. A retry of
-        an attempt that already recorded a decision reuses it. The original
+        an attempt that already recorded a decision reuses it, but only when
+        that decision's model is still one the current configuration would
+        actually produce (see `_stored_decision_still_valid`) — otherwise the
+        attempt never really got underway (a fallback pick, or a tier the
+        model catalog has since dropped) and re-routing is safe. The original
         issue text is not modified.
         """
         assert self.choice and self.issue
@@ -1692,12 +1696,41 @@ class Worker:
                 and stored.get("provider") == self.choice.key
                 and stored.get("selected_model")
             ):
-                self.choice.model = str(state.get("model") or stored["selected_model"])
-                self.choice.effort = str(state.get("effort") or stored.get("reasoning_effort") or self.choice.effort)
-                self.routing = stored
-                log("Reusing the routing decision already recorded for this attempt.")
-                return
+                if self._stored_decision_still_valid(stored):
+                    self.choice.model = str(state.get("model") or stored["selected_model"])
+                    self.choice.effort = str(
+                        state.get("effort") or stored.get("reasoning_effort") or self.choice.effort
+                    )
+                    self.routing = stored
+                    log("Reusing the routing decision already recorded for this attempt.")
+                    return
+                log(
+                    f"Stored routing decision selected {stored['selected_model']!r}, which the "
+                    "current configuration no longer offers (it was likely repaired away, e.g. a "
+                    "retired model or one needing usage credits the toggle now excludes); "
+                    "re-routing instead of reusing it."
+                )
         self.apply_dynamic_routing()
+
+    def _stored_decision_still_valid(self, stored: dict[str, Any]) -> bool:
+        """Whether a saved routing decision's model is still reachable from
+        the current configuration, so it is safe to keep resuming this
+        attempt with it rather than re-routing.
+
+        Config can change between a worker's cycles — a model retired, or a
+        saved selection self-healed away from one that turned out to need
+        usage credits the account doesn't have (see `allow_usage_credit_models`
+        in `src/config.rs`) — and an in-progress attempt must not keep
+        replaying a now-stale pick just because it is still on disk.
+        """
+        assert self.choice
+        model = str(stored.get("selected_model") or "").strip()
+        if not model:
+            return False
+        host = self.config.spec(self.choice.key)
+        if host is not None and model == host.model:
+            return True
+        return any(tier.model == model for tier in self.config.routing_tiers.get(self.choice.key, ()))
 
     def ensure_bot_auth(self) -> None:
         """Fail early when the chosen provider cannot act as its GitHub App.
