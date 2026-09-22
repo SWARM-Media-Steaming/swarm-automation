@@ -81,7 +81,9 @@ from dynamic_router import (
     format_routing_notice,
     load_routing_tiers,
     normalize_routing_optimization,
+    pin_configured_routing_decision,
     resolve_routing_decision,
+    routing_history_message,
     run_provider_router,
 )
 
@@ -2010,18 +2012,21 @@ class Worker(AdversarialUatMixin):
         self.write_state(state)
 
     def maybe_apply_dynamic_routing(self) -> None:
-        """Grade a new attempt and apply the configured complexity tier.
+        """Grade a new attempt and, when routing is on, apply the result.
 
-        Resumed sessions keep the model they already started with. A retry of
-        an attempt that already recorded a decision reuses it, but only when
-        that decision's model is still one the current configuration would
-        actually produce (see `_stored_decision_still_valid`) — otherwise the
-        attempt never really got underway (a fallback pick, or a tier the
-        model catalog has since dropped) and re-routing is safe. The original
-        issue text is not modified.
+        Pre-flight always runs for a new attempt so the grade is stored even
+        when Dynamic Model Routing is off. The toggle only decides whether
+        that grade may replace the provider, model, and effort already chosen
+        for this attempt. Resumed sessions keep the model they already started
+        with. A retry of an attempt that already recorded a decision reuses
+        it, but only when that decision's model is still one the current
+        configuration would actually produce (see `_stored_decision_still_valid`)
+        — otherwise the attempt never really got underway (a fallback pick, or
+        a tier the model catalog has since dropped) and re-routing is safe.
+        The original issue text is not modified.
         """
         assert self.choice and self.issue
-        if not self.config.dynamic_model_routing or self.choice.resume:
+        if self.choice.resume:
             self.routing = None
             return
         if self.in_progress_file.exists():
@@ -2193,10 +2198,16 @@ class Worker(AdversarialUatMixin):
                 rework=rework,
             )
         except RouterError as error:
-            log(
-                f"Dynamic routing failed ({error}); using configured "
-                f"{fallback_model} / {fallback_effort}."
-            )
+            if self.config.dynamic_model_routing:
+                log(
+                    f"Dynamic routing failed ({error}); using configured "
+                    f"{fallback_model} / {fallback_effort}."
+                )
+            else:
+                log(
+                    f"Pre-flight grading failed ({error}); keeping configured "
+                    f"{fallback_model} / {fallback_effort}."
+                )
             self.routing = fallback_routing_decision(
                 provider=host.key,
                 provider_name=host.name,
@@ -2208,9 +2219,25 @@ class Worker(AdversarialUatMixin):
                 router_provider=host.key,
                 candidates=[candidate.key for candidate in candidates],
                 routing_optimization=self.config.routing_optimization,
+                dynamic_model_routing=self.config.dynamic_model_routing,
             )
         else:
-            self.adopt_routing_decision(decision)
+            if self.config.dynamic_model_routing:
+                decision["dynamic_model_routing"] = True
+                self.adopt_routing_decision(decision)
+            else:
+                self.routing = pin_configured_routing_decision(
+                    decision,
+                    provider=self.choice.key,
+                    provider_name=self.choice.name,
+                    model=self.choice.model,
+                    effort=self.choice.effort,
+                )
+                log(
+                    f"Pre-flight grade {self.routing.get('prompt_grade')} recorded; keeping "
+                    f"configured {self.choice.name} {self.choice.model} with effort "
+                    f"{self.choice.effort} because Dynamic Model Routing is off."
+                )
         self.issue.body = original_body
         if self.in_progress_file.exists():
             self.update_state(
@@ -2314,6 +2341,7 @@ class Worker(AdversarialUatMixin):
             log(override)
         self.choice.model = str(decision["selected_model"])
         self.choice.effort = str(decision["reasoning_effort"])
+        decision["dynamic_model_routing"] = True
         self.routing = decision
         log(
             f"Dynamic routing selected {self.choice.name} {self.choice.model} with effort "
@@ -2321,6 +2349,18 @@ class Worker(AdversarialUatMixin):
             f"{decision['complexity']}/10, confidence "
             f"{int(round(float(decision.get('confidence') or 0) * 100))}%)."
         )
+
+    def record_routing_in_history(self) -> None:
+        """Note whether the configured setting or dynamic routing selected the worker."""
+        if not self.routing or not self.choice:
+            return
+        kind, message = routing_history_message(
+            self.routing, self.choice.name, self.choice.model, self.choice.effort
+        )
+        if kind == "warning":
+            self.history.warning(message, iso_timestamp())
+        else:
+            self.history.note(message, iso_timestamp())
 
     def start_execution_history(self) -> None:
         assert self.issue and self.choice
@@ -5032,11 +5072,17 @@ class Worker(AdversarialUatMixin):
         assert self.choice
         self.ensure_bot_auth()
         if self.config.dry_run:
-            if self.config.dynamic_model_routing and not self.choice.resume:
-                log(
-                    "Dry run: dynamic model routing is enabled and would grade this issue, then "
-                    "choose the AI tool, model, and reasoning effort before execution."
-                )
+            if not self.choice.resume:
+                if self.config.dynamic_model_routing:
+                    log(
+                        "Dry run: dynamic model routing is enabled and would grade this issue, then "
+                        "choose the AI tool, model, and reasoning effort before execution."
+                    )
+                else:
+                    log(
+                        "Dry run: would grade this issue and record the recommendation without "
+                        "applying it, then run the configured model and reasoning effort."
+                    )
             log(f"Dry run complete: would run {self.choice.name} for {self.issue.url}.")
             return 0
 
@@ -5053,27 +5099,7 @@ class Worker(AdversarialUatMixin):
             log(f"Selected {self.choice.name} model {self.choice.model} with effort {self.choice.effort} for this run.")
 
         self.start_execution_history()
-        if self.routing and self.routing.get("fallback"):
-            self.history.warning(
-                "Dynamic routing fell back to the configured worker model: "
-                f"{self.routing.get('grade_reason') or 'router unavailable'}",
-                iso_timestamp(),
-            )
-        elif self.routing:
-            note = (
-                f"Dynamic routing selected {self.choice.name} {self.choice.model} with effort "
-                f"{self.choice.effort}; prompt grade {self.routing.get('prompt_grade')}."
-            )
-            provider_reason = str(self.routing.get("provider_reason") or "").strip()
-            if provider_reason:
-                note += f" Why {self.choice.name}: {provider_reason}"
-            complexity_reason = str(self.routing.get("complexity_reason") or "").strip()
-            if complexity_reason:
-                note += f" Complexity {self.routing.get('complexity')}/10: {complexity_reason}"
-            override = str(self.routing.get("provider_override_reason") or "").strip()
-            if override:
-                note += f" {override}"
-            self.history.note(note, iso_timestamp())
+        self.record_routing_in_history()
         self.history.update(iso_timestamp(), final_status="preparing_repository")
         run_start, recovery_mode, candidate, recovery_dirty = self.prepare_repository()
         # save_new_state may have created/replaced state after history started.
@@ -5560,7 +5586,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--dynamic-model-routing",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_DYNAMIC_MODEL_ROUTING", False),
-        help="Grade each new issue and choose the worker model from the routing tiers.",
+        help=(
+            "When set, apply the pre-flight grade's provider, model, and effort. "
+            "The grade is recorded on every new attempt even when this is off."
+        ),
     )
     parser.add_argument(
         "--routing-tiers",

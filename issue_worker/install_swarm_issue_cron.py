@@ -37,6 +37,30 @@ WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 RUN_NOW_REQUEST_FILE = "run-now.request"
 
 
+def saved_routing_overrides(worker_args: Sequence[object]) -> list[str]:
+    """Routing flags from a saved repos.json entry, in the order they appear.
+
+    Repeated at the end of the worker command so a save while the scheduler is
+    already running wins over the copies captured on the scheduler command line
+    at startup. argparse keeps the last BooleanOptionalAction / store value.
+    """
+    flags: list[str] = []
+    arguments = [str(arg) for arg in worker_args]
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in {"--dynamic-model-routing", "--no-dynamic-model-routing"}:
+            flags.append(argument)
+            index += 1
+            continue
+        if argument == "--routing-optimization" and index + 1 < len(arguments):
+            flags.extend([argument, arguments[index + 1]])
+            index += 2
+            continue
+        index += 1
+    return flags
+
+
 def timestamp() -> str:
     return dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
 
@@ -508,11 +532,13 @@ class Runner:
         environment["PYTHONPATH"] = os.pathsep.join(
             [str(self.script_dir), environment.get("PYTHONPATH", "")]
         ).rstrip(os.pathsep)
+        worker_args = [str(arg) for arg in repo["worker_args"]]
         command = [
             self.args.python_bin,
             str(snapshot),
-            *[str(arg) for arg in repo["worker_args"]],
+            *worker_args,
             *self.worker_arguments,
+            *saved_routing_overrides(worker_args),
         ]
         process = subprocess.Popen(
             command,

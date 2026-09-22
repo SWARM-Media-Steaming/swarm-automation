@@ -21,6 +21,7 @@ from dynamic_router import (
     build_router_prompt,
     default_provider_strengths,
     default_routing_tiers,
+    describe_model_choice,
     describe_tier,
     display_model_name,
     fallback_routing_decision,
@@ -30,8 +31,10 @@ from dynamic_router import (
     model_catalog,
     model_description,
     parse_router_payload,
+    pin_configured_routing_decision,
     resolve_routing_decision,
     router_description,
+    routing_history_message,
     run_provider_router,
 )
 
@@ -354,8 +357,14 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertIn("Selected AI: Codex", notice)
         self.assertIn("Selected Model: GPT-5.6 Luna", notice)
         self.assertIn("Reasoning: Low", notice)
+        self.assertIn(
+            "How this was chosen: Dynamic Model Routing applied this model and effort "
+            "(best model for the work, regardless of cost).",
+            notice,
+        )
         self.assertIn("Routing Confidence: 91%", notice)
         self.assertIn("Routing Preference: Best model for the work, regardless of cost", notice)
+        self.assertNotIn("Grok Grok", notice)
         self.assertIn("AI Tools Considered: Codex, Grok", notice)
         self.assertIn("Why Codex: Codex is best at test-driven bug fixes", notice)
         self.assertIn("Why this grade (B+): Clear objective and context, but acceptance criteria are incomplete.", notice)
@@ -367,6 +376,14 @@ class DynamicRouterTest(unittest.TestCase):
         )
         self.assertEqual(display_model_name("claude-haiku-4-5"), "Claude Haiku 4.5")
         self.assertEqual(display_model_name("grok-4.3"), "Grok 4.3")
+        grok = candidates("grok")[0]
+        grok_choice = describe_model_choice(grok, "grok-4.6", "medium", 4, optimization="best")
+        self.assertIn(
+            "Complexity 4/10. The router chose Grok 4.6 at Medium reasoning, optimizing for "
+            "the best fit for the work, regardless of cost.",
+            grok_choice,
+        )
+        self.assertNotIn("Grok Grok", grok_choice)
 
     def test_notice_names_the_model_and_effort_that_graded_the_issue(self) -> None:
         decision = resolve(
@@ -452,6 +469,107 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertIn("Selected Model: GPT-5.6 Luna", notice)
         self.assertIn("Reasoning: Medium", notice)
         self.assertNotIn("Prompt Grade:", notice)
+        self.assertNotIn("Set in SWARM Automation", notice)
+
+    def test_configured_notice_records_the_grade_and_labels_the_recommendation(self) -> None:
+        decision = pin_configured_routing_decision(
+            resolve(
+                sample_payload(selected_provider="grok", selected_model="grok-4.6", reasoning_effort="high"),
+                "grok",
+            ),
+            provider="grok",
+            provider_name="Grok",
+            model="grok-4.6",
+            effort="medium",
+        )
+        notice = format_routing_notice(decision)
+        self.assertIn("SWARM AI Routing", notice)
+        self.assertIn("Prompt Grade: B+", notice)
+        self.assertIn("Selected AI: Grok", notice)
+        self.assertIn("Selected Model: Grok 4.6", notice)
+        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn(
+            "How this was chosen: Set in SWARM Automation. Dynamic Model Routing is off, so the "
+            "pre-flight grade was recorded and was not applied.",
+            notice,
+        )
+        self.assertIn("Router recommendation: Grok 4.6 at High reasoning", notice)
+        self.assertNotIn("matches the configured setting", notice)
+        self.assertNotIn("The router chose", notice)
+        self.assertNotIn("Grok Grok", notice)
+        self.assertNotIn("Routing Preference:", notice)
+
+    def test_configured_notice_says_when_the_recommendation_matches(self) -> None:
+        decision = pin_configured_routing_decision(
+            resolve(
+                sample_payload(selected_provider="grok", selected_model="grok-4.6", reasoning_effort="medium"),
+                "grok",
+            ),
+            provider="grok",
+            provider_name="Grok",
+            model="grok-4.6",
+            effort="medium",
+        )
+        notice = format_routing_notice(decision)
+        self.assertIn(
+            "Router recommendation: Grok 4.6 at Medium reasoning (matches the configured setting)",
+            notice,
+        )
+
+    def test_grading_unavailable_notice_keeps_the_configured_pair(self) -> None:
+        decision = fallback_routing_decision(
+            provider="grok",
+            provider_name="Grok",
+            model="grok-4.6",
+            effort="medium",
+            reason="router returned no JSON",
+            router_model="grok-4.6",
+            router_effort="low",
+            dynamic_model_routing=False,
+        )
+        notice = format_routing_notice(decision)
+        self.assertIn("Pre-flight grading was unavailable", notice)
+        self.assertIn("Selected AI: Grok", notice)
+        self.assertIn("Selected Model: Grok 4.6", notice)
+        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn(
+            "How this was chosen: Set in SWARM Automation. Pre-flight grading was unavailable.",
+            notice,
+        )
+        self.assertNotIn("The router chose", notice)
+
+    def test_execution_history_describes_configured_and_applied_pairs(self) -> None:
+        configured = pin_configured_routing_decision(
+            resolve(sample_payload(selected_model="gpt-5.6-luna", reasoning_effort="low"), "codex"),
+            provider="grok",
+            provider_name="Grok",
+            model="grok-4.6",
+            effort="medium",
+        )
+        kind, message = routing_history_message(configured, "Grok", "grok-4.6", "medium")
+        self.assertEqual(kind, "note")
+        self.assertIn("The configured setting was used: Grok grok-4.6 with effort medium", message)
+        self.assertIn("Router recommended gpt-5.6-luna with effort low", message)
+        self.assertNotIn("Dynamic routing selected", message)
+
+        applied = resolve(sample_payload(), "codex")
+        kind, message = routing_history_message(applied, "Codex", "gpt-5.6-luna", "low")
+        self.assertEqual(kind, "note")
+        self.assertIn("Dynamic routing selected Codex gpt-5.6-luna with effort low", message)
+
+        failed = fallback_routing_decision(
+            provider="grok",
+            model="grok-4.6",
+            effort="medium",
+            reason="router timed out",
+            router_model="grok-4.6",
+            router_effort="low",
+            dynamic_model_routing=False,
+        )
+        kind, message = routing_history_message(failed, "Grok", "grok-4.6", "medium")
+        self.assertEqual(kind, "warning")
+        self.assertIn("the configured setting was used", message)
+        self.assertNotIn("Dynamic routing selected", message)
 
     def test_router_attaches_issue_images_for_each_provider(self) -> None:
         import base64

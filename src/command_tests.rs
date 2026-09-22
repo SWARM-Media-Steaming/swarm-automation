@@ -1276,6 +1276,40 @@ fn repo_worker_args_carries_independent_history_settings() {
 }
 
 #[test]
+fn repo_worker_args_carries_the_saved_routing_toggle_and_preference() {
+    let repo = repo("octocat/example");
+    let mut config = AppConfig {
+        dynamic_model_routing: false,
+        routing_optimization: "best".into(),
+        ..AppConfig::default()
+    };
+    config.repositories.push(repo.clone());
+    let off = repo_worker_args(
+        &config,
+        &repo,
+        &PathBuf::from("/tmp/ws"),
+        &PathBuf::from("/usr/bin/git"),
+        &PathBuf::from("/usr/bin/gh"),
+    );
+    assert!(off.contains(&"--no-dynamic-model-routing".to_string()));
+    assert!(!off.contains(&"--dynamic-model-routing".to_string()));
+    assert_eq!(pair(&off, "--routing-optimization"), Some("best"));
+
+    config.dynamic_model_routing = true;
+    config.routing_optimization = "cost".into();
+    let on = repo_worker_args(
+        &config,
+        &repo,
+        &PathBuf::from("/tmp/ws"),
+        &PathBuf::from("/usr/bin/git"),
+        &PathBuf::from("/usr/bin/gh"),
+    );
+    assert!(on.contains(&"--dynamic-model-routing".to_string()));
+    assert!(!on.contains(&"--no-dynamic-model-routing".to_string()));
+    assert_eq!(pair(&on, "--routing-optimization"), Some("cost"));
+}
+
+#[test]
 fn scheduler_arguments_degrade_manual_to_continuous_and_pass_the_repos_file() {
     let config = AppConfig {
         schedule_mode: "manual".into(),

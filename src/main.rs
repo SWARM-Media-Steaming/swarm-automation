@@ -879,6 +879,9 @@ fn execution_history_db_path(config: &AppConfig) -> PathBuf {
 }
 
 /// `swarm_issue_worker.py` flag list for one repo, embedded in `repos.json`.
+/// Includes the routing toggle and preference so a save while the scheduler is
+/// already running can change them on the next new attempt: the scheduler
+/// repeats those flags after its startup copies, and argparse keeps the last.
 fn repo_worker_args(
     config: &AppConfig,
     repo: &RepoConfig,
@@ -983,6 +986,14 @@ fn repo_worker_args(
         execution_history_db_path(config)
             .to_string_lossy()
             .into_owned(),
+        if config.dynamic_model_routing {
+            "--dynamic-model-routing"
+        } else {
+            "--no-dynamic-model-routing"
+        }
+        .into(),
+        "--routing-optimization".into(),
+        config.routing_optimization.clone(),
     ];
     // A blank list is a genuine "trust no one" — fall back to the assignee so
     // a first run works without filling in two more fields.
