@@ -73,8 +73,8 @@ Optional per-repo setting (`dynamic_model_routing`) that, when on, has one
 of the enabled providers grade a new issue and pick which provider handles
 it, instead of the operator always choosing one provider up front. Lives
 mostly in `issue_worker/dynamic_router.py`; `swarm_issue_worker.py` calls
-it from `apply_dynamic_routing`. It is a two-step, **not** one AI free
-choice, and the two steps get very different amounts of AI discretion:
+it from `apply_dynamic_routing`. It is a two-step decision, and both steps are
+now genuine AI discretion bounded by operator settings:
 
 1. **Which provider.** The router (an ephemeral, tool-free call to one
    provider's own CLI — see `run_provider_router`) grades the issue and picks
@@ -87,38 +87,63 @@ choice, and the two steps get very different amounts of AI discretion:
    This is real AI discretion: `_select_candidate` can be overridden by the
    operator's `preferred_provider` tie-break or by the rework-favors-a-
    different-tool rule, but nothing here is mechanical.
-2. **Which model, at which effort.** Deliberately **not** an AI choice.
-   `resolve_routing_decision` takes the provider's own `selected_model`/
-   `reasoning_effort` suggestion, discards it, and instead looks up
-   `tier_for_complexity(chosen.tiers, complexity)` — the provider's
-   `routing_tiers` table (`_DEFAULT_TIER_ROWS` / `default_routing_tiers` in
-   `config.rs`), a plain numeric mapping from the router's own 1–10
-   complexity score to a model/effort pair the *operator* configured. This
-   keeps cost and behavior predictable and configurable; see the router
-   prompt's own comment in `build_router_prompt` and the docstring on
-   `resolve_routing_decision` before changing this — letting an AI's model
-   suggestion actually take effect was a deliberate design decision to
-   avoid, not an oversight to "fix".
+2. **Which model, at which effort.** Also real AI discretion, since issue #176
+   ("Dynamic Model Routing: add a cost-vs-best-model routing preference").
+   `resolve_routing_decision` now honours the router's own `selected_model` /
+   `reasoning_effort`, validated against the canonical cross-provider catalog
+   (`_MODEL_CATALOG`) rather than re-derived from the complexity band. Before
+   that issue the suggestion was deliberately discarded in favor of
+   `tier_for_complexity(chosen.tiers, complexity)`; that lookup is still in the
+   code and still matters, but only as the **fallback** path — do not read an
+   older comment or docstring as saying the tier table is the sole source of
+   the worker model.
 
-Since 2026-09-22, each model named in a tier also carries a short built-in
-description of what it tends to be good for (`_MODEL_DESCRIPTIONS` /
-`model_description`) — Haiku-tier "fast, cheap, well-scoped" through
-Opus-tier "large, ambiguous, high-risk", mirroring the increasing-capability
-ladder the tier table already encodes numerically. This is step 1 all over
-again, one level down: it is shown next to each tier in the router prompt so
-step 1's provider pick and complexity score are made with real knowledge of
-what a given tier actually invokes, and it is folded into the stored
-`tier_explanation`, so it shows up in AI execution history and the routing
-notice posted on the issue. It never feeds step 2 — the model a tier maps to
-does not change. Unlike the tier tables and provider strengths, this table
-has no `config.rs` counterpart and nothing to keep in sync: it is never sent
-to the app or saved in `config.json`, only built into `dynamic_router.py`.
+   What governs the choice is the global `routing_optimization` setting
+   ("Optimize routing for cost" on the AI Configuration page, `"cost"` or
+   `"best"`, defaulting to `"best"`): `"cost"` tells the router to take the
+   least expensive catalog model that can plausibly do the work and escalate
+   only on the graded `risk` score; `"best"` tells it to ignore cost and fit
+   the model to the task (explicitly *not* "always pick the top tier").
 
-Adding a provider's tiers, strengths, or model descriptions without a
-matching edit on the other side (Python vs. `config.rs`, for the two that
-have both) is a real way to introduce drift — the router prompt and the
-saved config would disagree about that provider's defaults. Model
-descriptions are the one exception: Python-only by design, see above.
+   The complexity/risk/context scores are still graded and recorded — they are
+   now inputs the router reasons over rather than a lookup key.
+
+Three things keep that discretion from going wrong, and all three must survive
+any later change here:
+
+- **The prompt is grounded in the whole valid set.** `build_router_prompt`
+  lists every model of every offered tool from `_MODEL_CATALOG`, filtered by
+  `allow_usage_credit_models` (forwarded from the desktop the same way
+  `routing_tiers` is) and by any model the provider just rejected in this run
+  (`RouterCandidate.excluded_models`, from the credit-model re-route path).
+- **One corrective retry, never a silent substitution.** A model outside that
+  catalog raises `InvalidRouterModel`; `SwarmIssueWorker.resolve_router_
+  response` spends exactly one follow-up call (`build_model_correction_prompt`,
+  the original prompt plus the rejected name and the catalog restated) and
+  takes that second answer.
+- **Failure degrades, never blocks.** A second invalid answer — or a failed
+  corrective call — resolves the first response through `tier_for_complexity`
+  (`model_source: "tier"`), so the worst case is exactly the pre-#176
+  behavior. The same tier path covers a decision whose *tool* pick was
+  overruled, since the router's model then belongs to a different tool.
+
+Since 2026-09-22, each model also carries a short built-in description of what
+it tends to be good for (`_MODEL_DESCRIPTIONS` / `model_description`, now the
+by-slug view of `_MODEL_CATALOG`) — Haiku-tier "fast, cheap, well-scoped"
+through Opus-tier "large, ambiguous, high-risk" — plus a relative `cost` rank
+comparable across providers, which is what makes "optimize for cost" a
+cross-provider judgement rather than a per-tier one. These are shown in the
+router prompt and folded into the stored `tier_explanation`, so they show up in
+AI execution history and the routing notice posted on the issue. Unlike the
+tier tables and provider strengths, this table has no `config.rs` counterpart
+and nothing to keep in sync: it is never sent to the app or saved in
+`config.json`, only built into `dynamic_router.py`. A model missing from it
+cannot be routed to, so adding a model means adding it here.
+
+Adding a provider's tiers or strengths without a matching edit on the other
+side (Python vs. `config.rs`) is a real way to introduce drift — the router
+prompt and the saved config would disagree about that provider's defaults. The
+model catalog is the one exception: Python-only by design, see above.
 
 ## Issue outcomes and no-code flows
 

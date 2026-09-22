@@ -60,16 +60,21 @@ from issue_images import (
     inlined_images,
 )
 from dynamic_router import (
+    DEFAULT_ROUTING_OPTIMIZATION,
+    InvalidRouterModel,
     RouterCandidate,
     RouterError,
     RoutingTier,
+    build_model_correction_prompt,
     build_router_prompt,
+    catalog_model_names,
     default_provider_strengths,
     default_router_effort,
     default_router_model,
     fallback_routing_decision,
     format_routing_notice,
     load_routing_tiers,
+    normalize_routing_optimization,
     resolve_routing_decision,
     run_provider_router,
 )
@@ -394,6 +399,8 @@ class Config:
     providers: tuple[ProviderSpec, ...]
     dynamic_model_routing: bool
     routing_tiers: dict[str, tuple[Any, ...]]
+    routing_optimization: str
+    allow_usage_credit_models: bool
     preferred_provider: str
     dry_run: bool
     gh_bin: str
@@ -442,6 +449,8 @@ class Config:
             ),
             dynamic_model_routing=bool(args.dynamic_model_routing),
             routing_tiers=_routing_tiers_from_args(args.routing_tiers),
+            routing_optimization=normalize_routing_optimization(args.routing_optimization),
+            allow_usage_credit_models=bool(args.allow_usage_credit_models),
             preferred_provider=args.preferred_provider,
             dry_run=args.dry_run,
             gh_bin=args.gh_bin,
@@ -2039,7 +2048,14 @@ class Worker:
         host = self.config.spec(self.choice.key)
         if host is not None and model == host.model:
             return True
-        return any(tier.model == model for tier in self.config.routing_tiers.get(self.choice.key, ()))
+        if any(tier.model == model for tier in self.config.routing_tiers.get(self.choice.key, ())):
+            return True
+        # The router picks from the model catalog, not only from the tiers, so
+        # a catalog model this configuration still offers is just as valid.
+        return model in catalog_model_names(
+            (self.choice.key,),
+            allow_usage_credit_models=self.config.allow_usage_credit_models,
+        )
 
     def ensure_bot_auth(self) -> None:
         """Fail early when the chosen provider cannot act as its GitHub App.
@@ -2114,6 +2130,9 @@ class Worker:
                     tiers=tuple(tiers),
                     strengths=spec.strengths,
                     usage_remaining=usage.remaining_percent if usage else None,
+                    excluded_models=tuple(
+                        model for provider, model in sorted(excluded) if provider == key
+                    ),
                 )
             )
         return candidates
@@ -2142,23 +2161,16 @@ class Worker:
                 comment_image_count=sum(
                     1 for image in images if not image.source.startswith("issue description")
                 ),
+                routing_optimization=self.config.routing_optimization,
+                allow_usage_credit_models=self.config.allow_usage_credit_models,
             )
-            raw = run_provider_router(
-                provider=host.key,
-                bin_path=host.bin or "",
-                model=host.router_model,
-                effort=host.router_effort,
-                prompt=prompt,
-                cwd=self.config.repo_dir,
-                images=tuple(image.path for image in images),
-            )
-            decision = resolve_routing_decision(
+            raw = self.run_router(host, prompt, images)
+            decision = self.resolve_router_response(
                 raw,
-                candidates,
-                default_provider=host.key,
-                router_provider=host.key,
-                router_model=host.router_model,
-                router_effort=host.router_effort,
+                prompt=prompt,
+                candidates=candidates,
+                host=host,
+                images=images,
                 previous_provider=previous_provider,
                 rework=rework,
             )
@@ -2177,6 +2189,7 @@ class Worker:
                 router_effort=host.router_effort,
                 router_provider=host.key,
                 candidates=[candidate.key for candidate in candidates],
+                routing_optimization=self.config.routing_optimization,
             )
         else:
             self.adopt_routing_decision(decision)
@@ -2187,6 +2200,77 @@ class Worker:
                 effort=self.choice.effort,
                 routing_decision=self.routing,
             )
+
+    def run_router(self, host: "ProviderSpec", prompt: str, images: Sequence[Any]) -> str:
+        return run_provider_router(
+            provider=host.key,
+            bin_path=host.bin or "",
+            model=host.router_model,
+            effort=host.router_effort,
+            prompt=prompt,
+            cwd=self.config.repo_dir,
+            images=tuple(image.path for image in images),
+        )
+
+    def resolve_router_response(
+        self,
+        raw: str,
+        *,
+        prompt: str,
+        candidates: Sequence[RouterCandidate],
+        host: "ProviderSpec",
+        images: Sequence[Any],
+        previous_provider: str,
+        rework: bool,
+    ) -> dict[str, Any]:
+        """Validate the router response, correcting one invalid model choice.
+
+        The router names the worker model itself now, so it can name one that
+        does not exist. That earns exactly one corrective follow-up call with
+        the full catalog restated — never a silent substitution. A second
+        invalid answer (or a failed retry) resolves the first response through
+        the configured complexity tiers instead, so a persistently wrong router
+        degrades to the old deterministic behavior rather than stalling the
+        issue.
+        """
+
+        def resolve(payload: Any, *, allow_tier_fallback: bool) -> dict[str, Any]:
+            return resolve_routing_decision(
+                payload,
+                candidates,
+                default_provider=host.key,
+                router_provider=host.key,
+                router_model=host.router_model,
+                router_effort=host.router_effort,
+                previous_provider=previous_provider,
+                rework=rework,
+                routing_optimization=self.config.routing_optimization,
+                allow_usage_credit_models=self.config.allow_usage_credit_models,
+                allow_tier_fallback=allow_tier_fallback,
+            )
+
+        try:
+            return resolve(raw, allow_tier_fallback=False)
+        except InvalidRouterModel as invalid:
+            log(
+                f"Dynamic routing: the router named {invalid.model or '(no model)'}, which is not a "
+                "model this app can run; asking it once more with the full catalog."
+            )
+            correction = build_model_correction_prompt(
+                prompt,
+                named_model=invalid.model,
+                candidates=candidates,
+                allow_usage_credit_models=self.config.allow_usage_credit_models,
+            )
+            try:
+                retry = self.run_router(host, correction, images)
+                return resolve(retry, allow_tier_fallback=True)
+            except RouterError as error:
+                log(
+                    "Dynamic routing: the corrective router call did not produce a usable model "
+                    f"({error}); using the configured complexity tier instead."
+                )
+            return resolve(invalid.payload, allow_tier_fallback=True)
 
     def adopt_routing_decision(self, decision: dict[str, Any]) -> None:
         """Apply a validated decision: the AI tool first, then model and effort."""
@@ -5416,6 +5500,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--routing-tiers",
         default=env_value("SWARM_ROUTING_TIERS", ""),
         help="JSON object of per-provider complexity tiers. Empty uses the built-in table.",
+    )
+    parser.add_argument(
+        "--routing-optimization",
+        choices=("cost", "best"),
+        default=env_value("SWARM_ROUTING_OPTIMIZATION", DEFAULT_ROUTING_OPTIMIZATION).lower(),
+        help="Whether dynamic routing favors the cheapest capable model or the best fit for the work.",
+    )
+    parser.add_argument(
+        "--allow-usage-credit-models",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_ALLOW_USAGE_CREDIT_MODELS", False),
+        help="Offer models that bill against a separate usage-credit balance to the router.",
     )
     parser.add_argument("--dry-run", action="store_true", default=env_bool("SWARM_ISSUE_WORKER_DRY_RUN"))
     parser.add_argument("--gh-bin", default=env_value("GH_BIN", executable_default("gh")))

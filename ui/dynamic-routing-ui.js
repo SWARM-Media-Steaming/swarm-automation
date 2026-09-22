@@ -18,6 +18,20 @@
     return DEFAULT_ROUTER[providerId] || { model: "", effort: "low" };
   }
 
+  // A few settings are a two-value string rather than a boolean, but are still
+  // a single checkbox (e.g. routing_optimization: "cost" when ticked, "best"
+  // when not). The generic [data-config] loop in app.js reads the pair off the
+  // element's data-checked-value/data-unchecked-value attributes and maps it
+  // through these, so such a setting stays part of that one loop instead of
+  // earning a handler of its own.
+  function valuedToggleChecked(value, checkedValue) {
+    return String(value ?? "") === String(checkedValue ?? "");
+  }
+
+  function valuedToggleValue(checked, checkedValue, uncheckedValue) {
+    return checked ? String(checkedValue ?? "") : String(uncheckedValue ?? "");
+  }
+
   function routingControlState(dynamicRouting) {
     const enabled = Boolean(dynamicRouting);
     return {
@@ -50,5 +64,12 @@
     return state;
   }
 
-  return { DEFAULT_ROUTER, defaultRouter, routingControlState, applyRoutingControlState };
+  return {
+    DEFAULT_ROUTER,
+    defaultRouter,
+    valuedToggleChecked,
+    valuedToggleValue,
+    routingControlState,
+    applyRoutingControlState,
+  };
 });

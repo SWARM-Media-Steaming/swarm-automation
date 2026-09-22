@@ -779,6 +779,20 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
         "--routing-tiers".into(),
         serde_json::to_string(&config.routing_tiers).unwrap_or_else(|_| "{}".into()),
     ]);
+    arguments.extend([
+        "--routing-optimization".into(),
+        config.routing_optimization.clone(),
+    ]);
+    // The router names the worker model itself, so it needs the same
+    // credit-model filter the desktop applies to every other model list.
+    arguments.push(
+        if config.allow_usage_credit_models {
+            "--allow-usage-credit-models"
+        } else {
+            "--no-allow-usage-credit-models"
+        }
+        .into(),
+    );
     arguments
 }
 

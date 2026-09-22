@@ -335,6 +335,7 @@ button.router-model:focus-visible { outline: 2px solid var(--violet); outline-of
 .provider-preference-choice:has(input:disabled) input { cursor: not-allowed; }
 .dynamic-routing-panel { margin: 0 0 16px; }
 .dynamic-routing-panel .toggle strong { letter-spacing: .04em; }
+.dynamic-routing-panel .policy-toggle + .policy-toggle { margin-top: 10px; }
 .provider-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); gap: 14px; margin-bottom: 22px; }
 .provider-card { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 12px; padding: 17px; display: flex; flex-direction: column; gap: 12px; }
 .provider-card.excluded { opacity: .55; }
