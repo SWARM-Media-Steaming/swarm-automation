@@ -2090,11 +2090,7 @@
     try {
       const page = await invoke("get_prompt_grades_background", {
         repoId: repo.id,
-        offset,
-        search,
-        grade,
-        router,
-        routerModel,
+        query: { offset, search, grade, router, routerModel },
       });
       if (requestId !== state.promptGradesRequest || repo.id !== state.activeRepoId) return;
       state.promptGrades = page;

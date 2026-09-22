@@ -1441,15 +1441,27 @@ fn normalize_router_model_filter(model: Option<String>) -> String {
     model.unwrap_or_default().trim().chars().take(120).collect()
 }
 
+/// Filters for one page of prompt grades, passed as a single command argument.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptGradesQuery {
+    #[serde(default)]
+    offset: Option<i64>,
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    grade: Option<String>,
+    #[serde(default)]
+    router: Option<String>,
+    #[serde(default)]
+    router_model: Option<String>,
+}
+
 fn prompt_grades_query_args(
     script: &Path,
     database: &Path,
     repository: &str,
-    offset: Option<i64>,
-    search: Option<String>,
-    grade: Option<String>,
-    router: Option<String>,
-    router_model: Option<String>,
+    query: PromptGradesQuery,
 ) -> Vec<String> {
     // `--limit` is always sent, matching execution history. Omitting it would
     // still page grades, but the desktop always asks for one page explicitly.
@@ -1463,15 +1475,15 @@ fn prompt_grades_query_args(
         "--limit".into(),
         EXECUTION_HISTORY_PAGE_SIZE.to_string(),
         "--offset".into(),
-        offset.unwrap_or(0).max(0).to_string(),
+        query.offset.unwrap_or(0).max(0).to_string(),
         "--search".into(),
-        normalize_execution_history_search(search),
+        normalize_execution_history_search(query.search),
         "--grade".into(),
-        normalize_prompt_grade(grade),
+        normalize_prompt_grade(query.grade),
         "--router".into(),
-        normalize_router_filter(router),
+        normalize_router_filter(query.router),
         "--router-model".into(),
-        normalize_router_model_filter(router_model),
+        normalize_router_model_filter(query.router_model),
     ]
 }
 
@@ -1480,11 +1492,7 @@ fn get_prompt_grades<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
     repo_id: String,
-    offset: Option<i64>,
-    search: Option<String>,
-    grade: Option<String>,
-    router: Option<String>,
-    router_model: Option<String>,
+    query: PromptGradesQuery,
 ) -> Result<PromptGradesPage, String> {
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?;
@@ -1503,16 +1511,7 @@ fn get_prompt_grades<R: tauri::Runtime>(
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
     let (ok, raw) = run_capture_owned(
         &python,
-        &prompt_grades_query_args(
-            &script,
-            &database_path,
-            &repo.github_repository,
-            offset,
-            search,
-            grade,
-            router,
-            router_model,
-        ),
+        &prompt_grades_query_args(&script, &database_path, &repo.github_repository, query),
     );
     if !ok {
         return Err(format!("Prompt grades lookup failed: {raw}"));
@@ -1525,24 +1524,11 @@ fn get_prompt_grades<R: tauri::Runtime>(
 async fn get_prompt_grades_background(
     app: tauri::AppHandle,
     repo_id: String,
-    offset: Option<i64>,
-    search: Option<String>,
-    grade: Option<String>,
-    router: Option<String>,
-    router_model: Option<String>,
+    query: PromptGradesQuery,
 ) -> Result<PromptGradesPage, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        get_prompt_grades(
-            app.clone(),
-            state,
-            repo_id,
-            offset,
-            search,
-            grade,
-            router,
-            router_model,
-        )
+        get_prompt_grades(app.clone(), state, repo_id, query)
     })
     .await
     .map_err(|error| format!("Prompt grades lookup failed: {error}"))?
