@@ -1303,17 +1303,19 @@ class WorkerTestCase(unittest.TestCase):
 
     def test_a_credit_only_model_is_rerouted_immediately_and_audited(self) -> None:
         self.worker.config = dataclasses.replace(
-            self.worker.config, dynamic_model_routing=True
+            self.worker.config,
+            dynamic_model_routing=True,
+            allow_usage_credit_models=True,
         )
         self.worker.issue = IssueContext(
             157, "Credit-only model", "ORIGINAL", [], "https://example.invalid/157"
         )
         self.worker.choice = ProviderChoice(
-            "Claude", "fable", "high", "old-session", resume=True
+            "Claude", "claude-fable-5-1", "high", "old-session", resume=True
         )
         self.worker.routing = {
             "provider": "claude",
-            "selected_model": "fable",
+            "selected_model": "claude-fable-5-1",
             "reasoning_effort": "high",
         }
         self.worker.save_new_state(
@@ -1338,8 +1340,8 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
             return 0
 
-        routed = self._routing_payload(
-            selected_provider="claude", selected_model="fable"
+        replacement = self._routing_payload(
+            selected_provider="claude", selected_model="claude-opus-5"
         )
         output = io.StringIO()
         with (
@@ -1347,7 +1349,8 @@ class WorkerTestCase(unittest.TestCase):
                 self.worker, "_run_claude", side_effect=fake_claude
             ),
             mock.patch(
-                "swarm_issue_worker.run_provider_router", return_value=routed
+                "swarm_issue_worker.run_provider_router",
+                return_value=replacement,
             ) as router,
             contextlib.redirect_stdout(output),
         ):
@@ -1355,27 +1358,28 @@ class WorkerTestCase(unittest.TestCase):
 
         self.assertEqual(status, 0)
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0], ("fable", "high", "old-session"))
-        self.assertNotEqual(calls[1][0], "fable")
+        self.assertEqual(calls[0], ("claude-fable-5-1", "high", "old-session"))
+        self.assertEqual(calls[1][0], "claude-opus-5")
         self.assertNotEqual(calls[1][2], "old-session")
         router.assert_called_once()
-        self.assertNotIn("fable", router.call_args.kwargs["prompt"].lower())
+        # The re-route's own prompt must not offer the rejected model again.
+        self.assertNotIn("claude-fable-5-1", router.call_args.kwargs["prompt"])
         state = self.worker.read_state()
         audit = state["routing_re_evaluation"]
         self.assertEqual(audit["trigger"], "model_requires_usage_credits")
-        self.assertEqual(audit["original_model"], "fable")
+        self.assertEqual(audit["original_model"], "claude-fable-5-1")
         self.assertIn("requires usage credits", audit["provider_message"])
         self.assertIn("current account/configuration", audit["configuration"])
         self.assertEqual(audit["replacement_model"], calls[1][0])
         self.assertEqual(
-            audit["previous_routing_decision"]["selected_model"], "fable"
+            audit["previous_routing_decision"]["selected_model"], "claude-fable-5-1"
         )
         self.assertEqual(
             state["routing_decision"]["re_evaluation"], audit
         )
         self.assertEqual(state["session_id"], calls[1][2])
         self.assertFalse(state["session_started"])
-        self.assertIn("originally selected Claude fable", output.getvalue())
+        self.assertIn("originally selected Claude claude-fable-5-1", output.getvalue())
         self.assertIn("required separate usage credits", output.getvalue())
 
     def test_a_failure_that_is_not_a_model_rejection_is_not_retried(self) -> None:
@@ -3071,7 +3075,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(self.worker.choice.effort, "medium")
         self.assertEqual(self.worker.issue.body, "ORIGINAL")
 
-    def test_dynamic_routing_selects_the_tier_and_leaves_the_worker_prompt_unchanged(self) -> None:
+    def test_dynamic_routing_runs_the_routers_own_model_and_leaves_the_prompt_unchanged(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
         body = "Keep this sentence exactly.\nAcceptance: the toggle persists."
         self.worker.issue = IssueContext(502, "Route me", body, ["enhancement"], "https://example.invalid/502")
@@ -3083,13 +3087,88 @@ class WorkerTestCase(unittest.TestCase):
         router.assert_called_once()
         self.assertIn(body, router.call_args.kwargs["prompt"])
         self.assertEqual(self.worker.issue.body, body)
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
-        self.assertEqual(self.worker.choice.effort, "high")
+        # The router's own pick runs, rather than complexity 7's tier row.
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
+        self.assertEqual(self.worker.choice.effort, "low")
+        self.assertEqual(self.worker.routing["model_source"], "router")
         self.assertFalse(self.worker.routing["fallback"])
         self.assertEqual(self.worker.build_prompt(False, "", False), before)
-        self.assertEqual(self.worker.read_state()["model"], "gpt-5.6-sol")
+        self.assertEqual(self.worker.read_state()["model"], "gpt-5.6-luna")
         self.assertEqual(self.worker.read_state()["routing_decision"]["prompt_grade"], "B+")
         self.assertEqual(self.worker.read_state()["routing_decision"]["provider"], "codex")
+
+    def test_dynamic_routing_prompt_carries_the_cost_preference(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, dynamic_model_routing=True, routing_optimization="cost"
+        )
+        self.worker.issue = IssueContext(511, "Economize", "ORIGINAL", [], "https://example.invalid/511")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-511")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(selected_model="gpt-5.6-terra"),
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        prompt = router.call_args.kwargs["prompt"]
+        self.assertIn("Routing preference: optimize for cost.", prompt)
+        self.assertIn("Model catalog", prompt)
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-terra")
+        self.assertEqual(self.worker.routing["routing_optimization"], "cost")
+
+    def test_dynamic_routing_asks_once_more_when_the_router_invents_a_model(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(512, "Invented", "ORIGINAL", [], "https://example.invalid/512")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-512")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            side_effect=[
+                self._routing_payload(selected_model="gpt-5.6-hyperion"),
+                self._routing_payload(selected_model="gpt-5.6-terra", reasoning_effort="medium"),
+            ],
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(router.call_count, 2)
+        correction = router.call_args_list[1].kwargs["prompt"]
+        self.assertIn("gpt-5.6-hyperion", correction)
+        self.assertIn("not a model that exists", correction)
+        self.assertIn("gpt-5.6-terra", correction.split("Correction —")[1])
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-terra")
+        self.assertEqual(self.worker.choice.effort, "medium")
+        self.assertEqual(self.worker.routing["model_source"], "router")
+        self.assertFalse(self.worker.routing["fallback"])
+
+    def test_dynamic_routing_degrades_to_the_tier_after_a_second_invented_model(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(513, "Twice wrong", "ORIGINAL", [], "https://example.invalid/513")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-513")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(selected_model="gpt-5.6-hyperion"),
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        # Exactly one corrective call, then today's deterministic tier lookup.
+        self.assertEqual(router.call_count, 2)
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
+        self.assertEqual(self.worker.choice.effort, "high")
+        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertFalse(self.worker.routing["fallback"])
+        self.assertEqual(self.worker.routing["router_suggested_model"], "gpt-5.6-hyperion")
+
+    def test_dynamic_routing_degrades_to_the_tier_when_the_corrective_call_fails(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(514, "Retry failed", "ORIGINAL", [], "https://example.invalid/514")
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-514")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            side_effect=[
+                self._routing_payload(selected_model="gpt-5.6-hyperion"),
+                RouterError("router timed out"),
+            ],
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(router.call_count, 2)
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
+        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertFalse(self.worker.routing["fallback"])
 
     def test_dynamic_routing_falls_back_and_still_posts_the_configured_model(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
@@ -3206,7 +3285,9 @@ class WorkerTestCase(unittest.TestCase):
         self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5", "low", "session-509")
         with mock.patch(
             "swarm_issue_worker.run_provider_router",
-            return_value=self._routing_payload(selected_provider="claude"),
+            return_value=self._routing_payload(
+                selected_provider="claude", selected_model="claude-opus-5", reasoning_effort="high"
+            ),
         ) as router:
             self.worker.maybe_apply_dynamic_routing()
         router.assert_called_once()
@@ -3310,7 +3391,7 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.maybe_apply_dynamic_routing()
         self.assertEqual(self.worker.choice.name, "Codex")
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
+        self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
         self.assertEqual(self.worker.routing["provider_override_reason"], "")
 
     def test_dynamic_routing_cannot_change_tools_on_an_owned_branch(self) -> None:

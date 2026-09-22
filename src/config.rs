@@ -105,6 +105,12 @@ pub fn provider_strengths_preset(id: &str) -> &'static str {
 /// Built-in complexity bands. An empty saved table is filled from this on
 /// normalize so the mapping stays in config instead of being scattered
 /// through the worker.
+/// Routing ignores cost and picks the best fit for the work until the operator
+/// turns "Optimize routing for cost" on.
+fn default_routing_optimization() -> String {
+    "best".into()
+}
+
 pub fn default_routing_tiers() -> HashMap<String, Vec<RoutingTier>> {
     HashMap::from([
         (
@@ -462,6 +468,15 @@ pub struct AppConfig {
     /// Per-provider complexity bands. Empty until [`Self::normalize`] fills
     /// the built-in table, which a saved config can replace.
     pub routing_tiers: HashMap<String, Vec<RoutingTier>>,
+    /// How dynamic routing weighs price against capability when it picks the
+    /// worker model: `"cost"` (the "Optimize routing for cost" toggle on) asks
+    /// the router for the least expensive model that can plausibly do the
+    /// work, escalating on risk; `"best"` (the default, toggle off) asks for
+    /// the best fit for the task and ignores price. Anything else is read as
+    /// `"best"`. The router itself lives in `issue_worker/dynamic_router.py`;
+    /// this is only the preference forwarded to it.
+    #[serde(default = "default_routing_optimization")]
+    pub routing_optimization: String,
     /// Off by default: a model that draws on a separate usage-credit balance
     /// (e.g. Claude's `fable` alias) is left out of every catalog offered to
     /// the worker model, router model, and routing tiers — for manual
@@ -572,6 +587,7 @@ impl Default for AppConfig {
             providers: default_providers(),
             dynamic_model_routing: false,
             routing_tiers: default_routing_tiers(),
+            routing_optimization: default_routing_optimization(),
             allow_usage_credit_models: false,
             minimum_remaining_percent: 10,
             parallel_repo_workers: false,
@@ -868,6 +884,9 @@ impl AppConfig {
     }
 
     fn normalize_routing(&mut self) {
+        if !matches!(self.routing_optimization.trim(), "cost" | "best") {
+            self.routing_optimization = default_routing_optimization();
+        }
         for (id, tiers) in default_routing_tiers() {
             let slot = self.routing_tiers.entry(id).or_default();
             if slot.is_empty() {
@@ -1212,6 +1231,30 @@ mod tests {
             .validate_providers()
             .unwrap_err()
             .contains("model cannot be empty"));
+    }
+
+    #[test]
+    fn routing_optimization_defaults_to_best_and_only_accepts_the_two_values() {
+        let mut config = config_with_one_repo();
+        config.normalize();
+        assert_eq!(config.routing_optimization, "best");
+
+        config.routing_optimization = "cost".into();
+        let encoded = serde_json::to_string(&config).unwrap();
+        let mut decoded: AppConfig = serde_json::from_str(&encoded).unwrap();
+        decoded.normalize();
+        assert_eq!(decoded.routing_optimization, "cost");
+        assert!(decoded.validate().is_ok());
+
+        // Anything else — including a config file written before the setting
+        // existed — routes for the best fit rather than silently economizing.
+        decoded.routing_optimization = "cheapest".into();
+        decoded.normalize();
+        assert_eq!(decoded.routing_optimization, "best");
+        let mut older: AppConfig =
+            serde_json::from_str(r#"{"dynamic_model_routing": true}"#).unwrap();
+        older.normalize();
+        assert_eq!(older.routing_optimization, "best");
     }
 
     #[test]

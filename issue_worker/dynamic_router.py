@@ -1,21 +1,30 @@
 """Optional dynamic AI routing for one GitHub issue.
 
-The router grades the original issue, scores its complexity, and picks which
-of the enabled AI tools runs the work. The worker model and reasoning effort
-then come from that tool's configured tier table for the score — never from
-the router's own model choice. The original issue text is never rewritten.
-Keep the default tier tables and provider strengths in sync with
-``default_routing_tiers`` / ``ProviderSettings`` in ``src/config.rs``.
+The router grades the original issue, scores its complexity, and picks which of
+the enabled AI tools runs the work and on which model. The original issue text
+is never rewritten. Keep the default tier tables and provider strengths in sync
+with ``default_routing_tiers`` / ``ProviderSettings`` in ``src/config.rs``.
 
-Each model named in a tier also carries a short, built-in description of what
-it tends to be good at (``_MODEL_DESCRIPTIONS`` / ``model_description``),
-shown to the router next to that tier so its provider choice and complexity
-score are made with real knowledge of which model each band actually invokes,
-and recorded on the routing decision for the same reason a human would want
-to see it. This never changes *which* model runs — that is still the tier
-table alone — and it exists only here: unlike the tier tables and provider
-strengths, it is never sent to the app or persisted in config.json, so there
-is no matching copy to keep in sync in ``src/config.rs``.
+The model is the router's own call, not a table lookup. It is shown the full
+cross-provider catalog (``_MODEL_CATALOG``) — every model, what it is good at,
+and what it costs relative to the others, minus anything needing usage credits
+the operator has not allowed — and the operator's ``routing_optimization``
+preference decides how to weigh those costs: ``"cost"`` asks for the cheapest
+model that can plausibly do the work, escalating on the graded risk score,
+while ``"best"`` asks for the best fit for the task and ignores price.
+
+The operator's ``routing_tiers`` table is still graded against and still shown
+as reference, and it remains the deterministic safety net: if the router names
+a model outside the catalog it gets exactly one corrective follow-up call with
+the catalog restated (``build_model_correction_prompt``), and a second invalid
+answer resolves through ``tier_for_complexity`` instead — so a persistently
+wrong router response degrades to the old behavior rather than stalling the
+issue. The same tier path covers a decision where the router's tool pick was
+overruled, since its model then belongs to a different tool.
+
+``_MODEL_CATALOG`` exists only here: unlike the tier tables and provider
+strengths, it is never sent to the app or persisted in config.json, so there is
+no matching copy to keep in sync in ``src/config.rs``.
 """
 
 from __future__ import annotations
@@ -114,70 +123,215 @@ _DEFAULT_PROVIDER_STRENGTHS: dict[str, str] = {
     ),
 }
 
-# What each specific model tends to be good at, independent of which provider
-# it belongs to — the counterpart to _DEFAULT_PROVIDER_STRENGTHS, one level
-# down. A provider's tier table already places its own models on an
-# increasing capability ladder (the fastest/cheapest model takes the lowest
-# complexity band, the most capable takes the highest); these descriptions
-# spell that out in words so the router (and anyone reading a stored routing
-# decision) knows what a given band actually invokes, not just its number.
-# Never edited by an operator and never leaves this process: it only shapes
-# the router's own prompt and the explanation attached to its decision, never
-# which model a tier maps to.
-_MODEL_DESCRIPTIONS: dict[str, str] = {
-    "claude-haiku-4-5": (
+# How the router weighs cost against capability, from the operator's
+# "Optimize routing for cost" toggle (``routing_optimization`` in config.json).
+# "cost" asks for the cheapest model that can plausibly do the work, escalating
+# on risk; "best" asks for the best fit for the work and ignores price.
+ROUTING_OPTIMIZATIONS = ("cost", "best")
+DEFAULT_ROUTING_OPTIMIZATION = "best"
+
+# Model families billed against a separate usage-credit balance rather than the
+# plan allowance. Keep in sync with ``USAGE_CREDIT_MODELS`` in ``src/tools.rs``:
+# the app already hides these everywhere while ``allow_usage_credit_models`` is
+# off, so the router must not be offered one either. Matched by family, so both
+# the alias (``fable``) and the full name (``claude-fable-5-1``) are caught.
+USAGE_CREDIT_FAMILIES = ("fable",)
+
+# Relative price of a model, 1 (cheapest) through 5 (most expensive), comparable
+# across providers — the router needs to rank a Claude model against a Codex one
+# to optimize for cost, which a per-provider tier table cannot express.
+_COST_LABELS = {
+    1: "lowest cost",
+    2: "low cost",
+    3: "moderate cost",
+    4: "high cost",
+    5: "highest cost",
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class CatalogModel:
+    """One model the router may name, and what it costs relative to the rest."""
+
+    provider: str
+    model: str
+    cost: int
+    description: str
+
+    @property
+    def requires_usage_credits(self) -> bool:
+        return requires_usage_credits(self.model)
+
+    @property
+    def cost_label(self) -> str:
+        return _COST_LABELS.get(self.cost, "")
+
+
+# The canonical, complete cross-provider model catalog: every model the router
+# may choose, what it is good at, and what it costs relative to the others.
+# A provider's tier table already places its own models on an increasing
+# capability ladder; this spells that out in words and adds the price ordering,
+# so the router picks a model knowing both what it is for and what it costs.
+# The whole (credit-filtered) list is shown in the router prompt and is what a
+# named model is validated against — a model missing from here cannot be routed
+# to. Never edited by an operator and never leaves this process: unlike the tier
+# tables and provider strengths, there is no counterpart in ``src/config.rs`` to
+# keep in sync.
+_MODEL_CATALOG: tuple[CatalogModel, ...] = (
+    CatalogModel(
+        "claude",
+        "claude-haiku-4-5",
+        1,
         "Claude's fastest, least expensive model. Best for small, well-scoped, "
-        "mechanical changes where turnaround matters more than deep reasoning."
+        "mechanical changes where turnaround matters more than deep reasoning.",
     ),
-    "claude-sonnet-5": (
+    CatalogModel(
+        "claude",
+        "claude-sonnet-5",
+        3,
         "Claude's balanced, general-purpose model. The default choice for typical "
-        "multi-file feature work and bug fixes."
+        "multi-file feature work and bug fixes.",
     ),
-    "claude-opus-5": (
+    CatalogModel(
+        "claude",
+        "claude-opus-5",
+        4,
         "Claude's most capable model. Reserved for the largest, most ambiguous, or "
-        "highest-risk work, where the deepest reasoning is worth the extra cost and time."
+        "highest-risk work, where the deepest reasoning is worth the extra cost and time.",
     ),
-    "gpt-5.6-luna": (
-        "Codex's lightest, fastest model. Efficient for small, mechanical, "
-        "well-defined changes."
-    ),
-    "gpt-5.6-terra": (
-        "Codex's mid-tier model. A solid default for typical feature work and bug fixes."
-    ),
-    "gpt-5.6-sol": (
-        "Codex's high-capability model. For larger or subtler changes that need "
-        "careful, verified reasoning."
-    ),
-    "gpt-6-astra": (
-        "Codex's most capable model. Reserved for sweeping, high-risk, or deeply "
-        "ambiguous work."
-    ),
-    "claude-fable-5": (
+    CatalogModel(
+        "claude",
+        "claude-fable-5",
+        5,
         "An earlier release of Claude's usage-credit model, kept for comparison "
-        "against the current one."
+        "against the current one.",
     ),
-    "claude-fable-5-1": (
+    CatalogModel(
+        "claude",
+        "claude-fable-5-1",
+        5,
         "Claude's deepest-reasoning model, billed against a separate usage-credit "
         "balance rather than the plan allowance. For the hardest work, where that "
-        "extra cost is accepted deliberately."
+        "extra cost is accepted deliberately.",
     ),
-    "grok-4.5": "An earlier, smaller Grok model, kept for compatibility where configured.",
-    "grok-4.6": (
+    CatalogModel(
+        "codex",
+        "gpt-5.6-luna",
+        1,
+        "Codex's lightest, fastest model. Efficient for small, mechanical, "
+        "well-defined changes.",
+    ),
+    CatalogModel(
+        "codex",
+        "gpt-5.6-terra",
+        3,
+        "Codex's mid-tier model. A solid default for typical feature work and bug fixes.",
+    ),
+    CatalogModel(
+        "codex",
+        "gpt-5.6-sol",
+        4,
+        "Codex's high-capability model. For larger or subtler changes that need "
+        "careful, verified reasoning.",
+    ),
+    CatalogModel(
+        "codex",
+        "gpt-6-astra",
+        5,
+        "Codex's most capable model. Reserved for sweeping, high-risk, or deeply "
+        "ambiguous work.",
+    ),
+    CatalogModel(
+        "grok",
+        "grok-4.5",
+        1,
+        "An earlier, smaller Grok model, kept for compatibility where configured.",
+    ),
+    CatalogModel(
+        "grok",
+        "grok-4.6",
+        2,
         "Grok's general-purpose coding model, balancing speed and capability across a "
-        "wide range of complexity."
+        "wide range of complexity.",
     ),
-    "grok-4.7": (
-        "Grok's most capable model, offering the deepest reasoning in the Grok line."
-    ),
-    "grok-4.7-build-fast": (
+    CatalogModel(
+        "grok",
+        "grok-4.7-build-fast",
+        3,
         "The fast variant of Grok's most capable model. Trades some depth for "
-        "noticeably quicker turnaround on well-scoped work."
+        "noticeably quicker turnaround on well-scoped work.",
     ),
-}
+    CatalogModel(
+        "grok",
+        "grok-4.7",
+        4,
+        "Grok's most capable model, offering the deepest reasoning in the Grok line.",
+    ),
+)
+
+# Kept as the by-slug view of the catalog above: the description shown next to a
+# tier, folded into ``tier_explanation``, and read back by anything holding only
+# a model name.
+_MODEL_DESCRIPTIONS: dict[str, str] = {entry.model: entry.description for entry in _MODEL_CATALOG}
+_MODEL_COSTS: dict[str, int] = {entry.model: entry.cost for entry in _MODEL_CATALOG}
+
+
+def requires_usage_credits(model: str) -> bool:
+    """Whether a model bills against the separate usage-credit balance."""
+    parts = re.split(r"[-_]", str(model or "").strip().lower())
+    return any(part in USAGE_CREDIT_FAMILIES for part in parts)
+
+
+def normalize_routing_optimization(value: Any) -> str:
+    key = str(value or "").strip().lower()
+    return key if key in ROUTING_OPTIMIZATIONS else DEFAULT_ROUTING_OPTIMIZATION
+
+
+def model_catalog(
+    providers: Sequence[str] = (),
+    *,
+    allow_usage_credit_models: bool = False,
+) -> tuple[CatalogModel, ...]:
+    """Every model the router may name, cheapest first within each provider.
+
+    ``providers`` restricts and orders the result; empty means the whole
+    catalog in its declared order. Models needing usage credits are dropped
+    unless the operator has allowed them, exactly as the desktop app filters
+    every other model list.
+    """
+    keys = [str(key).strip().lower() for key in providers if str(key).strip()]
+    if not keys:
+        seen: list[str] = []
+        for entry in _MODEL_CATALOG:
+            if entry.provider not in seen:
+                seen.append(entry.provider)
+        keys = seen
+    catalog: list[CatalogModel] = []
+    for key in keys:
+        rows = [entry for entry in _MODEL_CATALOG if entry.provider == key]
+        if not allow_usage_credit_models:
+            rows = [entry for entry in rows if not entry.requires_usage_credits]
+        catalog.extend(sorted(rows, key=lambda entry: (entry.cost, entry.model)))
+    return tuple(catalog)
+
+
+def catalog_model_names(
+    providers: Sequence[str] = (),
+    *,
+    allow_usage_credit_models: bool = False,
+) -> tuple[str, ...]:
+    return tuple(
+        entry.model
+        for entry in model_catalog(providers, allow_usage_credit_models=allow_usage_credit_models)
+    )
 
 
 def model_description(model: str) -> str:
     return _MODEL_DESCRIPTIONS.get(str(model or "").strip(), "")
+
+
+def model_cost(model: str) -> int | None:
+    return _MODEL_COSTS.get(str(model or "").strip())
 
 
 # A rework is deliberately sent to a different AI tool than the one that
@@ -228,6 +382,24 @@ class RouterError(ValueError):
     """The router response cannot be applied. The caller falls back."""
 
 
+class InvalidRouterModel(RouterError):
+    """The router named a model that is not in the catalog.
+
+    Carries the response it came from so the caller can retry once with the
+    catalog restated (``build_model_correction_prompt``) and, if that second
+    answer is no better, still resolve this one through the complexity tier
+    table rather than stalling the issue.
+    """
+
+    def __init__(self, model: str, payload: dict[str, Any]) -> None:
+        named = str(model or "").strip()
+        super().__init__(
+            f"router named {named or '(no model)'}, which is not a supported model"
+        )
+        self.model = named
+        self.payload = payload
+
+
 @dataclasses.dataclass(frozen=True)
 class RoutingTier:
     min_complexity: int
@@ -253,7 +425,11 @@ class RouterCandidate:
 
     ``tiers`` is that tool's complexity table, ``strengths`` the operator's
     description of what it is good at, and ``usage_remaining`` its headroom at
-    selection time (None when it could not be read).
+    selection time (None when it could not be read). ``excluded_models`` names
+    models this tool has just rejected in this run (e.g. one that turned out to
+    need usage credits): they are kept out of the catalog the router is shown
+    and out of what it is allowed to name, so an immediate re-route cannot
+    land on the same rejected model again.
     """
 
     key: str
@@ -261,6 +437,7 @@ class RouterCandidate:
     tiers: tuple[RoutingTier, ...]
     strengths: str = ""
     usage_remaining: float | None = None
+    excluded_models: tuple[str, ...] = ()
 
 
 def default_provider_strengths(provider: str) -> str:
@@ -338,6 +515,99 @@ def tier_for_complexity(tiers: tuple[RoutingTier, ...] | list[RoutingTier], comp
     return chosen
 
 
+def candidate_catalog(
+    candidate: RouterCandidate,
+    *,
+    allow_usage_credit_models: bool = False,
+) -> tuple[CatalogModel, ...]:
+    """Every model one AI tool may be asked to run, cheapest first."""
+    excluded = {str(model).strip() for model in candidate.excluded_models}
+    return tuple(
+        entry
+        for entry in model_catalog(
+            (candidate.key,), allow_usage_credit_models=allow_usage_credit_models
+        )
+        if entry.model not in excluded
+    )
+
+
+def catalog_prompt_lines(
+    candidates: Sequence[RouterCandidate],
+    *,
+    allow_usage_credit_models: bool = False,
+) -> list[str]:
+    """The full model catalog, as prompt lines the router selects from."""
+    lines = [
+        "Model catalog — selected_model must be one of these exact names, and must belong to the",
+        "tool you name in selected_provider. Costs are relative and comparable across tools:",
+    ]
+    for candidate in candidates:
+        for entry in candidate_catalog(
+            candidate, allow_usage_credit_models=allow_usage_credit_models
+        ):
+            lines.append(
+                f"- {entry.provider} / {entry.model} — {entry.cost_label}. {entry.description}"
+            )
+    return lines
+
+
+def optimization_prompt_lines(routing_optimization: str) -> list[str]:
+    """How to weigh cost against capability, from the operator's preference."""
+    if normalize_routing_optimization(routing_optimization) == "cost":
+        return [
+            "Routing preference: optimize for cost.",
+            "Choose the least expensive model in the catalog that can plausibly do this work well.",
+            "Treat the risk score you assigned as the signal to spend more: escalate to a stronger,",
+            "more expensive model when risk is high, even at a lower complexity score, and stay on a",
+            "cheaper model for low-risk work, even at a higher complexity score. Say in",
+            "provider_reason what made the cheaper model sufficient, or what risk forced the escalation.",
+        ]
+    return [
+        "Routing preference: optimize for the best fit, and ignore cost entirely.",
+        "Choose whichever model in the catalog genuinely suits what this work demands. This is not",
+        "'always pick the strongest model': a small, mechanical, low-risk task is better served by a",
+        "lighter, faster model, and picking an oversized one is the wrong answer even though it is",
+        "allowed. Say in provider_reason what about the task fits the model you chose.",
+    ]
+
+
+def build_model_correction_prompt(
+    prompt: str,
+    *,
+    named_model: str,
+    candidates: Sequence[RouterCandidate],
+    allow_usage_credit_models: bool = False,
+) -> str:
+    """The one corrective follow-up after the router names a model that does not exist.
+
+    The original grading prompt is restated so the second answer is made with
+    the same issue in view, followed by the rejected name and the complete
+    supported catalog. There is only ever one of these per routing pass; a
+    second invalid answer degrades to the complexity tier table instead.
+    """
+    catalog_lines = catalog_prompt_lines(
+        candidates, allow_usage_credit_models=allow_usage_credit_models
+    )
+    named = str(named_model or "").strip()
+    return "\n".join(
+        [
+            prompt.rstrip("\n"),
+            "",
+            "Correction — your previous answer to this exact request was rejected.",
+            (
+                f"You named selected_model {named!r}, which is not a model that exists."
+                if named
+                else "You did not name a model that exists in selected_model."
+            ),
+            "Answer the whole request again, unchanged except for selected_model: it must be one of",
+            "the exact names below, and must belong to the tool you name in selected_provider.",
+            "Return one JSON object and nothing else.",
+            "",
+            *catalog_lines,
+        ]
+    ) + "\n"
+
+
 def build_router_prompt(
     *,
     title: str,
@@ -348,11 +618,17 @@ def build_router_prompt(
     rework: bool = False,
     image_count: int = 0,
     comment_image_count: int = 0,
+    routing_optimization: str = DEFAULT_ROUTING_OPTIMIZATION,
+    allow_usage_credit_models: bool = False,
 ) -> str:
     """Ask for a grade of the original issue. The issue text is quoted only.
 
     Every enabled AI tool with capacity is offered, with its strengths and its
-    complexity tiers, so the router picks the tool as well as the model.
+    complexity tiers, so the router picks the tool as well as the model. The
+    full model catalog for those tools is listed too — grounding the choice in
+    the complete valid set up front is what keeps the router from naming a
+    model that does not exist — and ``routing_optimization`` decides whether it
+    is told to economize or to ignore cost entirely.
     """
     if not candidates:
         raise RouterError("no AI tools are available to route to")
@@ -364,7 +640,7 @@ def build_router_prompt(
         tool_lines.append(headline)
         if candidate.strengths.strip():
             tool_lines.append(f"  Best at: {candidate.strengths.strip()}")
-        tool_lines.append("  Tiers:")
+        tool_lines.append("  Operator reference tiers (guidance, not a rule you must follow):")
         for tier in candidate.tiers:
             line = (
                 f"    complexity {tier.min_complexity}-{tier.max_complexity} → "
@@ -375,6 +651,10 @@ def build_router_prompt(
                 line += f" — {description}"
             tool_lines.append(line)
     ids = ", ".join(candidate.key for candidate in candidates)
+    catalog_lines = catalog_prompt_lines(
+        candidates, allow_usage_credit_models=allow_usage_credit_models
+    )
+    preference_lines = optimization_prompt_lines(routing_optimization)
     previous = str(previous_provider or "").strip().lower()
     rework_lines: list[str] = []
     if rework and previous:
@@ -412,12 +692,14 @@ def build_router_prompt(
             "4. risk — low, medium, or high.",
             f"5. selected_provider — the id of the AI tool best suited to this work, one of: {ids}.",
             "6. provider_reason — one or two sentences naming what about this issue makes that tool the right one.",
-            "7. selected_model and reasoning_effort — copy the tier of the tool you selected whose range contains your complexity.",
-            "8. confidence — a number from 0 to 1 for how sure you are of this routing decision.",
-            "9. prompt_grade — exactly one of: " + ", ".join(PROMPT_GRADES) + ".",
-            "10. grade_reason — a short paragraph, written to the person who filed the issue, on exactly why it earned",
+            "7. selected_model — the model that should do this work, spelled exactly as it appears in the",
+            "    model catalog below, and belonging to the tool you chose for selected_provider.",
+            "8. reasoning_effort — one of: " + ", ".join(EFFORT_LABELS) + ".",
+            "9. confidence — a number from 0 to 1 for how sure you are of this routing decision.",
+            "10. prompt_grade — exactly one of: " + ", ".join(PROMPT_GRADES) + ".",
+            "11. grade_reason — a short paragraph, written to the person who filed the issue, on exactly why it earned",
             "    this grade: what it does well, what is missing or ambiguous, and what would raise the grade.",
-            "11. complexity_reason — a short paragraph on how the complexity score was determined: the specific factors",
+            "12. complexity_reason — a short paragraph on how the complexity score was determined: the specific factors",
             "    in this issue (scope, number of areas touched, unknowns, risk, testing needed) that put it at that",
             "    score rather than one lower or higher.",
             "",
@@ -428,6 +710,10 @@ def build_router_prompt(
             "",
             "Available AI tools — pick selected_provider from these ids and match the work to what each is best at:",
             *tool_lines,
+            "",
+            *catalog_lines,
+            "",
+            *preference_lines,
             *rework_lines,
             "",
             "Original issue title:",
@@ -498,15 +784,26 @@ def resolve_routing_decision(
     previous_provider: str = "",
     rework: bool = False,
     minimum_same_provider_confidence: float = REWORK_SAME_PROVIDER_MIN_CONFIDENCE,
+    routing_optimization: str = DEFAULT_ROUTING_OPTIMIZATION,
+    allow_usage_credit_models: bool = False,
+    allow_tier_fallback: bool = True,
 ) -> dict[str, Any]:
-    """Validate the router object, pick the AI tool, and apply its tier.
+    """Validate the router object, pick the AI tool, and apply its model choice.
 
-    The router's own model suggestion is recorded, but the worker model and
-    effort are taken from the selected tool's tier table so the mappings stay
-    configurable. A tool the router names that is not an available candidate
-    falls back to ``default_provider``. On a rework the previous tool is only
-    kept when the router is at least ``minimum_same_provider_confidence``
-    sure; otherwise the next candidate takes the round.
+    The router names the worker model itself, weighing cost against capability
+    under ``routing_optimization``; the name is honoured once it is in the
+    catalog for the tool that ends up running the work. A tool the router names
+    that is not an available candidate falls back to ``default_provider``. On a
+    rework the previous tool is only kept when the router is at least
+    ``minimum_same_provider_confidence`` sure; otherwise the next candidate
+    takes the round.
+
+    Whenever the router's own tool pick is overruled, its model belongs to a
+    different tool, so the replacement's ``tier_for_complexity`` table decides
+    instead. A model that is simply not in the catalog raises
+    ``InvalidRouterModel`` while ``allow_tier_fallback`` is false, so the caller
+    can spend its one corrective follow-up call; with it true (the default, and
+    what that retry uses) the tier table decides rather than raising.
     """
     if isinstance(payload, str):
         parsed = parse_router_payload(payload)
@@ -549,6 +846,34 @@ def resolve_routing_decision(
         minimum_same_provider_confidence=minimum_same_provider_confidence,
     )
     tier = tier_for_complexity(chosen.tiers, complexity)
+    optimization = normalize_routing_optimization(routing_optimization)
+    suggested_model = str(parsed.get("selected_model") or "").strip()
+    suggested_effort = str(parsed.get("reasoning_effort") or "").strip()
+    allowed = {
+        entry.model
+        for entry in candidate_catalog(
+            chosen, allow_usage_credit_models=allow_usage_credit_models
+        )
+    }
+    if override:
+        model, effort, model_source = tier.model, tier.effort, "tier"
+        explanation = describe_tier(chosen, tier, complexity)
+    elif suggested_model in allowed:
+        model = suggested_model
+        effort = _normalize_effort(suggested_effort) or tier.effort
+        model_source = "router"
+        explanation = describe_model_choice(
+            chosen, model, effort, complexity, optimization=optimization
+        )
+    elif not allow_tier_fallback:
+        raise InvalidRouterModel(suggested_model, parsed)
+    else:
+        model, effort, model_source = tier.model, tier.effort, "tier"
+        named = suggested_model or "no model"
+        explanation = (
+            f"The router named {named}, which is not a model {chosen.name} can run, so its "
+            f"configured complexity tier decided instead. " + describe_tier(chosen, tier, complexity)
+        )
     return {
         "provider": chosen.key,
         "provider_name": chosen.name,
@@ -560,8 +885,10 @@ def resolve_routing_decision(
         "complexity": complexity,
         "risk": risk,
         "context_requirement": context,
-        "selected_model": tier.model,
-        "reasoning_effort": tier.effort,
+        "selected_model": model,
+        "reasoning_effort": effort,
+        "model_source": model_source,
+        "routing_optimization": optimization,
         "router_suggested_provider": str(parsed.get("selected_provider") or "").strip().lower(),
         "router_suggested_model": str(parsed.get("selected_model") or "").strip(),
         "router_suggested_effort": str(parsed.get("reasoning_effort") or "").strip(),
@@ -569,11 +896,42 @@ def resolve_routing_decision(
         "prompt_grade": grade,
         "grade_reason": reason[:EXPLANATION_LIMIT],
         "complexity_reason": complexity_reason[:EXPLANATION_LIMIT],
-        "tier_explanation": describe_tier(chosen, tier, complexity),
+        "tier_explanation": explanation,
         "router_model": router_model,
         "router_effort": router_effort,
         "fallback": False,
     }
+
+
+def _normalize_effort(value: Any) -> str:
+    """The router's effort, or "" when it is not one this app can invoke."""
+    key = str(value or "").strip().lower()
+    return key if key in EFFORT_LABELS else ""
+
+
+def describe_model_choice(
+    candidate: RouterCandidate,
+    model: str,
+    effort: str,
+    complexity: int,
+    *,
+    optimization: str,
+) -> str:
+    """How the router's own model choice was reached, in plain words."""
+    model_name = display_model_name(model)
+    goal = (
+        "the least expensive model that can do the work"
+        if normalize_routing_optimization(optimization) == "cost"
+        else "the best fit for the work, regardless of cost"
+    )
+    text = (
+        f"Complexity {complexity}/10. The router chose {candidate.name} {model_name} at "
+        f"{display_effort(effort)} reasoning, optimizing for {goal}."
+    )
+    description = model_description(model)
+    if description:
+        text += f" {model_name}: {description}"
+    return text
 
 
 def describe_tier(candidate: RouterCandidate, tier: RoutingTier, complexity: int) -> str:
@@ -639,6 +997,7 @@ def fallback_routing_decision(
     router_effort: str,
     router_provider: str = "",
     candidates: Sequence[str] = (),
+    routing_optimization: str = DEFAULT_ROUTING_OPTIMIZATION,
 ) -> dict[str, Any]:
     return {
         "provider": provider,
@@ -653,6 +1012,8 @@ def fallback_routing_decision(
         "context_requirement": "",
         "selected_model": model,
         "reasoning_effort": effort,
+        "model_source": "configured",
+        "routing_optimization": normalize_routing_optimization(routing_optimization),
         "confidence": 0,
         "prompt_grade": "",
         "grade_reason": reason.strip()[:EXPLANATION_LIMIT],
@@ -734,6 +1095,21 @@ def router_description(decision: dict[str, Any]) -> str:
     return name or detail
 
 
+def routing_optimization_label(value: Any) -> str:
+    """The operator's cost preference, for a report a person reads.
+
+    Empty for a decision recorded before the preference existed, so an older
+    routing notice is not retroactively labelled with a preference that was
+    never applied to it.
+    """
+    key = str(value or "").strip().lower()
+    if key == "cost":
+        return "Cheapest model that fits the work"
+    if key == "best":
+        return "Best model for the work, regardless of cost"
+    return ""
+
+
 def format_routing_notice(decision: dict[str, Any]) -> str:
     """Issue-comment block shown when SWARM takes ownership."""
     model = display_model_name(str(decision.get("selected_model") or ""))
@@ -772,6 +1148,9 @@ def format_routing_notice(decision: dict[str, Any]) -> str:
     ]
     if grader:
         lines.append(f"Graded and routed by: {grader}")
+    preference = routing_optimization_label(decision.get("routing_optimization"))
+    if preference:
+        lines.append(f"Routing Preference: {preference}")
     if considered:
         lines.append(f"AI Tools Considered: {', '.join(considered)}")
     provider_reason = str(decision.get("provider_reason") or "").strip()

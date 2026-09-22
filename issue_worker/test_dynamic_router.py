@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import unittest
 from unittest import mock
 
 from dynamic_router import (
+    DEFAULT_ROUTING_OPTIMIZATION,
     REWORK_SAME_PROVIDER_MIN_CONFIDENCE,
     ROUTER_RESPONSE_SCHEMA,
+    InvalidRouterModel,
     RouterCandidate,
     RouterError,
     RoutingTier,
+    build_model_correction_prompt,
     build_router_prompt,
     default_provider_strengths,
     default_routing_tiers,
@@ -20,6 +24,7 @@ from dynamic_router import (
     fallback_routing_decision,
     format_routing_notice,
     load_routing_tiers,
+    model_catalog,
     model_description,
     parse_router_payload,
     resolve_routing_decision,
@@ -83,16 +88,21 @@ class DynamicRouterTest(unittest.TestCase):
         with self.assertRaises(RouterError):
             parse_router_payload("I would rewrite the issue as follows.")
 
-    def test_complexity_selects_the_configured_tier_not_the_suggestion(self) -> None:
+    def test_the_routers_own_model_choice_is_what_runs(self) -> None:
+        # Complexity 7 maps to gpt-5.6-sol in Codex's tier table; the router
+        # asked for the cheaper gpt-5.6-luna, and that is what runs.
         decision = resolve(sample_payload(), "codex")
-        self.assertEqual(decision["selected_model"], "gpt-5.6-sol")
-        self.assertEqual(decision["reasoning_effort"], "high")
+        self.assertEqual(decision["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(decision["reasoning_effort"], "low")
+        self.assertEqual(decision["model_source"], "router")
         self.assertEqual(decision["router_suggested_model"], "gpt-5.6-luna")
+        self.assertEqual(decision["router_suggested_effort"], "low")
+        self.assertEqual(decision["routing_optimization"], DEFAULT_ROUTING_OPTIMIZATION)
         self.assertEqual(decision["prompt_grade"], "B+")
         self.assertEqual(decision["confidence"], 0.91)
         self.assertFalse(decision["fallback"])
 
-    def test_tier_bands_cover_each_provider(self) -> None:
+    def test_tier_bands_decide_when_the_router_names_no_valid_model(self) -> None:
         expectations = {
             ("claude", 2): ("claude-haiku-4-5", "low"),
             ("claude", 5): ("claude-sonnet-5", "medium"),
@@ -109,9 +119,14 @@ class DynamicRouterTest(unittest.TestCase):
         }
         for (provider, complexity), (model, effort) in expectations.items():
             decision = resolve(
-                sample_payload(complexity=complexity, selected_provider=provider),
+                sample_payload(
+                    complexity=complexity,
+                    selected_provider=provider,
+                    selected_model="no-such-model",
+                ),
                 provider,
             )
+            self.assertEqual(decision["model_source"], "tier")
             self.assertEqual(decision["selected_model"], model, f"{provider} {complexity}")
             self.assertEqual(decision["reasoning_effort"], effort, f"{provider} {complexity}")
 
@@ -198,7 +213,7 @@ class DynamicRouterTest(unittest.TestCase):
         )
         tiers = load_routing_tiers(raw)
         decision = resolve(
-            sample_payload(complexity=9),
+            sample_payload(complexity=9, selected_model="no-such-model"),
             candidates=candidates("codex", tiers=tiers),
         )
         self.assertEqual(decision["selected_model"], "custom-worker")
@@ -260,9 +275,9 @@ class DynamicRouterTest(unittest.TestCase):
         line = next(line for line in prompt.splitlines() if "some-fine-tuned-codex" in line)
         self.assertNotIn(" — ", line)
 
-    def test_tier_explanation_includes_the_selected_models_description(self) -> None:
+    def test_explanation_includes_the_selected_models_description(self) -> None:
         decision = resolve(sample_payload(), "codex", "grok")
-        self.assertIn(model_description("gpt-5.6-sol"), decision["tier_explanation"])
+        self.assertIn(model_description("gpt-5.6-luna"), decision["tier_explanation"])
 
     def test_describe_tier_omits_the_second_sentence_for_an_unknown_model(self) -> None:
         candidate = candidates("codex")[0]
@@ -334,14 +349,19 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertIn("Prompt Grade: B+", notice)
         self.assertIn("Complexity: 7/10", notice)
         self.assertIn("Selected AI: Codex", notice)
-        self.assertIn("Selected Model: GPT-5.6 Sol", notice)
-        self.assertIn("Reasoning: High", notice)
+        self.assertIn("Selected Model: GPT-5.6 Luna", notice)
+        self.assertIn("Reasoning: Low", notice)
         self.assertIn("Routing Confidence: 91%", notice)
+        self.assertIn("Routing Preference: Best model for the work, regardless of cost", notice)
         self.assertIn("AI Tools Considered: Codex, Grok", notice)
         self.assertIn("Why Codex: Codex is best at test-driven bug fixes", notice)
         self.assertIn("Why this grade (B+): Clear objective and context, but acceptance criteria are incomplete.", notice)
         self.assertIn("How complexity was determined (7/10): Touches the parser and two callers", notice)
-        self.assertIn("Complexity 7/10 falls in Codex's 7–8 band, which maps to GPT-5.6 Sol at High reasoning.", notice)
+        self.assertIn(
+            "Complexity 7/10. The router chose Codex GPT-5.6 Luna at Low reasoning, optimizing for "
+            "the best fit for the work, regardless of cost.",
+            notice,
+        )
         self.assertEqual(display_model_name("claude-haiku-4-5"), "Claude Haiku 4.5")
         self.assertEqual(display_model_name("grok-4.3"), "Grok 4.3")
 
@@ -399,7 +419,7 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertEqual(decision["complexity_reason"], "")
         notice = format_routing_notice(decision)
         self.assertNotIn("How complexity was determined", notice)
-        self.assertIn("falls in Codex's 7–8 band", notice)
+        self.assertIn("The router chose Codex GPT-5.6 Luna", notice)
 
     def test_notice_reports_when_the_router_was_overruled(self) -> None:
         decision = resolve(
@@ -506,6 +526,173 @@ class DynamicRouterTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_routing_tiers("{")
 
+
+
+class CostAwareRoutingTest(unittest.TestCase):
+    """The cost-vs-best preference, the catalog it grounds, and its recovery."""
+
+    def test_catalog_lists_every_tool_and_stays_off_credit_models_by_default(self) -> None:
+        prompt = build_router_prompt(
+            title="t", body="b", labels=[], candidates=candidates("claude", "codex", "grok")
+        )
+        self.assertIn("Model catalog", prompt)
+        for model in ("claude-haiku-4-5", "claude-opus-5", "gpt-6-astra", "grok-4.7"):
+            self.assertIn(f"/ {model} —", prompt)
+        self.assertNotIn("claude-fable-5-1", prompt)
+
+    def test_catalog_offers_credit_models_once_the_operator_allows_them(self) -> None:
+        prompt = build_router_prompt(
+            title="t",
+            body="b",
+            labels=[],
+            candidates=candidates("claude"),
+            allow_usage_credit_models=True,
+        )
+        self.assertIn("claude-fable-5-1", prompt)
+
+    def test_catalog_is_ordered_cheapest_first_with_a_relative_cost_on_each_model(self) -> None:
+        catalog = model_catalog(("claude",))
+        self.assertEqual(
+            [entry.model for entry in catalog],
+            ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"],
+        )
+        self.assertEqual(catalog[0].cost_label, "lowest cost")
+        self.assertEqual(catalog[-1].cost_label, "high cost")
+
+    def test_catalog_covers_every_model_the_default_tiers_name(self) -> None:
+        catalog = {entry.model for entry in model_catalog()}
+        for provider, tiers in default_routing_tiers().items():
+            for tier in tiers:
+                self.assertIn(tier.model, catalog, f"{provider} tier model missing from catalog")
+
+    def test_a_rejected_model_is_kept_out_of_the_catalog_and_cannot_be_named(self) -> None:
+        tools = candidates("codex")
+        tools[0] = dataclasses.replace(tools[0], excluded_models=("gpt-5.6-luna",))
+        prompt = build_router_prompt(title="t", body="b", labels=[], candidates=tools)
+        self.assertNotIn("codex / gpt-5.6-luna", prompt)
+        with self.assertRaises(InvalidRouterModel):
+            resolve(sample_payload(), candidates=tools, allow_tier_fallback=False)
+
+    def test_cost_preference_tells_the_router_to_economize_and_escalate_on_risk(self) -> None:
+        prompt = build_router_prompt(
+            title="t",
+            body="b",
+            labels=[],
+            candidates=candidates("codex"),
+            routing_optimization="cost",
+        )
+        self.assertIn("Routing preference: optimize for cost.", prompt)
+        self.assertIn("least expensive model in the catalog", prompt)
+        self.assertIn("escalate to a stronger,", prompt)
+        self.assertNotIn("ignore cost entirely", prompt)
+
+    def test_best_preference_never_asks_the_router_to_economize(self) -> None:
+        prompt = build_router_prompt(
+            title="t",
+            body="b",
+            labels=[],
+            candidates=candidates("codex"),
+            routing_optimization="best",
+        )
+        self.assertIn("optimize for the best fit, and ignore cost entirely", prompt)
+        self.assertNotIn("least expensive", prompt)
+        # Not a licence to always reach for the strongest model.
+        self.assertIn("This is not", prompt)
+
+    def test_an_unknown_preference_falls_back_to_best(self) -> None:
+        prompt = build_router_prompt(
+            title="t", body="b", labels=[], candidates=candidates("codex"), routing_optimization="???"
+        )
+        self.assertIn("optimize for the best fit", prompt)
+        decision = resolve(sample_payload(), "codex", routing_optimization="")
+        self.assertEqual(decision["routing_optimization"], "best")
+
+    def test_a_cost_optimized_decision_records_and_reports_the_preference(self) -> None:
+        decision = resolve(
+            sample_payload(selected_model="gpt-5.6-luna", reasoning_effort="medium"),
+            "codex",
+            routing_optimization="cost",
+        )
+        self.assertEqual(decision["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(decision["reasoning_effort"], "medium")
+        self.assertEqual(decision["routing_optimization"], "cost")
+        self.assertIn(
+            "optimizing for the least expensive model that can do the work",
+            decision["tier_explanation"],
+        )
+        self.assertIn(
+            "Routing Preference: Cheapest model that fits the work",
+            format_routing_notice(decision),
+        )
+
+    def test_a_decision_recorded_before_the_preference_existed_reports_none(self) -> None:
+        decision = resolve(sample_payload(), "codex")
+        del decision["routing_optimization"]
+        self.assertNotIn("Routing Preference:", format_routing_notice(decision))
+
+    def test_a_credit_model_cannot_be_named_unless_the_operator_allows_it(self) -> None:
+        payload = sample_payload(selected_provider="claude", selected_model="claude-fable-5-1")
+        with self.assertRaises(InvalidRouterModel):
+            resolve(payload, "claude", allow_tier_fallback=False)
+        decision = resolve(payload, "claude", allow_usage_credit_models=True)
+        self.assertEqual(decision["selected_model"], "claude-fable-5-1")
+        self.assertEqual(decision["model_source"], "router")
+
+    def test_a_model_belonging_to_another_tool_is_not_accepted(self) -> None:
+        payload = sample_payload(selected_provider="claude", selected_model="gpt-5.6-sol")
+        with self.assertRaises(InvalidRouterModel) as caught:
+            resolve(payload, "claude", "codex", allow_tier_fallback=False)
+        self.assertEqual(caught.exception.model, "gpt-5.6-sol")
+        self.assertEqual(caught.exception.payload["selected_provider"], "claude")
+
+    def test_an_invalid_model_degrades_to_the_tier_once_the_retry_is_spent(self) -> None:
+        decision = resolve(
+            sample_payload(selected_model="gpt-5.6-hyperion"),
+            "codex",
+            allow_tier_fallback=True,
+        )
+        self.assertEqual(decision["selected_model"], "gpt-5.6-sol")
+        self.assertEqual(decision["reasoning_effort"], "high")
+        self.assertEqual(decision["model_source"], "tier")
+        self.assertIn("gpt-5.6-hyperion", decision["tier_explanation"])
+        self.assertIn("falls in Codex's 7–8 band", decision["tier_explanation"])
+
+    def test_an_effort_this_app_cannot_invoke_falls_back_to_the_tiers_effort(self) -> None:
+        decision = resolve(sample_payload(reasoning_effort="ludicrous"), "codex")
+        self.assertEqual(decision["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(decision["reasoning_effort"], "high")
+        self.assertEqual(decision["router_suggested_effort"], "ludicrous")
+
+    def test_an_overruled_tool_pick_uses_the_replacements_tier_not_the_named_model(self) -> None:
+        # The router's model belongs to the tool it asked for, so once that
+        # pick is overruled the replacement's own tier table decides.
+        decision = resolve(
+            sample_payload(selected_provider="codex", confidence=0.5),
+            "claude",
+            "codex",
+            previous_provider="codex",
+            rework=True,
+            allow_tier_fallback=False,
+        )
+        self.assertEqual(decision["provider"], "claude")
+        self.assertEqual(decision["selected_model"], "claude-opus-5")
+        self.assertEqual(decision["model_source"], "tier")
+
+    def test_the_correction_prompt_restates_the_catalog_and_the_rejected_name(self) -> None:
+        tools = candidates("codex")
+        prompt = build_router_prompt(title="Route me", body="BODY", labels=[], candidates=tools)
+        correction = build_model_correction_prompt(
+            prompt, named_model="gpt-5.6-hyperion", candidates=tools
+        )
+        self.assertIn("BODY", correction)
+        self.assertIn("'gpt-5.6-hyperion', which is not a model that exists", correction)
+        self.assertIn("Model catalog", correction.split("Correction —")[1])
+        self.assertIn("gpt-5.6-sol", correction.split("Correction —")[1])
+
+    def test_the_correction_prompt_handles_a_response_that_named_nothing(self) -> None:
+        tools = candidates("codex")
+        correction = build_model_correction_prompt("PROMPT", named_model="", candidates=tools)
+        self.assertIn("You did not name a model that exists", correction)
 
 if __name__ == "__main__":
     unittest.main()

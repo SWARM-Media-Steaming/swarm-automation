@@ -207,10 +207,54 @@ fn provider_scheduler_arguments_carry_dynamic_routing_settings() {
     let parsed: serde_json::Value = serde_json::from_str(&tiers).unwrap();
     assert_eq!(parsed["codex"][2]["model"], "gpt-5.6-sol");
 
+    // The router picks the worker model itself, so it needs both the cost
+    // preference and the same credit-model filter the desktop applies.
+    assert!(off
+        .windows(2)
+        .any(|pair| pair[0] == "--routing-optimization" && pair[1] == "best"));
+    assert!(off
+        .iter()
+        .any(|arg| arg == "--no-allow-usage-credit-models"));
+
     config.dynamic_model_routing = true;
+    config.routing_optimization = "cost".into();
+    config.allow_usage_credit_models = true;
     let on = provider_scheduler_arguments(&config, &providers);
     assert!(on.iter().any(|arg| arg == "--dynamic-model-routing"));
     assert!(!on.iter().any(|arg| arg == "--no-dynamic-model-routing"));
+    assert!(on
+        .windows(2)
+        .any(|pair| pair[0] == "--routing-optimization" && pair[1] == "cost"));
+    assert!(on.iter().any(|arg| arg == "--allow-usage-credit-models"));
+    assert!(!on.iter().any(|arg| arg == "--no-allow-usage-credit-models"));
+}
+
+#[test]
+fn the_cost_routing_preference_persists_to_disk_as_a_string() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    assert_eq!(config.routing_optimization, "best");
+
+    config.routing_optimization = "cost".into();
+    let saved = save_config(app.clone(), app.state(), config).expect("save_config should succeed");
+    assert_eq!(saved.routing_optimization, "cost");
+
+    let config_path = test_app._data_dir.path().join(crate::config::CONFIG_FILE);
+    let raw = std::fs::read_to_string(&config_path).expect("config.json should exist");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["routing_optimization"], "cost");
+    assert_eq!(
+        crate::config::load(&config_path).routing_optimization,
+        "cost"
+    );
+    assert_eq!(
+        get_config(app.state())
+            .expect("get_config should succeed")
+            .routing_optimization,
+        "cost"
+    );
 }
 
 #[test]
