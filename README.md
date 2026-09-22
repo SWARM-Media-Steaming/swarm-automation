@@ -114,6 +114,27 @@ The Overview's explicit **Merge to Main** action first reconciles `main` into
 `ai-main`, obtains a configured bot approval, and completes the promotion
 through GitHub's pull-request protections.
 
+### Cleaning up branches no pull request will ever cover
+
+An environment-only summary, a `Question` answer and an `AI Needs Input` request
+all finish without a commit, so no pull request is opened and the merged-PR
+cleanup above never sees their issue branch. Those work-rounds now return the
+checkout to `ai-main` and delete the empty branch locally and on the remote —
+but only after proving the checkout is on that branch, the worktree is clean,
+the branch carries nothing beyond the commit the attempt started from (locally
+and on the remote), and GitHub confirms no open pull request uses it. Anything
+unavailable or ambiguous keeps the branch and is logged; a cleanup problem is a
+warning on an already-published result, never a failed run, and never hides a
+branch that still exists.
+
+Each worker cycle also reconciles historical `ai/*/issue-*` branches the same
+way. A branch is only removed when it has never had a pull request, is not the
+saved branch of an active, quota-paused, recovering or awaiting-input attempt,
+carries no commits outside `ai-main`/`main`, and its issue has a terminal
+no-code result in AI execution history or in the worker's own authenticated
+issue comments. Having no pull request is never sufficient on its own — a live
+attempt is legitimately between branch creation and PR publication.
+
 ### Monitoring GitHub Actions
 
 The per-repository **Monitor GitHub Actions and fix failing pipelines** toggle

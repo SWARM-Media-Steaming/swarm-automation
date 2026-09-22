@@ -109,6 +109,17 @@ QUESTION_ANSWER_MARKER_RE = re.compile(
 QUESTION_LABEL = "Question"
 QUESTION_ANSWER_MARKER = "SWARM_QUESTION_ANSWER"
 
+# The terminal outcomes that never produce a commit. An issue branch left
+# behind by one of them is empty by construction: no pull request is ever
+# opened for it, so merged-PR cleanup never sees it (see
+# `reconcile_orphan_issue_branches`).
+NO_CODE_FINAL_STATUSES: frozenset[str] = frozenset(
+    {"environment_only", "answered", "awaiting_input"}
+)
+NO_CODE_TERMINAL_OUTCOMES: frozenset[str] = frozenset(
+    {"environment-only", "question-answer", "needs-input"}
+)
+
 # Issue priority, honored when choosing which assigned issue to work next.
 # Lower rank sorts first (Urgent before High before Medium before Low). An issue
 # with no recognized priority label is treated as Low.
@@ -718,6 +729,35 @@ def extract_question_answer_metadata(
                 }
             )
     return matches[-1] if matches else None
+
+
+def latest_terminal_outcome(
+    comments: Iterable[dict[str, Any]], completion_authors: set[str]
+) -> str:
+    """Which terminal worker comment an issue currently ends with.
+
+    One of ``commit``, ``environment-only``, ``question-answer``,
+    ``needs-input``, or ``""`` when the issue carries no authenticated
+    terminal worker comment at all. Only comments from a configured
+    completion author count, so a quoted marker in someone else's comment can
+    never be mistaken for the worker's own record of what happened."""
+    allowed_completion = {normalize_author(name) for name in completion_authors}
+    outcome = ""
+    for comment in sorted(comments, key=lambda item: int(item.get("id", 0))):
+        body = str(comment.get("body") or "")
+        author = str((comment.get("user") or {}).get("login") or "")
+        if normalize_author(author) not in allowed_completion:
+            continue
+        for name, expression in (
+            ("commit", COMMIT_MARKER_RE),
+            ("environment-only", ENVIRONMENT_ONLY_MARKER_RE),
+            ("question-answer", QUESTION_ANSWER_MARKER_RE),
+            ("needs-input", NEEDS_INPUT_MARKER_RE),
+        ):
+            if expression.search(body):
+                outcome = name
+                break
+    return outcome
 
 
 def extract_followup_metadata(
@@ -1519,6 +1559,164 @@ class Worker:
                 f"into {self.config.integration_branch} as {merge_sha}."
             )
         self.auto_promote_integration_branch()
+
+    def protected_attempt_branches(self) -> set[str]:
+        """Branch names an unfinished attempt still needs.
+
+        Covers the active attempt, a completion whose GitHub delivery has not
+        finished, and every quota-paused session. Every provider's branch name
+        is protected for those issue numbers, not just the saved one: a
+        handoff can move an issue to a different provider between two runs, so
+        the saved name alone is not the full set of branches that attempt may
+        still use."""
+        names: set[str] = set()
+        paths = [self.in_progress_file, self.pending_file]
+        if self.paused_dir.is_dir():
+            paths.extend(sorted(self.paused_dir.glob("*.json")))
+        for path in paths:
+            if not path.exists():
+                continue
+            state = read_json(path)
+            branch = str(state.get("branch_name") or "")
+            if branch:
+                names.add(branch)
+            number = state.get("issue_number")
+            if number is None:
+                continue
+            for key in (*KNOWN_PROVIDER_KEYS, *BRANCH_PROVIDER_KEYS):
+                names.add(f"{self.config.branch_prefix}/{key}/issue-{int(number)}")
+        return names
+
+    def branches_with_pull_requests(self) -> set[str]:
+        """Head branch of every pull request GitHub has ever recorded here."""
+        output = self.github.gh(
+            [
+                "pr", "list", "--repo", self.config.github_repository,
+                "--state", "all", "--limit", "1000", "--json", "headRefName",
+            ]
+        )
+        try:
+            records = json.loads(output or "null")
+        except json.JSONDecodeError as error:
+            raise WorkerError(
+                "GitHub returned an unreadable pull request list for "
+                f"{self.config.github_repository}"
+            ) from error
+        if not isinstance(records, list):
+            raise WorkerError(
+                "GitHub returned an unreadable pull request list for "
+                f"{self.config.github_repository}"
+            )
+        return {str(record.get("headRefName") or "") for record in records}
+
+    def terminal_no_code_outcome(self, issue_number: int) -> str:
+        """The terminal no-code result recorded for `issue_number`, or `""`.
+
+        Execution history is authoritative whenever it knows this issue;
+        otherwise the issue's own authenticated worker comments are read, so
+        branches older than the history database can still be reconciled.
+        A code completion, an attempt still in flight, and no evidence at all
+        all return `""` — the caller then keeps the branch."""
+        statuses = self.history.final_statuses(self.config.github_repository, issue_number)
+        if statuses:
+            newest = statuses[0]
+            return newest if newest in NO_CODE_FINAL_STATUSES else ""
+        try:
+            comments = self.comments(issue_number)
+        except (WorkerError, json.JSONDecodeError):
+            return ""
+        outcome = latest_terminal_outcome(comments, self.completion_authors)
+        return outcome if outcome in NO_CODE_TERMINAL_OUTCOMES else ""
+
+    def orphan_branch_blocker(self, branch: str, remote_sha: str, issue_number: int) -> str:
+        """Why a pull-request-less issue branch must be kept, or `""`."""
+        if branch == self.git("branch", "--show-current"):
+            return "it is the branch currently checked out"
+        if not self.git_ok("cat-file", "-e", f"{remote_sha}^{{commit}}"):
+            return f"its tip {remote_sha[:12]} could not be fetched for inspection"
+        merged = any(
+            self.git_ok("show-ref", "--verify", ref)
+            and self.git_ok("merge-base", "--is-ancestor", remote_sha, ref)
+            for ref in (
+                f"refs/remotes/{self.config.remote_name}/{self.config.integration_branch}",
+                f"refs/remotes/{self.config.remote_name}/{self.config.base_branch}",
+            )
+        )
+        if not merged:
+            return (
+                f"it carries commits that are not in {self.config.integration_branch} "
+                f"or {self.config.base_branch}"
+            )
+        if not self.terminal_no_code_outcome(issue_number):
+            return f"issue #{issue_number} has no confirmed terminal no-code result"
+        return ""
+
+    def reconcile_orphan_issue_branches(self) -> None:
+        """Remove historical issue branches a terminal no-code result stranded.
+
+        No pull request is ever opened for an environment-only summary, a
+        question answer or an input request, so `reconcile_issue_pull_requests`
+        never sees those branches and they keep showing as active work forever.
+        Absence of a pull request is deliberately *not* sufficient on its own —
+        a live attempt is legitimately between branch creation and PR
+        publication — so a branch is only removed when it is unprotected by
+        saved worker state, has never had a pull request, carries nothing
+        beyond the integration/base history, and its issue reached a terminal
+        no-code result. Anything unavailable or ambiguous keeps the branch."""
+        if self.config.dry_run:
+            return
+        pattern = self.issue_branch_pattern()
+        listing = self.git("ls-remote", "--heads", self.config.remote_name, check=False)
+        candidates: list[tuple[str, str, str, int]] = []
+        for line in listing.splitlines():
+            sha, _, ref = line.partition("\t")
+            name = ref.strip().removeprefix("refs/heads/")
+            match = pattern.fullmatch(name)
+            if not match or not SHA_RE.fullmatch(sha.strip()):
+                continue
+            provider = "grok" if match.group(1) == "xai" else match.group(1)
+            candidates.append((name, sha.strip(), provider, int(match.group(2))))
+        if not candidates:
+            return
+        try:
+            protected = self.protected_attempt_branches()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            log(
+                "WARNING: skipping orphan issue-branch cleanup; saved worker state "
+                f"could not be read: {error}"
+            )
+            return
+        candidates = [item for item in candidates if item[0] not in protected]
+        if not candidates:
+            return
+        try:
+            delivered = self.branches_with_pull_requests()
+        except WorkerError as error:
+            log(f"WARNING: skipping orphan issue-branch cleanup; GitHub was unavailable: {error}")
+            return
+        candidates = [item for item in candidates if item[0] not in delivered]
+        if not candidates:
+            return
+        self.git("fetch", "--prune", self.config.remote_name, check=False)
+        for branch, remote_sha, provider, issue_number in candidates:
+            try:
+                blocker = self.orphan_branch_blocker(branch, remote_sha, issue_number)
+            except WorkerError as error:
+                blocker = f"it could not be inspected: {error}"
+            if blocker:
+                log(f"Kept orphan issue branch {branch} because {blocker}.")
+                continue
+            try:
+                self.delete_remote_issue_branch(branch, provider, label="no-code orphan")
+            except WorkerError as error:
+                log(f"WARNING: could not remove orphan issue branch {branch}: {error}")
+                continue
+            if self.git_ok("show-ref", "--verify", f"refs/heads/{branch}"):
+                self.git("branch", "-D", branch, check=False)
+            log(
+                f"Reconciled orphan issue branch {branch}: issue #{issue_number} ended with a "
+                "no-code result and the branch held no unique work."
+            )
 
     def archive_closed_paused(self, paused_file: Path) -> Path:
         state = read_json(paused_file)
@@ -3497,31 +3695,35 @@ class Worker:
                 return self.apps.bot_environment(key)
         return {}
 
-    def delete_remote_issue_branch(self, branch: str, provider: str | None = None) -> None:
+    def issue_branch_pattern(self) -> re.Pattern[str]:
+        """Matches `<prefix>/<provider>/issue-<n>` for every known provider.
+
+        Group 1 is the branch's provider segment (`xai` for Grok), group 2 the
+        issue number. Every branch-deleting path shares this one pattern so a
+        new provider can never be recognized by one of them and not another."""
         provider_keys = "|".join(
             re.escape(key) for key in (*KNOWN_PROVIDER_KEYS, *BRANCH_PROVIDER_KEYS)
         )
-        pattern = re.compile(
-            rf"^{re.escape(self.config.branch_prefix)}/(?:{provider_keys})/issue-[0-9]+$"
+        return re.compile(
+            rf"^{re.escape(self.config.branch_prefix)}/({provider_keys})/issue-([0-9]+)$"
         )
-        if not pattern.fullmatch(branch):
+
+    def delete_remote_issue_branch(
+        self, branch: str, provider: str | None = None, *, label: str = "merged"
+    ) -> None:
+        if not self.issue_branch_pattern().fullmatch(branch):
             raise WorkerError(f"Refusing to delete unexpected branch name: {branch}")
         result = self.push_ref(f":refs/heads/{branch}", provider)
         detail = (result.stderr or result.stdout or "").strip()
         if result.returncode != 0 and "remote ref does not exist" not in detail.lower():
             raise WorkerError(
-                f"Could not remove merged issue branch {branch}: {detail or 'git push failed'}"
+                f"Could not remove {label} issue branch {branch}: {detail or 'git push failed'}"
             )
         self.git("fetch", "--prune", self.config.remote_name, check=False)
-        log(f"Removed merged remote issue branch {branch}.")
+        log(f"Removed {label} remote issue branch {branch}.")
 
     def prune_merged_worker_branches(self) -> None:
-        provider_keys = "|".join(
-            re.escape(key) for key in (*KNOWN_PROVIDER_KEYS, *BRANCH_PROVIDER_KEYS)
-        )
-        pattern = re.compile(
-            rf"^{re.escape(self.config.branch_prefix)}/(?:{provider_keys})/issue-[0-9]+$"
-        )
+        pattern = self.issue_branch_pattern()
         branches = self.git("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()
         for branch in branches:
             if not pattern.fullmatch(branch):
@@ -3632,7 +3834,10 @@ class Worker:
         recovery_mode = False
         candidate = ""
         recovery_dirty = False
-        if self.issue.work_type == "followup":
+        # A follow-up to an environment-only summary, a question answer or an
+        # input request has no previous commit to protect — only a follow-up to
+        # a real completion does.
+        if self.issue.work_type == "followup" and self.issue.previous_commit_sha:
             prev = self.issue.previous_commit_sha
             if not self.git_ok("cat-file", "-e", f"{prev}^{{commit}}"):
                 raise WorkerError(
@@ -3904,6 +4109,125 @@ class Worker:
             raise WorkerError(f"PR delivery did not return the checkout to {integ}")
         log(f"Returned the clean local checkout to {integ} at {synchronized}.")
         return synchronized
+
+    def open_pull_request_blocker(self, branch: str) -> str:
+        """`""` only when GitHub positively confirms `branch` has no open PR.
+
+        An unreachable or unreadable answer is a blocker, not a pass: the
+        caller is about to delete a branch, so "GitHub did not say" must never
+        be treated as "GitHub said no"."""
+        try:
+            listing = self.github.gh(
+                [
+                    "pr", "list", "--repo", self.config.github_repository,
+                    "--head", branch, "--state", "open", "--limit", "1", "--json", "url",
+                ]
+            )
+        except WorkerError as error:
+            return f"the open pull request check for {branch} failed: {error}"
+        try:
+            records = json.loads(listing or "null")
+        except json.JSONDecodeError:
+            records = None
+        if not isinstance(records, list):
+            return f"GitHub returned an unreadable pull request list for {branch}"
+        if records:
+            url = str((records[0] or {}).get("url") or "an open pull request")
+            return f"{branch} still has an open pull request ({url})"
+        return ""
+
+    def no_code_cleanup_blocker(self, branch: str) -> str:
+        """Why a terminal no-code issue branch must be kept, or `""`.
+
+        Every check fails closed. A branch is only safe to remove when it is
+        the branch this attempt is standing on, the worktree is clean, the
+        branch carries nothing beyond the commit the attempt started from
+        locally *and* on the remote, and GitHub confirms no open pull request
+        uses it."""
+        if not branch:
+            return "the worker does not know which branch this attempt used"
+        if not self.issue_branch_pattern().fullmatch(branch):
+            return f"{branch} is not a worker issue branch"
+        current = self.git("branch", "--show-current")
+        if current != branch:
+            return f"the checkout is on {current or 'a detached HEAD'} rather than {branch}"
+        if self.worktree_status():
+            return f"{branch} has uncommitted changes"
+        tip = self.git("rev-parse", "HEAD")
+        state = self.read_state() if self.in_progress_file.exists() else {}
+        anchors = [
+            str(state.get(key) or "") for key in ("base_sha", "attempt_start_sha")
+        ]
+        anchors = [value for value in anchors if value]
+        if not anchors:
+            return f"the starting commit saved for {branch} is unknown"
+        for value in anchors:
+            if not SHA_RE.fullmatch(value) or not self.git_ok(
+                "cat-file", "-e", f"{value}^{{commit}}"
+            ):
+                return f"the starting commit {value} saved for {branch} is unavailable"
+            if self.git("rev-list", "--count", f"{value}..{tip}") != "0":
+                return f"{branch} carries commits beyond {value[:12]}"
+        # "Nothing new since the attempt started" is not on its own proof the
+        # branch is empty: a follow-up work-round starts from the branch tip,
+        # so an earlier round's still-unmerged commit sits at the anchor too.
+        # Require the tip to already be part of the integration history.
+        integ = self.config.integration_branch
+        if not any(
+            self.git_ok("show-ref", "--verify", ref)
+            and self.git_ok("merge-base", "--is-ancestor", tip, ref)
+            for ref in (
+                f"refs/heads/{integ}",
+                f"refs/remotes/{self.config.remote_name}/{integ}",
+            )
+        ):
+            return f"{branch} carries work that is not yet in {integ}"
+        listing = self.git(
+            "ls-remote", "--heads", self.config.remote_name, f"refs/heads/{branch}", check=False
+        )
+        for line in listing.splitlines():
+            remote_sha = line.split("\t")[0].strip()
+            if remote_sha != tip:
+                return f"the remote {branch} is at {remote_sha[:12]} rather than {tip[:12]}"
+        return self.open_pull_request_blocker(branch)
+
+    def cleanup_no_code_branch(self, outcome: str) -> str:
+        """Return the checkout to the integration branch and drop the empty
+        issue branch a terminal no-code result left behind.
+
+        Returns ``cleaned``, ``kept`` or ``failed``. This never raises. The
+        no-code result is already published on the issue by the time cleanup
+        runs, so a cleanup problem is recorded as a warning and the branch is
+        retained for review — it must never turn a delivered outcome into a
+        failed run, and it must never suppress a branch it could not actually
+        remove (see .claude/rules/issue-branch-delivery.md)."""
+        assert self.issue and self.choice
+        state = self.read_state() if self.in_progress_file.exists() else {}
+        branch = str(state.get("branch_name") or self.expected_branch())
+        blocker = self.no_code_cleanup_blocker(branch)
+        if blocker:
+            message = f"Kept issue branch {branch} after the {outcome} result because {blocker}."
+            self.history.note(message, iso_timestamp())
+            log(message)
+            return "kept"
+        try:
+            self.return_to_integration_branch(branch)
+            self.delete_remote_issue_branch(branch, self.choice.key, label="no-code")
+        except WorkerError as error:
+            message = (
+                f"Could not clean up issue branch {branch} after the {outcome} result: {error}. "
+                "The branch was left in place."
+            )
+            self.history.warning(message, iso_timestamp())
+            log(f"WARNING: {message}")
+            return "failed"
+        message = (
+            f"Removed the empty issue branch {branch} after the {outcome} result and returned "
+            f"the checkout to {self.config.integration_branch}."
+        )
+        self.history.note(message, iso_timestamp())
+        log(message)
+        return "cleaned"
 
     def deliver_pull_request(self, commit_sha: str) -> tuple[str, str, str]:
         assert self.issue and self.choice
@@ -4377,6 +4701,7 @@ class Worker:
             )
         self.record_completed(self.issue.number)
         self.history.note("Execution completed without repository changes", iso_timestamp())
+        self.cleanup_no_code_branch("environment-only")
         self.finish_execution_history("environment_only", ai_output)
         self.clear_in_progress(self.issue.number)
         log(f"Finished issue #{self.issue.number} with {self.choice.name}: environment-only summary posted.")
@@ -4428,6 +4753,13 @@ class Worker:
         self.github.gh(label_arguments, self.choice.key)
         self.record_completed(self.issue.number)
         self.history.note("Execution paused for required trusted-user input", iso_timestamp())
+        # Safe here for the same reason the no-code branch is empty: the caller
+        # has already refused to publish an input request that left any commit
+        # or uncommitted change behind, and `no_code_cleanup_blocker` re-proves
+        # it. A trusted reply resumes this issue as a follow-up work-round,
+        # which recreates the branch from the integration branch — so nothing
+        # resumable lives on the branch itself.
+        self.cleanup_no_code_branch("needs-input")
         self.finish_execution_history("awaiting_input", ai_output)
         self.clear_in_progress(self.issue.number)
         log(f"Issue #{self.issue.number} is labelled '{NEEDS_INPUT_LABEL}' and waiting for user input.")
@@ -4469,6 +4801,7 @@ class Worker:
             )
         self.record_completed(self.issue.number)
         self.history.note("Question answered without repository changes", iso_timestamp())
+        self.cleanup_no_code_branch("question-answer")
         self.finish_execution_history("answered", ai_output)
         self.clear_in_progress(self.issue.number)
         log(f"Finished question issue #{self.issue.number} with a no-code answer from {self.choice.name}.")
@@ -4964,6 +5297,7 @@ class Worker:
                     raise WorkerError(f"{label} is required but was not found in PATH")
             self.deliver_pending()
             self.reconcile_issue_pull_requests()
+            self.reconcile_orphan_issue_branches()
             if self.prepare_paused_resume():
                 return 0
             # A CI failure issue the monitor just filed is worked directly by
