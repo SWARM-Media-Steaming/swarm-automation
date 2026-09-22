@@ -286,6 +286,20 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertIn("selected_provider", prompt)
         self.assertIn("gpt-5.6-sol", prompt)
         self.assertNotIn("being reworked", prompt)
+        self.assertNotIn("Attached issue images", prompt)
+
+    def test_prompt_tells_the_router_about_attached_issue_images(self) -> None:
+        prompt = build_router_prompt(
+            title="Layout",
+            body=ORIGINAL_BODY,
+            labels=[],
+            candidates=candidates("codex"),
+            image_count=2,
+            comment_image_count=1,
+        )
+        self.assertIn("2 image(s) uploaded on this issue", prompt)
+        self.assertIn("1 of them come from later GitHub comments", prompt)
+        self.assertIn(ORIGINAL_BODY, prompt)
 
     def test_prompt_tells_the_router_to_favor_another_tool_on_a_rework(self) -> None:
         prompt = build_router_prompt(
@@ -415,6 +429,66 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertIn("Selected Model: GPT-5.6 Luna", notice)
         self.assertIn("Reasoning: Medium", notice)
         self.assertNotIn("Prompt Grade:", notice)
+
+    def test_router_attaches_issue_images_for_each_provider(self) -> None:
+        import base64
+        import tempfile
+        from pathlib import Path
+
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        directory = Path(tempfile.mkdtemp(prefix="swarm-router-image."))
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        image = directory / "shot.png"
+        image.write_bytes(png)
+        grade = json.dumps({"type": "result", "result": "{\"prompt_grade\": \"B\"}"})
+
+        def run(provider: str) -> tuple[list[str], str | None]:
+            with mock.patch("dynamic_router._run", return_value=grade) as runner:
+                text = run_provider_router(
+                    provider=provider,
+                    bin_path="/usr/bin/true",
+                    model="router-model",
+                    effort="low",
+                    prompt="grade this",
+                    cwd=directory,
+                    images=(image,),
+                )
+            self.assertEqual(text, "{\"prompt_grade\": \"B\"}")
+            command = runner.call_args.args[0]
+            return command, runner.call_args.kwargs["stdin"]
+
+        claude_command, claude_stdin = run("claude")
+        self.assertIn("--input-format", claude_command)
+        self.assertIn("stream-json", claude_command)
+        assert claude_stdin is not None
+        claude_payload = json.loads(claude_stdin)
+        self.assertEqual(claude_payload["message"]["content"][0]["type"], "image")
+        self.assertEqual(claude_payload["message"]["content"][1]["text"], "grade this")
+
+        codex_command, codex_stdin = run("codex")
+        image_at = codex_command.index("--image")
+        self.assertEqual(codex_command[image_at + 1], str(image))
+        self.assertEqual(codex_command[image_at + 2], "-m")
+        self.assertEqual(codex_command[-1], "-")
+        self.assertEqual(codex_stdin, "grade this")
+
+        grok_command, grok_stdin = run("grok")
+        json_at = grok_command.index("--prompt-json")
+        grok_payload = json.loads(grok_command[json_at + 1])
+        self.assertEqual(grok_payload[0]["type"], "image")
+        self.assertEqual(grok_payload[1]["text"], "grade this")
+        self.assertNotIn("--prompt-file", grok_command)
+        self.assertIsNone(grok_stdin)
+
+    def test_extract_keeps_grok_text_when_claude_stream_json_is_unwrapped(self) -> None:
+        from dynamic_router import extract_router_text
+
+        grok = json.dumps({"text": "{\"prompt_grade\": \"B\"}", "sessionId": "abc"})
+        self.assertEqual(extract_router_text("grok", grok), "{\"prompt_grade\": \"B\"}")
+        wrapped = json.dumps({"type": "result", "result": "{\"prompt_grade\": \"C\"}", "session_id": "s"})
+        self.assertEqual(extract_router_text("claude", wrapped), "{\"prompt_grade\": \"C\"}")
 
     def test_router_invocation_failure_surfaces_as_router_error(self) -> None:
         with mock.patch("dynamic_router._run", side_effect=RouterError("router timed out")):

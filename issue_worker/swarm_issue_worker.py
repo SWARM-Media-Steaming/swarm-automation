@@ -46,6 +46,19 @@ if str(SCRIPT_HOME) not in sys.path:
 
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
 from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
+from issue_images import (
+    MAX_IMAGES,
+    ImageDownloadError,
+    IssueImage,
+    assistant_result_text,
+    claude_stream_message,
+    codex_image_flags,
+    download_issue_image,
+    extract_issue_image_refs,
+    format_image_note,
+    grok_prompt_json,
+    inlined_images,
+)
 from dynamic_router import (
     RouterCandidate,
     RouterError,
@@ -813,6 +826,9 @@ class Worker:
         self.github = GitHubClient(config, self.apps)
         self.choice: ProviderChoice | None = None
         self.issue: IssueContext | None = None
+        self.issue_images: list[IssueImage] = []
+        self._image_by_url: dict[str, IssueImage] = {}
+        self._image_failures: set[str] = set()
         self.routing: dict[str, Any] | None = None
         self.quota_resume_ready = False
         # Remaining-usage snapshot for the chosen provider taken while selecting
@@ -1916,6 +1932,7 @@ class Worker:
         previous_provider = (self.issue.previous_ai or "").lower()
         rework = self.issue.work_type == "followup"
         try:
+            images = self.ensure_issue_images()
             prompt = build_router_prompt(
                 title=self.issue.title,
                 body=original_body,
@@ -1923,6 +1940,10 @@ class Worker:
                 candidates=candidates,
                 previous_provider=previous_provider,
                 rework=rework,
+                image_count=len(images),
+                comment_image_count=sum(
+                    1 for image in images if not image.source.startswith("issue description")
+                ),
             )
             raw = run_provider_router(
                 provider=host.key,
@@ -1931,6 +1952,7 @@ class Worker:
                 effort=host.router_effort,
                 prompt=prompt,
                 cwd=self.config.repo_dir,
+                images=tuple(image.path for image in images),
             )
             decision = resolve_routing_decision(
                 raw,
@@ -2511,6 +2533,7 @@ class Worker:
         question_issue = QUESTION_LABEL.lower() in {label.lower() for label in issue.labels}
         state = self.read_state()
         lines: list[str] = []
+        extra_image_sources: list[tuple[str, str]] = []
         if self.choice.resume:
             comments = self.load_resume_comments(issue.number, int(state.get("session_comment_id", 0)))
             continuation = (
@@ -2538,6 +2561,9 @@ class Worker:
                 lines.append("Treat these comments as additional requirements or corrections for the work you are continuing.")
                 log(f"Adding trusted issue comments through comment {comments[-1]['id']} to the resumed session.")
                 self.update_state(session_comment_id=int(comments[-1]["id"]))
+                extra_image_sources.extend(
+                    (f"comment #{comment['id']}", str(comment.get("body") or "")) for comment in comments
+                )
         else:
             task_instruction = (
                 f"Answer this issue's question using evidence from {self.config.repo_dir}. Follow repository "
@@ -2650,7 +2676,92 @@ class Worker:
                 "do not duplicate code or rewrite history; put SWARM_RECOVERY_COMPLETE on its own final line after "
                 "your summary. If incomplete, finish it; the worker will commit any remaining completed changes."
             )
+        note = format_image_note(self.ensure_issue_images(extra_image_sources))
+        if note:
+            lines.extend(["", note])
         return "\n".join(lines) + "\n"
+
+    def ensure_issue_images(
+        self, extra_sources: Sequence[tuple[str, str]] | None = None
+    ) -> list[IssueImage]:
+        """Download GitHub-hosted images from the issue, follow-ups, and any extra text.
+
+        Already downloaded URLs are reused. A failed download is logged and
+        skipped so a missing picture does not block the rest of the issue.
+        """
+        assert self.issue
+        pieces: list[tuple[str, str]] = [("issue description", self.issue.body or "")]
+        for comment in self.issue.followup_comments:
+            pieces.append((f"comment #{comment.get('id')}", str(comment.get("body") or "")))
+        pieces.extend(extra_sources or ())
+        refs: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        for source, text in pieces:
+            for url, alt in extract_issue_image_refs(text, github_host=self.config.github_host):
+                if url in seen:
+                    continue
+                seen.add(url)
+                refs.append((url, alt, source))
+        if len(refs) > MAX_IMAGES:
+            log(
+                f"WARNING: Issue #{self.issue.number} has {len(refs)} images; "
+                f"attaching the first {MAX_IMAGES}."
+            )
+            refs = refs[:MAX_IMAGES]
+        needs_download = any(
+            url not in self._image_by_url and url not in self._image_failures for url, _, _ in refs
+        )
+        token = self._github_image_token() if needs_download else ""
+        ordered: list[IssueImage] = []
+        dest = self.state / "issue-images" / str(self.issue.number)
+        for url, alt, source in refs:
+            cached = self._image_by_url.get(url)
+            if cached is not None:
+                ordered.append(cached)
+                continue
+            if url in self._image_failures:
+                continue
+            try:
+                image = download_issue_image(url, alt, source, dest, token=token)
+            except ImageDownloadError as error:
+                self._image_failures.add(url)
+                log(f"WARNING: Could not download an image from {source} on issue #{self.issue.number}: {error}")
+                continue
+            self._image_by_url[url] = image
+            ordered.append(image)
+            log(f"Downloaded an issue image for #{self.issue.number} from {source}.")
+        self.issue_images = ordered
+        return ordered
+
+    def _github_image_token(self) -> str:
+        """Token that can read this repository's uploaded images.
+
+        A configured GitHub App token wins. Otherwise `gh auth token` uses the
+        same login the worker already uses for issues. The value is never logged.
+        """
+        environment = os.environ.copy()
+        if self.choice is not None:
+            try:
+                environment.update(self.github.environment(self.choice.key))
+            except WorkerError:
+                pass
+        token = environment.get("GH_TOKEN") or environment.get("GITHUB_TOKEN") or ""
+        if token:
+            return token
+        if not self.config.gh_bin:
+            return ""
+        result = subprocess.run(
+            [self.config.gh_bin, "auth", "token"],
+            cwd=self.config.repo_dir,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
 
     def ai_reported_environment_only(self, output: str) -> tuple[bool, str]:
         if not self.config.allow_environment_only_summary:
@@ -3023,7 +3134,21 @@ class Worker:
             if self.choice.resume
             else ["--session-id", self.choice.session_id]
         )
-        command.extend(["-p", "-"])
+        image_paths = [image.path for image in self.issue_images]
+        inlined = inlined_images(prompt, image_paths, kind="claude") if image_paths else []
+        if image_paths and not inlined:
+            log(
+                "WARNING: Issue images could not be inlined into the Claude prompt; "
+                "the prompt lists their local files instead."
+            )
+        if inlined:
+            command.extend(
+                ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+            )
+            stdin_text: str | None = claude_stream_message(prompt, inlined)
+        else:
+            command.extend(["-p", "-"])
+            stdin_text = None
         process = subprocess.Popen(
             command,
             cwd=self.config.repo_dir,
@@ -3038,11 +3163,18 @@ class Worker:
         # retry may legitimately --resume it. See choice_from_state.
         self.update_state(session_started=True)
         assert process.stdin and process.stdout
-        process.stdin.write(prompt)
+        process.stdin.write(stdin_text if stdin_text is not None else prompt)
         process.stdin.close()
-        with self.ai_output_file.open("w", encoding="utf-8") as output:
-            for line in process.stdout:
-                output.write(line)
+        if inlined:
+            raw = "".join(process.stdout)
+            text = assistant_result_text(raw)
+            if text and not text.endswith("\n"):
+                text += "\n"
+            self.ai_output_file.write_text(text, encoding="utf-8")
+        else:
+            with self.ai_output_file.open("w", encoding="utf-8") as output:
+                for line in process.stdout:
+                    output.write(line)
         return process.wait()
 
     def _run_grok(self, prompt: str, env: dict[str, str]) -> int:
@@ -3055,21 +3187,32 @@ class Worker:
             "summary will appear when finished."
         )
         self.ai_prompt_file.write_text(prompt, encoding="utf-8")
-        command = [
-            grok_bin,
-            "--prompt-file",
-            str(self.ai_prompt_file),
-            "--model",
-            self.choice.model,
-            "--reasoning-effort",
-            self.choice.effort,
-            "--permission-mode",
-            "bypassPermissions",
-            "--output-format",
-            "json",
-            "--cwd",
-            str(self.config.repo_dir),
-        ]
+        image_paths = [image.path for image in self.issue_images]
+        inlined = inlined_images(prompt, image_paths, kind="grok") if image_paths else []
+        if image_paths and not inlined:
+            log(
+                "WARNING: Issue images could not be inlined into the Grok prompt; "
+                "the prompt lists their local files instead."
+            )
+        command = [grok_bin]
+        if inlined:
+            command.extend(["--prompt-json", grok_prompt_json(prompt, inlined)])
+        else:
+            command.extend(["--prompt-file", str(self.ai_prompt_file)])
+        command.extend(
+            [
+                "--model",
+                self.choice.model,
+                "--reasoning-effort",
+                self.choice.effort,
+                "--permission-mode",
+                "bypassPermissions",
+                "--output-format",
+                "json",
+                "--cwd",
+                str(self.config.repo_dir),
+            ]
+        )
         command.extend(
             ["--resume", self.choice.session_id]
             if self.choice.resume
@@ -3113,6 +3256,8 @@ class Worker:
         command = [codex_bin, "exec"]
         if self.choice.resume:
             command.append("resume")
+        # Before `-m`, so a variadic `--image` cannot consume the stdin prompt (`-`).
+        command.extend(codex_image_flags(image.path for image in self.issue_images))
         command.extend(
             [
                 "-m",

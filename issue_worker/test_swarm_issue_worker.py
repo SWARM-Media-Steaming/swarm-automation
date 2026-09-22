@@ -376,6 +376,166 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("add or update UAT and integration tests", prompt)
         self.assertIn("SWARM_ENVIRONMENT_ONLY", prompt)
         self.assertIn("do not write code", prompt)
+        self.assertNotIn("Issue images:", prompt)
+
+    def test_prompt_includes_images_pasted_on_the_issue_and_follow_up(self) -> None:
+        from issue_images import IssueImage
+
+        attachment = "https://github.com/user-attachments/assets/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        comment_url = "https://user-images.githubusercontent.com/1/screenshot.png"
+        self.worker.issue = IssueContext(
+            163,
+            "Layout",
+            f"See ![desktop]({attachment})\nAlso https://imgur.com/skip.png",
+            ["enhancement"],
+            "https://example.invalid/163",
+            followup_comments=[{"id": 9, "body": f"![mobile]({comment_url})", "author": "ada"}],
+        )
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+
+        def fake_download(url: str, alt: str, source: str, dest: Path, *, token: str = "") -> IssueImage:
+            dest.mkdir(parents=True, exist_ok=True)
+            path = dest / ("desktop.png" if "user-attachments" in url else "mobile.png")
+            path.write_bytes(b"\x89PNG\r\n\x1a\n")
+            return IssueImage(url, path, "image/png", alt, source)
+
+        with mock.patch("swarm_issue_worker.download_issue_image", side_effect=fake_download) as download:
+            prompt = self.worker.build_prompt(False, "", False)
+        self.assertEqual(download.call_count, 2)
+        self.assertIn("Issue images:", prompt)
+        self.assertIn("desktop", prompt)
+        self.assertIn("mobile", prompt)
+        self.assertIn("comment #9", prompt)
+        self.assertIn("pasted into the CLI", prompt)
+        with mock.patch("swarm_issue_worker.download_issue_image", side_effect=fake_download) as again:
+            self.assertEqual(self.worker.build_prompt(False, "", False), prompt)
+        again.assert_not_called()
+
+    def test_runners_pass_issue_images_the_way_each_cli_accepts_a_paste(self) -> None:
+        from issue_images import IssueImage
+
+        image = self.state / "shot.png"
+        image.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+            b"\x00\x00\x00\x0cIDATx\x9cc\xfc\xcf\xc0P\x0f\x00\x04\x85\x01\x80\x84\xa9\x8c!\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        self.worker.issue = IssueContext(163, "Layout", "body", [], "https://example.invalid/163")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-163")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.issue_images = [
+            IssueImage(
+                "https://github.com/user-attachments/assets/abc",
+                image,
+                "image/png",
+                "shot",
+                "issue description",
+            )
+        ]
+
+        class FakeStdin:
+            def __init__(self) -> None:
+                self.buf = ""
+
+            def write(self, text: str) -> None:
+                self.buf += text
+
+            def close(self) -> None:
+                return None
+
+        stream = json.dumps({"type": "result", "result": "## Summary\nFixed the layout.\n"}) + "\n"
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = FakeStdin()
+                self.stdout = io.StringIO(stream)
+
+            def wait(self) -> int:
+                return 0
+
+        created: dict[str, object] = {}
+
+        def fake_popen(command: list[str], **_kwargs: object) -> FakeProcess:
+            process = FakeProcess()
+            created["command"] = command
+            created["process"] = process
+            return process
+
+        with mock.patch.object(self.worker, "provider_bin", return_value="/bin/echo"), mock.patch(
+            "swarm_issue_worker.subprocess.Popen", side_effect=fake_popen
+        ):
+            status = self.worker._run_claude("Fix the layout", {})
+        self.assertEqual(status, 0)
+        claude_command = created["command"]
+        assert isinstance(claude_command, list)
+        self.assertIn("--input-format", claude_command)
+        self.assertIn("stream-json", claude_command)
+        process = created["process"]
+        assert isinstance(process, FakeProcess)
+        payload = json.loads(process.stdin.buf)
+        self.assertEqual(payload["message"]["content"][0]["type"], "image")
+        self.assertEqual(payload["message"]["content"][1]["text"], "Fix the layout")
+        self.assertEqual(
+            self.worker.ai_output_file.read_text(encoding="utf-8"),
+            "## Summary\nFixed the layout.\n",
+        )
+
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "session-163")
+        with mock.patch.object(self.worker, "provider_bin", return_value="/bin/echo"), mock.patch(
+            "swarm_issue_worker.subprocess.run",
+            return_value=subprocess.CompletedProcess(["codex"], 0),
+        ) as run:
+            self.assertEqual(self.worker._run_codex("Fix the layout", {}), 0)
+        codex_command = run.call_args.args[0]
+        image_at = codex_command.index("--image")
+        self.assertEqual(codex_command[image_at + 1], str(image))
+        self.assertEqual(codex_command[image_at + 2], "-m")
+        self.assertEqual(codex_command[-1], "-")
+        self.assertEqual(run.call_args.kwargs["input"], "Fix the layout")
+
+        self.worker.choice = ProviderChoice("Grok", "test-model", "high", "session-163")
+        with mock.patch.object(self.worker, "provider_bin", return_value="/bin/echo"), mock.patch(
+            "swarm_issue_worker.subprocess.run",
+            return_value=subprocess.CompletedProcess(["grok"], 0),
+        ) as run:
+            self.assertEqual(self.worker._run_grok("Fix the layout", {}), 0)
+        grok_command = run.call_args.args[0]
+        grok_payload = json.loads(grok_command[grok_command.index("--prompt-json") + 1])
+        self.assertEqual(grok_payload[0]["mimeType"], "image/png")
+        self.assertEqual(grok_payload[1]["text"], "Fix the layout")
+        self.assertNotIn("--prompt-file", grok_command)
+        self.assertIn("Fix the layout", self.worker.ai_prompt_file.read_text(encoding="utf-8"))
+
+    def test_dynamic_routing_receives_downloaded_issue_images(self) -> None:
+        from issue_images import IssueImage
+
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        attachment = "https://github.com/user-attachments/assets/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        comment_url = "https://user-images.githubusercontent.com/1/screenshot.png"
+        self.worker.issue = IssueContext(
+            163,
+            "Layout",
+            f"![desktop]({attachment})",
+            [],
+            "https://example.invalid/163",
+            followup_comments=[{"id": 9, "body": f"![mobile]({comment_url})"}],
+        )
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "session-163")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        image = IssueImage(attachment, self.state / "shot.png", "image/png", "desktop", "issue description")
+        comment_image = IssueImage(comment_url, self.state / "mobile.png", "image/png", "mobile", "comment #9")
+
+        def fake_download(url: str, alt: str, source: str, _dest: Path, *, token: str = "") -> IssueImage:
+            return image if "user-attachments" in url else comment_image
+
+        with mock.patch("swarm_issue_worker.download_issue_image", side_effect=fake_download), mock.patch(
+            "swarm_issue_worker.run_provider_router", return_value=self._routing_payload()
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(router.call_args.kwargs["images"], (image.path, comment_image.path))
+        prompt = router.call_args.kwargs["prompt"]
+        self.assertIn("2 image(s) uploaded on this issue", prompt)
+        self.assertIn("1 of them come from later GitHub comments", prompt)
 
     def test_execution_history_configuration_is_independent(self) -> None:
         args = build_parser().parse_args(
