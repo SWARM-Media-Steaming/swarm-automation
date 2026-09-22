@@ -133,15 +133,17 @@
   function modelLabel(value) {
     const model = String(value || "").trim();
     if (!model) return "Model not recorded";
-    let match = model.match(/^claude-(haiku|sonnet|opus)-(\d+)-(\d+)$/i);
-    if (match) return `${match[1][0].toUpperCase()}${match[1].slice(1).toLowerCase()} ${match[2]}.${match[3]}`;
+    const capitalize = (word) => `${word[0].toUpperCase()}${word.slice(1).toLowerCase()}`;
+    // Claude names a model family then its version in hyphen-separated
+    // parts, however many: claude-sonnet-5, claude-haiku-4-5, claude-fable-5-1.
+    let match = model.match(/^claude-([a-z]+)-(\d+(?:-\d+)*)$/i);
+    if (match) return `${capitalize(match[1])} ${match[2].replace(/-/g, ".")}`;
     match = model.match(/^gpt-(\d+(?:\.\d+)?)-(.+)$/i);
     if (match) return `GPT-${match[1]} ${match[2][0].toUpperCase()}${match[2].slice(1)}`;
     match = model.match(/^grok-(.+)$/i);
     if (match) return `Grok ${match[1]}`;
-    if (/^(haiku|sonnet|opus)$/i.test(model)) {
-      return `${model[0].toUpperCase()}${model.slice(1).toLowerCase()}`;
-    }
+    // A bare Claude alias (opus, fable) as older configurations saved it.
+    if (/^[a-z]+$/i.test(model)) return capitalize(model);
     return model;
   }
 
