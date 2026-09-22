@@ -71,10 +71,10 @@ repository, split across three tabs:
   the reason, the complexity score, and the AI platform, model, and reasoning
   effort that ran the pre-flight grading pass (usually not the platform that
   then worked the issue). Filter by grade, by search, or by grading platform.
-- **Router activity** — one row per grading platform showing which AI tools its
-  router picked and how often, as counts and percentages of that router's own
-  graded issues. Selecting a row filters every prompt grade by the platform
-  that graded the issue rather than the one that worked it.
+- **Router activity** — one card per grading platform showing which router
+  models it used and which AI tools it picked, with counts and percentages of
+  that platform's graded issues. Select a platform or model to filter grades
+  by what graded the issue rather than what worked it.
 - **Execution history** — every AI execution grouped by issue and attempt,
   expandable to the original GitHub issue, the exact prompt submitted, the AI's
   summary of the requested and completed work, files/branch/commits/pull

@@ -38,6 +38,9 @@
     // Provider key of the AI platform that graded/routed an issue. A different
     // axis from the search box, which matches the platform that worked it.
     promptGradesRouter: "",
+    // Exact model used by the selected grading platform. Kept separate so a
+    // model click can narrow the grades without flattening platform identity.
+    promptGradesRouterModel: "",
     promptGradesOffset: 0,
     promptGradesRequest: 0,
     promptGradesSearchTimer: null,
@@ -222,7 +225,7 @@
     },
     "router-activity": {
       title: "Router activity",
-      html: "<p>When <strong>Dynamic Model Routing</strong> is on, one AI platform runs a pre-flight pass over a new issue: it grades the issue, scores its complexity, and picks which AI tool actually does the work. This panel is one row per grading platform, showing which tools that platform chose and how often, as a count and a share of its own graded issues.</p><p>Read it as router bias: if Grok's router graded twelve issues and handed nine of them to Grok, that row shows <strong>75%</strong>. Comparing rows shows which platforms are chosen most, and by whom.</p><p>Select a row to filter every prompt grade by the platform that <strong>graded</strong> the issue instead of the one that worked it — the grades list, its average, and the grade chart all narrow to that router. Select the same row again, or <strong>Show every router</strong> on the Prompt grades tab, to clear it. This panel always counts every router in the current search, so another row can be chosen without clearing the filter first.</p><p>The grading platform, its model, and its reasoning effort are recorded with each routing decision and are shown on every grade row. Rows recorded before that detail existed appear as <strong>Not recorded</strong> and cannot be filtered on.</p>",
+      html: "<p>When <strong>Dynamic Model Routing</strong> is on, one AI platform runs a pre-flight pass over a new issue: it grades the issue, scores its complexity, and picks which AI tool actually does the work. This panel keeps one card per grading platform, then breaks that platform down by the models it used and the tools it picked.</p><p>Read the model section as grading activity and the picked-platform section as router bias. For example, if Claude graded twelve issues using Opus eight times, the Opus model shows <strong>67%</strong>. If Claude handed nine of those issues to Claude, the picked-platform bar shows <strong>75%</strong>.</p><p>Select a platform to filter every prompt grade by who <strong>graded</strong> it. Select a grading model to narrow that platform further; selecting the same model again returns to the whole platform. The matrix always retains every platform and model in the current search so another can be chosen directly.</p><p>Historical platform or model details that were never recorded remain visible as <strong>Not recorded</strong> or <strong>Model not recorded</strong> and cannot be selected.</p>",
       links: [],
     },
     "provider-bins": {
@@ -1839,9 +1842,18 @@
     const box = byId("prompt-grades-router-matrix");
     if (!box) return;
     box.replaceChildren();
-    const rows = window.SwarmPromptGrades.routerRows(matrix, state.promptGradesRouter);
+    const rows = window.SwarmPromptGrades.routerRows(
+      matrix,
+      state.promptGradesRouter,
+      state.promptGradesRouterModel,
+    );
     const count = byId("prompt-grades-router-count");
-    if (count) count.textContent = `${rows.length} router${rows.length === 1 ? "" : "s"}`;
+    if (count) {
+      const summary = window.SwarmPromptGrades.routerSummary(matrix);
+      const platforms = `${summary.platforms} platform${summary.platforms === 1 ? "" : "s"}`;
+      const models = `${summary.models} model${summary.models === 1 ? "" : "s"}`;
+      count.textContent = `${platforms} · ${models}`;
+    }
     const legend = byId("prompt-grades-router-legend");
     if (legend) legend.replaceChildren();
     if (!rows.length) {
@@ -1864,15 +1876,17 @@
       return index >= 0 && index < 4 ? `series-${index + 1}` : "";
     };
     rows.forEach((row) => {
-      const element = document.createElement(row.interactive ? "button" : "div");
-      element.className = `router-row ${row.selected ? "selected" : ""}`.trim();
+      const element = document.createElement("div");
+      element.className = `router-row router-${row.router || "unknown"} ${row.selected ? "selected" : ""}`.trim();
+      const platform = document.createElement(row.interactive ? "button" : "div");
+      platform.className = "router-platform-control";
       if (row.interactive) {
-        element.type = "button";
-        element.dataset.router = row.router;
-        element.setAttribute("aria-pressed", row.selected ? "true" : "false");
-        element.setAttribute(
+        platform.type = "button";
+        platform.dataset.router = row.router;
+        platform.setAttribute("aria-pressed", row.selected && !state.promptGradesRouterModel ? "true" : "false");
+        platform.setAttribute(
           "aria-label",
-          row.selected
+          row.selected && !state.promptGradesRouterModel
             ? `Clear the ${providerLabel(row.router)} grading filter`
             : `Show only prompts graded by ${providerLabel(row.router)}`,
         );
@@ -1884,6 +1898,43 @@
       const subtitle = document.createElement("span");
       subtitle.textContent = `${row.graded} graded`;
       name.append(title, subtitle);
+      platform.appendChild(name);
+
+      const detail = document.createElement("div");
+      detail.className = "router-row-detail";
+      const modelHeading = document.createElement("span");
+      modelHeading.className = "router-detail-heading";
+      modelHeading.textContent = "Grading models";
+      const models = document.createElement("div");
+      models.className = "router-models";
+      row.models.forEach((entry) => {
+        const model = document.createElement(entry.interactive ? "button" : "div");
+        model.className = `router-model ${entry.selected ? "selected" : ""}`.trim();
+        model.style.setProperty("--model-share", `${entry.percent}%`);
+        if (entry.interactive) {
+          model.type = "button";
+          model.dataset.router = row.router;
+          model.dataset.routerModel = entry.model;
+          model.setAttribute("aria-pressed", entry.selected ? "true" : "false");
+          model.setAttribute(
+            "aria-label",
+            entry.selected
+              ? `Show every ${providerLabel(row.router)} grading model`
+              : `Show only prompts graded by ${providerLabel(row.router)} ${entry.model}`,
+          );
+        }
+        const modelName = document.createElement("strong");
+        modelName.textContent = window.SwarmPromptGrades.modelLabel(entry.model);
+        modelName.title = entry.model || "Model not recorded";
+        const modelCount = document.createElement("span");
+        modelCount.textContent = `${entry.count} · ${Math.round(entry.percent)}%`;
+        model.append(modelName, modelCount);
+        models.appendChild(model);
+      });
+
+      const pickedHeading = document.createElement("span");
+      pickedHeading.className = "router-detail-heading";
+      pickedHeading.textContent = "Platforms picked";
       const shares = document.createElement("div");
       shares.className = "router-shares";
       const track = document.createElement("div");
@@ -1900,7 +1951,8 @@
         labels.appendChild(Object.assign(document.createElement("span"), { textContent: text }));
       });
       shares.append(track, labels);
-      element.append(name, shares);
+      detail.append(modelHeading, models, pickedHeading, shares);
+      element.append(platform, detail);
       box.appendChild(element);
     });
     if (legend) {
@@ -1920,13 +1972,17 @@
     const banner = byId("prompt-grades-router-filter");
     if (!banner) return;
     const router = state.promptGradesRouter;
+    const routerModel = state.promptGradesRouterModel;
     banner.classList.toggle("hidden", !router);
     banner.replaceChildren();
     if (!router) return;
     const label = document.createElement("strong");
-    label.textContent = `Graded by ${providerLabel(router)}`;
+    label.textContent = `Graded by ${providerLabel(router)}${routerModel ? ` · ${window.SwarmPromptGrades.modelLabel(routerModel)}` : ""}`;
+    if (routerModel) label.title = routerModel;
     const detail = document.createElement("span");
-    detail.textContent = "Only issues this AI platform graded and routed are listed.";
+    detail.textContent = routerModel
+      ? "Only issues this AI platform graded with this model are listed."
+      : "Only issues this AI platform graded and routed are listed.";
     const clear = document.createElement("button");
     clear.type = "button";
     clear.className = "text-button";
@@ -1938,7 +1994,8 @@
   function promptGradesFiltering() {
     return state.promptGradesSearch.trim().length > 0
       || state.promptGradesGrade.length > 0
-      || state.promptGradesRouter.length > 0;
+      || state.promptGradesRouter.length > 0
+      || state.promptGradesRouterModel.length > 0;
   }
 
   function promptGradeCountNoun(total, filtering) {
@@ -2029,6 +2086,7 @@
     const search = state.promptGradesSearch.trim();
     const grade = state.promptGradesGrade;
     const router = state.promptGradesRouter;
+    const routerModel = state.promptGradesRouterModel;
     try {
       const page = await invoke("get_prompt_grades_background", {
         repoId: repo.id,
@@ -2036,6 +2094,7 @@
         search,
         grade,
         router,
+        routerModel,
       });
       if (requestId !== state.promptGradesRequest || repo.id !== state.activeRepoId) return;
       state.promptGrades = page;
@@ -3135,6 +3194,7 @@
     state.promptGradesSearch = "";
     state.promptGradesGrade = "";
     state.promptGradesRouter = "";
+    state.promptGradesRouterModel = "";
     clearTimeout(state.promptGradesSearchTimer);
     state.executionHistoryOffset = 0;
     state.executionHistorySearch = "";
@@ -3571,6 +3631,23 @@
     });
     showFeedbackTab(state.feedbackTab);
     byId("prompt-grades-router-matrix").addEventListener("click", (event) => {
+      const model = event.target.closest("[data-router-model]");
+      if (model) {
+        const page = promptGradesView();
+        const selected = window.SwarmPromptGrades.toggleRouterModel(
+          state.promptGradesRouter,
+          state.promptGradesRouterModel,
+          model.dataset.router,
+          model.dataset.routerModel,
+          page.routerMatrix,
+        );
+        state.promptGradesRouter = selected.router;
+        state.promptGradesRouterModel = selected.model;
+        state.promptGradesOffset = 0;
+        showFeedbackTab("grades");
+        void refreshPromptGrades({ quiet: true });
+        return;
+      }
       const row = event.target.closest("[data-router]");
       if (!row) return;
       const page = promptGradesView();
@@ -3579,6 +3656,7 @@
         row.dataset.router,
         page.routerMatrix,
       );
+      state.promptGradesRouterModel = "";
       state.promptGradesOffset = 0;
       // Land on the grades themselves: the filter's whole point is the list.
       if (state.promptGradesRouter) showFeedbackTab("grades");
@@ -3587,6 +3665,7 @@
     byId("prompt-grades-router-filter").addEventListener("click", (event) => {
       if (!event.target.closest("#prompt-grades-router-clear")) return;
       state.promptGradesRouter = "";
+      state.promptGradesRouterModel = "";
       state.promptGradesOffset = 0;
       void refreshPromptGrades({ quiet: true });
     });

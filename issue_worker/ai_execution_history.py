@@ -66,6 +66,7 @@ _JSON_COLUMNS = (
 # from the decision when it is there and from the row's own provider column
 # otherwise, so imported and pre-routing rows still line up.
 _ROUTER_KEY_SQL = "LOWER(COALESCE(json_extract(routing_decision, '$.router_provider'), ''))"
+_ROUTER_MODEL_SQL = "COALESCE(json_extract(routing_decision, '$.router_model'), '')"
 _WORKED_KEY_SQL = (
     "LOWER(COALESCE(NULLIF(json_extract(routing_decision, '$.provider'), ''), ai_provider, ''))"
 )
@@ -513,6 +514,7 @@ class ExecutionHistoryRepository:
         search: str = "",
         grade: str = "",
         router: str = "",
+        router_model: str = "",
         limit: int = PAGE_SIZE,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -526,10 +528,10 @@ class ExecutionHistoryRepository:
         the result so a panel is never the thing that hides its own options:
 
         * ``search`` narrows everything.
-        * ``router`` keeps only issues graded by that AI platform. It narrows
-          the page *and* the grade summary — the grade distribution of one
-          router is the interesting comparison — but not ``routerMatrix``, so
-          another router can always be picked.
+        * ``router`` and ``router_model`` keep only issues graded by that AI
+          platform/model. They narrow the page *and* the grade summary — the
+          grade distribution of one router is the interesting comparison —
+          but not ``routerMatrix``, so another router can always be picked.
         * ``grade`` keeps only that letter (for example ``B-``) on the page;
           neither summary narrows, so the chart can switch filters.
 
@@ -542,6 +544,7 @@ class ExecutionHistoryRepository:
         offset = clamp_offset(offset)
         selected = normalize_grade(grade)
         selected_router = normalize_provider_key(router)
+        selected_router_model = normalize_router_model(router_model)
         search_clause, search_params = _search_filter(search)
         grade_names = list(GRADE_POINTS)
         grade_slots = ", ".join("?" for _ in grade_names)
@@ -556,6 +559,9 @@ class ExecutionHistoryRepository:
         if selected_router:
             grade_where += f" AND {_ROUTER_KEY_SQL} = ?"
             grade_params.append(selected_router)
+        if selected_router_model:
+            grade_where += f" AND {_ROUTER_MODEL_SQL} = ?"
+            grade_params.append(selected_router_model)
         page_where = grade_where
         page_params = list(grade_params)
         if selected:
@@ -574,6 +580,11 @@ class ExecutionHistoryRepository:
             pairs = database.execute(
                 f"SELECT {_ROUTER_KEY_SQL} AS router, {_WORKED_KEY_SQL} AS worked, COUNT(*) "
                 f"FROM ai_executions{where} GROUP BY router, worked",
+                params,
+            ).fetchall()
+            models = database.execute(
+                f"SELECT {_ROUTER_KEY_SQL} AS router, {_ROUTER_MODEL_SQL} AS model, COUNT(*) "
+                f"FROM ai_executions{where} GROUP BY router, {_ROUTER_MODEL_SQL}",
                 params,
             ).fetchall()
             total = int(
@@ -603,7 +614,14 @@ class ExecutionHistoryRepository:
             "limit": limit,
             "summary": summarize_grades(grades),
             "routerMatrix": summarize_router_matrix(
-                [(str(router_key or ""), str(worked or ""), int(count)) for router_key, worked, count in pairs]
+                [
+                    (str(router_key or ""), str(worked or ""), int(count))
+                    for router_key, worked, count in pairs
+                ],
+                [
+                    (str(router_key or ""), str(model or ""), int(count))
+                    for router_key, model, count in models
+                ],
             ),
         }
 
@@ -634,7 +652,10 @@ def summarize_grades(grades: list[str]) -> dict[str, Any]:
     }
 
 
-def summarize_router_matrix(pairs: list[tuple[str, str, int]]) -> list[dict[str, Any]]:
+def summarize_router_matrix(
+    pairs: list[tuple[str, str, int]],
+    model_pairs: list[tuple[str, str, int]] | None = None,
+) -> list[dict[str, Any]]:
     """Which AI platform each grading platform picked, as counts and percents.
 
     One entry per grading (router) platform, busiest first, each carrying the
@@ -652,6 +673,12 @@ def summarize_router_matrix(pairs: list[tuple[str, str, int]]) -> list[dict[str,
         totals[router] = totals.get(router, 0) + count
         bucket = selections.setdefault(router, {})
         bucket[worked] = bucket.get(worked, 0) + count
+    models: dict[str, dict[str, int]] = {}
+    for router, model, count in model_pairs or []:
+        if count <= 0:
+            continue
+        bucket = models.setdefault(router, {})
+        bucket[model] = bucket.get(model, 0) + count
     rows: list[dict[str, Any]] = []
     for router in sorted(totals, key=lambda key: (-totals[key], key)):
         graded = totals[router]
@@ -660,6 +687,17 @@ def summarize_router_matrix(pairs: list[tuple[str, str, int]]) -> list[dict[str,
             {
                 "router": router,
                 "graded": graded,
+                "models": [
+                    {
+                        "model": model,
+                        "count": models[router][model],
+                        "percent": round(models[router][model] * 100 / graded, 1),
+                    }
+                    for model in sorted(
+                        models.get(router, {}),
+                        key=lambda key: (-models[router][key], key),
+                    )
+                ],
                 "selections": [
                     {
                         "provider": provider,
@@ -671,6 +709,11 @@ def summarize_router_matrix(pairs: list[tuple[str, str, int]]) -> list[dict[str,
             }
         )
     return rows
+
+
+def normalize_router_model(value: str) -> str:
+    """Trim a router-model filter without treating model IDs as provider keys."""
+    return sanitize_text(value).strip()[:120]
 
 
 def _serialize_routing(value: Any) -> str:
@@ -820,9 +863,10 @@ def main(argv: list[str] | None = None) -> int:
     summary of every graded execution in the current search — the Feedback
     view's grades panel. `--search` filters that page the same way it filters
     execution history. `--grade` keeps the page to one letter; the summary
-    still includes every grade in the search. `--router` keeps the page and
-    the grade summary to issues graded by one AI platform; `routerMatrix`
-    still covers every platform in the search so another can be chosen.
+    still includes every grade in the search. `--router` and `--router-model`
+    keep the page and grade summary to issues graded by one AI platform/model;
+    `routerMatrix` still covers every platform in the search so another can be
+    chosen.
 
     `--import-from-github` instead scans that repository's full GitHub issue
     backlog (open and closed) and adds a synthetic `imported` row for any
@@ -872,6 +916,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--router-model",
+        default="",
+        help=(
+            "With --grades, return only issues graded by this exact router model. "
+            "The router matrix still covers every platform and model."
+        ),
+    )
+    parser.add_argument(
         "--search",
         default="",
         help="Case-insensitive match on issue number, title, provider, model, branch, or status.",
@@ -905,6 +957,7 @@ def main(argv: list[str] | None = None) -> int:
                 search=args.search,
                 grade=args.grade,
                 router=args.router,
+                router_model=args.router_model,
                 limit=PAGE_SIZE if args.limit is None else args.limit,
                 offset=args.offset,
             ),

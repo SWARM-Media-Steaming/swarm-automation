@@ -9,6 +9,9 @@ const {
   toggleGrade,
   routerRows,
   toggleRouter,
+  toggleRouterModel,
+  routerSummary,
+  modelLabel,
   routerLine,
   summaryLine,
 } = require("./prompt-grades.js");
@@ -67,12 +70,21 @@ const MATRIX = [
   {
     router: "claude",
     graded: 3,
+    models: [
+      { model: "opus", count: 2, percent: 66.7 },
+      { model: "haiku", count: 1, percent: 33.3 },
+    ],
     selections: [
       { provider: "codex", count: 2, percent: 66.7 },
       { provider: "claude", count: 1, percent: 33.3 },
     ],
   },
-  { router: "grok", graded: 1, selections: [{ provider: "grok", count: 1, percent: 100 }] },
+  {
+    router: "grok",
+    graded: 1,
+    models: [{ model: "grok-4.7", count: 1, percent: 100 }],
+    selections: [{ provider: "grok", count: 1, percent: 100 }],
+  },
 ];
 
 test("sizes each grading platform's picks against its own graded total", () => {
@@ -82,6 +94,8 @@ test("sizes each grading platform's picks against its own graded total", () => {
   assert.equal(rows[0].graded, 3);
   assert.equal(rows[0].selected, true);
   assert.equal(rows[0].interactive, true);
+  assert.deepEqual(rows[0].models.map((entry) => entry.model), ["opus", "haiku"]);
+  assert.equal(rows[0].models[0].percent, 66.7);
   assert.deepEqual(rows[0].selections.map((entry) => entry.provider), ["codex", "claude"]);
   assert.equal(rows[0].selections[0].percent, 66.7);
   assert.equal(rows[1].selected, false);
@@ -102,6 +116,36 @@ test("clicking a grading platform selects it and clicking it again clears the fi
   assert.equal(toggleRouter("claude", "grok", MATRIX), "grok");
   assert.equal(toggleRouter("claude", "codex", MATRIX), "claude");
   assert.equal(toggleRouter("claude", "", MATRIX), "claude");
+});
+
+test("selects a grading model within its platform and clears back to the platform", () => {
+  assert.deepEqual(toggleRouterModel("", "", "claude", "opus", MATRIX), {
+    router: "claude", model: "opus",
+  });
+  assert.deepEqual(toggleRouterModel("claude", "opus", "claude", "opus", MATRIX), {
+    router: "claude", model: "",
+  });
+  assert.deepEqual(toggleRouterModel("claude", "opus", "grok", "missing", MATRIX), {
+    router: "claude", model: "opus",
+  });
+  assert.equal(routerRows(MATRIX, "claude", "opus")[0].models[0].selected, true);
+});
+
+test("counts recorded platforms and model rows without treating history gaps as platforms", () => {
+  const matrix = [...MATRIX, {
+    router: "", graded: 1, models: [{ model: "legacy-model", count: 1 }],
+    selections: [{ provider: "claude", count: 1 }],
+  }];
+  assert.deepEqual(routerSummary(matrix), { platforms: 2, models: 3 });
+});
+
+test("presents common router model IDs as friendly names", () => {
+  assert.equal(modelLabel("claude-haiku-4-5"), "Haiku 4.5");
+  assert.equal(modelLabel("gpt-5.6-luna"), "GPT-5.6 Luna");
+  assert.equal(modelLabel("grok-4.7"), "Grok 4.7");
+  assert.equal(modelLabel("opus"), "Opus");
+  assert.equal(modelLabel("custom/model"), "custom/model");
+  assert.equal(modelLabel(""), "Model not recorded");
 });
 
 test("summarizes who a grading platform picks most often", () => {

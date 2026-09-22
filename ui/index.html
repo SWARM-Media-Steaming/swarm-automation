@@ -193,9 +193,9 @@
           </div>
           <div class="settings-grid feedback-panel" id="feedback-panel-routing" role="tabpanel" aria-labelledby="feedback-tab-routing" data-feedback-panel="routing" hidden>
             <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">ROUTER ACTIVITY</p><h3>Who grades, and who do they pick? <button class="help-dot" data-help="router-activity" aria-label="About router activity">?</button></h3></div><span id="prompt-grades-router-count" class="availability">0 routers</span></div>
-              <p class="panel-copy">One row per AI platform that ran a pre-flight grading pass, showing which platform it then handed the issue to and how often. Select a row to filter every prompt grade by the platform that <strong>graded</strong> the issue rather than the one that worked it.</p>
-              <div id="prompt-grades-router-matrix" class="router-matrix" role="group" aria-label="Filter prompts by grading AI platform" aria-live="polite"><p class="panel-copy">No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.</p></div>
+              <div class="panel-header"><div><p class="eyebrow">ROUTER ACTIVITY</p><h3>Who grades, and who do they pick? <button class="help-dot" data-help="router-activity" aria-label="About router activity">?</button></h3></div><span id="prompt-grades-router-count" class="availability">0 platforms · 0 models</span></div>
+              <p class="panel-copy">One card per AI platform that ran a pre-flight grading pass, with the models it used and the platforms it picked. Select a platform or model to filter every prompt grade by what <strong>graded</strong> the issue rather than what worked it.</p>
+              <div id="prompt-grades-router-matrix" class="router-matrix" role="group" aria-label="Filter prompts by grading AI platform or model" aria-live="polite"><p class="panel-copy">No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.</p></div>
               <div id="prompt-grades-router-legend" class="router-legend" aria-hidden="true"></div>
             </article>
           </div>

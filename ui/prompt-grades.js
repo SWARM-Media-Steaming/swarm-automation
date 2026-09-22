@@ -64,18 +64,31 @@
   // Rows whose router was never recorded stay visible but cannot filter —
   // there is no value to filter on, and dropping them would make the totals
   // disagree with the grade count.
-  function routerRows(matrix, selectedRouter) {
+  function routerRows(matrix, selectedRouter, selectedModel = "") {
     const rows = Array.isArray(matrix) ? matrix : [];
     const selected = String(selectedRouter || "");
     return rows.map((row) => {
       const router = String((row && row.router) || "");
       const graded = Number(row && row.graded) || 0;
+      const models = Array.isArray(row && row.models) ? row.models : [];
       const selections = Array.isArray(row && row.selections) ? row.selections : [];
       return {
         router,
         graded,
         interactive: router.length > 0,
         selected: router.length > 0 && router === selected,
+        models: models.map((entry) => {
+          const model = String((entry && entry.model) || "");
+          const count = Number(entry && entry.count) || 0;
+          const percent = Number(entry && entry.percent);
+          return {
+            model,
+            count,
+            percent: Number.isFinite(percent) ? percent : (graded ? (count / graded) * 100 : 0),
+            interactive: router.length > 0 && model.length > 0,
+            selected: router === selected && model.length > 0 && model === selectedModel,
+          };
+        }),
         selections: selections.map((entry) => {
           const count = Number(entry && entry.count) || 0;
           const percent = Number(entry && entry.percent);
@@ -87,6 +100,49 @@
         }),
       };
     });
+  }
+
+  // Selecting a model also selects its grading platform. Clicking the active
+  // model clears only the model detail and leaves the platform filter active.
+  function toggleRouterModel(currentRouter, currentModel, router, model, matrix) {
+    const nextRouter = String(router || "");
+    const nextModel = String(model || "");
+    const known = routerRows(matrix, "", "").some((row) => (
+      row.router === nextRouter
+      && row.models.some((entry) => entry.interactive && entry.model === nextModel)
+    ));
+    if (!known) return { router: String(currentRouter || ""), model: String(currentModel || "") };
+    if (currentRouter === nextRouter && currentModel === nextModel) {
+      return { router: nextRouter, model: "" };
+    }
+    return { router: nextRouter, model: nextModel };
+  }
+
+  function routerSummary(matrix) {
+    const rows = routerRows(matrix, "", "");
+    const platforms = rows.filter((row) => row.interactive).length;
+    const models = rows.reduce(
+      (total, row) => total + (row.interactive
+        ? row.models.filter((entry) => entry.model).length
+        : 0),
+      0,
+    );
+    return { platforms, models };
+  }
+
+  function modelLabel(value) {
+    const model = String(value || "").trim();
+    if (!model) return "Model not recorded";
+    let match = model.match(/^claude-(haiku|sonnet|opus)-(\d+)-(\d+)$/i);
+    if (match) return `${match[1][0].toUpperCase()}${match[1].slice(1).toLowerCase()} ${match[2]}.${match[3]}`;
+    match = model.match(/^gpt-(\d+(?:\.\d+)?)-(.+)$/i);
+    if (match) return `GPT-${match[1]} ${match[2][0].toUpperCase()}${match[2].slice(1)}`;
+    match = model.match(/^grok-(.+)$/i);
+    if (match) return `Grok ${match[1]}`;
+    if (/^(haiku|sonnet|opus)$/i.test(model)) {
+      return `${model[0].toUpperCase()}${model.slice(1).toLowerCase()}`;
+    }
+    return model;
   }
 
   // Clicking the active router again clears the filter. A router that is not
@@ -127,6 +183,9 @@
     toggleGrade,
     routerRows,
     toggleRouter,
+    toggleRouterModel,
+    routerSummary,
+    modelLabel,
     routerLine,
     summaryLine,
   };

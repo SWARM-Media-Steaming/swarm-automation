@@ -3376,15 +3376,15 @@ class WorkerTestCase(unittest.TestCase):
             branch_name="b",
             application_version="1",
         )
-        # (issue, grading platform, platform it picked, grade)
+        # (issue, grading platform, grading model, platform it picked, grade)
         rows = [
-            (1, "claude", "Claude", "A"),
-            (2, "claude", "Codex", "B"),
-            (3, "claude", "Codex", "B-"),
-            (4, "grok", "Grok", "C"),
-            (5, "grok", "Claude", "A-"),
+            (1, "claude", "opus", "Claude", "A"),
+            (2, "claude", "opus", "Codex", "B"),
+            (3, "claude", "haiku", "Codex", "B-"),
+            (4, "grok", "grok-4.7", "Grok", "C"),
+            (5, "grok", "grok-4.7", "Claude", "A-"),
         ]
-        for number, router, worked, grade in rows:
+        for number, router, router_model, worked, grade in rows:
             ExecutionHistoryService(True, database_path).start(
                 ExecutionStart(
                     issue_number=number,
@@ -3396,7 +3396,7 @@ class WorkerTestCase(unittest.TestCase):
                         "fallback": False,
                         "provider": worked.lower(),
                         "router_provider": router,
-                        "router_model": f"{router}-router",
+                        "router_model": router_model,
                         "router_effort": "low",
                     },
                     **service_args,
@@ -3425,6 +3425,13 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual([row["router"] for row in matrix], ["claude", "grok"])
         self.assertEqual(matrix[0]["graded"], 3)
         self.assertEqual(
+            matrix[0]["models"],
+            [
+                {"model": "opus", "count": 2, "percent": 66.7},
+                {"model": "haiku", "count": 1, "percent": 33.3},
+            ],
+        )
+        self.assertEqual(
             matrix[0]["selections"],
             [
                 {"provider": "codex", "count": 2, "percent": 66.7},
@@ -3432,10 +3439,14 @@ class WorkerTestCase(unittest.TestCase):
             ],
         )
         self.assertEqual(matrix[1]["graded"], 2)
+        self.assertEqual(
+            matrix[1]["models"],
+            [{"model": "grok-4.7", "count": 2, "percent": 100.0}],
+        )
         self.assertEqual({entry["percent"] for entry in matrix[1]["selections"]}, {50.0})
         # The grading model and effort ride along on every record so the UI can
         # show which model graded without a second lookup.
-        self.assertEqual(page["records"][0]["routing_decision"]["router_model"], "grok-router")
+        self.assertEqual(page["records"][0]["routing_decision"]["router_model"], "grok-4.7")
         self.assertEqual(page["records"][0]["routing_decision"]["router_effort"], "low")
 
         # Filtering by the grading platform narrows the page and the grade
@@ -3452,6 +3463,13 @@ class WorkerTestCase(unittest.TestCase):
         narrowed = repository.graded_for_repository("octocat/example", router="claude", grade="B")
         self.assertEqual([row["issue_number"] for row in narrowed["records"]], [2])
         self.assertEqual(narrowed["summary"]["graded"], 3)
+
+        only_opus = repository.graded_for_repository(
+            "octocat/example", router="claude", router_model=" opus "
+        )
+        self.assertEqual([row["issue_number"] for row in only_opus["records"]], [2, 1])
+        self.assertEqual(only_opus["summary"]["graded"], 2)
+        self.assertEqual([row["router"] for row in only_opus["routerMatrix"]], ["claude", "grok"])
 
         # Anything that is not a provider key is no filter at all.
         self.assertEqual(
