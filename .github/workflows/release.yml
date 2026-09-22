@@ -30,7 +30,9 @@ jobs:
       - run: cargo test --locked
       - name: Issue-worker Python tests
         working-directory: issue_worker
-        run: python3 -m unittest test_swarm_issue_worker
+        run: python3 -m unittest discover -p 'test_*.py'
+      - name: Frontend tests
+        run: npm test
       - name: Release-version script tests
         working-directory: scripts
         run: python3 -m unittest test_compute_version

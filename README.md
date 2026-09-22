@@ -56,6 +56,24 @@ workspace folder is set.
 Provider and GitHub credentials remain owned by their CLIs and are never copied
 into the app configuration or automation log.
 
+Repository Work Policy includes **Adversarial UAT** (off by default; CLI
+`--adversarial-uat-enabled`, environment `SWARM_ADVERSARIAL_UAT_ENABLED`). It
+replaces the same-session test instruction with a fresh independent coding
+agent that derives tests from the issue specification. Tests live under
+`tests/adversarial/` and are registered in `.swarm/tests.json` with an
+`adversarial-` ID and `origin: "adversarial"`, so scheduled runs and failure
+triage continue after delivery. Framework selection is persisted in that
+manifest; the coding agent scaffolds it without a sign-off gate.
+
+After the initial assessment, up to six implementer-fix/tester-retest rounds
+run locally. Only a fresh tester can adjudicate disputed tests; the implementer
+cannot modify them. Out-of-scope findings become separate labelled, assigned
+issues. A clean pass follows normal PR delivery. A cap-hit still publishes the
+branch and PR, bypasses automatic approval/merge/promotion, and marks the issue
+**AI Needs Input** for a trusted-author adjudication. Quota pauses preserve the
+phase and remaining rounds. Pilot this setting on one repository per stack
+before enabling it broadly.
+
 Optional AI execution history can be enabled under Work Policy. It stores the
 original issue, sanitized effective prompt, provider settings, lifecycle,
 changes, delivery metadata, and failures in `swarm-automation.sqlite3` beneath
@@ -80,6 +98,13 @@ repository, split across three tabs:
   summary of the requested and completed work, files/branch/commits/pull
   request, lifecycle notes and warnings, and any reviewer feedback once a
   review platform has provided it.
+
+The execution view also shows a sortable UAT round column, per-round provider
+pairings and disputes, and aggregate average rounds, clean-first-pass rate and
+cap-hit rate. Counts are test files and failing suites. Quota consumption is an
+approximate percentage-point drop from remaining-quota snapshots across used
+providers, not metered token or dollar cost. Existing history databases migrate
+automatically to schema 3 when history is enabled.
 
 It is read-only and empty until "Store AI execution history" has recorded at
 least one execution; grades and router activity also need Dynamic Model Routing
@@ -116,7 +141,7 @@ through GitHub's pull-request protections.
 
 ### Cleaning up branches no pull request will ever cover
 
-An environment-only summary, a `Question` answer and an `AI Needs Input` request
+An environment-only summary, a `Question` answer and a no-code `AI Needs Input` request
 all finish without a commit, so no pull request is opened and the merged-PR
 cleanup above never sees their issue branch. Those work-rounds now return the
 checkout to `ai-main` and delete the empty branch locally and on the remote —

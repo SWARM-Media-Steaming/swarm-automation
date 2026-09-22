@@ -29,6 +29,7 @@
     coverageAudit: null,
     executionHistory: null,
     executionHistorySearch: "",
+    executionHistorySort: "recent",
     executionHistoryOffset: 0,
     executionHistoryRequest: 0,
     executionHistorySearchTimer: null,
@@ -210,12 +211,12 @@
     },
     "work-policy": {
       title: "Issue instructions",
-      html: "<p>These switches add instructions to each AI issue prompt.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>Both start off and apply only to this repository.</p>",
+      html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
       links: [],
     },
     "execution-history": {
       title: "Execution history",
-      html: "<p>Every AI issue execution for the selected repository, newest first. The list loads ten at a time from the local database. Each row shows the AI tool, model, and effort level used. Search matches issue number, title, provider, branch, or status, and Previous and Next fetch another page. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
+      html: "<p>Every AI issue execution for the selected repository, newest first. The list loads ten at a time from the local database. Each row shows the AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates; expand an execution for provider pairings, disputes and approximate remaining-quota consumption (not token/dollar cost). Search matches issue number, title, provider, branch, or status, and Previous and Next fetch another page. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
       links: [],
     },
     "prompt-grades": {
@@ -397,6 +398,7 @@
       auto_promote: false,
       monitor_actions: false,
       require_issue_tests: false,
+      adversarial_uat_enabled: false,
       allow_environment_only_summary: false,
       repo_dir: "",
       uat_hour: 3,
@@ -1115,6 +1117,9 @@
       const words = document.createElement("div");
       const name = document.createElement("strong");
       name.textContent = suite.name;
+      if (suite.origin === "adversarial") {
+        words.appendChild(Object.assign(document.createElement("span"), {className: "status-pill paused", textContent: "Adversarial"}));
+      }
       const meta = document.createElement("small");
       meta.textContent = `${suite.id} · ${suite.timeoutSeconds}s${suite.disruptive ? " · disruptive" : ""}`;
       words.append(name, meta);
@@ -1426,6 +1431,9 @@
         const words = document.createElement("div");
         const name = document.createElement("strong");
         name.textContent = suite.name || suite.id;
+        if (suite.origin === "adversarial") {
+          words.appendChild(Object.assign(document.createElement("span"), {className: "status-pill paused", textContent: "Adversarial"}));
+        }
         const detail = document.createElement("small");
         detail.textContent = suite.detail || `${suite.id}${suite.durationMs ? ` · ${Math.round(suite.durationMs / 1000)}s` : ""}`;
         words.append(name, detail);
@@ -1549,7 +1557,7 @@
     head.append(title, meta);
     const tagging = document.createElement("div");
     tagging.className = "execution-tagging";
-    [["AI tool", record.aiProvider], ["Model", record.model], ["Effort", record.effort]].forEach(([label, value]) => {
+    [["AI tool", record.aiProvider], ["Model", record.model], ["Effort", record.effort], ["UAT rounds", window.SwarmAdversarialUat.roundCount(record)]].forEach(([label, value]) => {
       const cell = document.createElement("div");
       cell.className = "execution-tag";
       const name = document.createElement("span");
@@ -1593,6 +1601,14 @@
     };
     addSummaryParagraph("Requested work", record.requestedWorkSummary);
     addSummaryParagraph("Changes made", record.changesSummary);
+    addSummaryParagraph("Adversarial UAT", record.adversarialOutcome?.replaceAll("_", " "));
+    if (record.capacityConsumedPercent != null) {
+      addSummaryParagraph("Approximate quota consumed", window.SwarmAdversarialUat.capacity(record.capacityConsumedPercent));
+    }
+    for (const round of record.adversarialRounds || []) {
+      addSummaryParagraph(`UAT ${round.round_number === 0 ? "initial assessment" : `round ${round.round_number}`}`,
+        window.SwarmAdversarialUat.roundDetail(round));
+    }
     const routing = record.routingDecision;
     if (routing && typeof routing === "object") {
       if (routing.fallback) {
@@ -1665,6 +1681,9 @@
     if (!box) return;
     box.replaceChildren();
     const page = executionHistoryView();
+    const aggregate = byId("adversarial-history-summary");
+    const stats = page.adversarial;
+    if (aggregate) aggregate.textContent = window.SwarmAdversarialUat.aggregate(stats);
     const searching = state.executionHistorySearch.trim().length > 0;
     const total = Number(page.total) || 0;
     const limit = Number(page.limit) || 10;
@@ -1721,6 +1740,7 @@
         repoId: repo.id,
         offset,
         search,
+        sort: state.executionHistorySort,
       });
       if (requestId !== state.executionHistoryRequest || repo.id !== state.activeRepoId) return;
       state.executionHistory = page;
@@ -3752,6 +3772,11 @@
       void refreshPromptGrades();
     });
     byId("import-execution-history").addEventListener("click", () => importExecutionHistory());
+    byId("execution-history-sort").addEventListener("change", (event) => {
+      state.executionHistorySort = event.target.value;
+      state.executionHistoryOffset = 0;
+      void refreshExecutionHistory();
+    });
     const executionSearch = byId("execution-history-search");
     const queueExecutionSearch = (immediate) => {
       state.executionHistorySearch = executionSearch.value;

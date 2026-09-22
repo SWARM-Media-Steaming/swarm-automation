@@ -574,6 +574,7 @@ fn execution_history_lookup_is_safe_before_any_execution_exists() {
         "octocat__example".into(),
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(history.records.is_empty());
@@ -690,12 +691,14 @@ fn execution_history_query_always_requests_one_page() {
         "octocat/example",
         Some(-4),
         Some("  Widget  ".into()),
+        Some("rounds_desc".into()),
     );
     let value_after = |flag: &str| {
         args.iter()
             .position(|arg| arg == flag)
             .map(|index| args[index + 1].as_str())
     };
+    assert_eq!(value_after("--sort"), Some("rounds_desc"));
     assert_eq!(value_after("--limit"), Some("10"));
     assert_eq!(value_after("--offset"), Some("0"));
     assert_eq!(value_after("--search"), Some("Widget"));
@@ -705,6 +708,7 @@ fn execution_history_query_always_requests_one_page() {
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
         "octocat/example",
+        None,
         None,
         None,
     );
@@ -762,6 +766,10 @@ fn ai_execution_record_deserializes_the_python_export_shape_into_camel_case() {
         "ai_provider": "Claude",
         "model": "claude-sonnet-5",
         "effort": "high",
+        "adversarial_round_count": 3,
+        "adversarial_outcome": "resolved_after_n",
+        "capacity_consumed_percent": 4.5,
+        "adversarial_rounds": [{"round_number": 1, "tester_provider": "Codex"}],
         "reasoning_config": {"effort": "high"},
         "started_at": "2026-09-14T10:00:00-05:00",
         "completed_at": "2026-09-14T10:05:00-05:00",
@@ -793,6 +801,8 @@ fn ai_execution_record_deserializes_the_python_export_shape_into_camel_case() {
     assert_eq!(record.files_changed, vec!["src/main.rs".to_string()]);
 
     let camel = serde_json::to_value(&record).expect("serialize for the frontend");
+    assert_eq!(camel["adversarialRoundCount"], 3);
+    assert_eq!(camel["adversarialRounds"][0]["tester_provider"], "Codex");
     assert!(camel.get("executionId").is_some(), "{camel}");
     assert!(camel.get("filesChanged").is_some(), "{camel}");
     assert!(camel.get("execution_id").is_none(), "{camel}");
@@ -1228,11 +1238,13 @@ fn grant_apps_request_sends_a_bare_json_array_on_stdin() {
 fn repo_worker_args_carries_advanced_issue_policy() {
     let repo = RepoConfig {
         require_issue_tests: true,
+        adversarial_uat_enabled: true,
         allow_environment_only_summary: true,
         ..repo("octocat/example")
     };
     let args = args_for(&repo);
     assert!(args.contains(&"--require-issue-tests".to_string()));
+    assert!(args.contains(&"--adversarial-uat-enabled".to_string()));
     assert!(args.contains(&"--allow-environment-only-summary".to_string()));
 }
 
