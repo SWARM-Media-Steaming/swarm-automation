@@ -141,6 +141,9 @@ test("counts recorded platforms and model rows without treating history gaps as 
 
 test("presents common router model IDs as friendly names", () => {
   assert.equal(modelLabel("claude-haiku-4-5"), "Haiku 4.5");
+  assert.equal(modelLabel("claude-sonnet-5"), "Sonnet 5");
+  assert.equal(modelLabel("claude-fable-5-1"), "Fable 5.1");
+  assert.equal(modelLabel("grok-4.7-build-fast"), "Grok 4.7-build-fast");
   assert.equal(modelLabel("gpt-5.6-luna"), "GPT-5.6 Luna");
   assert.equal(modelLabel("grok-4.7"), "Grok 4.7");
   assert.equal(modelLabel("opus"), "Opus");

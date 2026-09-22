@@ -11,23 +11,39 @@ pub struct ModelInfo {
     pub efforts: Vec<String>,
     pub default_effort: String,
     /// True when this model draws on a separate usage-credit balance instead
-    /// of the account's normal plan allowance (e.g. Claude's `fable` alias).
-    /// Set from [`requires_usage_credits`] once the raw catalog is parsed;
-    /// individual `parse_*_models` functions leave it `false`.
+    /// of the account's normal plan allowance (e.g. Claude's Fable models).
+    /// Set by a `parse_*` function when the CLI's own catalog says so
+    /// ([`mentions_usage_credits`]), and again in [`provider_models`] for any
+    /// model in a family [`requires_usage_credits`] knows about.
     #[serde(default)]
     pub requires_usage_credits: bool,
 }
 
-/// Model slugs/aliases known to draw on a separate usage-credit balance
-/// rather than the account's normal plan allowance. Maintained by hand, the
-/// same way as `_MODEL_DESCRIPTIONS` in `issue_worker/dynamic_router.py`:
-/// nothing in a CLI's own output says "this needs credits", so an operator
-/// has to name the ones that do here as they're discovered running a model
-/// that comes back with "requires usage credits".
+/// Model families known to draw on a separate usage-credit balance rather
+/// than the account's normal plan allowance. A catalog that says so itself
+/// (see [`mentions_usage_credits`]) is always preferred; this hand-maintained
+/// list is the backstop for a catalog that carries no such marker — e.g. the
+/// aliases parsed out of `claude --help` when no model-catalog cache exists
+/// yet. Named by family, so both the alias (`fable`) and every full model
+/// name in that family (`claude-fable-5-1`) match.
 const USAGE_CREDIT_MODELS: &[&str] = &["fable"];
 
 fn requires_usage_credits(value: &str) -> bool {
-    USAGE_CREDIT_MODELS.contains(&value)
+    value
+        .split(['-', '_'])
+        .any(|part| USAGE_CREDIT_MODELS.contains(&part))
+}
+
+/// True when a catalog entry itself says the model bills against usage
+/// credits, the way Claude Code's own model picker labels them.
+fn mentions_usage_credits(model: &serde_json::Value) -> bool {
+    [
+        model["badge"]["message"].as_str(),
+        model["tooltip"]["content"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| text.to_lowercase().contains("usage credits"))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -241,6 +257,99 @@ fn parenthesised_values(text: &str) -> Vec<String> {
     values
 }
 
+/// A model name without the dated snapshot suffix some catalog ids carry
+/// (`claude-haiku-4-5-20251001` → `claude-haiku-4-5`). The CLI accepts
+/// either, and the shorter name is the one this app's own defaults and the
+/// router's model descriptions use, so a saved selection keeps matching the
+/// catalog when the service publishes a new snapshot of the same model.
+fn without_snapshot_date(id: &str) -> String {
+    let snapshot = regex::Regex::new(r"-\d{8}$").expect("valid snapshot regex");
+    snapshot.replace(id, "").into_owned()
+}
+
+/// Models exactly as Claude Code's own picker lists them, read from the
+/// catalog the CLI caches after asking the service which models the signed-in
+/// account may use. `claude --help` only ever names two or three aliases as
+/// examples of the `--model` syntax, so this cache is the only complete and
+/// account-accurate source of the list.
+fn parse_claude_catalog(cache: &str) -> Vec<ModelInfo> {
+    let Ok(cache) = serde_json::from_str::<serde_json::Value>(cache) else {
+        return Vec::new();
+    };
+    cache["catalog"]["config"]["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|model| !model["hidden"].as_bool().unwrap_or(false))
+        .filter_map(|model| {
+            let value = without_snapshot_date(model["id"].as_str()?);
+            // A model with no reasoning control (Haiku today) reports no
+            // effort options; `provider_models` fills those in.
+            let levels = model["thinking"]["effort_options"].as_array();
+            Some(ModelInfo {
+                label: model["name"]
+                    .as_str()
+                    .map(|name| {
+                        if name.starts_with("Claude") {
+                            name.to_string()
+                        } else {
+                            format!("Claude {name}")
+                        }
+                    })
+                    .unwrap_or_else(|| display_model_name(&value)),
+                value,
+                efforts: levels
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|level| level["id"].as_str().map(str::to_string))
+                    .collect(),
+                default_effort: levels
+                    .into_iter()
+                    .flatten()
+                    .find(|level| level["badge"]["message"].as_str() == Some("Default"))
+                    .and_then(|level| level["id"].as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                requires_usage_credits: mentions_usage_credits(model),
+            })
+        })
+        .collect()
+}
+
+/// The models in the newest model-catalog cache Claude Code has written.
+/// The CLI keeps one file per account/surface, so the most recently fetched
+/// one is the catalog a run started now would use.
+fn claude_cached_catalog() -> Vec<ModelInfo> {
+    let directory = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+        .map(|base| base.join("cache/model-catalog"));
+    let Some(entries) = directory.and_then(|directory| std::fs::read_dir(directory).ok()) else {
+        return Vec::new();
+    };
+    let mut newest: Option<(i64, Vec<ModelInfo>)> = None;
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let models = parse_claude_catalog(&text);
+        if models.is_empty() {
+            continue;
+        }
+        let fetched = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|cache| cache["fetchedAt"].as_i64())
+            .unwrap_or_default();
+        if newest.as_ref().is_none_or(|(seen, _)| fetched >= *seen) {
+            newest = Some((fetched, models));
+        }
+    }
+    newest.map(|(_, models)| models).unwrap_or_default()
+}
+
 fn parse_claude_models(help: &str) -> Vec<ModelInfo> {
     let efforts = option_help(help, "--effort <level>")
         .map(|text| parenthesised_values(&text))
@@ -310,12 +419,19 @@ fn parse_codex_models(output: &str) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// The models `grok models` lists. Only the lines of its `Available models:`
+/// block are read, and both bullet characters it uses are accepted: the
+/// default model's line is bulleted `*` and every other model's `-`, so
+/// matching `*` alone would report the default as the entire catalog.
 fn parse_grok_models(output: &str) -> Vec<ModelInfo> {
     let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").expect("valid ANSI regex");
-    let clean = ansi.replace_all(output, "");
-    let model = regex::Regex::new(r"(?m)^\s*\*\s+([^\s(]+)").expect("valid model regex");
+    let clean = ansi.replace_all(output, "").into_owned();
+    let listing = clean
+        .split_once("Available models:")
+        .map_or(clean.as_str(), |(_, listing)| listing);
+    let model = regex::Regex::new(r"(?m)^\s*[*-]\s+([^\s(]+)").expect("valid model regex");
     model
-        .captures_iter(&clean)
+        .captures_iter(listing)
         .map(|capture| capture[1].to_string())
         .map(|value| ModelInfo {
             label: display_model_name(&value),
@@ -329,60 +445,90 @@ fn parse_grok_models(output: &str) -> Vec<ModelInfo> {
         .collect()
 }
 
-/// Effort levels per Grok model, from the catalog the CLI caches after
-/// talking to the Grok service (`grok models` itself lists no efforts).
-fn parse_grok_efforts(cache: &str) -> std::collections::HashMap<String, (Vec<String>, String)> {
+/// Grok's models as the CLI itself knows them, from the catalog it caches
+/// after talking to the Grok service. `grok models` prints only the model
+/// ids, so this is where their display names, effort levels and default
+/// effort come from.
+fn parse_grok_catalog(cache: &str) -> Vec<ModelInfo> {
     let Ok(cache) = serde_json::from_str::<serde_json::Value>(cache) else {
-        return Default::default();
+        return Vec::new();
     };
-    cache["models"]
+    let mut models: Vec<ModelInfo> = cache["models"]
         .as_object()
         .into_iter()
         .flatten()
-        .filter_map(|(id, model)| {
-            let levels = model["info"]["reasoning_efforts"].as_array()?;
-            let efforts: Vec<String> = levels
-                .iter()
-                .filter_map(|level| level["value"].as_str().map(str::to_string))
-                .collect();
-            let default = levels
-                .iter()
-                .find(|level| level["default"].as_bool().unwrap_or(false))
-                .and_then(|level| level["value"].as_str())
-                .unwrap_or_default()
-                .to_string();
-            (!efforts.is_empty()).then(|| (id.clone(), (efforts, default)))
+        .filter(|(_, model)| !model["info"]["hidden"].as_bool().unwrap_or(false))
+        .map(|(id, model)| {
+            let levels = model["info"]["reasoning_efforts"].as_array();
+            ModelInfo {
+                label: model["info"]["name"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| display_model_name(id)),
+                value: id.clone(),
+                efforts: levels
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|level| level["value"].as_str().map(str::to_string))
+                    .collect(),
+                default_effort: levels
+                    .into_iter()
+                    .flatten()
+                    .find(|level| level["default"].as_bool().unwrap_or(false))
+                    .and_then(|level| level["value"].as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                requires_usage_credits: mentions_usage_credits(&model["info"]),
+            }
         })
-        .collect()
+        .collect();
+    // The cache is a map, so it arrives in id order. Newest first matches how
+    // `grok models` prints the list, and keeps the newest model — rather than
+    // the oldest — as the first entry `reconcile_config_models` repairs an
+    // unavailable saved selection into.
+    models.sort_by(|left, right| right.value.cmp(&left.value));
+    models
 }
 
-fn grok_cached_efforts() -> std::collections::HashMap<String, (Vec<String>, String)> {
+fn grok_cached_catalog() -> Vec<ModelInfo> {
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".grok/models_cache.json"))
         .and_then(|path| std::fs::read_to_string(path).ok())
-        .map(|cache| parse_grok_efforts(&cache))
+        .map(|cache| parse_grok_catalog(&cache))
         .unwrap_or_default()
 }
 
 fn discover_models(id: &str, program: &Path) -> Vec<ModelInfo> {
-    let (_, output) = match id {
-        "claude" => command_output(program, &["--help"]),
+    match id {
+        "claude" => {
+            let cached = claude_cached_catalog();
+            if !cached.is_empty() {
+                return cached;
+            }
+            // No catalog cached yet (a fresh install that has not run, or a
+            // signed-out CLI): `--help` still names the aliases that track
+            // the latest models.
+            parse_claude_models(&command_output(program, &["--help"]).1)
+        }
         // The bundled catalog is updated with the CLI and avoids a network
         // refresh during the UI's periodic tool detection.
-        "codex" => command_output(program, &["debug", "models", "--bundled"]),
-        "grok" => command_output(program, &["models"]),
-        _ => return Vec::new(),
-    };
-    match id {
-        "claude" => parse_claude_models(&output),
-        "codex" => parse_codex_models(&output),
+        "codex" => {
+            parse_codex_models(&command_output(program, &["debug", "models", "--bundled"]).1)
+        }
         "grok" => {
-            let cached = grok_cached_efforts();
-            let mut models = parse_grok_models(&output);
+            let cached = grok_cached_catalog();
+            let mut models = parse_grok_models(&command_output(program, &["models"]).1);
+            if models.is_empty() {
+                return cached;
+            }
+            // The live listing decides which models exist for this account;
+            // the cache only labels them and lists their effort levels.
             for model in &mut models {
-                if let Some((efforts, default)) = cached.get(&model.value) {
-                    model.efforts = efforts.clone();
-                    model.default_effort = default.clone();
+                if let Some(cached) = cached.iter().find(|cached| cached.value == model.value) {
+                    model.label = cached.label.clone();
+                    model.efforts = cached.efforts.clone();
+                    model.default_effort = cached.default_effort.clone();
+                    model.requires_usage_credits = cached.requires_usage_credits;
                 }
             }
             models
@@ -405,9 +551,12 @@ fn fallback_efforts(id: &str) -> Vec<String> {
 /// the UI still offers a dropdown rather than a free-form field.
 fn fallback_models(id: &str) -> Vec<ModelInfo> {
     let (values, default_effort): (&[&str], &str) = match id {
-        "claude" => (&["opus", "sonnet", "haiku"], ""),
+        "claude" => (
+            &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+            "",
+        ),
         "codex" => (&["gpt-5.6-luna"], "medium"),
-        "grok" => (&["grok-4.6"], "high"),
+        "grok" => (&["grok-4.7", "grok-4.6"], "high"),
         _ => (&[], ""),
     };
     values
@@ -449,7 +598,7 @@ fn provider_models(
         if model.efforts.is_empty() {
             model.efforts = fallback_efforts(id);
         }
-        model.requires_usage_credits = requires_usage_credits(&model.value);
+        model.requires_usage_credits |= requires_usage_credits(&model.value);
     }
     if !allow_credit_models {
         let without_credit_models: Vec<_> = models
@@ -464,6 +613,51 @@ fn provider_models(
         }
     }
     (models, detected)
+}
+
+/// Brand prefixes that carry no meaning on their own when matching a saved
+/// model name against a catalog entry.
+const MODEL_BRANDS: &[&str] = &["claude", "gpt", "grok"];
+
+/// The family part of a model name: its alphabetic segments other than the
+/// brand — `opus` for both the `opus` alias and `claude-opus-5`, `luna` for
+/// `gpt-5.6-luna`. Empty when a name is only a brand and a version number
+/// (`grok-4.7`), which is the signal that it has no family to match on.
+fn model_family(value: &str) -> Vec<String> {
+    value
+        .to_ascii_lowercase()
+        .split(['-', '_'])
+        .filter(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_alphabetic())
+                && !MODEL_BRANDS.contains(part)
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The catalog entry a saved selection refers to: the exact model while it is
+/// still offered, else the catalog's first model of the same family, else the
+/// catalog's first model. The family step matters because a CLI can rename
+/// the same model — the alias `opus` became `claude-opus-5` when detection
+/// started reading Claude's own model catalog — and a saved `opus` should
+/// then become the current Opus rather than whichever model leads the list.
+fn matching_model<'a>(models: &'a [ModelInfo], saved: &str) -> &'a ModelInfo {
+    if let Some(exact) = models.iter().find(|model| model.value == saved) {
+        return exact;
+    }
+    let family = model_family(saved);
+    if !family.is_empty() {
+        if let Some(relative) = models
+            .iter()
+            .find(|model| model_family(&model.value) == family)
+        {
+            return relative;
+        }
+    }
+    &models[0]
 }
 
 fn supported_effort(model: &ModelInfo, current: &str) -> String {
@@ -491,10 +685,11 @@ fn supported_effort(model: &ModelInfo, current: &str) -> String {
 /// settings merely because a CLI is missing or temporarily unavailable.
 ///
 /// Newly reported models naturally appear in the UI through [`detect`]. When
-/// a saved model has disappeared, the CLI's first (normally default) model is
-/// selected and its reported effort levels are applied. Returns human-readable
-/// descriptions of every repair so callers can decide whether to persist and
-/// reload a running scheduler.
+/// a saved model has disappeared, [`matching_model`] picks its replacement —
+/// the current model of the same family where there is one, else the CLI's
+/// first (normally default) model — and its reported effort levels are
+/// applied. Returns human-readable descriptions of every repair so callers
+/// can decide whether to persist and reload a running scheduler.
 pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Vec<String> {
     let mut repairs = Vec::new();
     for tool in tools
@@ -508,13 +703,7 @@ pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Ve
         else {
             continue;
         };
-        let fallback = &tool.models[0];
-
-        let worker = tool
-            .models
-            .iter()
-            .find(|model| model.value == provider.model)
-            .unwrap_or(fallback);
+        let worker = matching_model(&tool.models, &provider.model);
         if provider.model != worker.value {
             repairs.push(format!(
                 "{} worker model '{}' is unavailable; using '{}'.",
@@ -531,11 +720,7 @@ pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Ve
             provider.effort = effort;
         }
 
-        let router = tool
-            .models
-            .iter()
-            .find(|model| model.value == provider.router_model)
-            .unwrap_or(fallback);
+        let router = matching_model(&tool.models, &provider.router_model);
         if provider.router_model != router.value {
             repairs.push(format!(
                 "{} router model '{}' is unavailable; using '{}'.",
@@ -554,11 +739,7 @@ pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Ve
 
         if let Some(tiers) = config.routing_tiers.get_mut(&tool.id) {
             for tier in tiers {
-                let model = tool
-                    .models
-                    .iter()
-                    .find(|model| model.value == tier.model)
-                    .unwrap_or(fallback);
+                let model = matching_model(&tool.models, &tier.model);
                 if tier.model != model.value {
                     repairs.push(format!(
                         "{} routing tier {}-{} model '{}' is unavailable; using '{}'.",
@@ -765,6 +946,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_every_grok_model_not_only_the_default_bullet() {
+        // `grok models` bullets the default model `*` and the rest `-`; the
+        // UI used to show the default alone. Prose above the listing must
+        // not be mistaken for a model, however it is bulleted.
+        let models = parse_grok_models(
+            "You are logged in with grok.com.\n\n\
+             - not a model\n\n\
+             Default model: grok-4.7\n\n\
+             Available models:\n  \
+             * grok-4.7 (default)\n  \
+             - grok-4.7-build-fast\n  \
+             - grok-4.6\n  \
+             - grok-4.5\n",
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.value.as_str())
+                .collect::<Vec<_>>(),
+            ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"]
+        );
+    }
+
+    #[test]
     fn parses_wrapped_claude_help_as_printed_by_the_cli() {
         let help = "\
   --effort <level>                      Effort level for the current session
@@ -789,13 +994,74 @@ mod tests {
     }
 
     #[test]
-    fn reads_grok_efforts_from_the_cli_model_cache() {
-        let efforts = parse_grok_efforts(
-            r#"{"models":{"grok-4.6":{"info":{"reasoning_efforts":[{"value":"high","default":true},{"value":"low","default":false}]}},"plain":{"info":{}}}}"#,
+    fn reads_grok_names_and_efforts_from_the_cli_model_cache() {
+        let models = parse_grok_catalog(
+            r#"{"models":{
+                "grok-4.6":{"info":{"name":"Grok 4.6","reasoning_efforts":[
+                    {"value":"high","default":true},{"value":"low","default":false}]}},
+                "grok-4.7":{"info":{"name":"Grok 4.7","reasoning_efforts":[
+                    {"value":"xhigh","default":false},{"value":"high","default":true}]}},
+                "grok-secret":{"info":{"name":"Grok Secret","hidden":true}},
+                "plain":{"info":{}}}}"#,
         );
-        assert_eq!(efforts.len(), 1);
-        assert_eq!(efforts["grok-4.6"].0, ["high", "low"]);
-        assert_eq!(efforts["grok-4.6"].1, "high");
+        // Descending id order (newest model of a family first), hidden
+        // models dropped, names taken from the cache.
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| (model.value.as_str(), model.label.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("plain", "Plain"),
+                ("grok-4.7", "Grok 4.7"),
+                ("grok-4.6", "Grok 4.6"),
+            ]
+        );
+        assert_eq!(models[1].efforts, ["xhigh", "high"]);
+        assert_eq!(models[1].default_effort, "high");
+        assert!(models[0].efforts.is_empty());
+    }
+
+    #[test]
+    fn parses_the_claude_model_catalog_the_cli_caches() {
+        let models = parse_claude_catalog(
+            r#"{"fetchedAt":1,"catalog":{"config":{"models":[
+                {"id":"claude-sonnet-5","name":"Sonnet 5","thinking":{"type":"effort",
+                 "effort_options":[{"id":"low"},{"id":"high","badge":{"message":"Default"}}]}},
+                {"id":"claude-fable-5-1","name":"Fable 5.1",
+                 "badge":{"message":"Requires usage credits"},
+                 "thinking":{"type":"effort","effort_options":[{"id":"high"}]}},
+                {"id":"claude-haiku-4-5-20251001","name":"Haiku 4.5",
+                 "thinking":{"type":"none"}},
+                {"id":"claude-opus-4-7","name":"Opus 4.7","hidden":true}]}}}"#,
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| (model.value.as_str(), model.label.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("claude-sonnet-5", "Claude Sonnet 5"),
+                ("claude-fable-5-1", "Claude Fable 5.1"),
+                // The dated snapshot suffix is dropped: the CLI accepts
+                // either name and the shorter one survives a new snapshot.
+                ("claude-haiku-4-5", "Claude Haiku 4.5"),
+            ]
+        );
+        assert_eq!(models[0].efforts, ["low", "high"]);
+        assert_eq!(models[0].default_effort, "high");
+        assert!(!models[0].requires_usage_credits);
+        // The catalog says so itself; no hand-maintained list needed.
+        assert!(models[1].requires_usage_credits);
+        // A model with no reasoning control reports no efforts of its own.
+        assert!(models[2].efforts.is_empty());
+    }
+
+    #[test]
+    fn credit_models_are_recognised_by_family_not_only_by_alias() {
+        assert!(requires_usage_credits("fable"));
+        assert!(requires_usage_credits("claude-fable-5-1"));
+        assert!(!requires_usage_credits("claude-opus-5"));
     }
 
     #[test]
@@ -927,6 +1193,51 @@ mod tests {
         assert!(repairs
             .iter()
             .any(|repair| repair.contains("routing tier 1-3")));
+    }
+
+    #[test]
+    fn a_renamed_model_is_repaired_into_its_own_family() {
+        // Claude detection used to report the aliases `opus`/`sonnet`; it now
+        // reports the full names from the CLI's own catalog. A configuration
+        // saved under the old names must follow each selection to the same
+        // model, not collapse onto whichever model leads the catalog.
+        let mut config = AppConfig::default();
+        for provider in &mut config.providers {
+            if provider.id == "claude" {
+                provider.model = "opus".into();
+                provider.router_model = "haiku".into();
+            }
+        }
+        config.routing_tiers.get_mut("claude").unwrap()[0].model = "claude-sonnet-4-1".into();
+        let mut tool = basic_tool("claude", "Claude Code", "claude", true, "");
+        tool.models = ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5"]
+            .into_iter()
+            .map(|value| ModelInfo {
+                value: value.into(),
+                label: value.into(),
+                efforts: vec!["low".into(), "high".into()],
+                default_effort: "high".into(),
+                requires_usage_credits: false,
+            })
+            .collect();
+        tool.models_detected = true;
+
+        reconcile_config_models(&mut config, &[tool]);
+
+        let claude = config.provider("claude").unwrap();
+        assert_eq!(claude.model, "claude-opus-5");
+        assert_eq!(claude.router_model, "claude-haiku-4-5");
+        assert_eq!(config.routing_tiers["claude"][0].model, "claude-sonnet-5");
+    }
+
+    #[test]
+    fn a_model_named_only_by_version_has_no_family_to_match() {
+        // Grok's names are brand plus version, so nothing may be treated as
+        // a family: a retired grok model falls back to the first offered one
+        // rather than being matched to an unrelated version.
+        assert!(model_family("grok-4.7").is_empty());
+        assert_eq!(model_family("claude-opus-5"), ["opus"]);
+        assert_eq!(model_family("gpt-5.6-luna"), ["luna"]);
     }
 
     #[test]
