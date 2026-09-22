@@ -818,7 +818,9 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(page_exit, 0)
         self.assertEqual(
             json.loads(page_buffer.getvalue()),
-            {"records": [], "total": 0, "offset": 0, "limit": 10},
+            {"records": [], "total": 0, "offset": 0, "limit": 10,
+             "adversarial": {"loops": 0, "averageRounds": None, "cleanFirstPassPercent": None,
+                             "capHitPercent": None, "averageCapacityConsumedPercent": None, "testsAdded": 0}},
         )
 
     def test_execution_history_page_fetches_ten_records_and_filters_in_sqlite(self) -> None:

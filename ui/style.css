@@ -231,7 +231,7 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .test-run-suite small, .execution-note small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 9px; overflow-wrap: anywhere; }
 .execution-notes { display: grid; gap: 6px; }
 .execution-record > summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 330px) auto; }
-.execution-tagging { display: grid; grid-template-columns: 1fr 1.6fr .8fr; gap: 10px; min-width: 0; }
+.execution-tagging { display: grid; grid-template-columns: 1fr 1.6fr .8fr .8fr; gap: 10px; min-width: 0; }
 .execution-tag { min-width: 0; }
 .execution-tag span { display: block; color: var(--muted-2); font-size: 8px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
 .execution-tag strong { display: block; margin-top: 3px; color: #cbd2df; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -44,8 +44,14 @@ SCRIPT_HOME = Path(os.environ.get("SWARM_ISSUE_WORKER_SCRIPT_DIR", Path(__file__
 if str(SCRIPT_HOME) not in sys.path:
     sys.path.insert(0, str(SCRIPT_HOME))
 
+# Mixin/helpers import worker types lazily. Keep their identity when this file
+# is launched as a CLI so WorkerError is still caught by main's handler.
+if __name__ == "__main__":
+    sys.modules["swarm_issue_worker"] = sys.modules[__name__]
+
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
 from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
+from adversarial_uat import AdversarialUatMixin, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE
 from issue_images import (
     MAX_IMAGES,
     ImageDownloadError,
@@ -414,6 +420,7 @@ class Config:
     auto_promote: bool
     monitor_actions: bool
     require_issue_tests: bool
+    adversarial_uat_enabled: bool
     allow_environment_only_summary: bool
     branch_prefix: str
     base_branch: str
@@ -464,6 +471,7 @@ class Config:
             auto_promote=args.auto_promote,
             monitor_actions=args.monitor_actions,
             require_issue_tests=args.require_issue_tests,
+            adversarial_uat_enabled=args.adversarial_uat_enabled,
             allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
             base_branch=args.base_branch,
@@ -855,7 +863,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker:
+class Worker(AdversarialUatMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -1406,6 +1414,13 @@ class Worker:
             # Leave the app's untracked .swarm/ draft in place. Stashing it
             # would hide the test definition for every other issue that runs
             # while this one is paused.
+            exclusions = [":(exclude).swarm"]
+            if state.get("adversarial"):
+                # UAT owns the tracked suite definition. Shelve that along with
+                # the tests, while keeping unrelated untracked app drafts local.
+                exclusions = [f":(exclude){path}" for path in self.git(
+                    "ls-files", "--others", "--exclude-standard", "-z", "--", ".swarm"
+                ).split("\0") if path and path != ".swarm/tests.json"]
             self.git(
                 "stash",
                 "push",
@@ -1414,7 +1429,7 @@ class Worker:
                 f"swarm issue worker paused #{issue_number}",
                 "--",
                 ".",
-                ":(exclude).swarm",
+                *exclusions,
             )
             stash_oid = self.git("rev-parse", "refs/stash")
             if self.worktree_status():
@@ -1516,7 +1531,7 @@ class Worker:
                 "--limit",
                 "1000",
                 "--json",
-                "url,state,headRefName,headRefOid,isDraft,mergeable,reviewDecision",
+                "url,state,headRefName,headRefOid,isDraft,mergeable,reviewDecision,body",
             ]
         )
         for pull_request in json.loads(output):
@@ -1542,6 +1557,9 @@ class Worker:
                     self.delete_remote_issue_branch(branch, provider)
                 continue
             if pr_state != "OPEN":
+                continue
+            if CAP_HIT_PR_MARKER in str(pull_request.get("body") or ""):
+                log(f"Issue #{issue_number} has an adversarial UAT deadlock; leaving its PR for human adjudication.")
                 continue
             if (
                 self.config.auto_approve
@@ -2328,6 +2346,8 @@ class Worker:
                 routing_decision=self.routing,
             ),
             iso_timestamp(),
+            existing_id=(str(self.read_state().get("execution_id") or "")
+                         if self.in_progress_file.exists() and self.read_state().get("adversarial") else ""),
         )
         if execution_id and self.in_progress_file.exists():
             self.update_state(execution_id=execution_id)
@@ -2711,6 +2731,7 @@ class Worker:
             f"{branch_line}"
             f"- Commit: `{commit_sha}` — {pending['commit_message']}\n"
             f"{usage_lines}\n"
+            f"{pending.get('adversarial_summary', '')}"
             "<details><summary>AI completion summary</summary>\n\n"
             f"{pending.get('ai_output') or '(No captured AI output was available.)'}\n"
             "</details>\n"
@@ -2925,10 +2946,17 @@ class Worker:
                     ]
                 )
                 lines.extend(self.format_comment(comment) for comment in issue.followup_comments)
-        if self.config.require_issue_tests and not question_issue:
+        if self.config.require_issue_tests and not self.config.adversarial_uat_enabled and not question_issue:
             lines.append(
                 "Also add or update UAT and integration tests that cover this issue. If the repository "
                 "does not have a relevant test layer, say why under Verification."
+            )
+        if self.config.adversarial_uat_enabled and not question_issue:
+            lines.append(
+                "An independent adversarial tester will verify this patch before delivery. "
+                "Do not edit, disable, or retire tests under tests/adversarial/ or suites with "
+                "origin=adversarial in .swarm/tests.json. Dispute incorrect expectations with "
+                "issue/spec evidence; only a fresh tester may adjudicate them."
             )
         if self.config.allow_environment_only_summary:
             lines.append(
@@ -4313,7 +4341,7 @@ class Worker:
         log(message)
         return "cleaned"
 
-    def deliver_pull_request(self, commit_sha: str) -> tuple[str, str, str]:
+    def deliver_pull_request(self, commit_sha: str, *, allow_automation: bool = True) -> tuple[str, str, str]:
         assert self.issue and self.choice
         branch = self.expected_branch()
         environment = self.provider_environment()
@@ -4330,7 +4358,7 @@ class Worker:
                 "--limit",
                 "1",
                 "--json",
-                "url,state,mergeCommit,baseRefName",
+                "url,state,mergeCommit,baseRefName,body",
             ],
             self.choice.key,
         )
@@ -4372,6 +4400,15 @@ class Worker:
                 "of treating it as already merged."
             )
 
+        # A separate scheduler reconciliation also approves open PRs. Put the
+        # durable hold on a reused PR before pushing any failing UAT commit.
+        if existing and existing[0].get("state") == "OPEN" and not allow_automation:
+            existing_body = str(existing[0].get("body") or "")
+            if CAP_HIT_PR_MARKER not in existing_body:
+                self.github.gh(
+                    ["pr", "edit", str(existing[0]["url"]), "--repo", self.config.github_repository, "--body-file", "-"],
+                    self.choice.key, CAP_HIT_PR_NOTICE + existing_body,
+                )
         push_result = self.push_ref(f"HEAD:refs/heads/{branch}")
         if push_result.returncode != 0:
             raise WorkerError(
@@ -4382,12 +4419,24 @@ class Worker:
         if existing and existing[0].get("state") == "OPEN":
             pr_url = str(existing[0]["url"])
             log(f"Reusing existing pull request {pr_url} for issue #{self.issue.number}.")
+            existing_body = str(existing[0].get("body") or "")
+            if allow_automation and CAP_HIT_PR_MARKER in existing_body:
+                # Only a successful UAT follow-up may release a failed head.
+                loop = self.read_state().get("adversarial", {})
+                if loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"}:
+                    raise WorkerError("An adversarial cap-hit PR requires a passing UAT follow-up before automatic delivery")
+                self.github.gh(
+                    ["pr", "edit", pr_url, "--repo", self.config.github_repository, "--body-file", "-"],
+                    self.choice.key, existing_body.replace(CAP_HIT_PR_NOTICE, "").replace(CAP_HIT_PR_MARKER, "").strip(),
+                )
         else:
             title = self.git("log", "-1", "--format=%s", commit_sha)
             body = (
                 f"Automated {self.choice.name} implementation for #{self.issue.number}.\n\n"
                 f"Commit: `{commit_sha}`\n"
             )
+            if not allow_automation:
+                body = CAP_HIT_PR_NOTICE + body
             output = self.github.gh(
                 [
                     "pr",
@@ -4408,7 +4457,7 @@ class Worker:
             ).strip()
             pr_url = output.splitlines()[-1]
         delivered_sha = commit_sha
-        if self.config.auto_approve:
+        if allow_automation and self.config.auto_approve:
             self.approve_pull_request(pr_url)
             delivered_sha = self.merge_pull_request(
                 pr_url, commit_sha, self.choice.key, self.issue.number
@@ -4721,6 +4770,7 @@ class Worker:
             "ready_for_testing_label_added": False,
             "pull_request_url": pr_url,
             "branch_name": branch,
+            "adversarial_summary": self.adversarial_summary_line(),
             "usage_at_start": usage_at_start,
             "usage_at_completion": self.usage_snapshot(self.choice.key),
             "execution_id": self.history.execution_id,
@@ -4790,7 +4840,7 @@ class Worker:
         self.clear_in_progress(self.issue.number)
         log(f"Finished issue #{self.issue.number} with {self.choice.name}: environment-only summary posted.")
 
-    def finalize_needs_input(self, ai_output: str) -> None:
+    def finalize_needs_input(self, ai_output: str, *, delivery: tuple[str, str, str] | None = None) -> None:
         """Pause an impossible-to-continue issue until a trusted user replies."""
         assert self.issue and self.choice
         marker_fields = (
@@ -4837,14 +4887,19 @@ class Worker:
         self.github.gh(label_arguments, self.choice.key)
         self.record_completed(self.issue.number)
         self.history.note("Execution paused for required trusted-user input", iso_timestamp())
-        # Safe here for the same reason the no-code branch is empty: the caller
-        # has already refused to publish an input request that left any commit
-        # or uncommitted change behind, and `no_code_cleanup_blocker` re-proves
-        # it. A trusted reply resumes this issue as a follow-up work-round,
-        # which recreates the branch from the integration branch — so nothing
-        # resumable lives on the branch itself.
-        self.cleanup_no_code_branch("needs-input")
-        self.finish_execution_history("awaiting_input", ai_output)
+        # Ordinary input requests are code-free. A UAT deadlock instead retains
+        # its delivered PR, branch and tests for trusted-author adjudication.
+        if delivery:
+            pr_url, _branch, commit_sha = delivery
+            base = str(self.read_state()["base_sha"])
+            self.finish_execution_history(
+                "awaiting_input", ai_output, pull_request_url=pr_url,
+                commit_shas=self.git("rev-list", f"{base}..{commit_sha}").splitlines(),
+                files_changed=self.git("diff", "--name-only", base, commit_sha).splitlines(),
+            )
+        else:
+            self.cleanup_no_code_branch("needs-input")
+            self.finish_execution_history("awaiting_input", ai_output)
         self.clear_in_progress(self.issue.number)
         log(f"Issue #{self.issue.number} is labelled '{NEEDS_INPUT_LABEL}' and waiting for user input.")
 
@@ -4985,7 +5040,8 @@ class Worker:
             log(f"Dry run complete: would run {self.choice.name} for {self.issue.url}.")
             return 0
 
-        self.maybe_apply_dynamic_routing()
+        if not (self.in_progress_file.exists() and self.read_state().get("adversarial")):
+            self.maybe_apply_dynamic_routing()
         if self.issue.work_type == "followup":
             self.clear_needs_input_label()
         if self.choice.resume:
@@ -5024,8 +5080,14 @@ class Worker:
         if self.history.execution_id and self.read_state().get("execution_id") != self.history.execution_id:
             self.update_state(execution_id=self.history.execution_id)
         self.history.note("Repository prepared", iso_timestamp())
-        self.post_started_comment()
+        # The loop is part of this work-round, with one Started comment even
+        # when a different tester or fixer owns the active quota checkpoint.
+        if not self.read_state().get("adversarial"):
+            self.post_started_comment()
         self.post_resumed_comment()
+        if self.read_state().get("adversarial"):
+            self.refresh_adversarial_requirements()
+            return self.run_adversarial_delivery()
         prompt = self.build_prompt(recovery_mode, candidate, recovery_dirty)
         self.history.update(
             iso_timestamp(), effective_prompt=prompt, final_status="prompt_generated"
@@ -5097,6 +5159,11 @@ class Worker:
                     f"{self.choice.name} did not return {QUESTION_ANSWER_MARKER} or a genuine input request "
                     f"for this '{QUESTION_LABEL}' issue"
                 )
+        if self.config.adversarial_uat_enabled and not question_issue:
+            protection = {"phase": "fix", "stage_base": run_start, "dispute": ""}
+            self.validate_adversarial_edits(protection, {})
+            if protection["dispute"]:
+                self.update_state(adversarial_initial_dispute=protection["dispute"])
         after = self.commit_completed_work(run_start)
         completion = after
         recovered = False
@@ -5148,6 +5215,10 @@ class Worker:
             raise WorkerError(
                 f"Issue #{self.issue.number} cannot be delivered with uncommitted changes"
             )
+        if self.config.adversarial_uat_enabled:
+            self.initialize_adversarial(completion, output)
+            return self.run_adversarial_delivery()
+        self.history.update(iso_timestamp(), adversarial_outcome="disabled")
         self.finalize_issue(completion, output)
         return ISSUE_COMPLETED_EXIT_CODE
 
@@ -5297,6 +5368,19 @@ class Worker:
             if "already exists" not in str(error).lower():
                 raise
 
+    def file_labelled_issue(
+        self, title: str, body: str, labels: Sequence[tuple[str, str, str]], provider: str
+    ) -> str:
+        """Shared auto-filing mechanism for CI and out-of-scope UAT findings."""
+        for label, color, description in labels:
+            self.ensure_label(label, color, description, provider)
+        return self.github.gh(
+            ["issue", "create", "--repo", self.config.github_repository,
+             "--title", title, "--body-file", "-", "--assignee", self.config.github_assignee,
+             *[part for label, _, _ in labels for part in ("--label", label)]],
+            provider, body,
+        )
+
     def monitor_repository_actions(self) -> IssueContext | None:
         """File — and hand straight to this run — an issue for a failing pipeline.
 
@@ -5333,25 +5417,7 @@ class Worker:
                 log("No enabled provider is available to file a CI failure issue.")
                 return None
             title, body = self.render_ci_failure_issue(failing)
-            for label, color, description in CI_FAILURE_LABELS:
-                self.ensure_label(label, color, description, provider)
-            output = self.github.gh(
-                [
-                    "issue",
-                    "create",
-                    "--repo",
-                    self.config.github_repository,
-                    "--title",
-                    title,
-                    "--body-file",
-                    "-",
-                    "--assignee",
-                    self.config.github_assignee,
-                    *[part for label, _, _ in CI_FAILURE_LABELS for part in ("--label", label)],
-                ],
-                provider,
-                body,
-            )
+            output = self.file_labelled_issue(title, body, CI_FAILURE_LABELS, provider)
         except (WorkerError, ValueError) as error:
             log(f"Could not check GitHub Actions; continuing with the issue queue: {error}")
             return None
@@ -5551,6 +5617,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--require-issue-tests",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_REQUIRE_ISSUE_TESTS", False),
+    )
+    parser.add_argument(
+        "--adversarial-uat-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_ADVERSARIAL_UAT_ENABLED", False),
     )
     parser.add_argument(
         "--allow-environment-only-summary",
