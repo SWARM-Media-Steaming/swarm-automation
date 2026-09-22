@@ -1,13 +1,14 @@
 use super::{
-    audit_test_coverage, bot_app_slugs_from_config, create_test_definition, decide_bot_push_access,
-    detect_test_definition, detect_tools, execution_history_query_args, get_config,
-    get_execution_history, get_prompt_grades, get_test_plan, get_test_runs, grant_apps_request,
-    inspect_repository, issue_branch_pr_is_visible, mark_permission_primed, needs_promotion,
-    parse_pr_ref, promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
-    push_access_message, reconcile_integration_for_promotion, refresh_running_scheduler,
-    repo_status_args, repo_worker_args, require_closed_issue, save_config, save_test_input,
-    scheduler_arguments, validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState,
-    BranchAheadBehind, ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider,
+    audit_test_coverage, automation_log_path, bot_app_slugs_from_config, create_test_definition,
+    decide_bot_push_access, detect_test_definition, detect_tools, execution_history_query_args,
+    get_config, get_execution_history, get_prompt_grades, get_test_plan, get_test_runs,
+    grant_apps_request, inspect_repository, issue_branch_pr_is_visible, mark_permission_primed,
+    needs_promotion, parse_pr_ref, promotion_approval_args, prompt_grades_query_args,
+    provider_scheduler_arguments, push_access_message, reconcile_integration_for_promotion,
+    refresh_running_scheduler, repo_status_args, repo_worker_args, request_issue_scan,
+    require_closed_issue, run_now_request_path, save_config, save_test_input, scheduler_arguments,
+    validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
+    ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -66,6 +67,67 @@ fn process_manager_reconnects_to_a_live_external_process() {
     assert!(std::fs::read_to_string(log_path)
         .unwrap()
         .contains("Reconnected to existing Issue worker scheduler"));
+}
+
+/// "Run now" pressed while the scheduler is already running. The scheduler is
+/// represented the way a real one is after an app restart: a live PID in the
+/// runner lock, which `request_issue_scan` reconnects to before leaving the
+/// request file `install_swarm_issue_cron.py` polls for.
+#[test]
+fn request_issue_scan_leaves_a_request_for_a_running_scheduler() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let state_dir = tempfile::tempdir().expect("create temp worker state dir");
+    let mut config = valid_config(repo_dir.path());
+    config.worker_state_dir = state_dir.path().to_string_lossy().into_owned();
+    save_config(app.clone(), app.state(), config.clone()).expect("save a valid config");
+    std::fs::create_dir_all(state_dir.path().join("runner.lock")).expect("create runner lock");
+    std::fs::write(
+        state_dir.path().join("runner.lock/pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .expect("record a live scheduler PID");
+
+    let message = request_issue_scan(app.clone(), app.state()).expect("request an immediate scan");
+
+    assert!(
+        message.contains("Scanning every repository now"),
+        "the user should be told the scan started: {message}"
+    );
+    assert!(
+        run_now_request_path(&config).is_file(),
+        "the running scheduler's run-now request should be on disk"
+    );
+    let log = std::fs::read_to_string(automation_log_path(&app).expect("log path")).unwrap();
+    assert!(
+        log.contains("Run now: asked the running scheduler"),
+        "the request should be visible in Info & Debug: {log}"
+    );
+}
+
+/// With no scheduler running there is nobody to receive the request, so the
+/// command refuses rather than leaving a file that would make the next started
+/// scheduler run an extra cycle nobody asked for. (The UI calls
+/// `start_issue_worker` in that state instead — see `runNowMode`.)
+#[test]
+fn request_issue_scan_refuses_when_no_scheduler_is_running() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let state_dir = tempfile::tempdir().expect("create temp worker state dir");
+    let mut config = valid_config(repo_dir.path());
+    config.worker_state_dir = state_dir.path().to_string_lossy().into_owned();
+    save_config(app.clone(), app.state(), config.clone()).expect("save a valid config");
+
+    let error = request_issue_scan(app.clone(), app.state())
+        .expect_err("a stopped worker cannot scan on request");
+
+    assert!(error.contains("not running"), "{error}");
+    assert!(
+        !run_now_request_path(&config).exists(),
+        "a refused request must not be left behind for a later scheduler"
+    );
 }
 
 /// A real, on-disk `git init`-ed directory — enough for `inspect_repository`

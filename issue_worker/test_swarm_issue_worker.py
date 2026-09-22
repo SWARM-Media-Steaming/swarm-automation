@@ -4667,6 +4667,86 @@ class RunnerTestCase(unittest.TestCase):
         self.assertIn("Cycle complete: queued issue work is waiting for AI capacity", output.getvalue())
         self.assertNotIn("no issue to work", output.getvalue())
 
+    @staticmethod
+    def _run_now_runner(root: Path, *extra: str) -> tuple[object, Path]:
+        """A scheduler over one repo whose idle wait is long enough that only a
+        Run now request can end it, plus the path the desktop app writes."""
+        worker = root / "worker.py"
+        worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        args = runner_module.build_parser().parse_args(
+            [
+                "--repo-dir", str(root), "--state-dir", str(root / "state"),
+                "--worker", str(worker), "--interval-seconds", "600",
+                "--crontab-bin", "", "--pgrep-bin", "",
+                *extra,
+            ]
+        )
+        runner = runner_module.Runner(args, [])
+        return runner, Path(args.state_dir) / runner_module.RUN_NOW_REQUEST_FILE
+
+    def test_run_now_request_starts_a_cycle_without_waiting_out_the_interval(self) -> None:
+        """Run now pressed while the scheduler is running: the app leaves a
+        request file, and the scheduler scans every repository immediately
+        instead of sitting out the rest of its poll interval."""
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-run-now-test.") as temporary:
+            runner, request = self._run_now_runner(Path(temporary))
+            cycles: list[str] = []
+
+            def worked(repo: dict[str, object], prefix: str = "") -> int:
+                cycles.append(str(repo["label"]))
+                if len(cycles) == 1:
+                    request.write_text("requested by the SWARM Automation app\n", encoding="utf-8")
+                else:
+                    runner.stop_requested = True
+                return 0
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(runner, "synchronize_repository", return_value=True),
+                mock.patch.object(runner, "run_worker", side_effect=worked),
+                mock.patch.object(runner, "prune_cargo_target"),
+                contextlib.redirect_stdout(output),
+            ):
+                runner.run()
+
+            self.assertEqual(len(cycles), 2, "the request should have triggered a second cycle")
+            self.assertIn("Run now requested", output.getvalue())
+            self.assertFalse(request.exists(), "the request must be consumed, not replayed")
+
+    def test_run_now_request_ends_a_wait_for_a_scheduled_window(self) -> None:
+        """On a daily/weekday schedule the wait is for a clock time, not an
+        interval; Run now ends that wait too, and the next window is recomputed
+        from the cycle it triggers."""
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-run-now-schedule-test.") as temporary:
+            runner, request = self._run_now_runner(
+                Path(temporary), "--schedule-mode", "daily", "--schedule-time", "03:00"
+            )
+            request.parent.mkdir(parents=True, exist_ok=True)
+            request.write_text("requested by the SWARM Automation app\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertTrue(runner.wait_for_schedule())
+            self.assertIn("Run now requested", output.getvalue())
+            self.assertFalse(request.exists())
+
+    def test_stale_run_now_request_is_discarded_when_the_scheduler_starts(self) -> None:
+        """A request left by a scheduler that stopped before reading it must not
+        buy a spare cycle later: the cycle this start already runs satisfies it."""
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-stale-run-now-test.") as temporary:
+            runner, request = self._run_now_runner(Path(temporary), "--once")
+            request.parent.mkdir(parents=True, exist_ok=True)
+            request.write_text("left over\n", encoding="utf-8")
+            output = io.StringIO()
+            with (
+                mock.patch.object(runner, "synchronize_repository", return_value=True),
+                mock.patch.object(runner, "run_worker", return_value=0),
+                mock.patch.object(runner, "prune_cargo_target"),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(runner.run(), 0)
+            self.assertFalse(request.exists())
+            self.assertNotIn("Run now requested", output.getvalue())
+
     def test_active_transcode_diagnostic_and_runner_lock(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-test.") as temporary:
             root = Path(temporary)
