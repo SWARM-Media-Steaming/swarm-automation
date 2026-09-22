@@ -52,6 +52,8 @@ if __name__ == "__main__":
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
 from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
 from adversarial_uat import AdversarialUatMixin, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE
+from handoff_context import HandoffContextMixin
+from handoff_context import render_prompt_section as render_handoff_prompt_section
 from issue_images import (
     MAX_IMAGES,
     ImageDownloadError,
@@ -865,7 +867,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker(AdversarialUatMixin):
+class Worker(AdversarialUatMixin, HandoffContextMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -971,6 +973,7 @@ class Worker(AdversarialUatMixin):
     def clear_in_progress(self, issue_number: int) -> None:
         if self.in_progress_file.exists() and int(self.read_state().get("issue_number", -1)) == issue_number:
             self.in_progress_file.unlink()
+            self.clear_handoff_bundle(issue_number)
 
     @property
     def trusted_followup_authors(self) -> set[str]:
@@ -1765,6 +1768,7 @@ class Worker(AdversarialUatMixin):
         )
         atomic_write_json(archive_file, state)
         paused_file.unlink()
+        self.clear_handoff_bundle(issue_number)
         log(
             f"Issue #{issue_number} was closed while quota-paused; archived its saved attempt "
             "without running AI and continuing to the next eligible issue."
@@ -1791,6 +1795,7 @@ class Worker(AdversarialUatMixin):
             }
         )
         self.write_state(state)
+        self.record_handoff_event("quota_exhausted", provider=self.choice.name, session_id=self.choice.session_id)
         log(
             f"Paused issue #{self.issue.number} because {self.choice.name} usage is unavailable; "
             f"session {self.choice.session_id} was preserved."
@@ -2666,6 +2671,7 @@ class Worker(AdversarialUatMixin):
                                     f"issue #{self.issue.number} on the existing branch."
                                 )
                                 return True
+                            self.create_handoff_bundle(self.choice, handoff, "usage is unavailable")
                             self.choice = handoff
                             self.update_state(status="active", quota_resumed_at=iso_timestamp())
                             self.update_state_for_choice(handoff)
@@ -2721,6 +2727,7 @@ class Worker(AdversarialUatMixin):
                         )
                         return True
                     self.restore_paused(paused_file)
+                    self.create_handoff_bundle(pinned_choice, handoff, "usage is unavailable")
                     self.update_state_for_choice(handoff)
                     restored = self.read_state()
                     self.choice = self.choice_from_state(restored)
@@ -2940,6 +2947,9 @@ class Worker(AdversarialUatMixin):
                     task_instruction,
                 ]
             )
+            handoff_bundle = self.read_handoff_bundle(issue.number)
+            if handoff_bundle:
+                lines.append(render_handoff_prompt_section(handoff_bundle))
             if issue.work_type == "followup":
                 lines.extend(
                     [
@@ -3328,7 +3338,11 @@ class Worker(AdversarialUatMixin):
         }.get(self.choice.key)
         if runner is None:
             raise WorkerError(f"No runner for provider {self.choice.name}")
+        self.record_handoff_event(
+            "ai_invocation_started", provider=self.choice.name, model=self.choice.model, resume=self.choice.resume
+        )
         status = runner(prompt, env)
+        self.record_handoff_event("ai_invocation_finished", provider=self.choice.name, status=status)
         if status != 0 and self.recover_from_rejected_model():
             runner = {
                 "claude": self._run_claude,
@@ -4174,6 +4188,7 @@ class Worker(AdversarialUatMixin):
                 f"Issue #{self.issue.number} still has uncommitted changes after worker commit"
             )
         log(f"Committed completed issue #{self.issue.number} work as {committed}.")
+        self.record_handoff_event("commit_created", sha=committed)
         return committed
 
     def ensure_issue_reference(self, commit_sha: str, recovered: bool) -> str:
@@ -5019,6 +5034,7 @@ class Worker(AdversarialUatMixin):
                 if capacity == 2:
                     handoff = self.choose_handoff_provider(self.choice, "usage could not be verified")
                     if handoff:
+                        self.create_handoff_bundle(self.choice, handoff, "usage could not be verified")
                         self.choice = handoff
                         self.update_state_for_choice(handoff)
                     else:
@@ -5030,6 +5046,7 @@ class Worker(AdversarialUatMixin):
                 if capacity == 1:
                     handoff = self.choose_handoff_provider(self.choice, "usage is unavailable")
                     if handoff:
+                        self.create_handoff_bundle(self.choice, handoff, "usage is unavailable")
                         self.choice = handoff
                         self.update_state_for_choice(handoff)
                     else:

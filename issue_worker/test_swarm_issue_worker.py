@@ -1242,6 +1242,154 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(state["ai_tool"], "Codex")
         self.assertEqual(state["branch_name"], "ai/claude/issue-143")
         self.assertFalse(state["session_started"])
+        # The state machine owns exactly one active provider/session; the old
+        # one is not left resumable, only recorded for diagnostics.
+        self.assertEqual(state["session_id"], "")
+        self.assertEqual(state["last_handoff"]["previous_provider"]["provider"], "Claude")
+        self.assertEqual(state["last_handoff"]["previous_provider"]["session_id"], "claude-session")
+        self.assertEqual(state["last_handoff"]["replacement_provider"]["provider"], "Codex")
+        self.assertEqual(state["last_handoff"]["reason"], "usage is unavailable")
+        bundle = self.worker.read_handoff_bundle(143)
+        self.assertIsNotNone(bundle)
+        self.assertEqual(bundle["issue"]["number"], 143)
+        self.assertEqual(bundle["handoff"]["previous_provider"]["provider"], "Claude")
+        self.assertEqual(bundle["handoff"]["replacement_provider"]["provider"], "Codex")
+
+    # ---- provider-neutral handoff context bundles --------------------------
+
+    def test_handoff_bundle_captures_context_and_extends_the_successor_prompt(self) -> None:
+        self.worker.issue = IssueContext(
+            701, "Flaky upload retry", "Body describing the bug.", ["bug"], "https://example.invalid/701"
+        )
+        previous = ProviderChoice("Claude", "claude-test", "high", "claude-session-701")
+        self.worker.choice = previous
+        self.worker.save_new_state(self.worker.issue, previous, self.base_sha)
+        self.git("switch", "-q", "-c", "ai/claude/issue-701")
+        self.worker.record_handoff_event("ai_invocation_started", provider="Claude", model="claude-test")
+        self.worker.ai_output_file.write_text(
+            "## Summary\nInvestigated the retry loop.\n## Changes\nNone yet.\n"
+            "## Verification\nRan the suite; two tests still fail.\n## Operational notes\n- None.\n",
+            encoding="utf-8",
+        )
+        replacement = ProviderChoice("Codex", "codex-test", "medium", "")
+
+        self.worker.create_handoff_bundle(previous, replacement, "usage is unavailable")
+
+        bundle = self.worker.read_handoff_bundle(701)
+        self.assertIsNotNone(bundle)
+        self.assertEqual(bundle["schema_version"], 1)
+        self.assertEqual(bundle["issue"]["title"], "Flaky upload retry")
+        self.assertEqual(bundle["repository"]["branch"], "ai/claude/issue-701")
+        self.assertEqual(bundle["repository"]["base_sha"], self.base_sha)
+        self.assertEqual(bundle["handoff"]["previous_provider"]["session_id"], "claude-session-701")
+        self.assertEqual(bundle["handoff"]["replacement_provider"]["provider"], "Codex")
+        self.assertIn("ai_invocation_started", [e["kind"] for e in bundle["activity_events"]])
+        self.assertIn("Ran the suite; two tests still fail.", bundle["observed_summary"]["verification"])
+
+        self.worker.choice = replacement
+        prompt = self.worker.build_prompt(False, "", False)
+        self.assertIn("Prior-attempt handoff context", prompt)
+        self.assertIn("Claude", prompt)
+        self.assertIn("independently verify", prompt.lower())
+        self.assertIn("Ran the suite; two tests still fail.", prompt)
+
+    def test_handoff_bundle_sanitizes_secrets_and_bounds_the_transcript(self) -> None:
+        from handoff_context import MAX_TRANSCRIPT_TAIL_CHARS
+
+        self.worker.issue = IssueContext(702, "Secret leak check", "Body", [], "https://example.invalid/702")
+        previous = ProviderChoice("Claude", "claude-test", "high", "claude-session-702")
+        self.worker.choice = previous
+        self.worker.save_new_state(self.worker.issue, previous, self.base_sha)
+        self.git("switch", "-q", "-c", "ai/claude/issue-702")
+        secret = "ghp_" + "a" * 36
+        # The secret sits at the very end so it survives the tail-bounding and
+        # exercises redaction on exactly what the bundle actually retains.
+        self.worker.ai_output_file.write_text(
+            ("x" * (MAX_TRANSCRIPT_TAIL_CHARS * 2)) + f"\nAuthorization: Bearer {secret}\n",
+            encoding="utf-8",
+        )
+        replacement = ProviderChoice("Grok", "grok-test", "medium", "grok-session")
+
+        self.worker.create_handoff_bundle(previous, replacement, "usage is unavailable")
+
+        bundle = self.worker.read_handoff_bundle(702)
+        self.assertIsNotNone(bundle)
+        self.assertNotIn(secret, json.dumps(bundle))
+        self.assertIn("[REDACTED]", bundle["transcript_tail"])
+        self.assertLessEqual(len(bundle["transcript_tail"]), MAX_TRANSCRIPT_TAIL_CHARS + 100)
+
+    def test_handoff_bundle_is_removed_once_the_attempt_is_cleared(self) -> None:
+        self.worker.issue = IssueContext(703, "Cleanup check", "Body", [], "https://example.invalid/703")
+        previous = ProviderChoice("Claude", "claude-test", "high", "claude-session-703")
+        self.worker.choice = previous
+        self.worker.save_new_state(self.worker.issue, previous, self.base_sha)
+        self.git("switch", "-q", "-c", "ai/claude/issue-703")
+        replacement = ProviderChoice("Codex", "codex-test", "medium", "")
+        self.worker.create_handoff_bundle(previous, replacement, "usage is unavailable")
+        self.assertTrue(self.worker.handoff_bundle_path(703).exists())
+
+        self.worker.clear_in_progress(703)
+
+        self.assertFalse(self.worker.handoff_bundle_path(703).exists())
+        self.assertFalse(self.worker.handoff_events_path(703).exists())
+        self.assertIsNone(self.worker.read_handoff_bundle(703))
+
+    def test_malformed_handoff_bundle_is_ignored_with_a_warning(self) -> None:
+        self.worker.issue = IssueContext(704, "Malformed bundle", "Body", [], "https://example.invalid/704")
+        self.worker.choice = ProviderChoice("Codex", "codex-test", "medium", "")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.git("switch", "-q", "-c", "ai/codex/issue-704")
+        bundle_path = self.worker.handoff_bundle_path(704)
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("not valid json", encoding="utf-8")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            bundle = self.worker.read_handoff_bundle(704)
+            prompt = self.worker.build_prompt(False, "", False)
+
+        self.assertIsNone(bundle)
+        self.assertIn("WARNING", output.getvalue())
+        self.assertNotIn("Prior-attempt handoff context", prompt)
+
+    def test_handoff_events_are_capped_and_kept_in_order(self) -> None:
+        from handoff_context import MAX_EVENTS
+
+        self.worker.issue = IssueContext(705, "Bounded events", "Body", [], "https://example.invalid/705")
+        for index in range(MAX_EVENTS + 10):
+            self.worker.record_handoff_event("milestone", index=index)
+
+        events = self.worker.read_handoff_events(705)
+        self.assertEqual(len(events), MAX_EVENTS)
+        self.assertEqual(events[0]["index"], "10")
+        self.assertEqual(events[-1]["index"], str(MAX_EVENTS + 9))
+
+    def test_paused_issue_restored_on_a_different_provider_creates_a_handoff_bundle(self) -> None:
+        self.git("switch", "-q", "-c", "ai/claude/issue-101")
+        self.worker.write_state(self.paused_state())
+        self.worker.suspend_paused()
+        paused_file = self.worker.paused_dir / "101.json"
+        self.assertTrue(paused_file.is_file())
+
+        def capacity(provider: str) -> int:
+            return 1 if provider.lower() == "claude" else 0
+
+        with (
+            mock.patch.object(self.worker, "issue_is_closed", return_value=False),
+            mock.patch.object(self.worker, "provider_capacity", side_effect=capacity),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertFalse(self.worker.prepare_paused_resume())
+
+        self.assertTrue(self.worker.in_progress_file.exists())
+        state = self.worker.read_state()
+        self.assertNotEqual(state["ai_tool"], "Claude")
+        bundle = self.worker.read_handoff_bundle(101)
+        self.assertIsNotNone(bundle)
+        self.assertEqual(bundle["handoff"]["previous_provider"]["provider"], "Claude")
+        self.assertEqual(bundle["handoff"]["previous_provider"]["session_id"], "session-101")
+        self.assertEqual(bundle["handoff"]["reason"], "usage is unavailable")
+        self.assertNotEqual(bundle["handoff"]["replacement_provider"]["provider"], "Claude")
 
     # ---- a provider CLI rejecting the model it was told to use ------------
 
