@@ -1493,6 +1493,7 @@ mod tests {
 
     fn suite(id: &str, command: &[&str], enabled: bool) -> TestSuiteDefinition {
         TestSuiteDefinition {
+            origin: String::new(),
             id: id.into(),
             name: id.into(),
             command: command.iter().map(|s| s.to_string()).collect(),

@@ -39,6 +39,9 @@ fn default_reporting_timeout() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestDefinition {
+    /// Persist the autonomous framework choice through definition round trips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adversarial_bootstrap: Option<serde_json::Value>,
     #[serde(default = "default_version")]
     pub version: u32,
     #[serde(default)]
@@ -151,6 +154,8 @@ impl InputOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestSuiteDefinition {
+    #[serde(default)]
+    pub origin: String,
     pub id: String,
     pub name: String,
     pub command: Vec<String>,
@@ -320,6 +325,8 @@ pub struct RequirementStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SuiteResult {
+    #[serde(default)]
+    pub origin: String,
     pub id: String,
     pub name: String,
     pub state: String,
@@ -453,6 +460,7 @@ fn boilerplate_suite(
     files: &[&str],
 ) -> TestSuiteDefinition {
     TestSuiteDefinition {
+        origin: String::new(),
         id: id.into(),
         name: name.into(),
         command: command.iter().map(|value| (*value).into()).collect(),
@@ -534,6 +542,7 @@ pub fn detect_definition(
             .cloned()
             .collect::<Vec<_>>();
         suites.push(TestSuiteDefinition {
+            origin: String::new(),
             id: candidate.id.clone(),
             name: candidate.name.clone(),
             command: candidate.command.clone(),
@@ -621,6 +630,7 @@ pub fn detect_definition(
     }
 
     let definition = TestDefinition {
+        adversarial_bootstrap: None,
         version: 1,
         suites,
         coverage_notes: Vec::new(),
@@ -1377,6 +1387,7 @@ pub fn build_plan(
             let missing = requirements.iter().any(|item| item.state == "missing");
             let disruptive_blocked = suite.disruptive && !allow_disruptive;
             let mut result = previous.get(&suite.id).cloned().unwrap_or(SuiteResult {
+                origin: suite.origin.clone(),
                 id: suite.id.clone(),
                 name: suite.name.clone(),
                 state: "Ready".into(),
@@ -1392,6 +1403,7 @@ pub fn build_plan(
                 argv: Vec::new(),
                 environment: Vec::new(),
             });
+            result.origin = suite.origin.clone();
             if !suite.enabled {
                 result.state = "Skipped".into();
                 result.blocked = false;
@@ -2165,6 +2177,7 @@ fn ai_discover_suites(
             id = format!("{id}-2");
         }
         suites.push(TestSuiteDefinition {
+            origin: String::new(),
             id,
             name,
             command,
@@ -2653,6 +2666,7 @@ fn run_suite(
     checkout: &CheckoutGuard,
 ) -> Result<CommandOutcome, String> {
     let definition = TestDefinition {
+        adversarial_bootstrap: None,
         version: 1,
         suites: vec![suite.clone()],
         coverage_notes: Vec::new(),
@@ -2985,6 +2999,35 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_origin_is_backward_compatible_and_survives_scheduled_plans() {
+        let legacy: TestSuiteDefinition =
+            serde_json::from_str(r#"{"id":"unit","name":"Unit","command":["true"]}"#).unwrap();
+        assert!(legacy.origin.is_empty());
+        let workspace = tempdir().unwrap();
+        let raw = r#"{"version":1,"adversarialBootstrap":{"framework":"unittest"},"suites":[{"id":"adversarial-180","name":"Independent acceptance","origin":"adversarial","command":["true"]}]}"#;
+        create_definition(workspace.path(), raw).unwrap();
+        let definition = load_definition(workspace.path()).unwrap();
+        assert_eq!(definition.suites[0].origin, "adversarial");
+        assert_eq!(
+            definition.adversarial_bootstrap.as_ref().unwrap()["framework"],
+            "unittest"
+        );
+        let runs = tempdir().unwrap();
+        let plan = build_plan(
+            workspace.path(),
+            runs.path(),
+            "repo",
+            &HashMap::new(),
+            false,
+        );
+        assert_eq!(plan.suites[0].result.origin, "adversarial");
+        assert_eq!(
+            serde_json::to_value(&definition.suites[0]).unwrap()["origin"],
+            "adversarial"
+        );
+    }
+
+    #[test]
     fn create_definition_validates_and_never_overwrites_an_existing_file() {
         let workspace = tempdir().unwrap();
         let raw = r#"{"version":1,"suites":[{"id":"unit","name":"Unit","command":["true"]}]}"#;
@@ -3021,6 +3064,7 @@ mod tests {
     #[test]
     fn selected_device_is_bound_as_exact_device_arguments() {
         let suite = TestSuiteDefinition {
+            origin: String::new(),
             id: "tv".into(),
             name: "TV".into(),
             command: vec!["suite.sh".into(), "--no-issue".into()],
@@ -3274,6 +3318,7 @@ mod tests {
         commit_test_workspace(workspace.path());
         let checkout = CheckoutGuard::acquire(workspace.path()).unwrap();
         let suite = TestSuiteDefinition {
+            origin: String::new(),
             id: "probe".into(),
             name: "Probe".into(),
             command: vec![

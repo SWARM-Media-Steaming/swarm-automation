@@ -16,6 +16,16 @@ pushed — cannot recur silently.
 
 For every work-round that produces a commit, in this order:
 
+0. When `adversarial_uat_enabled` is on, finish the independent assessment and
+   all local fix/re-test rounds before pushing. No intermediate round pushes
+   or PRs. A clean pass follows steps 1–3 below. A six-round deadlock also
+   pushes and opens/reuses the issue PR, but calls `deliver_pull_request` with
+   `allow_automation=False`, then `finalize_needs_input(delivery=...)` instead
+   of `finalize_issue`. The delivery-only flag is mandatory: auto-approval,
+   merging and promotion live inside `deliver_pull_request`. Cap-hit PRs also
+   carry a durable body marker that the later PR reconciler must skip. Only
+   a passing UAT follow-up clears that automation hold. Retain that
+   branch and its failing tests for a human to adjudicate.
 1. **Push** the commit to the issue's remote branch (`push_ref`,
    `expected_branch()`). Nothing past this point may run against a commit
    that has not been pushed.

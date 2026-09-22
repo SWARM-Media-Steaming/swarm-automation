@@ -23,7 +23,8 @@ transitions, and the code that must keep producing them:
    sync with the same rules below).
 5. **AI needs input** — `finalize_needs_input`, only when credentials,
    authority, unavailable external information, or an external user action
-   makes autonomous progress impossible. Apply `AI Needs Input`, remove
+   makes autonomous progress impossible, or the adversarial UAT six-round
+   cap is exhausted after publishing the reviewable PR. Apply `AI Needs Input`, remove
    `Ready For Testing`, and wait for a trusted-author comment.
 6. **Question answered** — `finalize_question_answer`, for issues labelled
    `Question`. Post a grounded no-code answer and never apply `Ready For
@@ -67,6 +68,7 @@ resume) always gets its own comment.
 - Branch: `<branch>` → <pull_request_url>
 - Commit: `<sha>` — <commit message>
 <usage report line(s)>
+- Adversarial UAT: <clean first pass|resolved after N rounds>, <N> test files added.
 <details><summary>AI completion summary</summary>
 
 <the AI's own final output>
@@ -157,3 +159,16 @@ No repository changes were made.
   genuine impossibility, and only a trusted-author comment after its marker
   may resume the issue. Automated CI comments may add evidence but are not a
   user answer unless explicitly configured as trusted.
+
+### Adversarial UAT is one work-round
+
+The independent assessment and every fixer/tester exchange share one Started
+comment and one terminal comment. Omit the UAT line when disabled. Quota pauses
+and resumes use the existing idempotent notices and retain the current role,
+phase, round count, test definition and execution-history row.
+
+A cap-hit uses the existing AI Needs Input template with an explicit
+**adversarial-test deadlock**, the delivered PR link and failing suite evidence.
+Ask for adjudication against the spec, not credentials or environment setup.
+Do not run no-code branch cleanup for this delivered PR. Only a trusted-author
+reply starts another work-round; no per-round GitHub comments are posted.

@@ -262,6 +262,8 @@ pub struct RepoConfig {
     pub monitor_actions: bool,
     /// Ask the AI to add or update UAT and integration tests for each issue.
     pub require_issue_tests: bool,
+    #[serde(default)]
+    pub adversarial_uat_enabled: bool,
     /// Let the AI return a summary without code when the issue is caused by
     /// local environment, credentials, services, or infrastructure state.
     pub allow_environment_only_summary: bool,
@@ -311,6 +313,7 @@ impl Default for RepoConfig {
             auto_promote: false,
             monitor_actions: false,
             require_issue_tests: false,
+            adversarial_uat_enabled: false,
             allow_environment_only_summary: false,
             repo_dir: String::new(),
             uat_hour: 3,
@@ -552,6 +555,8 @@ pub struct AppConfig {
     #[serde(default, skip_serializing)]
     pub require_issue_tests: bool,
     #[serde(default, skip_serializing)]
+    pub adversarial_uat_enabled: bool,
+    #[serde(default, skip_serializing)]
     pub allow_environment_only_summary: bool,
     #[serde(default, skip_serializing)]
     pub branch_prefix: String,
@@ -623,6 +628,7 @@ impl Default for AppConfig {
             auto_approve: true,
             auto_merge: false,
             require_issue_tests: false,
+            adversarial_uat_enabled: false,
             allow_environment_only_summary: false,
             branch_prefix: String::new(),
             uat_hour: 0,
@@ -919,6 +925,7 @@ impl AppConfig {
             repo.auto_approve = self.auto_approve;
             repo.auto_merge = self.auto_merge;
             repo.require_issue_tests = self.require_issue_tests;
+            repo.adversarial_uat_enabled = self.adversarial_uat_enabled;
             repo.allow_environment_only_summary = self.allow_environment_only_summary;
             // A migrated config keeps whatever prefix it already used; a fresh
             // repo defaults to "ai".
@@ -1099,6 +1106,7 @@ mod tests {
         assert!(!repo.monitor_actions, "Actions monitoring defaults off");
         assert!(repo.auto_merge, "approval also enables issue PR merging");
         assert!(!repo.require_issue_tests);
+        assert!(!repo.adversarial_uat_enabled);
         assert!(!repo.allow_environment_only_summary);
         assert_eq!(config.provider("claude").unwrap().model, "claude-opus-5");
         assert_eq!(config.preferred_provider, "codex");

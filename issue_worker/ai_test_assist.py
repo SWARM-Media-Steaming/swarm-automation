@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Best-effort AI helpers for the two gaps the deterministic test scheduler
-cannot fill on its own: finding test entry points a conventional-manifest scan
-cannot see, and generating placeholder data for a suite that says it needs
-some. Every other part of the test scheduler (discovery via manifests, running
-suites, recording results) stays deterministic and never reaches this file.
+"""Read-only test discovery, bootstrap planning and placeholder-data helpers.
 
-Invoked by the Rust test runner (``testing.rs``) as a subprocess, one call per
-need, printing a single JSON object to stdout. It is never given write access
-to the repository and never executes a suggested command — only the human
-reviewing a definition draft, or the repository's own suite commands, do that.
+The Rust scheduler and issue worker invoke this script for pure detection and
+planning. It prints JSON, never writes repository files and never executes a
+suggested test command. Human-reviewed drafts or the full adversarial coding
+session apply its suggestions; the latter scaffolds the bootstrap plan without
+an approval gate. Suite execution remains outside this restricted helper.
 
 The capacity-probing logic below intentionally mirrors
 ``swarm_issue_worker.Worker.claude_usage`` / ``codex_usage`` / ``grok_usage``.
@@ -242,6 +239,9 @@ Use an empty "suites" array if you found nothing plausible.
 
 
 def discover(workspace: str, provider_id: str, bin_path: str, model: str, timeout: float) -> dict[str, Any]:
+    existing = manifest_suites(Path(workspace))
+    if existing:
+        return {"ok": True, "suites": existing, "notes": []}
     listing = shallow_listing(Path(workspace))
     if not listing.strip():
         return {"ok": True, "suites": [], "notes": []}
@@ -282,6 +282,93 @@ def discover(workspace: str, provider_id: str, bin_path: str, model: str, timeou
     return {"ok": True, "suites": valid_suites, "notes": valid_notes}
 
 
+def manifest_suites(root: Path) -> list[dict[str, Any]]:
+    """Conventional entry points before asking an AI to infer one."""
+    definition = root / ".swarm/tests.json"
+    if definition.is_file():
+        payload = json.loads(definition.read_text())
+        if payload.get("suites"):
+            return payload["suites"]
+    commands = []
+    if (root / "Cargo.toml").is_file():
+        commands.append(("cargo", ["cargo", "test"]))
+    if (root / "go.mod").is_file():
+        commands.append(("go", ["go", "test", "./..."]))
+    if (root / "package.json").is_file():
+        package = json.loads((root / "package.json").read_text())
+        if package.get("scripts", {}).get("test"):
+            commands.append(("npm", ["npm", "test"]))
+    if any((root / name).is_file() for name in ("pytest.ini", "tox.ini", "conftest.py")):
+        commands.append(("pytest", ["python3", "-m", "pytest"]))
+    if (root / "gradlew").is_file():
+        commands.append(("gradle", ["./gradlew", "test"]))
+    return [{"id": name, "name": name, "command": command,
+             "timeoutSeconds": 1800, "disruptive": False} for name, command in commands]
+
+
+def bootstrap(workspace: str, provider_id: str = "", bin_path: str = "", model: str = "",
+              timeout: float = 90, primary_language: str = "") -> dict[str, Any]:
+    """Return a scaffold *plan*, never write files or execute commands.
+
+    The full coding session applies this plan and the worker persists the
+    choice. This keeps this helper's no-tools/no-write contract intact.
+    """
+    root = Path(workspace)
+    definition = root / ".swarm/tests.json"
+    if definition.is_file():
+        saved = json.loads(definition.read_text()).get("adversarialBootstrap")
+        if saved:
+            return {"ok": True, **saved}
+    existing = manifest_suites(root)
+    if existing:
+        return {"ok": True, "framework": "existing", "suites": existing,
+                "instructions": "Use the existing test frameworks and repository conventions."}
+    listing = shallow_listing(root)
+    language = primary_language.lower().strip()
+    if not language:
+        extensions = {".py": "python", ".rs": "rust", ".js": "javascript",
+                      ".ts": "typescript", ".java": "java", ".kt": "kotlin", ".go": "go"}
+        counts: dict[str, int] = {}
+        for name in listing.splitlines():
+            if value := extensions.get(Path(name).suffix):
+                counts[value] = counts.get(value, 0) + 1
+        language = max(counts, key=counts.get) if counts else ""
+    plans = {
+        "python": ("unittest", "Use Python unittest (no dependencies); add tests/adversarial/test_*.py and run python3 -m unittest discover -s tests/adversarial."),
+        "javascript": ("node:test", "Use the built-in node:test runner; add tests/adversarial/*.test.js and an explicit node --test command."),
+        "typescript": ("node:test", "Use node:test with the repository's TypeScript compilation setup; scaffold only missing test configuration."),
+        "rust": ("cargo-test", "Use Cargo's native integration harness. Add explicit [[test]] targets for tests/adversarial/*.rs in Cargo.toml."),
+        "java": ("junit", "Use JUnit with the repository's Gradle or Maven conventions; configure tests/adversarial as a separate test source set."),
+        "kotlin": ("junit", "Use JUnit with Gradle; configure tests/adversarial as a separate test source set."),
+        "go": ("go-test", "Use Go's native testing package; put integration tests under tests/adversarial and register go test ./tests/adversarial/...."),
+    }
+    if language in plans:
+        framework, instructions = plans[language]
+        return {"ok": True, "framework": framework, "language": language,
+                "instructions": instructions, "suites": []}
+    result = generate(provider_id, bin_path, model,
+                      "Choose one minimal test framework to scaffold for this repository. "
+                      "Do not run commands or write files. Return only JSON with nonempty "
+                      "framework and instructions strings. Primary language: " + language +
+                      "\nShallow repository listing:\n" + listing, timeout)
+    if not result.get("ok"):
+        # Every issue worker already has Python. This portable black-box
+        # harness makes bootstrap autonomous even on an unrecognized stack
+        # with only providers whose tool-free helper is not supported.
+        return {"ok": True, "framework": "unittest", "language": language,
+                "instructions": "Use Python unittest as a black-box UAT harness for the repository's public CLI/API. "
+                                "Add tests/adversarial/test_*.py with deterministic fixtures and invoke the existing build/runtime as needed.",
+                "suites": [], "notes": ["Portable fallback: " + str(result.get("error", "AI detection unavailable"))]}
+    try:
+        plan = json.loads(result["text"].strip().removeprefix("```json").removesuffix("```").strip())
+        if not all(isinstance(plan.get(key), str) and plan[key].strip() for key in ("framework", "instructions")):
+            raise ValueError("missing framework/instructions")
+    except (ValueError, TypeError, AttributeError):
+        return {"ok": False, "error": "Framework bootstrap returned an invalid plan"}
+    return {"ok": True, "framework": plan["framework"], "instructions": plan["instructions"],
+            "language": language, "suites": []}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -306,6 +393,14 @@ def parse_args() -> argparse.Namespace:
     discover_parser.add_argument("--model", default="")
     discover_parser.add_argument("--timeout", type=float, default=90.0)
 
+    bootstrap_parser = subparsers.add_parser("bootstrap")
+    bootstrap_parser.add_argument("--workspace", required=True)
+    bootstrap_parser.add_argument("--primary-language", default="")
+    bootstrap_parser.add_argument("--provider", default="")
+    bootstrap_parser.add_argument("--bin", default="")
+    bootstrap_parser.add_argument("--model", default="")
+    bootstrap_parser.add_argument("--timeout", type=float, default=90.0)
+
     return parser.parse_args()
 
 
@@ -318,6 +413,8 @@ def main() -> int:
         payload = generate(args.provider, args.bin, args.model, args.prompt, args.timeout)
     elif args.command == "discover":
         payload = discover(args.workspace, args.provider, args.bin, args.model, args.timeout)
+    elif args.command == "bootstrap":
+        payload = bootstrap(args.workspace, args.provider, args.bin, args.model, args.timeout, args.primary_language)
     else:  # pragma: no cover - argparse enforces valid choices
         return 2
     print(json.dumps(payload))

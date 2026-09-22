@@ -19,7 +19,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 9] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 10] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
@@ -28,6 +28,7 @@ const REQUIRED_WORKER_RESOURCES: [&str; 9] = [
     "grok_rate_limits.py",
     "ai_execution_history.py",
     "ai_test_assist.py",
+    "adversarial_uat.py",
     "issue_images.py",
 ];
 
@@ -952,6 +953,12 @@ fn repo_worker_args(
             "--no-require-issue-tests"
         }
         .into(),
+        if repo.adversarial_uat_enabled {
+            "--adversarial-uat-enabled"
+        } else {
+            "--no-adversarial-uat-enabled"
+        }
+        .into(),
         if repo.allow_environment_only_summary {
             "--allow-environment-only-summary"
         } else {
@@ -1226,6 +1233,15 @@ async fn get_test_runs_background(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
 struct AiExecutionRecord {
+    #[serde(default)]
+    adversarial_round_count: i64,
+    #[serde(default)]
+    adversarial_outcome: String,
+    /// Approximate quota percentage-point drop across providers, not token/dollar cost.
+    #[serde(default)]
+    capacity_consumed_percent: Option<f64>,
+    #[serde(default)]
+    adversarial_rounds: Vec<serde_json::Value>,
     execution_id: String,
     repository: String,
     issue_number: i64,
@@ -1298,6 +1314,8 @@ const EXECUTION_HISTORY_PAGE_SIZE: i64 = 10;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExecutionHistoryPage {
+    #[serde(default)]
+    adversarial: serde_json::Value,
     records: Vec<AiExecutionRecord>,
     total: i64,
     offset: i64,
@@ -1319,6 +1337,7 @@ fn execution_history_query_args(
     repository: &str,
     offset: Option<i64>,
     search: Option<String>,
+    sort: Option<String>,
 ) -> Vec<String> {
     // `--limit` is always sent. Omitting it makes the CLI print every row.
     vec![
@@ -1333,11 +1352,19 @@ fn execution_history_query_args(
         offset.unwrap_or(0).max(0).to_string(),
         "--search".into(),
         normalize_execution_history_search(search),
+        "--sort".into(),
+        match sort.as_deref() {
+            Some("rounds_asc") => "rounds_asc",
+            Some("rounds_desc") => "rounds_desc",
+            _ => "recent",
+        }
+        .into(),
     ]
 }
 
 fn empty_execution_history_page() -> ExecutionHistoryPage {
     ExecutionHistoryPage {
+        adversarial: serde_json::Value::Null,
         records: Vec::new(),
         total: 0,
         offset: 0,
@@ -1352,6 +1379,7 @@ fn get_execution_history<R: tauri::Runtime>(
     repo_id: String,
     offset: Option<i64>,
     search: Option<String>,
+    sort: Option<String>,
 ) -> Result<ExecutionHistoryPage, String> {
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?;
@@ -1369,6 +1397,7 @@ fn get_execution_history<R: tauri::Runtime>(
             &repo.github_repository,
             offset,
             search,
+            sort,
         ),
     );
     if !ok {
@@ -1384,10 +1413,11 @@ async fn get_execution_history_background(
     repo_id: String,
     offset: Option<i64>,
     search: Option<String>,
+    sort: Option<String>,
 ) -> Result<ExecutionHistoryPage, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        get_execution_history(app.clone(), state, repo_id, offset, search)
+        get_execution_history(app.clone(), state, repo_id, offset, search, sort)
     })
     .await
     .map_err(|error| format!("Execution history lookup failed: {error}"))?

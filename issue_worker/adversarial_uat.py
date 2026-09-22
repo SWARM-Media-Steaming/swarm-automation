@@ -1,0 +1,490 @@
+"""Durable, pre-delivery adversarial UAT using the worker's full coding CLIs.
+
+Round zero is the independent assessment of the normal implementation. Each
+of the six subsequent rounds is exactly one fix plus one fresh assessment.
+Only suite exit codes decide success; an agent's self-reported pass never does.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import tempfile
+from typing import Any
+
+MAX_ROUNDS = 6
+TEST_ROOT = "tests/adversarial/"
+DEFINITION = ".swarm/tests.json"
+RESULT_MARKER = "SWARM_ADVERSARIAL_RESULT:"
+CAP_HIT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-cap-hit -->"
+CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing after six fix/re-test rounds. "
+                     "Automation is held; review the failing tests and adjudicate on the linked issue.\n\n")
+# Framework wiring is the only non-test code a tester may scaffold. This list
+# is deliberately explicit: adding a test framework must not grant product edits.
+FRAMEWORK_FILES = {
+    "Cargo.toml", "Cargo.lock", "package.json", "package-lock.json", "pnpm-lock.yaml",
+    "yarn.lock", "pyproject.toml", "pytest.ini", "tox.ini", "requirements-test.txt",
+    "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+    "pom.xml", "go.mod", "go.sum", "tsconfig.json",
+}
+
+
+def read_definition(root: Path) -> dict[str, Any]:
+    path = root / DEFINITION
+    value = json.loads(path.read_text()) if path.exists() else {"version": 1, "suites": []}
+    if not isinstance(value, dict) or not isinstance(value.get("suites"), list) or not all(isinstance(s, dict) for s in value.get("suites", [])):
+        raise ValueError(".swarm/tests.json must contain a suites array")
+    return value
+
+
+def test_path(path: str) -> bool:
+    return path.startswith(TEST_ROOT) and "__pycache__" not in path.split("/") and not path.endswith(".pyc")
+
+
+def result_payload(output: str) -> dict[str, Any]:
+    lines = [line[len(RESULT_MARKER):].strip() for line in output.splitlines() if line.startswith(RESULT_MARKER)]
+    if len(lines) != 1:
+        raise ValueError("Tester must return exactly one SWARM_ADVERSARIAL_RESULT JSON line")
+    value = json.loads(lines[0])
+    if not isinstance(value, dict) or not isinstance(value.get("out_of_scope", []), list):
+        raise ValueError("Invalid adversarial result")
+    for finding in value.get("out_of_scope", []):
+        if not isinstance(finding, dict) or not all(isinstance(finding.get(k), str) and finding[k].strip()
+                                                   for k in ("title", "body")):
+            raise ValueError("Out-of-scope findings require title and body evidence")
+        if not isinstance(finding.get("suite_ids", []), list) or not all(isinstance(v, str) for v in finding.get("suite_ids", [])):
+            raise ValueError("Out-of-scope suite_ids must be an array of suite IDs")
+    if not isinstance(value.get("dispute_resolution", ""), str):
+        raise ValueError("Invalid dispute resolution")
+    return value
+
+
+def run_suites(root: Path, suites: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Direct argv, bounded runtime/output, no shell or AI-reported verdicts."""
+    results = []
+    if not suites:
+        return [{"id": "adversarial-registration", "exit_code": 1,
+                 "output": "No enabled adversarial suite was registered."}]
+    for suite in suites:
+        command = suite.get("command")
+        error = ""
+        if not isinstance(command, list) or not command or not all(isinstance(v, str) and v and "\0" not in v for v in command):
+            error = "Invalid suite command; expected a nonempty argv array."
+        if suite.get("enabled", True) is not True or suite.get("disruptive", False):
+            error = "Adversarial suites must be enabled and non-disruptive."
+        requirements = suite.get("requirements", {})
+        if not isinstance(requirements, dict):
+            error = "Suite requirements must be an object."
+        if isinstance(requirements, dict) and requirements.get("aiTestData"):
+            error = "Adversarial suites must use deterministic fixtures, not generated test data."
+        timeout = suite.get("timeoutSeconds", 1800)
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 1800:
+            error = "Suite timeoutSeconds must be an integer from 1 to 1800."
+        code = 1
+        output = error
+        if not error:
+            with tempfile.TemporaryFile() as log:
+                try:
+                    process = subprocess.Popen(command, cwd=root, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, stdout=log, stderr=subprocess.STDOUT,
+                                               start_new_session=True)
+                    try:
+                        code = process.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+                        code = 124
+                        output = f"Suite timed out after {timeout}s.\n"
+                    log.seek(0, os.SEEK_END)
+                    log.seek(max(0, log.tell() - 12000))
+                    output += log.read().decode("utf-8", errors="replace")
+                except OSError as exc:
+                    output = str(exc)
+        # Several common runners return success when they collect no tests.
+        # A zero-test run cannot prove the implementation survived UAT.
+        counts = re.findall(r"(?:Ran|running) (\d+) tests?\b|# tests (\d+)\b", output)
+        if code == 0 and counts and not any(int(a or b) for a, b in counts):
+            code = 1
+            output += "\nNo tests were collected; this is not a passing UAT suite."
+        results.append({"id": str(suite.get("id", "unknown")), "exit_code": code, "output": output})
+    return results
+
+
+class AdversarialUatMixin:
+    """Worker integration kept separate from delivery and lifecycle mechanics."""
+
+    def save_adversarial(self, loop: dict[str, Any]) -> None:
+        self.update_state(adversarial=loop)
+
+    def initialize_adversarial(self, completion: str, output: str) -> None:
+        from swarm_issue_worker import iso_timestamp
+        import dataclasses
+        self.save_adversarial({
+            "phase": "test", "round": 0, "completion": completion,
+            "amendments": list(self.issue.followup_comments),
+            "implementation_output": output, "implementer": self.choice.name,
+            "delivery_choice": dataclasses.asdict(self.choice), "capacity_used": [self.choice.name],
+            "fixer_provider": self.choice.name, "fixer_model": self.choice.model,
+            "round_started": iso_timestamp(), "outcome": "", "results": [],
+            "tests_added": 0, "tests_modified": 0, "dispute": self.read_state().get("adversarial_initial_dispute", ""), "rounds": [],
+            "capacity_start": ({self.choice.name: self.read_state()["usage_at_start"]["remaining_percent"]}
+                               if (self.read_state().get("usage_at_start") or {}).get("remaining_percent") is not None else {}),
+            "capacity_end": {}, "filed_findings": [], "excluded_suites": [],
+        })
+
+    def refresh_adversarial_requirements(self) -> None:
+        """Trusted comments may clarify the spec during a quota pause."""
+        state = self.read_state()
+        loop = state["adversarial"]
+        comments = self.load_resume_comments(self.issue.number, int(state.get("session_comment_id", 0)))
+        known = {c["id"] for c in loop.get("amendments", [])}
+        loop.setdefault("amendments", []).extend(c for c in comments if c["id"] not in known)
+        if comments:
+            self.update_state(session_comment_id=int(comments[-1]["id"]))
+            # A previously returned report cannot establish success against a
+            # requirement received later. Reassess with a fresh tester first.
+            if loop["phase"] in {"done", "test"}:
+                loop.update(phase="test", outcome="", active=False, response=None)
+                loop.pop("delivery", None)
+            self.save_adversarial(loop)
+
+    def choose_adversarial_provider(self, loop: dict[str, Any]):
+        from swarm_issue_worker import ProviderChoice, RouterCandidate, RouterError, build_router_prompt, iso_timestamp
+        usages = {s.name: self.provider_usage(s.key) for s in self.config.enabled_specs}
+        remaining = {name: u.remaining_percent for name, u in usages.items() if u.usable}
+        previous = loop["fixer_provider"] if loop["phase"] == "test" else ""
+        choice = self.choose_provider(previous, remaining)
+        for name, usage in usages.items():
+            if usage.remaining_percent is not None:
+                loop["capacity_start"].setdefault(name, usage.remaining_percent)
+                loop["capacity_end"][name] = usage.remaining_percent
+        if choice is None:
+            self.save_adversarial(loop)
+            return None
+        # Prefer a different tester provider even if the model router would
+        # have preferred the implementer. Same-provider fallback is still fresh.
+        names = self.provider_priority_order(previous, remaining)
+        alternatives = [name for name in names if name != previous]
+        if previous and alternatives:
+            names = alternatives
+        if self.config.dynamic_model_routing:
+            candidates = [RouterCandidate(
+                key=s.key, name=s.name, tiers=self.config.routing_tiers[s.key],
+                strengths=s.strengths, usage_remaining=remaining[s.name],
+            ) for s in self.config.enabled_specs if s.name in names and self.config.routing_tiers.get(s.key)]
+            host = self.config.require_spec(choice.key)
+            if candidates:
+                try:
+                    prompt = build_router_prompt(
+                        title=f"Adversarial UAT {loop['phase']}: {self.issue.title}",
+                        body=self.issue.body, labels=self.issue.labels, candidates=candidates,
+                        previous_provider=previous.lower(), rework=bool(previous),
+                        routing_optimization=self.config.routing_optimization,
+                        allow_usage_credit_models=self.config.allow_usage_credit_models,
+                    )
+                    decision = self.resolve_router_response(
+                        self.run_router(host, prompt, []), prompt=prompt, candidates=candidates,
+                        host=host, images=[], previous_provider=previous.lower(), rework=bool(previous),
+                    )
+                    spec = self.config.require_spec(decision["provider"])
+                    choice = ProviderChoice(spec.name, decision["selected_model"], decision["reasoning_effort"], self.new_session_id(spec))
+                except RouterError as error:
+                    self.history.warning(f"Adversarial routing used capacity fallback: {error}", iso_timestamp())
+        if choice.name not in loop["capacity_used"]:
+            loop["capacity_used"].append(choice.name)
+        return choice
+
+    def adversarial_prompt(self, loop: dict[str, Any]) -> str:
+        base = str(self.read_state()["base_sha"])
+        # No completion summary, session transcript, or implementer reasoning
+        # enters the tester context. It sees the spec, diff and repo conventions.
+        diff = self.git("diff", "--no-ext-diff", base, "--", ".", ":(exclude)tests/adversarial")
+        amendments = "\n".join(str(c.get("body") or "") for c in loop.get("amendments", []))
+        common = (
+            f"Issue #{self.issue.number}: {self.issue.title}\n\n{self.issue.body}\n\n"
+            f"Trusted issue amendments (authoritative clarifications):\n{amendments or 'None.'}\n\n"
+            f"Repository: {self.config.repo_dir}\nRemain on {self.expected_branch()}. "
+            "Read repository conventions (AGENTS.md, CLAUDE.md, .claude/rules and existing test patterns). "
+            "Do not inspect prior agent transcripts, session logs, or completion summaries. "
+            "Do not commit, push, open PRs, post comments, or file issues; the worker handles delivery. "
+            "Run checks in the foreground. Do not edit VERSION.\n\nResulting patch:\n" + diff + "\n"
+        )
+        if loop["phase"] == "fix":
+            return (
+                "You are the implementer in a bounded adversarial fix/test cycle. Fix failures "
+                "within the issue's scope. Do not change, delete, skip, disable, or retire any "
+                "test under tests/adversarial/ or any part of .swarm/tests.json. "
+                "If an expectation is wrong, state the specific test and issue/spec evidence "
+                "on a line beginning SWARM_TEST_DISPUTE:; a fresh independent tester will decide.\n" +
+                common + "\nSpecific suite failures:\n" + json.dumps(loop["results"], indent=2)
+            )
+        return (
+            "You are a fresh, independent adversarial tester. Challenge prior assumptions and "
+            "use repository evidence as the source of truth. Derive expected behavior from "
+            "the issue/spec and domain invariants BEFORE inspecting the diff; never assert "
+            "current behavior merely because the implementation does it. Try boundary conditions, "
+            "malformed input, error paths and related past regressions. Add meaningful executable "
+            "UAT/integration tests under tests/adversarial/. You may write tests, not product fixes. "
+            "Register suites in .swarm/tests.json with origin='adversarial', ids prefixed 'adversarial-', "
+            "enabled=true, disruptive=false, deterministic fixtures, explicit argv commands and "
+            "timeoutSeconds <= 1800. Retain existing non-adversarial suites and metadata. "
+            "Every command must actually collect the new tests and fail if an assertion fails. "
+            "Do not weaken/retire earlier tests unless adjudicating the dispute below; you are "
+            "a new instance, not their author. Explain any revision against the issue's requirements. "
+            "Real findings outside this issue's scope must not block delivery: report evidence "
+            "as out_of_scope findings for the worker to file as separate labelled, assigned issues; "
+            "do not add those findings as blocking tests. If an existing suite fails for an "
+            "unrelated reason, retain it for scheduled runs and report its ID in that finding's "
+            "suite_ids array; use separate suites for in-scope and out-of-scope assertions.\n"
+            + common + "\nFramework scaffold plan (apply autonomously, no sign-off):\n" +
+            json.dumps(loop.get("bootstrap", {}), indent=2) +
+            "\nOnly tests/adversarial/, .swarm/tests.json and necessary test framework manifests "
+            "may be changed. Preserve the framework choice.\nDispute to adjudicate:\n" +
+            (loop.get("dispute") or ("Adjudicate prior tests against these trusted amendments: " + amendments
+                                      if amendments else "None. Keep earlier test expectations intact.")) +
+            '\nReturn one final line: SWARM_ADVERSARIAL_RESULT: {"dispute_resolution":"",'
+            '"out_of_scope":[{"title":"...","body":"reproduction, evidence and why outside scope","suite_ids":[]}]}\n'
+        )
+
+    def adversarial_changed_paths(self, baseline: str) -> set[str]:
+        # --no-renames sees a moved test as a deletion plus an addition.
+        paths = self.git("diff", "--no-renames", "--name-only", "-z", baseline).split("\0")
+        paths += self.git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
+        return {p for p in paths if p and (not p.startswith(".swarm/") or p == DEFINITION)}
+
+    def validate_adversarial_edits(self, loop: dict[str, Any], report: dict[str, Any]) -> tuple[int, int]:
+        from swarm_issue_worker import WorkerError
+        baseline = loop["stage_base"]
+        if self.git("branch", "--show-current") != self.expected_branch():
+            raise WorkerError("Adversarial role changed the issue branch")
+        if not self.git_ok("merge-base", "--is-ancestor", baseline, "HEAD"):
+            raise WorkerError("Adversarial role rewrote the issue history")
+        paths = self.adversarial_changed_paths(baseline)
+        if loop["phase"] == "fix":
+            protected = {p for p in paths if test_path(p) or p == DEFINITION}
+            if protected:
+                # Preserve product repairs, but undo attempts to grade one's own
+                # homework. A fresh tester, not the fixer, sees this as a dispute.
+                for path in sorted(protected):
+                    if self.git_ok("cat-file", "-e", f"{baseline}:{path}"):
+                        self.git("restore", f"--source={baseline}", "--staged", "--worktree", "--", path)
+                    else:
+                        self.git("rm", "-f", "--ignore-unmatch", "--", path)
+                        (self.config.repo_dir / path).unlink(missing_ok=True)
+                loop["dispute"] += "\nFixer attempted to alter protected tests; worker restored them: " + ", ".join(sorted(protected))
+            return 0, 0
+        forbidden = paths - {p for p in paths if test_path(p) or p == DEFINITION or p in FRAMEWORK_FILES}
+        if forbidden:
+            raise WorkerError("Tester changed product files: " + ", ".join(sorted(forbidden)))
+        before = json.loads(self.git("show", f"{baseline}:{DEFINITION}"))
+        after = read_definition(self.config.repo_dir)
+        non_adversarial = lambda v: {**v, "suites": [s for s in v["suites"] if s.get("origin") != "adversarial"]}
+        if non_adversarial(before) != non_adversarial(after):
+            raise WorkerError("Tester changed existing framework choice or non-adversarial suites/metadata")
+        changed_tests = {p for p in paths if test_path(p)}
+        prior = {p for p in changed_tests if self.git_ok("cat-file", "-e", f"{baseline}:{p}")}
+        old_suites = [s for s in before["suites"] if s.get("origin") == "adversarial"]
+        new_suites = [s for s in after["suites"] if s.get("origin") == "adversarial"]
+        revised = prior or any(s not in new_suites for s in old_suites)
+        if revised and not ((loop.get("dispute") or loop.get("amendments")) and report.get("dispute_resolution", "").strip()):
+            raise WorkerError("Only a fresh tester adjudicating a dispute may revise or retire existing adversarial tests")
+        if not any(test_path(p) for p in self.git("ls-files", "--cached", "--others", "--exclude-standard", "-z").split("\0")):
+            raise WorkerError("Tester did not leave any adversarial test files")
+        ids = [s.get("id") for s in after["suites"]]
+        if len(ids) != len(set(ids)) or any(not str(s.get("id", "")).startswith("adversarial-") for s in new_suites):
+            raise WorkerError("Adversarial suite IDs must be unique and visibly prefixed")
+        for path in changed_tests | {DEFINITION}:
+            if (self.config.repo_dir / path).is_symlink():
+                raise WorkerError("Adversarial files may not be symlinks")
+        return len(changed_tests - prior), len(prior)
+
+    def prepare_adversarial_framework(self, loop: dict[str, Any]) -> None:
+        from ai_test_assist import bootstrap
+        from swarm_issue_worker import WorkerError, atomic_write_json
+        if loop.get("bootstrap"):
+            return
+        spec = self.config.require_spec(self.choice.key)
+        plan = bootstrap(str(self.config.repo_dir), spec.key, spec.bin or "", spec.model)
+        if not plan.get("ok"):
+            raise WorkerError(f"Test framework bootstrap failed: {plan.get('error')}")
+        plan.pop("ok", None)
+        definition = read_definition(self.config.repo_dir)
+        definition.setdefault("adversarialBootstrap", plan)
+        atomic_write_json(self.config.repo_dir / DEFINITION, definition)
+        # .swarm drafts are normally app-owned/untracked; this is intentionally
+        # a repository artifact, so stage it explicitly for ongoing scheduling.
+        self.git("add", "--", DEFINITION)
+        self.commit_completed_work(self.git("rev-parse", "HEAD"))
+        loop["bootstrap"] = definition["adversarialBootstrap"]
+        self.save_adversarial(loop)
+
+    def file_adversarial_findings(self, loop: dict[str, Any], findings: list[dict[str, str]]) -> None:
+        # Same labelled/assigned issue creation path as the Actions monitor,
+        # with an idempotent marker so a retry after create cannot duplicate it.
+        for finding in findings:
+            digest = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()[:20]
+            marker = f"<!-- swarm-issue-worker:adversarial-finding:issue:{self.issue.number};id:{digest} -->"
+            if marker in loop["filed_findings"]:
+                continue
+            existing = json.loads(self.github.gh([
+                "issue", "list", "--repo", self.config.github_repository, "--state", "all",
+                "--search", f'"{digest}" in:body', "--json", "body,url", "--limit", "100",
+            ], self.choice.key))
+            if not any(marker in item.get("body", "") for item in existing):
+                self.file_labelled_issue(finding["title"][:120],
+                    f"{marker}\nFound while testing #{self.issue.number}; outside that delivery's scope.\n\n{finding['body']}",
+                    (("bug", "d73a4a", "Something is not working"),
+                     ("adversarial-uat", "5319e7", "Found by independent adversarial tests")), self.choice.key)
+            loop["filed_findings"].append(marker)
+            self.save_adversarial(loop)
+
+    def pause_adversarial(self) -> int:
+        from swarm_issue_worker import QUOTA_PAUSED_EXIT_CODE, iso_timestamp
+        # A probe can stop before Codex creates a session. A placeholder gives
+        # the existing pause format an identity but session_started stays false.
+        if not self.choice.session_id:
+            import uuid
+            self.choice.session_id = str(uuid.uuid4())
+            self.update_state(session_id=self.choice.session_id, session_started=False)
+        self.mark_quota_paused()
+        self.history.update(iso_timestamp(), final_status="quota_paused")
+        self.post_quota_comment()
+        self.suspend_paused()
+        return QUOTA_PAUSED_EXIT_CODE
+
+    def adversarial_summary_line(self) -> str:
+        if not self.in_progress_file.exists():
+            return ""
+        loop = self.read_state().get("adversarial", {})
+        outcome = loop.get("outcome")
+        if not outcome:
+            return ""
+        description = {"clean_first_pass": "clean first pass", "resolved_after_n": f"resolved after {loop['round']} rounds",
+                       "cap_hit": f"still failing after {MAX_ROUNDS} rounds"}[outcome]
+        return f"- Adversarial UAT: {description}, {loop['tests_added']} test files added.\n"
+
+    def run_adversarial_delivery(self) -> int:
+        from swarm_issue_worker import ISSUE_COMPLETED_EXIT_CODE, WorkerError, iso_timestamp
+        loop = self.read_state()["adversarial"]
+        while loop["phase"] != "done":
+            if not loop.get("active"):
+                choice = self.choose_adversarial_provider(loop)
+                if choice is None:
+                    return self.pause_adversarial()
+                self.choice = choice
+                self.update_state_for_choice(choice)
+                self.ensure_bot_auth()
+                self.prepare_adversarial_framework(loop)
+                loop.update(active=True, stage_base=loop.pop("retry_stage_base", None) or self.git("rev-parse", "HEAD"), response=None)
+                self.save_adversarial(loop)
+            if loop.get("response") is None:
+                # Every tester phase starts with a new CLI session. Only an
+                # interrupted *same phase* resumes its existing session.
+                self.issue_images = []
+                status = self.run_ai(self.adversarial_prompt(loop))
+                if status != 0 or not self.ai_output_file.exists() or not self.ai_output_file.stat().st_size:
+                    if self.ai_failure_is_quota():
+                        return self.pause_adversarial()
+                    raise WorkerError("Adversarial coding session failed; phase and worktree preserved")
+                loop["response"] = self.ai_output_file.read_text(encoding="utf-8", errors="replace")
+                self.save_adversarial(loop)
+            output = loop["response"]
+            if loop["phase"] == "fix":
+                loop["dispute"] = "\n".join(line.partition(":")[2].strip() for line in output.splitlines()
+                                             if line.startswith("SWARM_TEST_DISPUTE:"))
+                self.validate_adversarial_edits(loop, {})
+                loop["fixer_provider"], loop["fixer_model"] = self.choice.name, self.choice.model
+                import dataclasses
+                loop["delivery_choice"] = dataclasses.asdict(self.choice)
+            else:
+                try:
+                    report = result_payload(output)
+                    added, modified = self.validate_adversarial_edits(loop, report)
+                    definition = read_definition(self.config.repo_dir)
+                except (ValueError, TypeError, KeyError, WorkerError) as error:
+                    # A rejected report must not be replayed forever from the
+                    # checkpoint. Retry with a fresh tester and the same guard
+                    # baseline; preserve all work for inspection/repair.
+                    loop.update(active=False, response=None, retry_stage_base=loop["stage_base"])
+                    self.save_adversarial(loop)
+                    raise WorkerError(f"Invalid adversarial test result: {error}") from error
+                known_suites = {s["id"] for s in definition["suites"] if s.get("origin") == "adversarial"}
+                excluded = {sid for finding in report.get("out_of_scope", []) for sid in finding.get("suite_ids", [])}
+                if excluded - known_suites:
+                    raise WorkerError("Out-of-scope findings named unknown adversarial suites")
+                self.file_adversarial_findings(loop, report.get("out_of_scope", []))
+                loop["excluded_suites"] = sorted(set(loop.get("excluded_suites", [])) | excluded)
+                before = sum(r["exit_code"] != 0 for r in loop["results"])
+                results = run_suites(self.config.repo_dir, [s for s in definition["suites"] if s.get("origin") == "adversarial" and s["id"] not in loop["excluded_suites"]])
+                completed = iso_timestamp()
+                round_value = {
+                    "round_number": loop["round"], "fixer_provider": loop["fixer_provider"],
+                    "fixer_model": loop["fixer_model"], "tester_provider": self.choice.name,
+                    "tester_model": self.choice.model, "tests_added": added, "tests_modified": modified,
+                    "tests_failing_before": before, "tests_failing_after": sum(r["exit_code"] != 0 for r in results),
+                    "disputed": bool(loop["dispute"] or (loop.get("amendments") and report.get("dispute_resolution"))), "dispute_resolution": report.get("dispute_resolution", ""),
+                    "started_at": loop["round_started"], "completed_at": completed,
+                    "duration_seconds": max(0, (dt.datetime.fromisoformat(completed) - dt.datetime.fromisoformat(loop["round_started"])).total_seconds()),
+                }
+                # Do not append until the phase is durably complete; repeated
+                # reporting of this round is an upsert in the existing store.
+                self.history.adversarial_round(round_value)
+                loop["rounds"] = [r for r in loop["rounds"] if r["round_number"] != loop["round"]] + [round_value]
+                loop["tests_added"] = sum(r["tests_added"] for r in loop["rounds"])
+                loop["tests_modified"] = sum(r["tests_modified"] for r in loop["rounds"])
+                loop["results"] = results
+                self.git("add", "--", DEFINITION)
+                if not round_value["tests_failing_after"]:
+                    loop["outcome"] = "clean_first_pass" if loop["round"] == 0 else "resolved_after_n"
+                elif loop["round"] >= MAX_ROUNDS:
+                    loop["outcome"] = "cap_hit"
+            completion = self.commit_completed_work(loop["stage_base"])
+            self.validate_new_commit_messages(loop["stage_base"], completion)
+            loop["completion"] = completion
+            usage = self.provider_usage(self.choice.key)
+            if usage.remaining_percent is not None:
+                loop["capacity_end"][self.choice.name] = usage.remaining_percent
+            if loop["outcome"]:
+                loop["phase"] = "done"
+            elif loop["phase"] == "fix":
+                loop["phase"] = "test"
+            else:
+                loop["phase"] = "fix"
+                loop["round"] += 1
+                loop["round_started"] = iso_timestamp()
+            loop.update(active=False, response=None)
+            self.save_adversarial(loop)
+        consumed = [max(0, start - loop["capacity_end"][name]) for name, start in loop["capacity_start"].items()
+                    if name in loop["capacity_end"] and name in loop["capacity_used"]]
+        self.history.update(iso_timestamp(), adversarial_round_count=loop["round"], adversarial_outcome=loop["outcome"],
+                            capacity_consumed_percent=sum(consumed) if consumed else None)
+        if self.worktree_status():
+            raise WorkerError("Adversarial delivery has uncommitted changes")
+        from swarm_issue_worker import ProviderChoice
+        self.choice = ProviderChoice(**loop["delivery_choice"])
+        self.update_state_for_choice(self.choice)
+        if loop["outcome"] == "cap_hit":
+            delivery = tuple(loop["delivery"]) if loop.get("delivery") else None
+            if delivery is None:
+                delivery = self.deliver_pull_request(loop["completion"], allow_automation=False)
+                loop["delivery"] = delivery
+                self.save_adversarial(loop)
+            failures = "\n".join(f"- {r['id']}: {r['output'][-2000:]}" for r in loop["results"] if r["exit_code"])
+            output = (
+                "## Action required\nReview the failing tests and implementation in " + delivery[0] +
+                "; adjudicate the disputed expectation or specify the required fix. Reply with your decision "
+                "in a new trusted-author comment to resume.\n\n## Summary\nAdversarial-test deadlock; "
+                "the six fix/re-test rounds are exhausted. The branch and failing tests are published for review. "
+                "This is a test/implementation disagreement, not a request for credentials.\n\n" +
+                self.adversarial_summary_line() + "\n" + failures +
+                "\n\n## Recommendations\nReview the linked PR against the issue's requirements. Automatic approval, "
+                "merge and promotion were bypassed.\n\n## Step-by-step guide\n- Review the linked PR and reply with your adjudication.\n"
+            )
+            self.finalize_needs_input(output, delivery=delivery)
+        else:
+            self.finalize_issue(loop["completion"], loop["implementation_output"])
+        return ISSUE_COMPLETED_EXIT_CODE

@@ -17,10 +17,10 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -75,6 +75,45 @@ _WORKED_KEY_SQL = (
 # filter" rather than reaching SQL.
 _PROVIDER_KEY_LIMIT = 40
 _PROVIDER_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+# Migration 3 columns on ``ai_executions``. ``capacity_consumed_percent`` is an
+# honest approximation, not a metered cost: it is the drop in the provider's
+# remaining-quota percentage between the start and the end of the work-round,
+# read from the same ``*_capacity`` probes routing already performs. Nothing in
+# this codebase meters tokens or dollars, so anything showing this value must
+# say it is an approximation.
+_MIGRATION_3_COLUMNS = (
+    ("adversarial_round_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("adversarial_outcome", "TEXT NOT NULL DEFAULT ''"),
+    ("capacity_consumed_percent", "REAL"),
+)
+
+# Every value ``adversarial_outcome`` may hold. ``""`` means the work-round
+# predates the loop or never reached it; ``disabled`` means it ran with the
+# setting off. The loop in ``adversarial_uat.py`` writes these outcomes.
+ADVERSARIAL_OUTCOMES = (
+    "clean_first_pass",
+    "resolved_after_n",
+    "cap_hit",
+    "disabled",
+)
+
+_ADVERSARIAL_ROUND_COLUMNS = (
+    "round_number",
+    "fixer_provider",
+    "fixer_model",
+    "tester_provider",
+    "tester_model",
+    "tests_added",
+    "tests_modified",
+    "tests_failing_before",
+    "tests_failing_after",
+    "disputed",
+    "dispute_resolution",
+    "started_at",
+    "completed_at",
+    "duration_seconds",
+)
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(authorization\s*:\s*(?:bearer|token)\s+)[^\s]+"),
@@ -270,6 +309,47 @@ class ExecutionHistoryRepository:
                     "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                     (2,),
                 )
+            if 3 not in applied and 3 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(ai_executions)")
+                }
+                for name, definition in _MIGRATION_3_COLUMNS:
+                    if name not in columns:
+                        database.execute(
+                            f"ALTER TABLE ai_executions ADD COLUMN {name} {definition}"
+                        )
+                database.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS adversarial_rounds (
+                        round_id TEXT PRIMARY KEY,
+                        execution_id TEXT NOT NULL
+                            REFERENCES ai_executions(execution_id) ON DELETE CASCADE,
+                        round_number INTEGER NOT NULL,
+                        fixer_provider TEXT NOT NULL DEFAULT '',
+                        fixer_model TEXT NOT NULL DEFAULT '',
+                        tester_provider TEXT NOT NULL DEFAULT '',
+                        tester_model TEXT NOT NULL DEFAULT '',
+                        tests_added INTEGER NOT NULL DEFAULT 0,
+                        tests_modified INTEGER NOT NULL DEFAULT 0,
+                        tests_failing_before INTEGER NOT NULL DEFAULT 0,
+                        tests_failing_after INTEGER NOT NULL DEFAULT 0,
+                        disputed INTEGER NOT NULL DEFAULT 0,
+                        dispute_resolution TEXT NOT NULL DEFAULT '',
+                        started_at TEXT NOT NULL DEFAULT '',
+                        completed_at TEXT NOT NULL DEFAULT '',
+                        duration_seconds REAL,
+                        UNIQUE(execution_id, round_number)
+                    );
+                    CREATE INDEX IF NOT EXISTS adversarial_rounds_execution_idx
+                        ON adversarial_rounds(execution_id, round_number);
+                    """
+                )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (3,),
+                )
 
     def create(self, start: ExecutionStart, started_at: str) -> str:
         execution_id = str(uuid.uuid4())
@@ -393,6 +473,9 @@ class ExecutionHistoryRepository:
             "reviewer_feedback",
             "reviewer_feedback_at",
             "routing_decision",
+            "adversarial_round_count",
+            "adversarial_outcome",
+            "capacity_consumed_percent",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -484,6 +567,106 @@ class ExecutionHistoryRepository:
                 )
             ]
 
+    def record_adversarial_round(self, execution_id: str, round_values: dict[str, Any]) -> None:
+        """Insert (or replace) one adversarial fix/test round of an execution.
+
+        A round is identified by ``(execution_id, round_number)`` so a retried
+        scheduler tick that re-reports the same round updates it rather than
+        appending a duplicate — the same idempotency rule the issue comments
+        follow.
+        """
+        values: dict[str, Any] = {}
+        for column in _ADVERSARIAL_ROUND_COLUMNS:
+            value = round_values.get(column)
+            if column in {"round_number", "tests_added", "tests_modified",
+                          "tests_failing_before", "tests_failing_after"}:
+                values[column] = int(value or 0)
+            elif column == "disputed":
+                values[column] = 1 if value else 0
+            elif column == "duration_seconds":
+                values[column] = None if value is None else float(value)
+            else:
+                values[column] = sanitize_text(value)
+        columns = ", ".join(("round_id", "execution_id", *_ADVERSARIAL_ROUND_COLUMNS))
+        slots = ", ".join("?" for _ in range(len(_ADVERSARIAL_ROUND_COLUMNS) + 2))
+        if not 0 <= values["round_number"] <= 6:
+            raise ValueError("Adversarial round must be from 0 (assessment) through 6")
+        assignments = ", ".join(f"{column}=excluded.{column}" for column in _ADVERSARIAL_ROUND_COLUMNS)
+        with self.connect() as database:
+            database.execute(
+                f"INSERT INTO adversarial_rounds ({columns}) VALUES ({slots}) "
+                f"ON CONFLICT(execution_id, round_number) DO UPDATE SET {assignments}",
+                (str(uuid.uuid4()), execution_id, *(values[column] for column in _ADVERSARIAL_ROUND_COLUMNS)),
+            )
+
+    def adversarial_rounds_for(self, execution_ids: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
+        """Every recorded round of the given executions, oldest round first."""
+        ids = [str(value) for value in execution_ids if value]
+        if not ids:
+            return {}
+        slots = ", ".join("?" for _ in ids)
+        rounds: dict[str, list[dict[str, Any]]] = {}
+        with self.connect() as database:
+            for row in database.execute(
+                f"SELECT * FROM adversarial_rounds WHERE execution_id IN ({slots}) "
+                "ORDER BY execution_id, round_number",
+                ids,
+            ):
+                record = dict(row)
+                record["disputed"] = bool(record.get("disputed"))
+                rounds.setdefault(str(record["execution_id"]), []).append(record)
+        return rounds
+
+    def adversarial_summary(self, repository: str, *, search: str = "") -> dict[str, Any]:
+        """How the adversarial UAT loop is performing for one repository.
+
+        Only work-rounds that actually ran the loop are counted (``disabled``
+        and rows written before the loop existed are not), so the percentages
+        answer "when the loop runs, how often does it settle cleanly?" rather
+        than being diluted by every issue worked with it switched off.
+        """
+        clause, params = _search_filter(search)
+        where = (
+            " WHERE repository = ? AND adversarial_outcome <> '' "
+            "AND adversarial_outcome <> 'disabled'" + clause
+        )
+        with self.connect() as database:
+            row = database.execute(
+                "SELECT COUNT(*), AVG(adversarial_round_count), "
+                "SUM(adversarial_outcome = 'clean_first_pass'), "
+                "SUM(adversarial_outcome = 'cap_hit'), "
+                "AVG(capacity_consumed_percent) "
+                f"FROM ai_executions{where}",
+                (repository, *params),
+            ).fetchone()
+            tests = database.execute(
+                "SELECT COALESCE(SUM(tests_added), 0) FROM adversarial_rounds "
+                "WHERE execution_id IN ("
+                f"SELECT execution_id FROM ai_executions{where})",
+                (repository, *params),
+            ).fetchone()
+        loops = int(row[0] or 0)
+        if not loops:
+            return {
+                "loops": 0,
+                "averageRounds": None,
+                "cleanFirstPassPercent": None,
+                "capHitPercent": None,
+                "averageCapacityConsumedPercent": None,
+                "testsAdded": 0,
+            }
+        capacity = row[4]
+        return {
+            "loops": loops,
+            "averageRounds": round(float(row[1] or 0.0), 2),
+            "cleanFirstPassPercent": round(int(row[2] or 0) * 100 / loops, 1),
+            "capHitPercent": round(int(row[3] or 0) * 100 / loops, 1),
+            "averageCapacityConsumedPercent": (
+                None if capacity is None else round(float(capacity), 2)
+            ),
+            "testsAdded": int(tests[0] or 0),
+        }
+
     def page_for_repository(
         self,
         repository: str,
@@ -491,6 +674,7 @@ class ExecutionHistoryRepository:
         search: str = "",
         limit: int = PAGE_SIZE,
         offset: int = 0,
+        sort: str = "recent",
     ) -> tuple[list[sqlite3.Row], int, int, int]:
         """One page of executions, newest first, plus the filtered total.
 
@@ -500,6 +684,9 @@ class ExecutionHistoryRepository:
         """
         limit = clamp_page_size(limit)
         offset = clamp_offset(offset)
+        order = {"rounds_asc": "adversarial_round_count ASC, started_at DESC, attempt_number DESC",
+                 "rounds_desc": "adversarial_round_count DESC, started_at DESC, attempt_number DESC"}.get(
+                     sort, "started_at DESC, attempt_number DESC")
         clause, params = _search_filter(search)
         with self.connect() as database:
             total = int(
@@ -515,7 +702,7 @@ class ExecutionHistoryRepository:
             rows = list(
                 database.execute(
                     "SELECT * FROM ai_executions WHERE repository = ?"
-                    f"{clause} ORDER BY started_at DESC, attempt_number DESC "
+                    f"{clause} ORDER BY {order}, execution_id "
                     "LIMIT ? OFFSET ?",
                     (repository, *params, limit, offset),
                 )
@@ -758,6 +945,18 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return record
 
 
+def attach_adversarial_rounds(
+    repository: "ExecutionHistoryRepository", records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Give each record its ``adversarial_rounds`` list (possibly empty)."""
+    rounds = repository.adversarial_rounds_for(
+        [str(record.get("execution_id") or "") for record in records]
+    )
+    for record in records:
+        record["adversarial_rounds"] = rounds.get(str(record.get("execution_id") or ""), [])
+    return records
+
+
 def fetch_github_issues(gh_bin: str, repository: str) -> list[dict[str, Any]]:
     """Every open and closed issue (never pull requests — `gh issue list`
     already excludes those) for ``repository``, via the operator's own `gh`
@@ -825,7 +1024,13 @@ class ExecutionHistoryService:
         if not self.repository:
             return ""
         try:
+            existing = False
             if existing_id:
+                with self.repository.connect() as database:
+                    existing = database.execute(
+                        "SELECT 1 FROM ai_executions WHERE execution_id = ?", (existing_id,)
+                    ).fetchone() is not None
+            if existing:
                 self.execution_id = existing_id
                 self.note("Execution resumed", now)
             else:
@@ -855,6 +1060,14 @@ class ExecutionHistoryService:
             self.error = sanitize_text(error)
             return []
 
+    def adversarial_round(self, round_values: dict[str, Any]) -> None:
+        """Record one adversarial fix/test round; a no-op when history is off."""
+        if self.repository and self.execution_id:
+            try:
+                self.repository.record_adversarial_round(self.execution_id, round_values)
+            except sqlite3.Error as error:
+                self.error = sanitize_text(error)
+
     def note(self, message: str, now: str) -> None:
         if self.repository and self.execution_id:
             try:
@@ -874,8 +1087,25 @@ def _page_requested(limit: int | None, offset: int, search: str) -> bool:
     return limit is not None or offset != 0 or bool(normalize_search(search))
 
 
+def _empty_adversarial_summary() -> dict[str, Any]:
+    return {
+        "loops": 0,
+        "averageRounds": None,
+        "cleanFirstPassPercent": None,
+        "capHitPercent": None,
+        "averageCapacityConsumedPercent": None,
+        "testsAdded": 0,
+    }
+
+
 def _empty_page() -> dict[str, Any]:
-    return {"records": [], "total": 0, "offset": 0, "limit": PAGE_SIZE}
+    return {
+        "records": [],
+        "total": 0,
+        "offset": 0,
+        "limit": PAGE_SIZE,
+        "adversarial": _empty_adversarial_summary(),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -883,9 +1113,11 @@ def main(argv: list[str] | None = None) -> int:
 
     Without paging flags, prints the repository's executions as a JSON array
     on stdout. `--limit`, `--offset`, or `--search` instead print one page
-    object (`records`/`total`/`offset`/`limit`) of at most 10 rows — the
-    desktop Feedback view always uses that form so it never receives the
-    full history.
+    object (`records`/`total`/`offset`/`limit`/`adversarial`) of at most 10
+    rows — the desktop Feedback view always uses that form so it never
+    receives the full history. Every record carries its `adversarial_rounds`,
+    and `adversarial` summarizes the adversarial UAT loop across the whole
+    (searched) repository, not just the page.
 
     `--grades` instead prints one page of prompt grades (the router's grade
     of each issue's original prompt, with the reason and complexity) plus a
@@ -906,6 +1138,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True, help="Path to the SQLite database file.")
     parser.add_argument("--repository", required=True, help="owner/name to filter by.")
+    parser.add_argument("--sort", choices=("recent", "rounds_asc", "rounds_desc"), default="recent")
     parser.add_argument(
         "--import-from-github",
         action="store_true",
@@ -961,7 +1194,7 @@ def main(argv: list[str] | None = None) -> int:
 
     database_path = Path(args.db).expanduser()
     repository_name = sanitize_text(args.repository)
-    paging = _page_requested(args.limit, args.offset, args.search)
+    paging = _page_requested(args.limit, args.offset, args.search) or args.sort != "recent"
 
     if args.import_from_github:
         repository = ExecutionHistoryRepository(database_path)
@@ -1004,21 +1237,30 @@ def main(argv: list[str] | None = None) -> int:
     repository = ExecutionHistoryRepository(database_path)
     if not paging:
         rows = repository.for_repository(repository_name)
-        json.dump([row_to_dict(row) for row in rows], sys.stdout)
+        json.dump(
+            attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
+            sys.stdout,
+        )
         return 0
 
     rows, total, offset, limit = repository.page_for_repository(
         repository_name,
+        sort=args.sort,
         search=args.search,
         limit=PAGE_SIZE if args.limit is None else args.limit,
         offset=args.offset,
     )
     json.dump(
         {
-            "records": [row_to_dict(row) for row in rows],
+            "records": attach_adversarial_rounds(
+                repository, [row_to_dict(row) for row in rows]
+            ),
             "total": total,
             "offset": offset,
             "limit": limit,
+            "adversarial": repository.adversarial_summary(
+                repository_name, search=args.search
+            ),
         },
         sys.stdout,
     )
