@@ -473,11 +473,12 @@ pub struct AppConfig {
     pub routing_tiers: HashMap<String, Vec<RoutingTier>>,
     /// How dynamic routing weighs price against capability when it picks the
     /// worker model: `"cost"` (the "Optimize routing for cost" toggle on) asks
-    /// the router for the least expensive model that can plausibly do the
-    /// work, escalating on risk; `"best"` (the default, toggle off) asks for
-    /// the best fit for the task and ignores price. Anything else is read as
-    /// `"best"`. The router itself lives in `issue_worker/dynamic_router.py`;
-    /// this is only the preference forwarded to it.
+    /// the router for the least expensive capable model and treats a frontier
+    /// model as a last resort at complexity 9 or 10; `"best"` (the default,
+    /// toggle off) asks for the best fit for the task and ignores price.
+    /// Anything else is read as `"best"`. The router itself lives in
+    /// `issue_worker/dynamic_router.py`; this is only the preference forwarded
+    /// to it.
     #[serde(default = "default_routing_optimization")]
     pub routing_optimization: String,
     /// Off by default: a model that draws on a separate usage-credit balance

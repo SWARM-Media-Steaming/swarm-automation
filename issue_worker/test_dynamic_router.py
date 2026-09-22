@@ -8,7 +8,9 @@ import unittest
 from unittest import mock
 
 from dynamic_router import (
+    COMPLEXITY_SCALE_TOP,
     DEFAULT_ROUTING_OPTIMIZATION,
+    FRONTIER_COMPLEXITY_FLOOR,
     REWORK_SAME_PROVIDER_MIN_CONFIDENCE,
     ROUTER_RESPONSE_SCHEMA,
     InvalidRouterModel,
@@ -23,6 +25,7 @@ from dynamic_router import (
     display_model_name,
     fallback_routing_decision,
     format_routing_notice,
+    frontier_model_names,
     load_routing_tiers,
     model_catalog,
     model_description,
@@ -573,18 +576,97 @@ class CostAwareRoutingTest(unittest.TestCase):
         with self.assertRaises(InvalidRouterModel):
             resolve(sample_payload(), candidates=tools, allow_tier_fallback=False)
 
-    def test_cost_preference_tells_the_router_to_economize_and_escalate_on_risk(self) -> None:
+    def test_cost_preference_holds_frontier_models_to_the_complexity_floor(self) -> None:
         prompt = build_router_prompt(
             title="t",
             body="b",
             labels=[],
-            candidates=candidates("codex"),
+            candidates=candidates("claude", "codex", "grok"),
             routing_optimization="cost",
         )
         self.assertIn("Routing preference: optimize for cost.", prompt)
-        self.assertIn("least expensive model in the catalog", prompt)
-        self.assertIn("escalate to a stronger,", prompt)
+        self.assertIn("least expensive model in the catalog that is actually capable", prompt)
+        self.assertIn(f"Frontier complexity floor: {FRONTIER_COMPLEXITY_FLOOR}", prompt)
+        self.assertIn(f"Complexity scale top: {COMPLEXITY_SCALE_TOP}", prompt)
+        self.assertIn(
+            f"Use a frontier model only when the complexity score is {FRONTIER_COMPLEXITY_FLOOR} or {COMPLEXITY_SCALE_TOP}.",
+            prompt,
+        )
+        self.assertIn(
+            "The frontier models in this catalog are: claude-opus-5, gpt-6-astra, grok-4.7.",
+            prompt,
+        )
+        self.assertNotIn("claude-fable-5", prompt)
+        self.assertNotIn("claude-fable-5-1", prompt)
+        # High-capability, same cost rank as Opus, but not the Codex frontier.
+        self.assertNotIn("gpt-5.6-sol.", prompt.split("The frontier models in this catalog are:")[1].split("\n")[0])
+        self.assertIn(
+            "High risk may justify leaving the cheapest tier for a capable mid-tier model only.",
+            prompt,
+        )
+        self.assertIn("High risk is not a license to pick a frontier model below the floor.", prompt)
+        self.assertIn("Do not follow a tier that names a frontier model below the floor.", prompt)
+        self.assertIn("cheaper capable model you considered", prompt)
+        self.assertIn(
+            f"Scoring {FRONTIER_COMPLEXITY_FLOOR} or {COMPLEXITY_SCALE_TOP} in order to unlock a frontier model is not allowed.",
+            prompt,
+        )
+        self.assertNotIn("escalate to a stronger", prompt)
+        self.assertNotIn("even at a lower complexity score", prompt)
         self.assertNotIn("ignore cost entirely", prompt)
+
+        best = build_router_prompt(
+            title="t",
+            body="b",
+            labels=[],
+            candidates=candidates("codex"),
+            routing_optimization="best",
+        )
+        self.assertIn("optimize for the best fit, and ignore cost entirely", best)
+        self.assertNotIn("least expensive", best)
+        self.assertNotIn("Frontier complexity floor:", best)
+
+    def test_cost_preference_names_fable_as_frontier_only_when_usage_credits_are_allowed(self) -> None:
+        prompt = build_router_prompt(
+            title="t",
+            body="b",
+            labels=[],
+            candidates=candidates("claude"),
+            routing_optimization="cost",
+            allow_usage_credit_models=True,
+        )
+        self.assertIn(
+            "The frontier models in this catalog are: claude-opus-5, claude-fable-5, claude-fable-5-1.",
+            prompt,
+        )
+
+    def test_frontier_flags_mark_the_most_capable_model_of_each_line(self) -> None:
+        self.assertEqual(
+            frontier_model_names(model_catalog(allow_usage_credit_models=False)),
+            ("claude-opus-5", "gpt-6-astra", "grok-4.7"),
+        )
+        self.assertEqual(
+            frontier_model_names(model_catalog(("claude",), allow_usage_credit_models=True)),
+            ("claude-opus-5", "claude-fable-5", "claude-fable-5-1"),
+        )
+
+    def test_a_frontier_model_still_runs_below_the_floor_when_the_router_names_it(self) -> None:
+        # The prompt is the control; resolve_routing_decision does not reject
+        # a valid catalog name at a complexity below the floor.
+        decision = resolve(
+            sample_payload(
+                complexity=4,
+                risk="high",
+                selected_provider="codex",
+                selected_model="gpt-6-astra",
+                reasoning_effort="xhigh",
+            ),
+            "codex",
+            routing_optimization="cost",
+        )
+        self.assertEqual(decision["selected_model"], "gpt-6-astra")
+        self.assertEqual(decision["model_source"], "router")
+        self.assertEqual(decision["complexity"], 4)
 
     def test_best_preference_never_asks_the_router_to_economize(self) -> None:
         prompt = build_router_prompt(

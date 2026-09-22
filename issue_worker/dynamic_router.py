@@ -9,9 +9,10 @@ The model is the router's own call, not a table lookup. It is shown the full
 cross-provider catalog (``_MODEL_CATALOG``) — every model, what it is good at,
 and what it costs relative to the others, minus anything needing usage credits
 the operator has not allowed — and the operator's ``routing_optimization``
-preference decides how to weigh those costs: ``"cost"`` asks for the cheapest
-model that can plausibly do the work, escalating on the graded risk score,
-while ``"best"`` asks for the best fit for the task and ignores price.
+preference decides how to weigh those costs: ``"cost"`` asks for the least
+expensive capable model and treats a frontier model as a last resort at
+complexity 9 or 10, while ``"best"`` asks for the best fit for the task and
+ignores price.
 
 The operator's ``routing_tiers`` table is still graded against and still shown
 as reference, and it remains the deterministic safety net: if the router names
@@ -125,10 +126,17 @@ _DEFAULT_PROVIDER_STRENGTHS: dict[str, str] = {
 
 # How the router weighs cost against capability, from the operator's
 # "Optimize routing for cost" toggle (``routing_optimization`` in config.json).
-# "cost" asks for the cheapest model that can plausibly do the work, escalating
-# on risk; "best" asks for the best fit for the work and ignores price.
+# "cost" asks for the least expensive capable model and treats a frontier model
+# as a last resort at complexity 9 or 10; "best" asks for the best fit for the
+# work and ignores price.
 ROUTING_OPTIMIZATIONS = ("cost", "best")
 DEFAULT_ROUTING_OPTIMIZATION = "best"
+
+# Under cost optimization, a frontier model is allowed only at this complexity
+# or at the top of the 1–10 scale. Interpolated into the router prompt; the
+# answer is not clamped if the router still names a frontier model below it.
+FRONTIER_COMPLEXITY_FLOOR = 9
+COMPLEXITY_SCALE_TOP = 10
 
 # Model families billed against a separate usage-credit balance rather than the
 # plan allowance. Keep in sync with ``USAGE_CREDIT_MODELS`` in ``src/tools.rs``:
@@ -157,6 +165,7 @@ class CatalogModel:
     model: str
     cost: int
     description: str
+    frontier: bool = False
 
     @property
     def requires_usage_credits(self) -> bool:
@@ -198,6 +207,7 @@ _MODEL_CATALOG: tuple[CatalogModel, ...] = (
         4,
         "Claude's most capable model. Reserved for the largest, most ambiguous, or "
         "highest-risk work, where the deepest reasoning is worth the extra cost and time.",
+        frontier=True,
     ),
     CatalogModel(
         "claude",
@@ -205,6 +215,7 @@ _MODEL_CATALOG: tuple[CatalogModel, ...] = (
         5,
         "An earlier release of Claude's usage-credit model, kept for comparison "
         "against the current one.",
+        frontier=True,
     ),
     CatalogModel(
         "claude",
@@ -213,6 +224,7 @@ _MODEL_CATALOG: tuple[CatalogModel, ...] = (
         "Claude's deepest-reasoning model, billed against a separate usage-credit "
         "balance rather than the plan allowance. For the hardest work, where that "
         "extra cost is accepted deliberately.",
+        frontier=True,
     ),
     CatalogModel(
         "codex",
@@ -240,6 +252,7 @@ _MODEL_CATALOG: tuple[CatalogModel, ...] = (
         5,
         "Codex's most capable model. Reserved for sweeping, high-risk, or deeply "
         "ambiguous work.",
+        frontier=True,
     ),
     CatalogModel(
         "grok",
@@ -266,6 +279,7 @@ _MODEL_CATALOG: tuple[CatalogModel, ...] = (
         "grok-4.7",
         4,
         "Grok's most capable model, offering the deepest reasoning in the Grok line.",
+        frontier=True,
     ),
 )
 
@@ -531,6 +545,27 @@ def candidate_catalog(
     )
 
 
+def offered_catalog(
+    candidates: Sequence[RouterCandidate],
+    *,
+    allow_usage_credit_models: bool = False,
+) -> tuple[CatalogModel, ...]:
+    """Every model the offered tools may run, in catalog order, credit-filtered."""
+    entries: list[CatalogModel] = []
+    for candidate in candidates:
+        entries.extend(
+            candidate_catalog(
+                candidate, allow_usage_credit_models=allow_usage_credit_models
+            )
+        )
+    return tuple(entries)
+
+
+def frontier_model_names(catalog: Sequence[CatalogModel]) -> tuple[str, ...]:
+    """The most-capable model of each line present in ``catalog``."""
+    return tuple(entry.model for entry in catalog if entry.frontier)
+
+
 def catalog_prompt_lines(
     candidates: Sequence[RouterCandidate],
     *,
@@ -541,26 +576,47 @@ def catalog_prompt_lines(
         "Model catalog — selected_model must be one of these exact names, and must belong to the",
         "tool you name in selected_provider. Costs are relative and comparable across tools:",
     ]
-    for candidate in candidates:
-        for entry in candidate_catalog(
-            candidate, allow_usage_credit_models=allow_usage_credit_models
-        ):
-            lines.append(
-                f"- {entry.provider} / {entry.model} — {entry.cost_label}. {entry.description}"
-            )
+    for entry in offered_catalog(
+        candidates, allow_usage_credit_models=allow_usage_credit_models
+    ):
+        lines.append(
+            f"- {entry.provider} / {entry.model} — {entry.cost_label}. {entry.description}"
+        )
     return lines
 
 
-def optimization_prompt_lines(routing_optimization: str) -> list[str]:
+def optimization_prompt_lines(
+    routing_optimization: str,
+    catalog: Sequence[CatalogModel] = (),
+) -> list[str]:
     """How to weigh cost against capability, from the operator's preference."""
     if normalize_routing_optimization(routing_optimization) == "cost":
+        floor = FRONTIER_COMPLEXITY_FLOOR
+        top = COMPLEXITY_SCALE_TOP
+        named = frontier_model_names(catalog)
+        if named:
+            frontier_line = (
+                "The frontier models in this catalog are: " + ", ".join(named) + "."
+            )
+        else:
+            frontier_line = "This catalog currently names no frontier models."
         return [
             "Routing preference: optimize for cost.",
-            "Choose the least expensive model in the catalog that can plausibly do this work well.",
-            "Treat the risk score you assigned as the signal to spend more: escalate to a stronger,",
-            "more expensive model when risk is high, even at a lower complexity score, and stay on a",
-            "cheaper model for low-risk work, even at a higher complexity score. Say in",
-            "provider_reason what made the cheaper model sufficient, or what risk forced the escalation.",
+            "Start from the least expensive model in the catalog that is actually capable of this",
+            "task, and prefer it whenever one exists.",
+            "A frontier model is a last resort.",
+            frontier_line,
+            f"Frontier complexity floor: {floor}",
+            f"Complexity scale top: {top}",
+            f"Use a frontier model only when the complexity score is {floor} or {top}.",
+            "High risk may justify leaving the cheapest tier for a capable mid-tier model only.",
+            "High risk is not a license to pick a frontier model below the floor.",
+            "The operator reference tiers are the best-fit ladder under cost optimization.",
+            "Do not follow a tier that names a frontier model below the floor.",
+            "In provider_reason, name the cheaper capable model you considered and why it cannot",
+            "do this task.",
+            "Score complexity from the work itself.",
+            f"Scoring {floor} or {top} in order to unlock a frontier model is not allowed.",
         ]
     return [
         "Routing preference: optimize for the best fit, and ignore cost entirely.",
@@ -651,10 +707,13 @@ def build_router_prompt(
                 line += f" — {description}"
             tool_lines.append(line)
     ids = ", ".join(candidate.key for candidate in candidates)
+    catalog = offered_catalog(
+        candidates, allow_usage_credit_models=allow_usage_credit_models
+    )
     catalog_lines = catalog_prompt_lines(
         candidates, allow_usage_credit_models=allow_usage_credit_models
     )
-    preference_lines = optimization_prompt_lines(routing_optimization)
+    preference_lines = optimization_prompt_lines(routing_optimization, catalog)
     previous = str(previous_provider or "").strip().lower()
     rework_lines: list[str] = []
     if rework and previous:
