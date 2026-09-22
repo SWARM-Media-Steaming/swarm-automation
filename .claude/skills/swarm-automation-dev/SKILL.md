@@ -50,7 +50,9 @@ close. Adding a fourth provider = one entry in `KNOWN_PROVIDERS`, a
 `<key>_capacity` method, a `_run_<key>` branch in `run_ai`, an entry in
 `PROVIDERS` (`setup_github_bots.py`) and the loader tuple
 (`github_app_auth.py`), plus `config.rs::KNOWN_PROVIDERS` and
-`PROVIDER_META` / `HELP_TOPICS` in `ui/app.js` on the app side.
+`PROVIDER_META` / `HELP_TOPICS` in `ui/app.js` on the app side. If it
+should be reachable by dynamic model routing, see "Dynamic model routing"
+below for the further entries it needs.
 
 Related, still-accurate mechanics:
 
@@ -64,6 +66,59 @@ Related, still-accurate mechanics:
   `scripts/issue_worker/install_swarm_issue_cron.py` is a legacy detection
   heuristic for the UI, not something the worker's own execution path
   branches on.)
+
+## Dynamic model routing
+
+Optional per-repo setting (`dynamic_model_routing`) that, when on, has one
+of the enabled providers grade a new issue and pick which provider handles
+it, instead of the operator always choosing one provider up front. Lives
+mostly in `issue_worker/dynamic_router.py`; `swarm_issue_worker.py` calls
+it from `apply_dynamic_routing`. It is a two-step, **not** one AI free
+choice, and the two steps get very different amounts of AI discretion:
+
+1. **Which provider.** The router (an ephemeral, tool-free call to one
+   provider's own CLI — see `run_provider_router`) grades the issue and picks
+   `selected_provider` from the enabled candidates, weighing each one's
+   `strengths` text (`_DEFAULT_PROVIDER_STRENGTHS` /
+   `provider_strengths_preset` in `config.rs` — real input to the prompt,
+   genuinely read by the router, not decorative; its UI textbox was removed
+   2026-09-22 because an *editable* field next to model/effort looked like a
+   rule the app enforced, when it is only advice the router can overrule).
+   This is real AI discretion: `_select_candidate` can be overridden by the
+   operator's `preferred_provider` tie-break or by the rework-favors-a-
+   different-tool rule, but nothing here is mechanical.
+2. **Which model, at which effort.** Deliberately **not** an AI choice.
+   `resolve_routing_decision` takes the provider's own `selected_model`/
+   `reasoning_effort` suggestion, discards it, and instead looks up
+   `tier_for_complexity(chosen.tiers, complexity)` — the provider's
+   `routing_tiers` table (`_DEFAULT_TIER_ROWS` / `default_routing_tiers` in
+   `config.rs`), a plain numeric mapping from the router's own 1–10
+   complexity score to a model/effort pair the *operator* configured. This
+   keeps cost and behavior predictable and configurable; see the router
+   prompt's own comment in `build_router_prompt` and the docstring on
+   `resolve_routing_decision` before changing this — letting an AI's model
+   suggestion actually take effect was a deliberate design decision to
+   avoid, not an oversight to "fix".
+
+Since 2026-09-22, each model named in a tier also carries a short built-in
+description of what it tends to be good for (`_MODEL_DESCRIPTIONS` /
+`model_description`) — Haiku-tier "fast, cheap, well-scoped" through
+Opus-tier "large, ambiguous, high-risk", mirroring the increasing-capability
+ladder the tier table already encodes numerically. This is step 1 all over
+again, one level down: it is shown next to each tier in the router prompt so
+step 1's provider pick and complexity score are made with real knowledge of
+what a given tier actually invokes, and it is folded into the stored
+`tier_explanation`, so it shows up in AI execution history and the routing
+notice posted on the issue. It never feeds step 2 — the model a tier maps to
+does not change. Unlike the tier tables and provider strengths, this table
+has no `config.rs` counterpart and nothing to keep in sync: it is never sent
+to the app or saved in `config.json`, only built into `dynamic_router.py`.
+
+Adding a provider's tiers, strengths, or model descriptions without a
+matching edit on the other side (Python vs. `config.rs`, for the two that
+have both) is a real way to introduce drift — the router prompt and the
+saved config would disagree about that provider's defaults. Model
+descriptions are the one exception: Python-only by design, see above.
 
 ## Test suite
 
