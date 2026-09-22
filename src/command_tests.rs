@@ -7,7 +7,7 @@ use super::{
     push_access_message, reconcile_integration_for_promotion, refresh_running_scheduler,
     repo_status_args, repo_worker_args, require_closed_issue, save_config, save_test_input,
     scheduler_arguments, validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState,
-    BranchAheadBehind, ExecutionHistoryPage, ResolvedProvider,
+    BranchAheadBehind, ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -494,11 +494,7 @@ fn prompt_grades_lookup_is_safe_before_any_execution_exists() {
         app.clone(),
         app.state(),
         "octocat__example".into(),
-        None,
-        None,
-        None,
-        None,
-        None,
+        PromptGradesQuery::default(),
     )
     .unwrap();
     assert!(grades.records.is_empty());
@@ -514,11 +510,13 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
         "octocat/example",
-        Some(-4),
-        Some("  Widget  ".into()),
-        Some(" B- ".into()),
-        Some("  Claude ".into()),
-        Some("  claude-opus-4-1  ".into()),
+        PromptGradesQuery {
+            offset: Some(-4),
+            search: Some("  Widget  ".into()),
+            grade: Some(" B- ".into()),
+            router: Some("  Claude ".into()),
+            router_model: Some("  claude-opus-4-1  ".into()),
+        },
     );
     assert!(args.contains(&"--grades".to_string()));
     let value_after = |flag: &str| {
@@ -539,11 +537,7 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
         "octocat/example",
-        None,
-        None,
-        None,
-        None,
-        None,
+        PromptGradesQuery::default(),
     );
     assert!(unfiltered
         .windows(2)
