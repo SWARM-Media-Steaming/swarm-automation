@@ -352,6 +352,43 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertIsNone(row["capacity_consumed_percent"])
         self.assertEqual(upgraded.adversarial_summary(self.worker.config.github_repository)["loops"], 0)
 
+    def test_preflight_grade_is_recorded_when_routing_is_off(self):
+        self.prepare()
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=False)
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "uat-session")
+        payload = json.dumps({
+            "task_type": "debugging",
+            "complexity": 4,
+            "risk": "low",
+            "context_requirement": "small",
+            "selected_provider": "grok",
+            "provider_reason": "Grok is already on this issue.",
+            "selected_model": "grok-4.6",
+            "reasoning_effort": "high",
+            "confidence": 0.8,
+            "prompt_grade": "B",
+            "grade_reason": "Clear enough to grade.",
+            "complexity_reason": "Small scripted change.",
+        })
+        with mock.patch("swarm_issue_worker.run_provider_router", return_value=payload):
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(self.worker.choice.name, "Grok")
+        self.assertEqual(self.worker.choice.model, "grok-4.6")
+        self.assertEqual(self.worker.choice.effort, "medium")
+        self.assertEqual(self.worker.routing["model_source"], "configured")
+        self.assertEqual(self.worker.routing["prompt_grade"], "B")
+        self.assertEqual(self.worker.routing["router_suggested_model"], "grok-4.6")
+        self.assertEqual(self.worker.routing["router_suggested_effort"], "high")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with mock.patch.object(self.worker, "comments", return_value=[]), mock.patch.object(
+            self.worker.github, "gh", return_value=""
+        ) as github:
+            self.worker.post_started_comment()
+        notice = github.call_args.args[2]
+        self.assertIn("Set in SWARM Automation", notice)
+        self.assertIn("Router recommendation: Grok 4.6 at High reasoning", notice)
+        self.assertNotIn("Dynamic Model Routing applied", notice)
+
     def test_cost_routing_prompt_holds_frontier_models_to_the_complexity_floor(self):
         self.prepare()
         self.worker.config = dataclasses.replace(

@@ -3073,14 +3073,154 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(self.worker.config.spec("codex").router_effort, "low")
         self.assertEqual(self.worker.config.spec("grok").router_model, "grok-4.6")
         self.worker.issue = IssueContext(501, "Manual", "ORIGINAL", [], "https://example.invalid/501")
-        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(
+                selected_provider="codex",
+                selected_model="gpt-5.6-luna",
+                reasoning_effort="low",
+                complexity_reason="Touches the parser and two callers.",
+            ),
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        router.assert_called_once()
+        self.assertEqual(self.worker.choice.name, "Grok")
+        self.assertEqual(self.worker.choice.model, "grok-4.6")
+        self.assertEqual(self.worker.choice.effort, "medium")
+        self.assertEqual(self.worker.issue.body, "ORIGINAL")
+        self.assertEqual(self.worker.routing["model_source"], "configured")
+        self.assertEqual(self.worker.routing["prompt_grade"], "B+")
+        self.assertEqual(self.worker.routing["complexity"], 7)
+        self.assertEqual(self.worker.routing["confidence"], 0.91)
+        self.assertEqual(
+            self.worker.routing["complexity_reason"], "Touches the parser and two callers."
+        )
+        self.assertEqual(self.worker.routing["router_suggested_model"], "gpt-5.6-luna")
+        self.assertEqual(self.worker.routing["router_suggested_effort"], "low")
+        self.assertFalse(self.worker.routing["fallback"])
+        self.assertFalse(self.worker.routing["dynamic_model_routing"])
+
+    def test_routing_off_start_comment_labels_the_setting_and_the_recommendation(self) -> None:
+        self.worker.issue = IssueContext(515, "Graded off", "ORIGINAL", [], "https://example.invalid/515")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "session-515")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(
+                selected_provider="grok",
+                selected_model="grok-4.6",
+                reasoning_effort="high",
+            ),
+        ):
+            self.worker.maybe_apply_dynamic_routing()
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_started_comment()
+        notice = github.call_args.args[2]
+        self.assertIn("SWARM AI Routing", notice)
+        self.assertIn("Selected AI: Grok", notice)
+        self.assertIn("Selected Model: Grok 4.6", notice)
+        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn("Set in SWARM Automation", notice)
+        self.assertIn("Router recommendation: Grok 4.6 at High reasoning", notice)
+        self.assertNotIn("matches the configured setting", notice)
+        self.assertNotIn("The router chose", notice)
+        self.assertNotIn("Grok Grok", notice)
+
+    def test_routing_off_start_comment_says_when_the_recommendation_matches(self) -> None:
+        self.worker.issue = IssueContext(516, "Match", "ORIGINAL", [], "https://example.invalid/516")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "session-516")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(
+                selected_provider="grok",
+                selected_model="grok-4.6",
+                reasoning_effort="medium",
+            ),
+        ):
+            self.worker.maybe_apply_dynamic_routing()
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_started_comment()
+        notice = github.call_args.args[2]
+        self.assertIn(
+            "Router recommendation: Grok 4.6 at Medium reasoning (matches the configured setting)",
+            notice,
+        )
+
+    def test_routing_off_failed_grade_still_runs_the_configured_pair(self) -> None:
+        self.worker.issue = IssueContext(517, "Unavailable", "ORIGINAL", [], "https://example.invalid/517")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "session-517")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            side_effect=RouterError("router returned an empty response"),
+        ) as router:
+            self.worker.maybe_apply_dynamic_routing()
+        router.assert_called_once()
+        self.assertEqual(self.worker.choice.name, "Grok")
+        self.assertEqual(self.worker.choice.model, "grok-4.6")
+        self.assertEqual(self.worker.choice.effort, "medium")
+        self.assertTrue(self.worker.routing["fallback"])
+        self.assertEqual(self.worker.routing["model_source"], "configured")
+        self.assertFalse(self.worker.routing["dynamic_model_routing"])
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_started_comment()
+        notice = github.call_args.args[2]
+        self.assertIn("Pre-flight grading was unavailable", notice)
+        self.assertIn("Selected Model: Grok 4.6", notice)
+        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn("router returned an empty response", notice)
+
+    def test_routing_off_does_not_reroute_a_resumed_session(self) -> None:
+        self.worker.issue = IssueContext(518, "Resume off", "ORIGINAL", [], "https://example.invalid/518")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "session-518", resume=True)
         with mock.patch("swarm_issue_worker.run_provider_router") as router:
             self.worker.maybe_apply_dynamic_routing()
         router.assert_not_called()
         self.assertIsNone(self.worker.routing)
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
+        self.assertEqual(self.worker.choice.model, "grok-4.6")
         self.assertEqual(self.worker.choice.effort, "medium")
-        self.assertEqual(self.worker.issue.body, "ORIGINAL")
+
+    def test_routing_off_execution_history_describes_the_configured_setting(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, ai_execution_history_enabled=True,
+            execution_history_db=self.state / "routing-off-history.sqlite3",
+        )
+        self.worker.history = ExecutionHistoryService(True, self.state / "routing-off-history.sqlite3")
+        self.worker.issue = IssueContext(519, "History", "ORIGINAL", [], "https://example.invalid/519")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "session-519")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(
+                selected_provider="codex", selected_model="gpt-5.6-luna", reasoning_effort="low"
+            ),
+        ):
+            self.worker.maybe_apply_dynamic_routing()
+        self.worker.start_execution_history()
+        self.worker.record_routing_in_history()
+        repository = ExecutionHistoryRepository(self.state / "routing-off-history.sqlite3")
+        with repository.connect() as database:
+            row = database.execute(
+                "SELECT routing_decision, operational_notes FROM ai_executions WHERE execution_id = ?",
+                (self.worker.history.execution_id,),
+            ).fetchone()
+        notes = json.loads(row["operational_notes"])
+        stored = json.loads(row["routing_decision"])
+        self.assertTrue(any("The configured setting was used" in note for note in notes))
+        self.assertFalse(any("Dynamic routing selected" in note for note in notes))
+        self.assertEqual(stored["model_source"], "configured")
+        self.assertEqual(stored["selected_model"], "grok-4.6")
+        self.assertEqual(stored["router_suggested_model"], "gpt-5.6-luna")
 
     def test_dynamic_routing_runs_the_routers_own_model_and_leaves_the_prompt_unchanged(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
@@ -3211,6 +3351,34 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("fell back", notice)
         self.assertIn("Selected Model: GPT-5.6 Luna", notice)
         self.assertIn("router returned an empty response", notice)
+
+    def test_dynamic_routing_on_names_the_model_once_and_says_the_choice_was_applied(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(520, "Grok on", "ORIGINAL", [], "https://example.invalid/520")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "session-520")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(
+                selected_provider="grok",
+                selected_model="grok-4.6",
+                reasoning_effort="high",
+            ),
+        ):
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(self.worker.choice.model, "grok-4.6")
+        self.assertEqual(self.worker.choice.effort, "high")
+        self.assertEqual(self.worker.routing["model_source"], "router")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_started_comment()
+        notice = github.call_args.args[2]
+        self.assertIn("Selected Model: Grok 4.6", notice)
+        self.assertIn("Dynamic Model Routing applied this model and effort", notice)
+        self.assertNotIn("Grok Grok", notice)
+        self.assertNotIn("Set in SWARM Automation", notice)
 
     def test_dynamic_routing_comment_reports_the_grade_without_rewriting_the_issue(self) -> None:
         self.worker.issue = IssueContext(504, "Graded", "ORIGINAL", [], "https://example.invalid/504")
@@ -4700,6 +4868,90 @@ class WorkerTestCase(unittest.TestCase):
 
 
 class RunnerTestCase(unittest.TestCase):
+    def test_saved_routing_flags_win_over_scheduler_startup_flags(self) -> None:
+        worker_args = [
+            "--github-repository", "acme/widgets",
+            "--no-dynamic-model-routing",
+            "--routing-optimization", "cost",
+        ]
+        self.assertEqual(
+            runner_module.saved_routing_overrides(worker_args),
+            ["--no-dynamic-model-routing", "--routing-optimization", "cost"],
+        )
+        parsed = build_parser().parse_args(
+            [
+                "--repo-dir", "/tmp/repo",
+                "--state-dir", "/tmp/state",
+                "--dynamic-model-routing",
+                "--routing-optimization", "best",
+                *runner_module.saved_routing_overrides(worker_args),
+            ]
+        )
+        self.assertFalse(parsed.dynamic_model_routing)
+        self.assertEqual(parsed.routing_optimization, "cost")
+
+    def test_scheduler_repeats_saved_routing_flags_after_startup_arguments(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-routing-test.") as temporary:
+            root = Path(temporary)
+            worker = root / "worker.py"
+            worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            workspace = root / "repo"
+            workspace.mkdir()
+            args = runner_module.build_parser().parse_args(
+                [
+                    "--repo-dir", str(workspace),
+                    "--state-dir", str(root / "state"),
+                    "--worker", str(worker),
+                    "--crontab-bin", "",
+                    "--pgrep-bin", "",
+                ]
+            )
+            runner = runner_module.Runner(
+                args,
+                ["--dynamic-model-routing", "--routing-optimization", "best"],
+            )
+            repo = {
+                "label": "acme/widgets",
+                "workspace_dir": str(workspace),
+                "state_dir": str(root / "state" / "widgets"),
+                "base_branch": "main",
+                "remote_name": "origin",
+                "integration_branch": "ai-main",
+                "worker_args": [
+                    "--github-repository", "acme/widgets",
+                    "--no-dynamic-model-routing",
+                    "--routing-optimization", "cost",
+                ],
+            }
+            captured: dict[str, list[str]] = {}
+
+            class FakeProcess:
+                def __init__(self) -> None:
+                    self.stdout = io.StringIO()
+                    self.stderr = io.StringIO()
+
+                def wait(self) -> int:
+                    return 0
+
+            def fake_popen(command, **_kwargs):
+                captured["command"] = list(command)
+                return FakeProcess()
+
+            with mock.patch("install_swarm_issue_cron.subprocess.Popen", side_effect=fake_popen):
+                self.assertEqual(runner.run_worker(repo), 0)
+            command = captured["command"]
+            self.assertEqual(
+                command[-6:],
+                [
+                    "--dynamic-model-routing",
+                    "--routing-optimization",
+                    "best",
+                    "--no-dynamic-model-routing",
+                    "--routing-optimization",
+                    "cost",
+                ],
+            )
+
     def test_scheduler_keeps_repos_file_out_of_worker_arguments(self) -> None:
         args, worker_arguments = runner_module.build_parser().parse_known_args(
             [
