@@ -26,10 +26,19 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+from issue_images import (
+    assistant_result_text,
+    claude_stream_message,
+    codex_image_flags,
+    grok_prompt_json,
+    inlined_images,
+)
 
 
 PROMPT_GRADES = (
@@ -337,6 +346,8 @@ def build_router_prompt(
     candidates: Sequence[RouterCandidate],
     previous_provider: str = "",
     rework: bool = False,
+    image_count: int = 0,
+    comment_image_count: int = 0,
 ) -> str:
     """Ask for a grade of the original issue. The issue text is quoted only.
 
@@ -376,6 +387,18 @@ def build_router_prompt(
             f"when you do. Lower confidence in {previous} is read as 'no clear reason' and the work goes elsewhere.",
         ]
     quoted_body = body if body.strip() else "(empty)"
+    image_lines: list[str] = []
+    if image_count > 0:
+        image_lines = [
+            "",
+            "Attached issue images:",
+            f"{image_count} image(s) uploaded on this issue are attached to this message, in the order they appear.",
+            "Grade clarity and complexity using what those images show, not only the text.",
+        ]
+        if comment_image_count > 0:
+            image_lines.append(
+                f"{comment_image_count} of them come from later GitHub comments rather than the original description."
+            )
     return "\n".join(
         [
             "You are the SWARM dynamic AI router.",
@@ -415,6 +438,7 @@ def build_router_prompt(
             "",
             "Original issue tags:",
             ", ".join(labels) if labels else "none",
+            *image_lines,
         ]
     ) + "\n"
 
@@ -784,6 +808,11 @@ def extract_router_text(provider: str, stdout: str, last_message: str = "") -> s
     if provider == "codex" and last_message.strip():
         return last_message.strip()
     raw = stdout.strip()
+    # Claude image input uses stream-json, whose `result` event holds the grade.
+    # A single `--output-format json` object has the same `type`/`result` shape.
+    wrapped = assistant_result_text(raw)
+    if wrapped.strip():
+        return wrapped.strip()
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
@@ -809,6 +838,7 @@ def run_provider_router(
     prompt: str,
     cwd: Path,
     timeout: float = 180,
+    images: Sequence[Path] = (),
 ) -> str:
     """One-shot router call that does not start or resume the worker session.
 
@@ -829,7 +859,15 @@ def run_provider_router(
         last_message = temp / "router-last.txt"
         prompt_path = temp / "router-prompt.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
+        image_paths = [Path(path) for path in images if Path(path).is_file()]
         if provider == "claude":
+            inlined = inlined_images(prompt, image_paths, kind="claude") if image_paths else []
+            if image_paths and not inlined:
+                print(
+                    "WARNING: Issue images could not be inlined into the router prompt; "
+                    "grading will use the issue text only.",
+                    file=sys.stderr,
+                )
             command = [
                 bin_path,
                 "--model",
@@ -837,20 +875,31 @@ def run_provider_router(
                 "--effort",
                 effort or "low",
                 "-p",
-                "--output-format",
-                "json",
-                "--json-schema",
-                schema,
-                "--tools",
-                "",
-                "--no-session-persistence",
             ]
-            completed = _run(command, cwd=cwd, timeout=timeout, stdin=prompt)
+            if inlined:
+                command.extend(
+                    ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+                )
+                stdin: str | None = claude_stream_message(prompt, inlined)
+            else:
+                command.extend(["--output-format", "json"])
+                stdin = prompt
+            command.extend(
+                [
+                    "--json-schema",
+                    schema,
+                    "--tools",
+                    "",
+                    "--no-session-persistence",
+                ]
+            )
+            completed = _run(command, cwd=cwd, timeout=timeout, stdin=stdin)
             return extract_router_text(provider, completed)
         if provider == "codex":
             command = [
                 bin_path,
                 "exec",
+                *codex_image_flags(image_paths),
                 "-m",
                 model,
                 "-c",
@@ -871,27 +920,38 @@ def run_provider_router(
             message = last_message.read_text(encoding="utf-8") if last_message.exists() else ""
             return extract_router_text(provider, completed, message)
         if provider == "grok":
-            command = [
-                bin_path,
-                "--prompt-file",
-                str(prompt_path),
-                "--model",
-                model,
-                "--reasoning-effort",
-                effort or "low",
-                "--output-format",
-                "json",
-                "--json-schema",
-                schema,
-                "--max-turns",
-                "1",
-                "--permission-mode",
-                "dontAsk",
-                "--disable-web-search",
-                "--no-subagents",
-                "--cwd",
-                str(cwd),
-            ]
+            inlined = inlined_images(prompt, image_paths, kind="grok") if image_paths else []
+            if image_paths and not inlined:
+                print(
+                    "WARNING: Issue images could not be inlined into the router prompt; "
+                    "grading will use the issue text only.",
+                    file=sys.stderr,
+                )
+            command = [bin_path]
+            if inlined:
+                command.extend(["--prompt-json", grok_prompt_json(prompt, inlined)])
+            else:
+                command.extend(["--prompt-file", str(prompt_path)])
+            command.extend(
+                [
+                    "--model",
+                    model,
+                    "--reasoning-effort",
+                    effort or "low",
+                    "--output-format",
+                    "json",
+                    "--json-schema",
+                    schema,
+                    "--max-turns",
+                    "1",
+                    "--permission-mode",
+                    "dontAsk",
+                    "--disable-web-search",
+                    "--no-subagents",
+                    "--cwd",
+                    str(cwd),
+                ]
+            )
             completed = _run(command, cwd=cwd, timeout=timeout, stdin=None)
             return extract_router_text(provider, completed)
     raise RouterError(f"no router runner for provider {provider}")
