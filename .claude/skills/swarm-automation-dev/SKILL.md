@@ -100,10 +100,13 @@ now genuine AI discretion bounded by operator settings:
 
    What governs the choice is the global `routing_optimization` setting
    ("Optimize routing for cost" on the AI Configuration page, `"cost"` or
-   `"best"`, defaulting to `"best"`): `"cost"` tells the router to take the
-   least expensive catalog model that can plausibly do the work and escalate
-   only on the graded `risk` score; `"best"` tells it to ignore cost and fit
-   the model to the task (explicitly *not* "always pick the top tier").
+   `"best"`, defaulting to `"best"`): `"cost"` tells the router to start from
+   the least expensive capable catalog model and treat a frontier model as a
+   last resort at complexity 9 or 10 (high risk may justify a capable mid-tier
+   model); `"best"` tells it to ignore cost and fit the model to the task
+   (explicitly *not* "always pick the top tier"). The prompt is the control —
+   `resolve_routing_decision` still accepts a valid catalog name at any
+   complexity.
 
    The complexity/risk/context scores are still graded and recorded — they are
    now inputs the router reasons over rather than a lookup key.
