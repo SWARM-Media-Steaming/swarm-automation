@@ -11,13 +11,16 @@ from dynamic_router import (
     ROUTER_RESPONSE_SCHEMA,
     RouterCandidate,
     RouterError,
+    RoutingTier,
     build_router_prompt,
     default_provider_strengths,
     default_routing_tiers,
+    describe_tier,
     display_model_name,
     fallback_routing_decision,
     format_routing_notice,
     load_routing_tiers,
+    model_description,
     parse_router_payload,
     resolve_routing_decision,
     run_provider_router,
@@ -222,6 +225,49 @@ class DynamicRouterTest(unittest.TestCase):
         )
         self.assertEqual(decision["confidence"], 0.91)
         self.assertEqual(decision["selected_model"], "grok-4.6")
+
+    def test_model_description_covers_every_default_tier_model(self) -> None:
+        for tiers in default_routing_tiers().values():
+            for tier in tiers:
+                description = model_description(tier.model)
+                self.assertTrue(description, f"{tier.model} has no description")
+                self.assertGreater(len(description), 20, tier.model)
+
+    def test_model_description_is_empty_for_an_unknown_model(self) -> None:
+        self.assertEqual(model_description("some-custom-fine-tune"), "")
+        self.assertEqual(model_description(""), "")
+
+    def test_prompt_lists_each_tiers_model_description_next_to_it(self) -> None:
+        prompt = build_router_prompt(
+            title="t", body="b", labels=[], candidates=candidates("codex"),
+        )
+        self.assertIn("gpt-5.6-luna / low", prompt)
+        luna_line = next(line for line in prompt.splitlines() if "gpt-5.6-luna / low" in line)
+        self.assertIn(model_description("gpt-5.6-luna"), luna_line)
+        sol_line = next(line for line in prompt.splitlines() if "gpt-5.6-sol / high" in line)
+        self.assertIn(model_description("gpt-5.6-sol"), sol_line)
+
+    def test_prompt_tolerates_a_custom_tier_naming_an_unknown_model(self) -> None:
+        custom_tiers = {
+            "codex": (RoutingTier(1, 10, "some-fine-tuned-codex", "medium"),),
+        }
+        prompt = build_router_prompt(
+            title="t", body="b", labels=[], candidates=candidates("codex", tiers=custom_tiers),
+        )
+        self.assertIn("some-fine-tuned-codex / medium", prompt)
+        # No dangling "— " with nothing after it for the unknown model.
+        line = next(line for line in prompt.splitlines() if "some-fine-tuned-codex" in line)
+        self.assertNotIn(" — ", line)
+
+    def test_tier_explanation_includes_the_selected_models_description(self) -> None:
+        decision = resolve(sample_payload(), "codex", "grok")
+        self.assertIn(model_description("gpt-5.6-sol"), decision["tier_explanation"])
+
+    def test_describe_tier_omits_the_second_sentence_for_an_unknown_model(self) -> None:
+        candidate = candidates("codex")[0]
+        tier = RoutingTier(1, 10, "some-fine-tuned-codex", "medium")
+        text = describe_tier(candidate, tier, 5)
+        self.assertTrue(text.endswith("reasoning."), text)
 
     def test_prompt_offers_every_tool_and_does_not_rewrite_the_issue(self) -> None:
         prompt = build_router_prompt(

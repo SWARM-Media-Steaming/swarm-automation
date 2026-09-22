@@ -2,10 +2,20 @@
 
 The router grades the original issue, scores its complexity, and picks which
 of the enabled AI tools runs the work. The worker model and reasoning effort
-then come from that tool's configured tier table for the score. The original
-issue text is never rewritten. Keep the default tier tables and provider
-strengths in sync with ``default_routing_tiers`` / ``ProviderSettings`` in
-``src/config.rs``.
+then come from that tool's configured tier table for the score — never from
+the router's own model choice. The original issue text is never rewritten.
+Keep the default tier tables and provider strengths in sync with
+``default_routing_tiers`` / ``ProviderSettings`` in ``src/config.rs``.
+
+Each model named in a tier also carries a short, built-in description of what
+it tends to be good at (``_MODEL_DESCRIPTIONS`` / ``model_description``),
+shown to the router next to that tier so its provider choice and complexity
+score are made with real knowledge of which model each band actually invokes,
+and recorded on the routing decision for the same reason a human would want
+to see it. This never changes *which* model runs — that is still the tier
+table alone — and it exists only here: unlike the tier tables and provider
+strengths, it is never sent to the app or persisted in config.json, so there
+is no matching copy to keep in sync in ``src/config.rs``.
 """
 
 from __future__ import annotations
@@ -94,6 +104,59 @@ _DEFAULT_PROVIDER_STRENGTHS: dict[str, str] = {
         "and quick orientation in unfamiliar code."
     ),
 }
+
+# What each specific model tends to be good at, independent of which provider
+# it belongs to — the counterpart to _DEFAULT_PROVIDER_STRENGTHS, one level
+# down. A provider's tier table already places its own models on an
+# increasing capability ladder (the fastest/cheapest model takes the lowest
+# complexity band, the most capable takes the highest); these descriptions
+# spell that out in words so the router (and anyone reading a stored routing
+# decision) knows what a given band actually invokes, not just its number.
+# Never edited by an operator and never leaves this process: it only shapes
+# the router's own prompt and the explanation attached to its decision, never
+# which model a tier maps to.
+_MODEL_DESCRIPTIONS: dict[str, str] = {
+    "claude-haiku-4-5": (
+        "Claude's fastest, least expensive model. Best for small, well-scoped, "
+        "mechanical changes where turnaround matters more than deep reasoning."
+    ),
+    "claude-sonnet-5": (
+        "Claude's balanced, general-purpose model. The default choice for typical "
+        "multi-file feature work and bug fixes."
+    ),
+    "claude-opus-5": (
+        "Claude's most capable model. Reserved for the largest, most ambiguous, or "
+        "highest-risk work, where the deepest reasoning is worth the extra cost and time."
+    ),
+    "gpt-5.6-luna": (
+        "Codex's lightest, fastest model. Efficient for small, mechanical, "
+        "well-defined changes."
+    ),
+    "gpt-5.6-terra": (
+        "Codex's mid-tier model. A solid default for typical feature work and bug fixes."
+    ),
+    "gpt-5.6-sol": (
+        "Codex's high-capability model. For larger or subtler changes that need "
+        "careful, verified reasoning."
+    ),
+    "gpt-6-astra": (
+        "Codex's most capable model. Reserved for sweeping, high-risk, or deeply "
+        "ambiguous work."
+    ),
+    "grok-4.5": "An earlier, smaller Grok model, kept for compatibility where configured.",
+    "grok-4.6": (
+        "Grok's general-purpose coding model, balancing speed and capability across a "
+        "wide range of complexity."
+    ),
+    "grok-4.7": (
+        "Grok's most capable model, offering the deepest reasoning in the Grok line."
+    ),
+}
+
+
+def model_description(model: str) -> str:
+    return _MODEL_DESCRIPTIONS.get(str(model or "").strip(), "")
+
 
 # A rework is deliberately sent to a different AI tool than the one that
 # produced the previous pass, so the follow-up is an independent second
@@ -277,13 +340,16 @@ def build_router_prompt(
         tool_lines.append(headline)
         if candidate.strengths.strip():
             tool_lines.append(f"  Best at: {candidate.strengths.strip()}")
-        tool_lines.append(
-            "  Tiers: "
-            + "; ".join(
-                f"complexity {tier.min_complexity}-{tier.max_complexity} → {tier.model} / {tier.effort}"
-                for tier in candidate.tiers
+        tool_lines.append("  Tiers:")
+        for tier in candidate.tiers:
+            line = (
+                f"    complexity {tier.min_complexity}-{tier.max_complexity} → "
+                f"{tier.model} / {tier.effort}"
             )
-        )
+            description = model_description(tier.model)
+            if description:
+                line += f" — {description}"
+            tool_lines.append(line)
     ids = ", ".join(candidate.key for candidate in candidates)
     previous = str(previous_provider or "").strip().lower()
     rework_lines: list[str] = []
@@ -480,10 +546,15 @@ def describe_tier(candidate: RouterCandidate, tier: RoutingTier, complexity: int
         if tier.min_complexity == tier.max_complexity
         else f"{tier.min_complexity}–{tier.max_complexity}"
     )
-    return (
+    model_name = display_model_name(tier.model)
+    text = (
         f"Complexity {complexity}/10 falls in {candidate.name}'s {band} band, which maps to "
-        f"{display_model_name(tier.model)} at {display_effort(tier.effort)} reasoning."
+        f"{model_name} at {display_effort(tier.effort)} reasoning."
     )
+    description = model_description(tier.model)
+    if description:
+        text += f" {model_name}: {description}"
+    return text
 
 
 def _select_candidate(
