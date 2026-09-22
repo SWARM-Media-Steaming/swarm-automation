@@ -211,7 +211,7 @@
     },
     "work-policy": {
       title: "Issue instructions",
-      html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
+      html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Update Claude assets</strong> — asks the AI to update any Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository that the issue makes relevant.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
       links: [],
     },
     "execution-history": {
@@ -399,6 +399,7 @@
       monitor_actions: false,
       require_issue_tests: false,
       adversarial_uat_enabled: false,
+      update_claude_assets_enabled: false,
       allow_environment_only_summary: false,
       repo_dir: "",
       uat_hour: 3,
