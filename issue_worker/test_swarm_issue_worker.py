@@ -46,6 +46,7 @@ from swarm_issue_worker import (
     extract_needs_input_metadata,
     extract_question_answer_metadata,
     is_worker_comment,
+    latest_terminal_outcome,
     priority_rank,
     resolve_preferred_provider,
     bump_minor_in_version_text,
@@ -107,6 +108,32 @@ class WorkerTestCase(unittest.TestCase):
 
     def pr_worker(self) -> Worker:
         return Worker(Config.from_args(build_parser().parse_args(self._worker_argv(auto=True))))
+
+    def gh_responder(self, pr_list: str = "[]"):
+        """`gh` stand-in that answers the pull-request probes branch cleanup
+        makes and returns an empty string for everything else."""
+
+        def respond(arguments, *_rest):
+            if list(arguments[0:2]) == ["pr", "list"]:
+                return pr_list
+            return ""
+
+        return respond
+
+    def remote_branches(self) -> list[str]:
+        return subprocess.run(
+            ["git", "-C", str(self.remote), "for-each-ref", "--format=%(refname:short)",
+             "refs/heads"],
+            text=True, stdout=subprocess.PIPE, check=True,
+        ).stdout.split()
+
+    def worker_comment(self, comment_id: int, marker: str) -> dict[str, object]:
+        return {
+            "id": comment_id,
+            "created_at": "2026-09-01T10:00:00Z",
+            "user": {"login": "DotNetRockStar"},
+            "body": f"<!-- {marker} -->\nWorker comment.",
+        }
 
     def paused_state(self, issue_number: int = 101) -> dict[str, object]:
         return {
@@ -986,7 +1013,7 @@ class WorkerTestCase(unittest.TestCase):
             mock.patch.object(self.worker, "post_started_comment"),
             mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
             mock.patch.object(self.worker, "comments", return_value=[]),
-            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()) as github,
             contextlib.redirect_stdout(io.StringIO()),
         ):
             status = self.worker.run_selected_issue()
@@ -994,7 +1021,10 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(status, ISSUE_COMPLETED_EXIT_CODE)
         self.assertIn(142, self.worker.completed_numbers())
         self.assertFalse(self.worker.in_progress_file.exists())
-        body = github.call_args.args[2]
+        body = next(
+            call.args[2] for call in github.call_args_list
+            if call.args[0][0:2] == ["issue", "comment"]
+        )
         self.assertIn("environment-only", body)
         self.assertNotIn("SWARM_ENVIRONMENT_ONLY", body)
 
@@ -4071,6 +4101,505 @@ class WorkerTestCase(unittest.TestCase):
             "auto",
         )
         self.assertEqual(overridden.integration_branch, "staging")
+
+
+    # ------------------------------------------------------------------
+    # No-code issue-branch cleanup and orphan reconciliation (issue #170).
+    # ------------------------------------------------------------------
+
+    def no_code_worker(self, **overrides: object) -> Worker:
+        argv = self._worker_argv(auto=False)
+        for flag, value in overrides.items():
+            argv.append(flag)
+            if value is not None:
+                argv.append(str(value))
+        return Worker(Config.from_args(build_parser().parse_args(argv)))
+
+    def start_no_code_attempt(
+        self, worker: Worker, issue_number: int, provider: str = "Claude",
+        labels: list[str] | None = None,
+    ) -> str:
+        worker.in_progress_file.unlink(missing_ok=True)
+        worker.issue = IssueContext(
+            issue_number, "No code needed", "Body", labels or [],
+            f"https://example.invalid/{issue_number}",
+        )
+        worker.choice = ProviderChoice(provider, "test-model", "high", f"session-{issue_number}")
+        with contextlib.redirect_stdout(io.StringIO()):
+            worker.prepare_repository()
+        return worker.expected_branch()
+
+    def push_orphan_branch(self, branch: str, extra_commit: bool = False) -> str:
+        """Put `branch` on the remote as a worker would, without any PR."""
+        self.git("switch", "-q", "-c", branch, "ai-main")
+        if extra_commit:
+            (self.repo / f"{branch.replace('/', '-')}.txt").write_text("work\n", encoding="utf-8")
+            self.git("add", "--all")
+            self.git("commit", "-q", "-m", "unique work")
+        tip = self.git("rev-parse", "HEAD")
+        self.git("push", "-q", "origin", branch)
+        self.git("switch", "-q", "ai-main")
+        self.git("branch", "-q", "-D", branch)
+        return tip
+
+    def test_environment_only_completion_returns_to_integration_and_drops_the_branch(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, allow_environment_only_summary=True
+        )
+        self.worker.issue = IssueContext(
+            170, "Env issue", "Body", [], "https://example.invalid/170"
+        )
+
+        def fake_run_ai(_prompt: str) -> int:
+            self.worker.ai_output_file.write_text(
+                "## Summary\nA local service is missing.\nSWARM_ENVIRONMENT_ONLY\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with (
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            status = self.worker.run_selected_issue()
+
+        self.assertEqual(status, ISSUE_COMPLETED_EXIT_CODE)
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+        self.assertNotIn(
+            "ai/claude/issue-170",
+            self.git("branch", "--format=%(refname:short)").splitlines(),
+        )
+        self.assertNotIn("ai/claude/issue-170", self.remote_branches())
+        self.assertIn("Removed the empty issue branch ai/claude/issue-170", output.getvalue())
+
+    def test_question_answer_drops_its_empty_issue_branch(self) -> None:
+        self.worker.issue = IssueContext(
+            171, "How does routing work?", "Explain it.", ["Question"],
+            "https://example.invalid/171",
+        )
+
+        def fake_run_ai(_prompt: str) -> int:
+            self.worker.ai_output_file.write_text(
+                "## Answer\nTiers pick the model.\n\n## Evidence\nThe tier table.\n\n"
+                "## Recommendations\n- None.\n\nSWARM_QUESTION_ANSWER\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with (
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = self.worker.run_selected_issue()
+
+        self.assertEqual(status, ISSUE_COMPLETED_EXIT_CODE)
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+        self.assertNotIn(
+            "ai/claude/issue-171",
+            self.git("branch", "--format=%(refname:short)").splitlines(),
+        )
+
+    def test_clean_needs_input_drops_its_empty_issue_branch(self) -> None:
+        """An input request is only published once the worker has proved no
+        commit and no uncommitted change survived, so its branch is empty and a
+        trusted reply recreates it as a follow-up work-round."""
+        self.worker.issue = IssueContext(
+            172, "Signing failure", "Body", ["Ready For Testing"], "https://example.invalid/172"
+        )
+
+        def fake_run_ai(_prompt: str) -> int:
+            self.worker.ai_output_file.write_text(
+                "## Action required\nAdd the signing secrets and reply `done`.\n\n"
+                "## Summary\nNo key is available.\n\n## Recommendations\nDo not paste secrets.\n\n"
+                "## Step-by-step guide\n1. Add the secrets.\n\nSWARM_NEEDS_INPUT\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with (
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = self.worker.run_selected_issue()
+
+        self.assertEqual(status, ISSUE_COMPLETED_EXIT_CODE)
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+        self.assertNotIn(
+            "ai/claude/issue-172",
+            self.git("branch", "--format=%(refname:short)").splitlines(),
+        )
+
+    def test_no_code_cleanup_refuses_a_dirty_worktree(self) -> None:
+        worker = self.no_code_worker()
+        branch = self.start_no_code_attempt(worker, 173)
+        (self.repo / "tracked.txt").write_text("edited\n", encoding="utf-8")
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.gh_responder()) as github,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(worker.cleanup_no_code_branch("environment-only"), "kept")
+        github.assert_not_called()
+        self.assertEqual(self.git("branch", "--show-current"), branch)
+        self.assertIn("has uncommitted changes", output.getvalue())
+
+    def test_no_code_cleanup_refuses_a_branch_carrying_a_new_commit(self) -> None:
+        worker = self.no_code_worker()
+        branch = self.start_no_code_attempt(worker, 174)
+        (self.repo / "new.txt").write_text("work\n", encoding="utf-8")
+        self.git("add", "new.txt")
+        self.git("commit", "-q", "-m", "real work")
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.gh_responder()) as github,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(worker.cleanup_no_code_branch("environment-only"), "kept")
+        github.assert_not_called()
+        self.assertEqual(self.git("branch", "--show-current"), branch)
+        self.assertIn("carries commits beyond", output.getvalue())
+
+    def test_no_code_cleanup_refuses_a_followup_branch_holding_unmerged_work(self) -> None:
+        """A follow-up work-round starts from the branch tip, so an earlier
+        round's un-merged commit sits at the saved starting commit too. "No new
+        commits this round" must not be mistaken for "this branch is empty"."""
+        worker = self.no_code_worker()
+        branch = self.start_no_code_attempt(worker, 184)
+        (self.repo / "round-one.txt").write_text("round one\n", encoding="utf-8")
+        self.git("add", "round-one.txt")
+        self.git("commit", "-q", "-m", "[claude] Round one (#184)")
+        # Round two starts here, with round one still un-merged into ai-main.
+        worker.update_state(
+            base_sha=self.git("rev-parse", "HEAD"),
+            attempt_start_sha=self.git("rev-parse", "HEAD"),
+        )
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.gh_responder()) as github,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(worker.cleanup_no_code_branch("environment-only"), "kept")
+        github.assert_not_called()
+        self.assertEqual(self.git("branch", "--show-current"), branch)
+        self.assertIn("carries work that is not yet in ai-main", output.getvalue())
+
+    def test_no_code_cleanup_refuses_while_an_open_pull_request_uses_the_branch(self) -> None:
+        worker = self.no_code_worker()
+        branch = self.start_no_code_attempt(worker, 175)
+        open_pr = json.dumps([{"url": "https://example.invalid/pull/9"}])
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.gh_responder(open_pr)),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(worker.cleanup_no_code_branch("question-answer"), "kept")
+        self.assertEqual(self.git("branch", "--show-current"), branch)
+        self.assertIn("still has an open pull request", output.getvalue())
+
+    def test_no_code_cleanup_fails_closed_when_github_cannot_be_reached(self) -> None:
+        worker = self.no_code_worker()
+        branch = self.start_no_code_attempt(worker, 176)
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=WorkerError("gh exploded")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(worker.cleanup_no_code_branch("environment-only"), "kept")
+        self.assertEqual(self.git("branch", "--show-current"), branch)
+        self.assertIn("open pull request check", output.getvalue())
+
+    def test_no_code_cleanup_failure_keeps_the_branch_and_warns(self) -> None:
+        worker = self.no_code_worker()
+        branch = self.start_no_code_attempt(worker, 177)
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.gh_responder()),
+            mock.patch.object(
+                worker, "return_to_integration_branch", side_effect=WorkerError("switch failed")
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(worker.cleanup_no_code_branch("environment-only"), "failed")
+        self.assertEqual(self.git("branch", "--show-current"), branch)
+        self.assertIn("Could not clean up issue branch", output.getvalue())
+        self.assertIn("left in place", output.getvalue())
+
+    def test_no_code_cleanup_removes_the_pushed_remote_branch(self) -> None:
+        worker = self.no_code_worker()
+        branch = self.start_no_code_attempt(worker, 178)
+        self.git("push", "-q", "origin", branch)
+        self.assertIn(branch, self.remote_branches())
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.gh_responder()),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(worker.cleanup_no_code_branch("environment-only"), "cleaned")
+        self.assertNotIn(branch, self.remote_branches())
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+
+    def test_no_code_cleanup_is_idempotent_when_the_remote_branch_is_absent(self) -> None:
+        worker = self.no_code_worker()
+        branch = self.start_no_code_attempt(worker, 179)
+        self.assertNotIn(branch, self.remote_branches())
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.gh_responder()),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(worker.cleanup_no_code_branch("environment-only"), "cleaned")
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+
+    def test_no_code_cleanup_authenticates_deletion_per_provider_branch_name(self) -> None:
+        """Claude, Codex and Grok/XAI branch names are all recognized, and the
+        delete push runs as the provider that owns the branch."""
+        for provider, key, issue_number in (
+            ("Claude", "claude", 180), ("Codex", "codex", 181), ("Grok", "xai", 182),
+        ):
+            with self.subTest(provider=provider):
+                worker = self.no_code_worker()
+                branch = self.start_no_code_attempt(worker, issue_number, provider=provider)
+                self.assertEqual(branch, f"ai/{key}/issue-{issue_number}")
+                pushes: list[tuple[str, str | None]] = []
+
+                def record_push(refspec: str, provider_key: str | None = None) -> object:
+                    pushes.append((refspec, provider_key))
+                    return subprocess.CompletedProcess([], 0, "", "")
+
+                with (
+                    mock.patch.object(worker, "push_ref", side_effect=record_push),
+                    mock.patch.object(worker.github, "gh", side_effect=self.gh_responder()),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(worker.cleanup_no_code_branch("environment-only"), "cleaned")
+                self.assertEqual(pushes, [(f":refs/heads/{branch}", provider.lower())])
+                self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+
+    def test_orphan_reconciliation_removes_a_terminal_no_code_branch(self) -> None:
+        branch = "ai/claude/issue-89"
+        self.push_orphan_branch(branch)
+        answered = [self.worker_comment(1, "swarm-issue-worker:question-answer:issue:89;provider:claude")]
+        with (
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            mock.patch.object(self.worker, "comments", return_value=answered),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.worker.reconcile_orphan_issue_branches()
+        self.assertNotIn(branch, self.remote_branches())
+        self.assertIn(f"Reconciled orphan issue branch {branch}", output.getvalue())
+
+    def test_orphan_reconciliation_is_idempotent_once_the_branch_is_gone(self) -> None:
+        branch = "ai/xai/issue-96"
+        self.push_orphan_branch(branch)
+        environment_only = [
+            self.worker_comment(1, "swarm-issue-worker:environment-only:issue:96;provider:grok")
+        ]
+        with (
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            mock.patch.object(self.worker, "comments", return_value=environment_only),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.worker.reconcile_orphan_issue_branches()
+            self.assertNotIn(branch, self.remote_branches())
+            self.worker.reconcile_orphan_issue_branches()
+        self.assertNotIn(branch, self.remote_branches())
+
+    def test_orphan_reconciliation_keeps_a_branch_with_unique_commits(self) -> None:
+        branch = "ai/codex/issue-97"
+        self.push_orphan_branch(branch, extra_commit=True)
+        answered = [self.worker_comment(1, "swarm-issue-worker:question-answer:issue:97;provider:codex")]
+        with (
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            mock.patch.object(self.worker, "comments", return_value=answered),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.worker.reconcile_orphan_issue_branches()
+        self.assertIn(branch, self.remote_branches())
+        self.assertIn("carries commits that are not in", output.getvalue())
+
+    def test_orphan_reconciliation_keeps_a_branch_whose_issue_ended_in_a_commit(self) -> None:
+        branch = "ai/claude/issue-98"
+        self.push_orphan_branch(branch)
+        completed = [self.worker_comment(1, "swarm-issue-worker:commit:" + "a" * 40)]
+        with (
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            mock.patch.object(self.worker, "comments", return_value=completed),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.worker.reconcile_orphan_issue_branches()
+        self.assertIn(branch, self.remote_branches())
+        self.assertIn("no confirmed terminal no-code result", output.getvalue())
+
+    def test_orphan_reconciliation_keeps_a_branch_with_no_evidence_at_all(self) -> None:
+        """A live attempt between branch creation and PR publication has no
+        pull request either — absence of one is never enough on its own."""
+        branch = "ai/claude/issue-99"
+        self.push_orphan_branch(branch)
+        with (
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.worker.reconcile_orphan_issue_branches()
+        self.assertIn(branch, self.remote_branches())
+
+    def test_orphan_reconciliation_keeps_active_and_paused_attempt_branches(self) -> None:
+        active = "ai/claude/issue-100"
+        paused = "ai/codex/issue-101"
+        self.push_orphan_branch(active)
+        self.push_orphan_branch(paused)
+        self.worker.write_state(
+            {"issue_number": 100, "branch_name": active, "base_sha": self.base_sha}
+        )
+        self.worker.paused_dir.mkdir(parents=True, exist_ok=True)
+        (self.worker.paused_dir / "101.json").write_text(
+            json.dumps(self.paused_state(101) | {"branch_name": paused}), encoding="utf-8"
+        )
+        answered = [self.worker_comment(1, "swarm-issue-worker:question-answer:issue:100;provider:claude")]
+        with (
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            mock.patch.object(self.worker, "comments", return_value=answered),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.worker.reconcile_orphan_issue_branches()
+        self.assertIn(active, self.remote_branches())
+        self.assertIn(paused, self.remote_branches())
+
+    def test_orphan_reconciliation_protects_every_provider_name_of_a_saved_issue(self) -> None:
+        """A handoff can move a saved attempt to another provider between two
+        runs, so the saved branch name alone is not the protected set."""
+        self.worker.write_state(
+            {"issue_number": 102, "branch_name": "ai/claude/issue-102", "base_sha": self.base_sha}
+        )
+        protected = self.worker.protected_attempt_branches()
+        for key in ("claude", "codex", "grok", "xai"):
+            self.assertIn(f"ai/{key}/issue-102", protected)
+
+    def test_orphan_reconciliation_keeps_everything_when_github_is_unavailable(self) -> None:
+        branch = "ai/claude/issue-103"
+        self.push_orphan_branch(branch)
+        with (
+            mock.patch.object(self.worker.github, "gh", side_effect=WorkerError("gh exploded")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.worker.reconcile_orphan_issue_branches()
+        self.assertIn(branch, self.remote_branches())
+        self.assertIn("GitHub was unavailable", output.getvalue())
+
+    def test_orphan_reconciliation_skips_a_branch_that_already_has_a_pull_request(self) -> None:
+        branch = "ai/claude/issue-104"
+        self.push_orphan_branch(branch)
+        listed = json.dumps([{"headRefName": branch}])
+        with (
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder(listed)),
+            mock.patch.object(self.worker, "comments") as comments,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.worker.reconcile_orphan_issue_branches()
+        comments.assert_not_called()
+        self.assertIn(branch, self.remote_branches())
+
+    def test_orphan_reconciliation_prefers_execution_history_over_comments(self) -> None:
+        database_path = self.root / "history.sqlite3"
+        worker = self.no_code_worker(
+            **{"--ai-execution-history-enabled": None, "--execution-history-db": database_path}
+        )
+        repository = ExecutionHistoryRepository(database_path)
+        branch = "ai/claude/issue-157"
+        execution_id = repository.create(
+            ExecutionStart(
+                repository=worker.config.github_repository,
+                issue_number=157,
+                issue_url="https://example.invalid/157",
+                issue_title="Env only",
+                issue_body="Body",
+                provider="claude",
+                model="test-model",
+                effort="high",
+                branch_name=branch,
+                application_version="test",
+            ),
+            "2026-09-01T10:00:00-05:00",
+        )
+        repository.update(
+            execution_id, "2026-09-01T10:05:00-05:00", final_status="environment_only"
+        )
+        self.push_orphan_branch(branch)
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.gh_responder()),
+            mock.patch.object(worker, "comments") as comments,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            worker.reconcile_orphan_issue_branches()
+        comments.assert_not_called()
+        self.assertNotIn(branch, self.remote_branches())
+
+    def test_orphan_reconciliation_keeps_a_branch_whose_history_is_still_running(self) -> None:
+        database_path = self.root / "running.sqlite3"
+        worker = self.no_code_worker(
+            **{"--ai-execution-history-enabled": None, "--execution-history-db": database_path}
+        )
+        repository = ExecutionHistoryRepository(database_path)
+        branch = "ai/claude/issue-158"
+        repository.create(
+            ExecutionStart(
+                repository=worker.config.github_repository,
+                issue_number=158,
+                issue_url="https://example.invalid/158",
+                issue_title="In flight",
+                issue_body="Body",
+                provider="claude",
+                model="test-model",
+                effort="high",
+                branch_name=branch,
+                application_version="test",
+            ),
+            "2026-09-01T10:00:00-05:00",
+        )
+        self.push_orphan_branch(branch)
+        with (
+            mock.patch.object(worker.github, "gh", side_effect=self.gh_responder()),
+            mock.patch.object(worker, "comments") as comments,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            worker.reconcile_orphan_issue_branches()
+        comments.assert_not_called()
+        self.assertIn(branch, self.remote_branches())
+
+    def test_latest_terminal_outcome_reads_only_authenticated_worker_comments(self) -> None:
+        comments = [
+            self.worker_comment(1, "swarm-issue-worker:commit:" + "b" * 40),
+            self.worker_comment(2, "swarm-issue-worker:environment-only:issue:5;provider:claude"),
+            {
+                "id": 3,
+                "user": {"login": "stranger"},
+                "body": "<!-- swarm-issue-worker:commit:" + "c" * 40 + " -->",
+            },
+        ]
+        self.assertEqual(
+            latest_terminal_outcome(comments, {"DotNetRockStar"}), "environment-only"
+        )
+        self.assertEqual(latest_terminal_outcome(comments[0:1], {"DotNetRockStar"}), "commit")
+        self.assertEqual(latest_terminal_outcome(comments, {"someone-else"}), "")
+
+    def test_followup_after_a_no_code_round_does_not_require_a_previous_commit(self) -> None:
+        """A rework triggered by a trusted reply to an input request or a
+        question answer has no previous commit SHA to protect."""
+        worker = self.no_code_worker()
+        worker.issue = IssueContext(
+            183, "Continue", "Body", [], "https://example.invalid/183",
+            work_type="followup", trigger_comment_id=99,
+        )
+        worker.choice = ProviderChoice("Claude", "test-model", "high", "session-183")
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_start, recovery_mode, _, _ = worker.prepare_repository()
+        self.assertEqual(worker.git("branch", "--show-current"), "ai/claude/issue-183")
+        self.assertFalse(recovery_mode)
+        self.assertEqual(run_start, worker.git("rev-parse", "ai-main"))
 
 
 class RunnerTestCase(unittest.TestCase):

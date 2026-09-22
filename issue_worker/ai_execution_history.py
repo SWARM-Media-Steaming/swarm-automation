@@ -468,6 +468,22 @@ class ExecutionHistoryRepository:
                 )
             )
 
+    def final_statuses_for_issue(self, repository: str, issue_number: int) -> list[str]:
+        """`final_status` of every recorded attempt for one issue, newest first.
+
+        Used by the worker's orphan-branch reconciliation to tell a terminal
+        no-code outcome from a code completion or a run still in flight."""
+        with self.connect() as database:
+            return [
+                str(row[0])
+                for row in database.execute(
+                    "SELECT final_status FROM ai_executions "
+                    "WHERE repository = ? AND issue_number = ? "
+                    "ORDER BY attempt_number DESC",
+                    (sanitize_text(repository), int(issue_number)),
+                )
+            ]
+
     def page_for_repository(
         self,
         repository: str,
@@ -825,6 +841,19 @@ class ExecutionHistoryService:
                 self.repository.update(self.execution_id, now, **fields)
             except sqlite3.Error as error:
                 self.error = sanitize_text(error)
+
+    def final_statuses(self, repository: str, issue_number: int) -> list[str]:
+        """Recorded attempt statuses for one issue, newest first.
+
+        Empty when history is disabled or unreadable, so callers treat missing
+        history as "no evidence" rather than as evidence of anything."""
+        if not self.repository:
+            return []
+        try:
+            return self.repository.final_statuses_for_issue(repository, issue_number)
+        except sqlite3.Error as error:
+            self.error = sanitize_text(error)
+            return []
 
     def note(self, message: str, now: str) -> None:
         if self.repository and self.execution_id:
