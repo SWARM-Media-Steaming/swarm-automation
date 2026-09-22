@@ -23,6 +23,7 @@ from dynamic_router import (
     model_description,
     parse_router_payload,
     resolve_routing_decision,
+    router_description,
     run_provider_router,
 )
 
@@ -329,6 +330,47 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertIn("Complexity 7/10 falls in Codex's 7–8 band, which maps to GPT-5.6 Sol at High reasoning.", notice)
         self.assertEqual(display_model_name("claude-haiku-4-5"), "Claude Haiku 4.5")
         self.assertEqual(display_model_name("grok-4.3"), "Grok 4.3")
+
+    def test_notice_names_the_model_and_effort_that_graded_the_issue(self) -> None:
+        decision = resolve(
+            sample_payload(),
+            "codex",
+            "grok",
+            router_provider="grok",
+            router_model="grok-4.6",
+            router_effort="low",
+        )
+        # The grader is a different AI, model, and effort from the worker the
+        # decision selects; reporting only the worker hides who graded.
+        self.assertEqual(decision["router_provider"], "grok")
+        self.assertEqual(decision["router_model"], "grok-4.6")
+        self.assertEqual(decision["router_effort"], "low")
+        self.assertEqual(router_description(decision), "Grok (Grok 4.6, Low reasoning)")
+        notice = format_routing_notice(decision)
+        self.assertIn("Graded and routed by: Grok (Grok 4.6, Low reasoning)", notice)
+        self.assertIn("Selected AI: Codex", notice)
+
+    def test_router_description_tolerates_a_decision_without_router_fields(self) -> None:
+        self.assertEqual(router_description({}), "")
+        self.assertEqual(router_description({"router_provider": "claude"}), "Claude")
+        self.assertEqual(
+            router_description({"router_model": "claude-haiku-4-5"}), "Claude Haiku 4.5"
+        )
+
+    def test_fallback_notice_still_names_the_router(self) -> None:
+        decision = fallback_routing_decision(
+            provider="codex",
+            model="gpt-5.6-luna",
+            effort="medium",
+            reason="router returned no JSON",
+            router_provider="claude",
+            router_model="claude-haiku-4-5",
+            router_effort="low",
+        )
+        self.assertIn(
+            "Routed by: Claude (Claude Haiku 4.5, Low reasoning)",
+            format_routing_notice(decision),
+        )
 
     def test_prompt_asks_for_both_explanations(self) -> None:
         prompt = build_router_prompt(title="t", body="b", labels=[], candidates=candidates("codex"))

@@ -65,12 +65,25 @@ upload. The database includes upload and reviewer-feedback state for a future
 review-platform integration, but this release does not transmit records.
 
 The **Feedback** tab reads that same local database for the selected
-repository: every AI execution grouped by issue and attempt, expandable to the
-original GitHub issue, the exact prompt submitted, the AI's summary of the
-requested and completed work, files/branch/commits/pull request, lifecycle
-notes and warnings, and any reviewer feedback once a review platform has
-provided it. It is read-only and empty until "Store AI execution history" has
-recorded at least one execution.
+repository, split across three tabs:
+
+- **Prompt grades** — the router's grade of each issue's original prompt, with
+  the reason, the complexity score, and the AI platform, model, and reasoning
+  effort that ran the pre-flight grading pass (usually not the platform that
+  then worked the issue). Filter by grade, by search, or by grading platform.
+- **Router activity** — one row per grading platform showing which AI tools its
+  router picked and how often, as counts and percentages of that router's own
+  graded issues. Selecting a row filters every prompt grade by the platform
+  that graded the issue rather than the one that worked it.
+- **Execution history** — every AI execution grouped by issue and attempt,
+  expandable to the original GitHub issue, the exact prompt submitted, the AI's
+  summary of the requested and completed work, files/branch/commits/pull
+  request, lifecycle notes and warnings, and any reviewer feedback once a
+  review platform has provided it.
+
+It is read-only and empty until "Store AI execution history" has recorded at
+least one execution; grades and router activity also need Dynamic Model Routing
+turned on.
 
 ## Branch safety model
 
