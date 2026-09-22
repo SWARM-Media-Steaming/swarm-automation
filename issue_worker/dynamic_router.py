@@ -143,6 +143,15 @@ _MODEL_DESCRIPTIONS: dict[str, str] = {
         "Codex's most capable model. Reserved for sweeping, high-risk, or deeply "
         "ambiguous work."
     ),
+    "claude-fable-5": (
+        "An earlier release of Claude's usage-credit model, kept for comparison "
+        "against the current one."
+    ),
+    "claude-fable-5-1": (
+        "Claude's deepest-reasoning model, billed against a separate usage-credit "
+        "balance rather than the plan allowance. For the hardest work, where that "
+        "extra cost is accepted deliberately."
+    ),
     "grok-4.5": "An earlier, smaller Grok model, kept for compatibility where configured.",
     "grok-4.6": (
         "Grok's general-purpose coding model, balancing speed and capability across a "
@@ -150,6 +159,10 @@ _MODEL_DESCRIPTIONS: dict[str, str] = {
     ),
     "grok-4.7": (
         "Grok's most capable model, offering the deepest reasoning in the Grok line."
+    ),
+    "grok-4.7-build-fast": (
+        "The fast variant of Grok's most capable model. Trades some depth for "
+        "noticeably quicker turnaround on well-scoped work."
     ),
 }
 
