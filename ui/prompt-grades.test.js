@@ -1,6 +1,17 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { GRADES, gradeTone, distributionBars, toggleGrade, summaryLine } = require("./prompt-grades.js");
+const {
+  GRADES,
+  FEEDBACK_TABS,
+  activeTab,
+  gradeTone,
+  distributionBars,
+  toggleGrade,
+  routerRows,
+  toggleRouter,
+  routerLine,
+  summaryLine,
+} = require("./prompt-grades.js");
 
 test("maps each letter onto the shared state palette", () => {
   assert.equal(gradeTone("A+"), "passed");
@@ -41,4 +52,60 @@ test("summarizes how many prompts earned a B or better", () => {
     summaryLine({ graded: 5, distribution: { "A-": 1, B: 2, C: 2 } }),
     "3 of 5 graded prompts earned a B or better.",
   );
+});
+
+test("falls back to the first tab for an unknown feedback tab", () => {
+  assert.deepEqual(FEEDBACK_TABS, ["grades", "routing", "history"]);
+  assert.equal(activeTab("routing"), "routing");
+  assert.equal(activeTab("history"), "history");
+  assert.equal(activeTab("nope"), "grades");
+  assert.equal(activeTab(""), "grades");
+  assert.equal(activeTab(undefined), "grades");
+});
+
+const MATRIX = [
+  {
+    router: "claude",
+    graded: 3,
+    selections: [
+      { provider: "codex", count: 2, percent: 66.7 },
+      { provider: "claude", count: 1, percent: 33.3 },
+    ],
+  },
+  { router: "grok", graded: 1, selections: [{ provider: "grok", count: 1, percent: 100 }] },
+];
+
+test("sizes each grading platform's picks against its own graded total", () => {
+  const rows = routerRows(MATRIX, "claude");
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].router, "claude");
+  assert.equal(rows[0].graded, 3);
+  assert.equal(rows[0].selected, true);
+  assert.equal(rows[0].interactive, true);
+  assert.deepEqual(rows[0].selections.map((entry) => entry.provider), ["codex", "claude"]);
+  assert.equal(rows[0].selections[0].percent, 66.7);
+  assert.equal(rows[1].selected, false);
+  assert.deepEqual(routerRows(null, ""), []);
+});
+
+test("keeps a router-less row visible but not selectable", () => {
+  const rows = routerRows([{ router: "", graded: 2, selections: [{ provider: "codex", count: 2 }] }], "");
+  assert.equal(rows[0].interactive, false);
+  assert.equal(rows[0].selected, false);
+  // percent is derived when the payload predates the rounded value.
+  assert.equal(rows[0].selections[0].percent, 100);
+});
+
+test("clicking a grading platform selects it and clicking it again clears the filter", () => {
+  assert.equal(toggleRouter("", "claude", MATRIX), "claude");
+  assert.equal(toggleRouter("claude", "claude", MATRIX), "");
+  assert.equal(toggleRouter("claude", "grok", MATRIX), "grok");
+  assert.equal(toggleRouter("claude", "codex", MATRIX), "claude");
+  assert.equal(toggleRouter("claude", "", MATRIX), "claude");
+});
+
+test("summarizes who a grading platform picks most often", () => {
+  assert.equal(routerLine(routerRows(MATRIX, "")[0], (id) => id.toUpperCase()),
+    "3 graded · picked CODEX 67% of the time");
+  assert.equal(routerLine({ graded: 0, selections: [] }), "No graded prompts yet.");
 });

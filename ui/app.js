@@ -35,9 +35,13 @@
     promptGrades: null,
     promptGradesSearch: "",
     promptGradesGrade: "",
+    // Provider key of the AI platform that graded/routed an issue. A different
+    // axis from the search box, which matches the platform that worked it.
+    promptGradesRouter: "",
     promptGradesOffset: 0,
     promptGradesRequest: 0,
     promptGradesSearchTimer: null,
+    feedbackTab: "grades",
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
     botReadiness: {},
     // repoId -> last BranchPushAccess from branch_push_access.
@@ -213,7 +217,12 @@
     },
     "prompt-grades": {
       title: "Prompt grades",
-      html: "<p>When <strong>Dynamic Model Routing</strong> is on, the router grades the original issue before any AI works on it — from <strong>A+</strong> down to <strong>F</strong> — and explains what the issue does well, what is missing, and what would raise the grade. This panel lists those grades for the selected repository, newest first. The list loads ten at a time from the local database, the same way execution history does.</p><p>Search matches issue number, title, provider, model, branch, or status, and Previous and Next fetch another page. Click a bar in the chart, such as <strong>B-</strong>, to show only prompts with that grade. Click the same bar again to clear it. The chart keeps counting every grade in the current search, so another bar can be chosen without clearing the search.</p><p>The <strong>average grade</strong> uses a 4.0 scale (A = 4.0, B = 3.0, C = 2.0, D = 1.0, F = 0) across the graded runs in the current search. Expand a row to read why it earned its grade, plus the complexity, tool, model, and confidence the router chose.</p><p>Runs without routing, and runs where the router was unavailable, are not graded and do not appear here. An issue that is reworked is graded again, so it can appear more than once. This view only reads the local execution history and never changes issue processing.</p>",
+      html: "<p>When <strong>Dynamic Model Routing</strong> is on, the router grades the original issue before any AI works on it — from <strong>A+</strong> down to <strong>F</strong> — and explains what the issue does well, what is missing, and what would raise the grade. This panel lists those grades for the selected repository, newest first. The list loads ten at a time from the local database, the same way execution history does.</p><p>Search matches issue number, title, provider, model, branch, or status, and Previous and Next fetch another page. Click a bar in the chart, such as <strong>B-</strong>, to show only prompts with that grade. Click the same bar again to clear it. The chart keeps counting every grade in the current search, so another bar can be chosen without clearing the search.</p><p>The <strong>average grade</strong> uses a 4.0 scale (A = 4.0, B = 3.0, C = 2.0, D = 1.0, F = 0) across the graded runs in the current search. Each row also shows <strong>Graded by</strong> — the AI platform and model that ran the pre-flight grading and routing pass, which is usually not the platform that then worked the issue. Expand a row to read why it earned its grade, plus the complexity, tool, model, and confidence the router chose, and the grading model's own reasoning effort.</p><p>The <strong>Router activity</strong> tab breaks the same grades down by which platform graded them, and selecting a router there filters this list to that platform's grades.</p><p>Runs without routing, and runs where the router was unavailable, are not graded and do not appear here. An issue that is reworked is graded again, so it can appear more than once. This view only reads the local execution history and never changes issue processing.</p>",
+      links: [],
+    },
+    "router-activity": {
+      title: "Router activity",
+      html: "<p>When <strong>Dynamic Model Routing</strong> is on, one AI platform runs a pre-flight pass over a new issue: it grades the issue, scores its complexity, and picks which AI tool actually does the work. This panel is one row per grading platform, showing which tools that platform chose and how often, as a count and a share of its own graded issues.</p><p>Read it as router bias: if Grok's router graded twelve issues and handed nine of them to Grok, that row shows <strong>75%</strong>. Comparing rows shows which platforms are chosen most, and by whom.</p><p>Select a row to filter every prompt grade by the platform that <strong>graded</strong> the issue instead of the one that worked it — the grades list, its average, and the grade chart all narrow to that router. Select the same row again, or <strong>Show every router</strong> on the Prompt grades tab, to clear it. This panel always counts every router in the current search, so another row can be chosen without clearing the filter first.</p><p>The grading platform, its model, and its reasoning effort are recorded with each routing decision and are shown on every grade row. Rows recorded before that detail existed appear as <strong>Not recorded</strong> and cannot be filtered on.</p>",
       links: [],
     },
     "provider-bins": {
@@ -234,6 +243,7 @@
     ["Test scheduler", "uat-suite"],
     ["Test run history", "test-runs"],
     ["Prompt grades", "prompt-grades"],
+    ["Router activity", "router-activity"],
     ["Execution history", "execution-history"],
     ["Where your data lives", "data-location"],
   ];
@@ -1675,9 +1685,24 @@
   function promptGradesView() {
     const page = state.promptGrades;
     if (!page || !Array.isArray(page.records)) {
-      return { records: [], total: 0, offset: 0, limit: 10, summary: null };
+      return { records: [], total: 0, offset: 0, limit: 10, summary: null, routerMatrix: [] };
     }
     return page;
+  }
+
+  // The AI platform, model, and effort that graded and routed an issue, from
+  // the stored routing decision. Reported separately from the worker's own
+  // model everywhere, so a grade can be attributed to the AI that gave it.
+  function routerLabel(decision) {
+    const provider = String((decision && decision.router_provider) || "").trim();
+    return provider ? providerLabel(provider) : "";
+  }
+
+  function routerModelLabel(decision) {
+    const model = String((decision && decision.router_model) || "").trim();
+    const name = routerLabel(decision);
+    if (name && model) return `${name} · ${model}`;
+    return name || model;
   }
 
   function gradeBadge(grade, extraClass = "") {
@@ -1708,6 +1733,7 @@
     [
       ["AI tool", record.aiProvider],
       ["Model", record.model],
+      ["Graded by", routerModelLabel(decision)],
       ["Complexity", decision.complexity != null ? `${decision.complexity}/10` : ""],
     ].forEach(([label, value]) => {
       const cell = document.createElement("div");
@@ -1736,6 +1762,9 @@
     facts.className = "repo-inspection";
     [
       ["Effort", record.effort],
+      ["Graded by", routerLabel(decision)],
+      ["Grading model", decision.router_model || ""],
+      ["Grading effort", decision.router_effort || ""],
       ["Router confidence", Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : ""],
       ["Outcome", executionStatusMeta(record.finalStatus).label],
     ].forEach(([label, value]) => {
@@ -1802,8 +1831,114 @@
     });
   }
 
+  // One row per grading platform, each showing the platforms it handed work to
+  // as a proportional bar with counts and percentages. Selecting a row filters
+  // every grade by who graded it, which is the axis the search box cannot
+  // reach. The matrix itself ignores that filter so another row stays pickable.
+  function renderPromptGradeRouters(matrix) {
+    const box = byId("prompt-grades-router-matrix");
+    if (!box) return;
+    box.replaceChildren();
+    const rows = window.SwarmPromptGrades.routerRows(matrix, state.promptGradesRouter);
+    const count = byId("prompt-grades-router-count");
+    if (count) count.textContent = `${rows.length} router${rows.length === 1 ? "" : "s"}`;
+    const legend = byId("prompt-grades-router-legend");
+    if (legend) legend.replaceChildren();
+    if (!rows.length) {
+      box.appendChild(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: state.promptGradesSearch.trim()
+          ? "No graded prompts match this search."
+          : "No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.",
+      }));
+      return;
+    }
+    // One series colour per platform across every row, so a colour means the
+    // same thing whichever router picked it.
+    const seriesOrder = [];
+    rows.forEach((row) => row.selections.forEach(({ provider }) => {
+      if (provider && !seriesOrder.includes(provider)) seriesOrder.push(provider);
+    }));
+    const seriesClass = (provider) => {
+      const index = seriesOrder.indexOf(provider);
+      return index >= 0 && index < 4 ? `series-${index + 1}` : "";
+    };
+    rows.forEach((row) => {
+      const element = document.createElement(row.interactive ? "button" : "div");
+      element.className = `router-row ${row.selected ? "selected" : ""}`.trim();
+      if (row.interactive) {
+        element.type = "button";
+        element.dataset.router = row.router;
+        element.setAttribute("aria-pressed", row.selected ? "true" : "false");
+        element.setAttribute(
+          "aria-label",
+          row.selected
+            ? `Clear the ${providerLabel(row.router)} grading filter`
+            : `Show only prompts graded by ${providerLabel(row.router)}`,
+        );
+      }
+      const name = document.createElement("div");
+      name.className = "router-row-name";
+      const title = document.createElement("strong");
+      title.textContent = row.interactive ? providerLabel(row.router) : "Not recorded";
+      const subtitle = document.createElement("span");
+      subtitle.textContent = `${row.graded} graded`;
+      name.append(title, subtitle);
+      const shares = document.createElement("div");
+      shares.className = "router-shares";
+      const track = document.createElement("div");
+      track.className = "router-share-track";
+      const labels = document.createElement("div");
+      labels.className = "router-share-labels";
+      row.selections.forEach((entry) => {
+        const share = document.createElement("div");
+        share.className = `router-share ${seriesClass(entry.provider)}`.trim();
+        share.style.setProperty("--share", `${entry.percent}%`);
+        const text = `${providerLabel(entry.provider)} ${entry.count} (${Math.round(entry.percent)}%)`;
+        share.title = text;
+        track.appendChild(share);
+        labels.appendChild(Object.assign(document.createElement("span"), { textContent: text }));
+      });
+      shares.append(track, labels);
+      element.append(name, shares);
+      box.appendChild(element);
+    });
+    if (legend) {
+      seriesOrder.forEach((provider) => {
+        const item = document.createElement("span");
+        const swatch = document.createElement("i");
+        swatch.className = seriesClass(provider);
+        item.append(swatch, document.createTextNode(providerLabel(provider)));
+        legend.appendChild(item);
+      });
+    }
+  }
+
+  // The banner shown on the grades tab while a router filter set on the
+  // routing tab is narrowing the list, so the filter is never invisible.
+  function renderPromptGradeRouterFilter() {
+    const banner = byId("prompt-grades-router-filter");
+    if (!banner) return;
+    const router = state.promptGradesRouter;
+    banner.classList.toggle("hidden", !router);
+    banner.replaceChildren();
+    if (!router) return;
+    const label = document.createElement("strong");
+    label.textContent = `Graded by ${providerLabel(router)}`;
+    const detail = document.createElement("span");
+    detail.textContent = "Only issues this AI platform graded and routed are listed.";
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "text-button";
+    clear.id = "prompt-grades-router-clear";
+    clear.textContent = "Show every router";
+    banner.append(label, detail, clear);
+  }
+
   function promptGradesFiltering() {
-    return state.promptGradesSearch.trim().length > 0 || state.promptGradesGrade.length > 0;
+    return state.promptGradesSearch.trim().length > 0
+      || state.promptGradesGrade.length > 0
+      || state.promptGradesRouter.length > 0;
   }
 
   function promptGradeCountNoun(total, filtering) {
@@ -1822,6 +1957,8 @@
     const offset = Number(page.offset) || 0;
     const records = page.records;
     renderPromptGradeSummary(page.summary);
+    renderPromptGradeRouters(page.routerMatrix);
+    renderPromptGradeRouterFilter();
     const count = byId("prompt-grades-count");
     if (count) {
       const noun = promptGradeCountNoun(total, filtering);
@@ -1857,6 +1994,27 @@
     records.forEach((record) => box.appendChild(buildPromptGradeItem(record)));
   }
 
+  // The Feedback view is a tablist over three reports rather than one long
+  // stack. Same shape as the view-switcher: a button per panel, one panel
+  // visible at a time, no route of its own.
+  function showFeedbackTab(tab, { focus = false } = {}) {
+    state.feedbackTab = window.SwarmPromptGrades.activeTab(tab);
+    document.querySelectorAll("[data-feedback-tab]").forEach((button) => {
+      const active = button.dataset.feedbackTab === state.feedbackTab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      // Roving tabindex: only the selected tab is in the tab order, so the
+      // arrow keys below are the only way to reach the others by keyboard.
+      button.tabIndex = active ? 0 : -1;
+      if (active && focus) button.focus();
+    });
+    document.querySelectorAll("[data-feedback-panel]").forEach((panel) => {
+      const active = panel.dataset.feedbackPanel === state.feedbackTab;
+      panel.classList.toggle("active", active);
+      panel.hidden = !active;
+    });
+  }
+
   async function refreshPromptGrades({ quiet = false } = {}) {
     const repo = currentRepo();
     const requestId = state.promptGradesRequest + 1;
@@ -1870,12 +2028,14 @@
     const offset = Math.max(0, Number(state.promptGradesOffset) || 0);
     const search = state.promptGradesSearch.trim();
     const grade = state.promptGradesGrade;
+    const router = state.promptGradesRouter;
     try {
       const page = await invoke("get_prompt_grades_background", {
         repoId: repo.id,
         offset,
         search,
         grade,
+        router,
       });
       if (requestId !== state.promptGradesRequest || repo.id !== state.activeRepoId) return;
       state.promptGrades = page;
@@ -2974,6 +3134,7 @@
     state.promptGradesOffset = 0;
     state.promptGradesSearch = "";
     state.promptGradesGrade = "";
+    state.promptGradesRouter = "";
     clearTimeout(state.promptGradesSearchTimer);
     state.executionHistoryOffset = 0;
     state.executionHistorySearch = "";
@@ -3392,6 +3553,42 @@
     byId("refresh-execution-history").addEventListener("click", () => {
       void refreshPromptGrades();
       void refreshExecutionHistory();
+    });
+    const feedbackTabs = Array.from(document.querySelectorAll("[data-feedback-tab]"));
+    feedbackTabs.forEach((button) => {
+      button.addEventListener("click", () => showFeedbackTab(button.dataset.feedbackTab));
+      button.addEventListener("keydown", (event) => {
+        const steps = { ArrowRight: 1, ArrowLeft: -1, Home: "first", End: "last" };
+        const step = steps[event.key];
+        if (step === undefined) return;
+        event.preventDefault();
+        const current = feedbackTabs.indexOf(button);
+        const index = step === "first" ? 0
+          : step === "last" ? feedbackTabs.length - 1
+          : (current + step + feedbackTabs.length) % feedbackTabs.length;
+        showFeedbackTab(feedbackTabs[index].dataset.feedbackTab, { focus: true });
+      });
+    });
+    showFeedbackTab(state.feedbackTab);
+    byId("prompt-grades-router-matrix").addEventListener("click", (event) => {
+      const row = event.target.closest("[data-router]");
+      if (!row) return;
+      const page = promptGradesView();
+      state.promptGradesRouter = window.SwarmPromptGrades.toggleRouter(
+        state.promptGradesRouter,
+        row.dataset.router,
+        page.routerMatrix,
+      );
+      state.promptGradesOffset = 0;
+      // Land on the grades themselves: the filter's whole point is the list.
+      if (state.promptGradesRouter) showFeedbackTab("grades");
+      void refreshPromptGrades({ quiet: true });
+    });
+    byId("prompt-grades-router-filter").addEventListener("click", (event) => {
+      if (!event.target.closest("#prompt-grades-router-clear")) return;
+      state.promptGradesRouter = "";
+      state.promptGradesOffset = 0;
+      void refreshPromptGrades({ quiet: true });
     });
     byId("prompt-grades-bars").addEventListener("click", (event) => {
       const bar = event.target.closest("[data-grade]");

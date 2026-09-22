@@ -497,12 +497,14 @@ fn prompt_grades_lookup_is_safe_before_any_execution_exists() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(grades.records.is_empty());
     assert_eq!(grades.total, 0);
     assert_eq!(grades.summary.graded, 0);
     assert_eq!(grades.summary.average_points, None);
+    assert!(grades.router_matrix.is_empty());
 }
 
 #[test]
@@ -514,6 +516,7 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
         Some(-4),
         Some("  Widget  ".into()),
         Some(" B- ".into()),
+        Some("  Claude ".into()),
     );
     assert!(args.contains(&"--grades".to_string()));
     let value_after = |flag: &str| {
@@ -525,11 +528,15 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
     assert_eq!(value_after("--offset"), Some("0"));
     assert_eq!(value_after("--search"), Some("Widget"));
     assert_eq!(value_after("--grade"), Some("B-"));
+    // The grades panel filters by the platform that graded the issue, which is
+    // a different axis from the provider the search box already matches.
+    assert_eq!(value_after("--router"), Some("claude"));
 
     let unfiltered = prompt_grades_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
         "octocat/example",
+        None,
         None,
         None,
         None,
@@ -540,6 +547,28 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
     assert!(unfiltered
         .windows(2)
         .any(|pair| pair[0] == "--grade" && pair[1].is_empty()));
+    assert!(unfiltered
+        .windows(2)
+        .any(|pair| pair[0] == "--router" && pair[1].is_empty()));
+}
+
+#[test]
+fn prompt_grades_page_decodes_the_router_matrix_the_history_cli_prints() {
+    let page: super::PromptGradesPage = serde_json::from_str(
+        r#"{"records":[],"total":0,"offset":0,"limit":10,
+            "summary":{"graded":3,"averagePoints":3.0,"averageGrade":"B","distribution":{"B":3}},
+            "routerMatrix":[{"router":"claude","graded":3,
+              "selections":[{"provider":"codex","count":2,"percent":66.7},
+                            {"provider":"claude","count":1,"percent":33.3}]}]}"#,
+    )
+    .expect("router matrix should decode");
+    assert_eq!(page.router_matrix.len(), 1);
+    let row = &page.router_matrix[0];
+    assert_eq!(row.router, "claude");
+    assert_eq!(row.graded, 3);
+    assert_eq!(row.selections[0].provider, "codex");
+    assert_eq!(row.selections[0].count, 2);
+    assert!((row.selections[0].percent - 66.7).abs() < f64::EPSILON);
 }
 
 #[test]

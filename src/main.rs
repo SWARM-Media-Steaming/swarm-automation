@@ -1363,6 +1363,32 @@ struct PromptGradeSummary {
     distribution: std::collections::BTreeMap<String, i64>,
 }
 
+/// How often one grading platform picked one worker platform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptGradeRouterSelection {
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    count: i64,
+    /// Share of that router's own graded issues, already rounded by Python.
+    #[serde(default)]
+    percent: f64,
+}
+
+/// One grading platform's picks: which AI tools its pre-flight router chose,
+/// and how often. Lets the desktop show router bias without a second query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptGradeRouterRow {
+    #[serde(default)]
+    router: String,
+    #[serde(default)]
+    graded: i64,
+    #[serde(default)]
+    selections: Vec<PromptGradeRouterSelection>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PromptGradesPage {
@@ -1372,12 +1398,28 @@ struct PromptGradesPage {
     limit: i64,
     #[serde(default)]
     summary: PromptGradeSummary,
+    /// Every grading platform in the current search, even when one of them is
+    /// the active filter, so the desktop can always offer another.
+    #[serde(default)]
+    router_matrix: Vec<PromptGradeRouterRow>,
 }
 
 fn normalize_prompt_grade(grade: Option<String>) -> String {
     // The history CLI ignores anything that is not a router grade. Cap the
     // argument so a huge string cannot reach the process argv.
     grade.unwrap_or_default().trim().chars().take(8).collect()
+}
+
+fn normalize_router_filter(router: Option<String>) -> String {
+    // Same contract as the grade filter: the history CLI ignores anything that
+    // is not a provider key, and the argument is capped before it reaches argv.
+    router
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase()
+        .chars()
+        .take(40)
+        .collect()
 }
 
 fn prompt_grades_query_args(
@@ -1387,6 +1429,7 @@ fn prompt_grades_query_args(
     offset: Option<i64>,
     search: Option<String>,
     grade: Option<String>,
+    router: Option<String>,
 ) -> Vec<String> {
     // `--limit` is always sent, matching execution history. Omitting it would
     // still page grades, but the desktop always asks for one page explicitly.
@@ -1405,6 +1448,8 @@ fn prompt_grades_query_args(
         normalize_execution_history_search(search),
         "--grade".into(),
         normalize_prompt_grade(grade),
+        "--router".into(),
+        normalize_router_filter(router),
     ]
 }
 
@@ -1416,6 +1461,7 @@ fn get_prompt_grades<R: tauri::Runtime>(
     offset: Option<i64>,
     search: Option<String>,
     grade: Option<String>,
+    router: Option<String>,
 ) -> Result<PromptGradesPage, String> {
     let config = current_config(&state)?;
     let repo = resolve_repo(&config, &repo_id)?;
@@ -1427,6 +1473,7 @@ fn get_prompt_grades<R: tauri::Runtime>(
             offset: 0,
             limit: EXECUTION_HISTORY_PAGE_SIZE,
             summary: PromptGradeSummary::default(),
+            router_matrix: Vec::new(),
         });
     }
     let script = worker_script_dir(&app)?.join("ai_execution_history.py");
@@ -1440,6 +1487,7 @@ fn get_prompt_grades<R: tauri::Runtime>(
             offset,
             search,
             grade,
+            router,
         ),
     );
     if !ok {
@@ -1456,10 +1504,11 @@ async fn get_prompt_grades_background(
     offset: Option<i64>,
     search: Option<String>,
     grade: Option<String>,
+    router: Option<String>,
 ) -> Result<PromptGradesPage, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        get_prompt_grades(app.clone(), state, repo_id, offset, search, grade)
+        get_prompt_grades(app.clone(), state, repo_id, offset, search, grade, router)
     })
     .await
     .map_err(|error| format!("Prompt grades lookup failed: {error}"))?
