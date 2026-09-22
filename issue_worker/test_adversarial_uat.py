@@ -15,6 +15,7 @@ import ai_test_assist
 import adversarial_uat as uat
 import test_swarm_issue_worker as fixtures
 from ai_execution_history import ExecutionHistoryRepository, ExecutionHistoryService, ExecutionStart
+from dynamic_router import COMPLEXITY_SCALE_TOP, FRONTIER_COMPLEXITY_FLOOR
 from swarm_issue_worker import Worker, ProviderChoice, ProviderUsage, IssueContext, WorkerError, iso_timestamp
 
 
@@ -350,6 +351,28 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(row["adversarial_outcome"], "")
         self.assertIsNone(row["capacity_consumed_percent"])
         self.assertEqual(upgraded.adversarial_summary(self.worker.config.github_repository)["loops"], 0)
+
+    def test_cost_routing_prompt_holds_frontier_models_to_the_complexity_floor(self):
+        self.prepare()
+        self.worker.config = dataclasses.replace(
+            self.worker.config, dynamic_model_routing=True, routing_optimization="cost"
+        )
+        loop = self.worker.read_state()["adversarial"]
+        with self.patches(), mock.patch.object(
+            self.worker, "run_router", return_value="router response"
+        ) as router, mock.patch.object(
+            self.worker,
+            "resolve_router_response",
+            return_value={"provider": "grok", "selected_model": "grok-4.6", "reasoning_effort": "high"},
+        ):
+            self.worker.choose_adversarial_provider(loop)
+        prompt = router.call_args.args[1]
+        self.assertIn("Routing preference: optimize for cost.", prompt)
+        self.assertIn(f"Frontier complexity floor: {FRONTIER_COMPLEXITY_FLOOR}", prompt)
+        self.assertIn(f"Complexity scale top: {COMPLEXITY_SCALE_TOP}", prompt)
+        self.assertIn("A frontier model is a last resort.", prompt)
+        self.assertIn("High risk is not a license to pick a frontier model below the floor.", prompt)
+        self.assertNotIn("escalate to a stronger", prompt)
 
     def test_router_is_not_pinned_by_the_existing_issue_branch(self):
         self.prepare()

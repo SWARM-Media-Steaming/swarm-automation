@@ -30,7 +30,12 @@ from ai_execution_history import (
     sanitize_text,
     summarize_router_matrix,
 )
-from dynamic_router import PROMPT_GRADES, RouterError
+from dynamic_router import (
+    COMPLEXITY_SCALE_TOP,
+    FRONTIER_COMPLEXITY_FLOOR,
+    PROMPT_GRADES,
+    RouterError,
+)
 from swarm_issue_worker import (
     Config,
     ISSUE_COMPLETED_EXIT_CODE,
@@ -3113,6 +3118,15 @@ class WorkerTestCase(unittest.TestCase):
         prompt = router.call_args.kwargs["prompt"]
         self.assertIn("Routing preference: optimize for cost.", prompt)
         self.assertIn("Model catalog", prompt)
+        self.assertIn(f"Frontier complexity floor: {FRONTIER_COMPLEXITY_FLOOR}", prompt)
+        self.assertIn(f"Complexity scale top: {COMPLEXITY_SCALE_TOP}", prompt)
+        self.assertIn("The frontier models in this catalog are:", prompt)
+        self.assertIn("gpt-6-astra", prompt.split("The frontier models in this catalog are:")[1].split("\n")[0])
+        self.assertIn(
+            "High risk may justify leaving the cheapest tier for a capable mid-tier model only.",
+            prompt,
+        )
+        self.assertNotIn("escalate to a stronger", prompt)
         self.assertEqual(self.worker.choice.model, "gpt-5.6-terra")
         self.assertEqual(self.worker.routing["routing_optimization"], "cost")
 

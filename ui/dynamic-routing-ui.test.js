@@ -111,3 +111,32 @@ test("a two-value checkbox saves a string, never a boolean", () => {
   assert.equal(valuedToggleValue(false, "cost", "best"), "best");
   assert.notEqual(typeof valuedToggleValue(true, "cost", "best"), "boolean");
 });
+
+test("cost routing toggle copy holds frontier models to complexity 9 or 10", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+  const match = html.match(/Optimize routing for cost<\/strong><small>(.*?)<\/small>/);
+  assert.ok(match, "toggle blurb should sit under Optimize routing for cost");
+  const copy = match[1];
+  assert.match(copy, /least expensive model that can actually do the work/);
+  assert.match(copy, /frontier model is a last resort/);
+  assert.match(copy, /complexity is 9 or 10/);
+  assert.match(copy, /capable mid-tier model/);
+  assert.doesNotMatch(copy, /escalating only when risk is high/);
+});
+
+test("dynamic model routing help describes the cost frontier floor", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  const topic = source.match(/"dynamic-model-routing":\s*\{[\s\S]*?html:\s*"([\s\S]*?)",\n\s*links:/);
+  assert.ok(topic, "dynamic-model-routing help topic should exist");
+  const html = topic[1];
+  assert.match(html, /Optimize routing for cost/);
+  assert.match(html, /least expensive model that can actually do the work/);
+  assert.match(html, /frontier model is a last resort/);
+  assert.match(html, /complexity is 9 or 10/);
+  assert.match(html, /capable mid-tier model/);
+  assert.doesNotMatch(html, /escalates to a stronger one when the graded risk is high/);
+});
