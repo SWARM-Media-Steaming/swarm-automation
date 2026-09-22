@@ -172,10 +172,16 @@
         </section>
 
         <section id="view-feedback" class="view">
-          <div class="section-intro"><div><p class="eyebrow">FEEDBACK</p><h2>Prompt grades, history, and reviewer feedback <button class="help-dot" data-help="execution-history" aria-label="About execution history">?</button></h2><p>Every AI issue execution for the selected repository, ten at a time: the issue, the exact prompt submitted, what the AI reported, and any reviewer feedback. Search finds an issue without loading the rest. Read-only — this never changes issue processing.</p></div><div class="control-row"><button id="import-execution-history" class="secondary-button">Import from GitHub</button><button id="refresh-execution-history" class="secondary-button">Refresh</button></div></div>
-          <div class="settings-grid">
+          <div class="section-intro"><div><p class="eyebrow">FEEDBACK</p><h2>Prompt grades, router activity, and execution history <button class="help-dot" data-help="execution-history" aria-label="About execution history">?</button></h2><p>Three reports over the selected repository's AI work, one tab at a time: how well each issue was written, which AI platform graded it and who that platform picked, and the full execution record. Read-only — this never changes issue processing.</p></div><div class="control-row"><button id="import-execution-history" class="secondary-button">Import from GitHub</button><button id="refresh-execution-history" class="secondary-button">Refresh</button></div></div>
+          <div class="panel-tabs" role="tablist" aria-label="Feedback reports">
+            <button type="button" role="tab" id="feedback-tab-grades" class="active" data-feedback-tab="grades" aria-selected="true" aria-controls="feedback-panel-grades">Prompt grades</button>
+            <button type="button" role="tab" id="feedback-tab-routing" data-feedback-tab="routing" aria-selected="false" aria-controls="feedback-panel-routing" tabindex="-1">Router activity</button>
+            <button type="button" role="tab" id="feedback-tab-history" data-feedback-tab="history" aria-selected="false" aria-controls="feedback-panel-history" tabindex="-1">Execution history</button>
+          </div>
+          <div class="settings-grid feedback-panel active" id="feedback-panel-grades" role="tabpanel" aria-labelledby="feedback-tab-grades" data-feedback-panel="grades">
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">PROMPT GRADES</p><h3>How well were your issues written? <button class="help-dot" data-help="prompt-grades" aria-label="About prompt grades">?</button></h3></div><span id="prompt-grades-count" class="availability">0 graded</span></div>
+              <div id="prompt-grades-router-filter" class="banner policy hidden"></div>
               <div id="prompt-grades-summary" class="grade-summary hidden">
                 <div class="grade-average"><span>Average grade</span><strong id="prompt-grades-average" class="grade-badge">—</strong><small id="prompt-grades-average-detail"></small></div>
                 <div id="prompt-grades-bars" class="grade-bars" role="group" aria-label="Filter prompts by grade"></div>
@@ -184,6 +190,16 @@
               <div id="prompt-grades-list" class="execution-list" aria-live="polite"><p class="panel-copy">No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.</p></div>
               <nav id="prompt-grades-pager" class="execution-pager hidden" aria-label="Prompt grade pages"><button type="button" id="prompt-grades-prev" class="secondary-button compact">Previous</button><span id="prompt-grades-page-label">Page 1 of 1</span><button type="button" id="prompt-grades-next" class="secondary-button compact">Next</button></nav>
             </article>
+          </div>
+          <div class="settings-grid feedback-panel" id="feedback-panel-routing" role="tabpanel" aria-labelledby="feedback-tab-routing" data-feedback-panel="routing" hidden>
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">ROUTER ACTIVITY</p><h3>Who grades, and who do they pick? <button class="help-dot" data-help="router-activity" aria-label="About router activity">?</button></h3></div><span id="prompt-grades-router-count" class="availability">0 routers</span></div>
+              <p class="panel-copy">One row per AI platform that ran a pre-flight grading pass, showing which platform it then handed the issue to and how often. Select a row to filter every prompt grade by the platform that <strong>graded</strong> the issue rather than the one that worked it.</p>
+              <div id="prompt-grades-router-matrix" class="router-matrix" role="group" aria-label="Filter prompts by grading AI platform" aria-live="polite"><p class="panel-copy">No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.</p></div>
+              <div id="prompt-grades-router-legend" class="router-legend" aria-hidden="true"></div>
+            </article>
+          </div>
+          <div class="settings-grid feedback-panel" id="feedback-panel-history" role="tabpanel" aria-labelledby="feedback-tab-history" data-feedback-panel="history" hidden>
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">EXECUTION HISTORY</p><h3>Issues, prompts, and conversations</h3></div><span id="execution-history-count" class="availability">0 executions</span></div>
               <label class="execution-search">Search issues<input id="execution-history-search" type="search" placeholder="Issue number, title, provider, branch, or status" autocomplete="off" spellcheck="false" aria-controls="execution-history-list" /></label>

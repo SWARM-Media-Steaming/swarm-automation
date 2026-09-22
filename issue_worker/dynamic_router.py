@@ -671,11 +671,38 @@ def provider_display_name(decision: dict[str, Any]) -> str:
     return key.capitalize() if key else ""
 
 
+def router_description(decision: dict[str, Any]) -> str:
+    """Who graded and routed the issue: ``Claude (Haiku 4.5, low reasoning)``.
+
+    The pre-flight grader is a different AI, model, and effort from the worker
+    the decision selects, so every report that shows the worker also needs this
+    to be readable: without it a grade cannot be attributed to the AI that gave
+    it, and router effectiveness/bias cannot be compared across providers.
+    Returns ``""`` when the decision predates these fields.
+    """
+    provider = str(decision.get("router_provider") or "").strip()
+    model = str(decision.get("router_model") or "").strip()
+    effort = str(decision.get("router_effort") or "").strip()
+    name = provider.capitalize() if provider else ""
+    detail = ", ".join(
+        part
+        for part in (
+            display_model_name(model) if model else "",
+            f"{display_effort(effort)} reasoning" if effort else "",
+        )
+        if part
+    )
+    if name and detail:
+        return f"{name} ({detail})"
+    return name or detail
+
+
 def format_routing_notice(decision: dict[str, Any]) -> str:
     """Issue-comment block shown when SWARM takes ownership."""
     model = display_model_name(str(decision.get("selected_model") or ""))
     effort = display_effort(str(decision.get("reasoning_effort") or ""))
     provider = provider_display_name(decision)
+    grader = router_description(decision)
     if decision.get("fallback"):
         lines = [
             "SWARM AI Routing",
@@ -684,6 +711,8 @@ def format_routing_notice(decision: dict[str, Any]) -> str:
         if provider:
             lines.append(f"Selected AI: {provider}")
         lines.extend([f"Selected Model: {model}", f"Reasoning: {effort}"])
+        if grader:
+            lines.append(f"Routed by: {grader}")
         reason = str(decision.get("grade_reason") or "").strip()
         if reason:
             lines.extend(["", reason])
@@ -704,6 +733,8 @@ def format_routing_notice(decision: dict[str, Any]) -> str:
         f"Reasoning: {effort}",
         f"Routing Confidence: {percent}%",
     ]
+    if grader:
+        lines.append(f"Graded and routed by: {grader}")
     if considered:
         lines.append(f"AI Tools Considered: {', '.join(considered)}")
     provider_reason = str(decision.get("provider_reason") or "").strip()

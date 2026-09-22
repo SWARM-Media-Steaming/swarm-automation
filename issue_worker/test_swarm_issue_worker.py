@@ -26,7 +26,9 @@ from ai_execution_history import (
     ExecutionStart,
     import_missing_issues,
     main as execution_history_main,
+    normalize_provider_key,
     sanitize_text,
+    summarize_router_matrix,
 )
 from dynamic_router import PROMPT_GRADES, RouterError
 from swarm_issue_worker import (
@@ -3137,6 +3139,131 @@ class WorkerTestCase(unittest.TestCase):
         cli_page = json.loads(buffer.getvalue())
         self.assertEqual([row["issue_number"] for row in cli_page["records"]], [3])
         self.assertEqual(cli_page["summary"]["distribution"]["A"], 1)
+
+    def test_router_matrix_counts_who_graded_and_who_they_picked(self) -> None:
+        database_path = self.state / "grades-routers.sqlite3"
+        service_args = dict(
+            repository="octocat/example",
+            issue_url="",
+            issue_body="SECRET BODY",
+            model="m",
+            effort="high",
+            branch_name="b",
+            application_version="1",
+        )
+        # (issue, grading platform, platform it picked, grade)
+        rows = [
+            (1, "claude", "Claude", "A"),
+            (2, "claude", "Codex", "B"),
+            (3, "claude", "Codex", "B-"),
+            (4, "grok", "Grok", "C"),
+            (5, "grok", "Claude", "A-"),
+        ]
+        for number, router, worked, grade in rows:
+            ExecutionHistoryService(True, database_path).start(
+                ExecutionStart(
+                    issue_number=number,
+                    issue_title=f"Issue {number}",
+                    provider=worked,
+                    routing_decision={
+                        "prompt_grade": grade,
+                        "grade_reason": "Reason.",
+                        "fallback": False,
+                        "provider": worked.lower(),
+                        "router_provider": router,
+                        "router_model": f"{router}-router",
+                        "router_effort": "low",
+                    },
+                    **service_args,
+                ),
+                f"2026-09-2{number}T10:00:00-05:00",
+            )
+        # A fallback row is never graded, so it must not reach the matrix.
+        ExecutionHistoryService(True, database_path).start(
+            ExecutionStart(
+                issue_number=6,
+                issue_title="Ungraded",
+                provider="Codex",
+                routing_decision={
+                    "prompt_grade": "",
+                    "fallback": True,
+                    "router_provider": "codex",
+                },
+                **service_args,
+            ),
+            "2026-09-26T10:00:00-05:00",
+        )
+        repository = ExecutionHistoryRepository(database_path)
+
+        page = repository.graded_for_repository("octocat/example")
+        matrix = page["routerMatrix"]
+        self.assertEqual([row["router"] for row in matrix], ["claude", "grok"])
+        self.assertEqual(matrix[0]["graded"], 3)
+        self.assertEqual(
+            matrix[0]["selections"],
+            [
+                {"provider": "codex", "count": 2, "percent": 66.7},
+                {"provider": "claude", "count": 1, "percent": 33.3},
+            ],
+        )
+        self.assertEqual(matrix[1]["graded"], 2)
+        self.assertEqual({entry["percent"] for entry in matrix[1]["selections"]}, {50.0})
+        # The grading model and effort ride along on every record so the UI can
+        # show which model graded without a second lookup.
+        self.assertEqual(page["records"][0]["routing_decision"]["router_model"], "grok-router")
+        self.assertEqual(page["records"][0]["routing_decision"]["router_effort"], "low")
+
+        # Filtering by the grading platform narrows the page and the grade
+        # summary, but never the matrix — another router must stay pickable.
+        only_claude = repository.graded_for_repository("octocat/example", router=" Claude ")
+        self.assertEqual([row["issue_number"] for row in only_claude["records"]], [3, 2, 1])
+        self.assertEqual(only_claude["total"], 3)
+        self.assertEqual(only_claude["summary"]["graded"], 3)
+        self.assertEqual(only_claude["summary"]["distribution"]["C"], 0)
+        self.assertEqual([row["router"] for row in only_claude["routerMatrix"]], ["claude", "grok"])
+
+        # Both filters together, and the grade chart still counts the router's
+        # other grades so a different bar can be chosen.
+        narrowed = repository.graded_for_repository("octocat/example", router="claude", grade="B")
+        self.assertEqual([row["issue_number"] for row in narrowed["records"]], [2])
+        self.assertEqual(narrowed["summary"]["graded"], 3)
+
+        # Anything that is not a provider key is no filter at all.
+        self.assertEqual(
+            repository.graded_for_repository("octocat/example", router="../etc")["total"], 5
+        )
+        self.assertEqual(normalize_provider_key(" CLAUDE "), "claude")
+        self.assertEqual(normalize_provider_key("drop table"), "")
+        self.assertEqual(normalize_provider_key("-lead"), "")
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = execution_history_main(
+                ["--db", str(database_path), "--repository", "octocat/example",
+                 "--grades", "--router", "grok", "--limit", "10"]
+            )
+        self.assertEqual(exit_code, 0)
+        cli_page = json.loads(buffer.getvalue())
+        self.assertEqual([row["issue_number"] for row in cli_page["records"]], [5, 4])
+        self.assertEqual(len(cli_page["routerMatrix"]), 2)
+
+        missing = io.StringIO()
+        with contextlib.redirect_stdout(missing):
+            execution_history_main(
+                ["--db", str(self.state / "none.sqlite3"), "--repository", "x/y", "--grades"]
+            )
+        self.assertEqual(json.loads(missing.getvalue())["routerMatrix"], [])
+
+    def test_router_matrix_keeps_rows_whose_router_was_never_recorded(self) -> None:
+        # Dropping them would make the percentages disagree with the grade
+        # count; they are reported under "" and the UI marks them unfilterable.
+        matrix = summarize_router_matrix(
+            [("", "codex", 2), ("claude", "codex", 1), ("claude", "claude", 3), ("grok", "grok", 0)]
+        )
+        self.assertEqual([row["router"] for row in matrix], ["claude", ""])
+        self.assertEqual(matrix[0]["selections"][0], {"provider": "claude", "count": 3, "percent": 75.0})
+        self.assertEqual(matrix[1]["graded"], 2)
+        self.assertEqual(summarize_router_matrix([]), [])
 
     def test_execution_history_migration_adds_routing_decision(self) -> None:
         database_path = self.state / "legacy-history.sqlite3"
