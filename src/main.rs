@@ -963,6 +963,12 @@ fn repo_worker_args(
             "--no-adversarial-uat-enabled"
         }
         .into(),
+        if repo.update_claude_assets_enabled {
+            "--update-claude-assets-enabled"
+        } else {
+            "--no-update-claude-assets-enabled"
+        }
+        .into(),
         if repo.allow_environment_only_summary {
             "--allow-environment-only-summary"
         } else {
