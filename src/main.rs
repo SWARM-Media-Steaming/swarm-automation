@@ -19,7 +19,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 10] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 11] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
@@ -30,6 +30,7 @@ const REQUIRED_WORKER_RESOURCES: [&str; 10] = [
     "ai_test_assist.py",
     "adversarial_uat.py",
     "issue_images.py",
+    "handoff_context.py",
 ];
 
 struct AppState {
