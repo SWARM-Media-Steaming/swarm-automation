@@ -150,7 +150,7 @@
     },
     "schedule-modes": {
       title: "Pickup schedule",
-      html: "<ul><li><strong>Continuous</strong> — checks repeatedly and handles ready issues one after another.</li><li><strong>Daily</strong> — checks once each day.</li><li><strong>Weekdays</strong> — checks Monday through Friday.</li><li><strong>Custom</strong> — checks on the days you choose.</li><li><strong>Manual</strong> — checks only when you select <em>Run now</em>.</li></ul>",
+      html: "<ul><li><strong>Continuous</strong> — checks repeatedly and handles ready issues one after another.</li><li><strong>Daily</strong> — checks once each day.</li><li><strong>Weekdays</strong> — checks Monday through Friday.</li><li><strong>Custom</strong> — checks on the days you choose.</li><li><strong>Manual</strong> — checks only when you select <em>Run now</em>.</li></ul><p><strong>Run now</strong> stays available whatever the schedule says, including while the worker is already running: it checks every enabled repository straight away, then the timer for the next check restarts from the end of that check.</p>",
       links: [],
     },
     "uat-suite": {
@@ -864,16 +864,38 @@
     }
   }
 
+  // What "Run now" should do for a [data-action] in the current status.
+  function runNowModeFor(action) {
+    const isIssue = action.endsWith("issue");
+    return window.SwarmRunNow.runNowMode({
+      kind: isIssue ? "issue" : "uat",
+      processState: isIssue ? (state.status?.issue?.state || "stopped") : (currentRepoStatus()?.uat?.state || "stopped"),
+      available: isIssue || Boolean(currentRepoStatus()?.uatAvailable),
+      busy: state.busy.has(action),
+    });
+  }
+
   async function runAction(action) {
     const verb = action.startsWith("start-") ? "Starting" : action.startsWith("run-") ? "Running"
       : action.startsWith("pause-") ? "Updating" : "Stopping";
     const subject = action.endsWith("issue") ? "issue worker" : "test scheduler";
+    // Resolved before withBusy marks the action busy, which would read as
+    // "disabled" and lose the distinction between starting and interrupting.
+    const runMode = action.startsWith("run-") ? runNowModeFor(action) : "";
+    const progress = runMode === "request"
+      ? "Asking the issue worker to scan now…"
+      : `${verb} the ${subject}…`;
     await withBusy(action, async () => {
       const isIssue = action.endsWith("issue");
       const repo = currentRepo();
       if (!isIssue && !repo) throw new Error("Choose a repository first.");
       const process = isIssue ? "issue" : `uat:${repo.id}`;
-      if (action.startsWith("start-") || action.startsWith("run-")) {
+      if (runMode === "request") {
+        // Already running: don't start a second scheduler, ask this one to
+        // scan now and restart its timer.
+        await saveBeforeAction();
+        showToast(await invoke("request_issue_scan"), "success");
+      } else if (action.startsWith("start-") || action.startsWith("run-")) {
         await saveBeforeAction();
         const command = isIssue ? "start_issue_worker" : "start_uat_scheduler";
         const args = { runOnce: action.startsWith("run-") };
@@ -891,7 +913,7 @@
       }
       await refreshStatus();
       if (!isIssue) await refreshTestPlan({ quiet: true });
-    }, { progress: `${verb} the ${subject}…` });
+    }, { progress });
   }
 
   function processLabel(status, kind) {
@@ -937,7 +959,10 @@
       const isIssue = action.endsWith("issue");
       const processState = isIssue ? (state.status?.issue?.state || "stopped") : (currentRepoStatus()?.uat?.state || "stopped");
       const busy = state.busy.has(action);
-      if (action.startsWith("start-") || action.startsWith("run-")) {
+      if (action.startsWith("run-")) {
+        // Stays available while the issue worker runs — see runNowMode.
+        button.disabled = runNowModeFor(action) === "disabled";
+      } else if (action.startsWith("start-")) {
         button.disabled = busy || processState !== "stopped" || (!isIssue && !currentRepoStatus()?.uatAvailable);
       } else {
         button.disabled = busy || processState === "stopped";

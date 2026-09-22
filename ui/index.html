@@ -83,6 +83,7 @@
                 <label id="poll-field">Poll every <div class="input-with-suffix"><input type="number" min="10" data-config="poll_interval_seconds" /><span>seconds</span></div></label>
                 <label id="time-field" class="hidden">Start at <input type="time" data-config="schedule_time" /></label>
                 <fieldset id="days-field" class="day-picker hidden"><legend>Run on</legend><label><input type="checkbox" value="mon" />M</label><label><input type="checkbox" value="tue" />T</label><label><input type="checkbox" value="wed" />W</label><label><input type="checkbox" value="thu" />T</label><label><input type="checkbox" value="fri" />F</label><label><input type="checkbox" value="sat" />S</label><label><input type="checkbox" value="sun" />S</label></fieldset>
+                <small class="field-hint">Run now works whether or not the worker is started: while it is running, it checks every repository straight away and restarts the timer for the next check.</small>
               </div>
               <div class="service-parallel"><label class="toggle"><input type="checkbox" data-config="parallel_repo_workers" /><span></span>One worker per repository</label><button class="help-dot" data-help="parallel-repo-workers" aria-label="About one worker per repository">?</button></div>
               <div class="service-meta"><span>Schedule</span><strong id="worker-schedule-summary">Continuous</strong></div>
@@ -289,6 +290,7 @@
     <script src="logging.js"></script>
     <script src="now-working.js"></script>
     <script src="prompt-grades.js"></script>
+    <script src="run-now.js"></script>
     <script src="test-inputs.js"></script>
     <script src="version.js"></script>
     <script src="app.js"></script>
