@@ -374,7 +374,7 @@ class AdversarialUatMixin:
             loop["filed_findings"].append(marker)
             details = loop.setdefault("filed_finding_details", [])
             if not any(item.get("marker") == marker for item in details):
-                details.append({"marker": marker, "title": finding["title"], "url": url})
+                details.append({"marker": marker, "title": finding["title"][:120], "url": url})
             self.save_adversarial(loop)
             self.history.update(
                 iso_timestamp(),
