@@ -230,6 +230,29 @@
       "command": [
         "node",
         "--test",
+        "tests/adversarial/test_help_async_refresh_relocation.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-help-async-refresh-relocation",
+      "name": "Help Concepts owns the async-refresh explanation",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "ui/index.html",
+          "tests/adversarial/test_help_async_refresh_relocation.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
         "tests/adversarial/test_filed_finding_actionable_log.js"
       ],
       "disruptive": false,
