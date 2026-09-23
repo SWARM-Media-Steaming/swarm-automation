@@ -1,0 +1,142 @@
+# Scoring configuration for the SWARM dynamic model router.
+#
+# Everything here is a prior, not a rigid lookup table (issue #195). The
+# engine (issue_worker/model_router.py) computes a suitability score per
+# eligible (provider, model, effort) combination and picks the highest; the
+# values below are what make that score configurable without touching code.
+
+# Six complexity bands, ordered lightest to heaviest. `min_capability` is the
+# relative_capability (1-5, see models.yaml) a model needs to be considered a
+# safe fit for that band; falling short lowers expected_success rather than
+# hard-excluding the model, so a constrained catalog still routes somewhere.
+# `ai_grade_range` documents how a 1-10 pre-flight complexity grade (the
+# existing dynamic_router.py AI call) maps onto these bands.
+complexity_bands:
+  - level: TRIVIAL
+    ai_grade_range: [1, 1]
+    min_capability: 1
+  - level: SIMPLE
+    ai_grade_range: [2, 3]
+    min_capability: 2
+  - level: STANDARD
+    ai_grade_range: [4, 6]
+    min_capability: 3
+  - level: COMPLEX
+    ai_grade_range: [7, 8]
+    min_capability: 4
+  - level: VERY_COMPLEX
+    ai_grade_range: [9, 9]
+    min_capability: 5
+  - level: EXTREME
+    ai_grade_range: [10, 10]
+    min_capability: 5
+
+# Reasoning-effort ladder, lightest to heaviest, and the minimum effort a
+# band starts from before task-specific and sensitivity adjustments apply.
+# EXTREME's floor is deliberately xhigh, not max: "max" must be earned by the
+# scoring formula (reliability/task fit), never assumed from the label alone.
+effort_ladder: [low, medium, high, xhigh, max]
+min_effort_by_complexity:
+  TRIVIAL: low
+  SIMPLE: low
+  STANDARD: medium
+  COMPLEX: high
+  VERY_COMPLEX: xhigh
+  EXTREME: xhigh
+
+# Task types (issue #195's list) grouped by which benchmark axis and which
+# scoring terms should be emphasized for that kind of work. A type not listed
+# anywhere below uses the `default` group.
+task_type_groups:
+  mechanical:
+    task_types: [mechanical_edit, documentation]
+    benchmark_emphasis: {deep_swe: 0.6, terminal_bench: 0.6, swe_atlas_qna: 0.6}
+    extra_weights: {cost_efficiency: 0.10, token_efficiency: 0.08, latency: 0.06}
+  implementation_heavy:
+    task_types: [test_generation, feature, complex_feature, refactor, large_refactor]
+    benchmark_emphasis: {deep_swe: 1.4, terminal_bench: 0.8, swe_atlas_qna: 0.9}
+    extra_weights: {}
+  debugging:
+    task_types: [simple_bug_fix, debugging]
+    benchmark_emphasis: {deep_swe: 1.2, terminal_bench: 0.9, swe_atlas_qna: 0.9}
+    extra_weights: {}
+  deep_reasoning:
+    task_types: [deep_debugging, architecture, security_analysis, performance_analysis, planning]
+    benchmark_emphasis: {deep_swe: 1.1, terminal_bench: 0.9, swe_atlas_qna: 1.2}
+    extra_weights: {reliability: 0.08}
+  terminal_heavy:
+    task_types: [infrastructure, devops]
+    benchmark_emphasis: {deep_swe: 0.9, terminal_bench: 1.6, swe_atlas_qna: 0.7}
+    extra_weights: {}
+  repository_comprehension:
+    task_types: [repository_analysis, multi_repository, research, code_review]
+    benchmark_emphasis: {deep_swe: 0.7, terminal_bench: 0.7, swe_atlas_qna: 1.5}
+    extra_weights: {context_fit: 0.06}
+  default:
+    task_types: [general_reasoning]
+    benchmark_emphasis: {deep_swe: 1.0, terminal_bench: 1.0, swe_atlas_qna: 1.0}
+    extra_weights: {}
+
+# Initial BALANCED weights (issue #195). Percentages of the positive side of
+# the score; cost/token/latency act as efficiency bonuses (higher relative_*
+# score contributes positively) rather than raw subtractions, since a cheap
+# model should be rewarded, not merely have expensive models punished twice.
+weights:
+  expected_success: 0.35
+  task_fit: 0.20
+  coding_capability: 0.15
+  context_fit: 0.10
+  cost_efficiency: 0.08
+  token_efficiency: 0.07
+  latency: 0.05
+
+# Multiplier applied to the relevant efficiency weight above when the caller
+# flags a request as sensitive to that dimension (e.g. cost_sensitive=True).
+sensitivity_boost: 2.5
+
+# Penalty terms, applied after the weighted sum. Both scale with how far past
+# the minimum the choice goes, so a model/effort one notch above requirement
+# costs little and one far above costs a lot.
+overqualification_penalty_per_level: 0.09
+unnecessary_reasoning_penalty_per_level: 0.07
+
+# Score margin within which two candidates are treated as a tie; the cheaper
+# (lower relative_cost, then lower effort) one wins. Implements "if two
+# adjacent effort levels are expected to perform similarly, select the lower
+# effort" and the equivalent rule across models.
+tie_break_margin: 0.03
+
+# Confidence reported alongside a decision: how far the winning score is
+# above the runner-up, scaled into 0..1 and floored so a decision is never
+# reported as fully uncertain just because two options were close.
+confidence_floor: 0.5
+confidence_score_gap_scale: 3.0
+
+# Non-binding reference matrix from issue #195, shown in documentation and
+# used only as a sanity check in tests — the scorer decides, this is not a
+# lookup table the engine consults at runtime.
+reference_matrix:
+  TRIVIAL:
+    claude: claude-haiku-4-5
+    codex: gpt-5.6-luna
+    grok: grok-4.5
+  SIMPLE:
+    claude: claude-sonnet-5
+    codex: gpt-5.6-luna
+    grok: grok-4.6
+  STANDARD:
+    claude: claude-sonnet-5
+    codex: gpt-5.6-sol
+    grok: grok-4.6
+  COMPLEX:
+    claude: claude-fable-5-1
+    codex: gpt-5.6-sol
+    grok: grok-4.6
+  VERY_COMPLEX:
+    claude: claude-fable-5-1
+    codex: gpt-6-astra
+    grok: grok-4.6
+  EXTREME:
+    claude: claude-fable-5-1
+    codex: gpt-6-astra
+    grok: grok-4.7

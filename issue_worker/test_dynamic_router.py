@@ -109,19 +109,24 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertFalse(decision["fallback"])
 
     def test_tier_bands_decide_when_the_router_names_no_valid_model(self) -> None:
+        # These pairs come from the reusable Dynamic Model Router (issue #195,
+        # model_router.py + skills/model-router/*.yaml), not the old flat
+        # complexity-band lookup: it only takes over for a tool whose
+        # routing_tiers still match the built-in default (see
+        # _scored_tier_decision), which is the case for every candidate below.
         expectations = {
-            ("claude", 2): ("claude-haiku-4-5", "low"),
+            ("claude", 2): ("claude-sonnet-5", "low"),
             ("claude", 5): ("claude-sonnet-5", "medium"),
             ("claude", 8): ("claude-opus-5", "high"),
-            ("claude", 10): ("claude-opus-5", "max"),
+            ("claude", 10): ("claude-opus-5", "xhigh"),
             ("codex", 1): ("gpt-5.6-luna", "low"),
-            ("codex", 6): ("gpt-5.6-terra", "medium"),
+            ("codex", 6): ("gpt-5.6-sol", "medium"),
             ("codex", 7): ("gpt-5.6-sol", "high"),
             ("codex", 9): ("gpt-6-astra", "xhigh"),
             ("grok", 3): ("grok-4.6", "low"),
             ("grok", 4): ("grok-4.6", "medium"),
             ("grok", 8): ("grok-4.6", "high"),
-            ("grok", 10): ("grok-4.6", "xhigh"),
+            ("grok", 10): ("grok-4.7", "xhigh"),
         }
         for (provider, complexity), (model, effort) in expectations.items():
             decision = resolve(
@@ -855,7 +860,7 @@ class CostAwareRoutingTest(unittest.TestCase):
         self.assertEqual(decision["reasoning_effort"], "high")
         self.assertEqual(decision["model_source"], "tier")
         self.assertIn("gpt-5.6-hyperion", decision["tier_explanation"])
-        self.assertIn("falls in Codex's 7–8 band", decision["tier_explanation"])
+        self.assertIn("falls in Codex's COMPLEX band", decision["tier_explanation"])
 
     def test_an_effort_this_app_cannot_invoke_falls_back_to_the_tiers_effort(self) -> None:
         decision = resolve(sample_payload(reasoning_effort="ludicrous"), "codex")
