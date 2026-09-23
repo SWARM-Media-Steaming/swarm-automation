@@ -350,7 +350,8 @@ class AdversarialUatMixin:
         for finding in findings:
             digest = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()[:20]
             marker = f"<!-- swarm-issue-worker:adversarial-finding:issue:{self.issue.number};id:{digest} -->"
-            title = " ".join(finding["title"][:120].split())
+            stored_title = finding["title"][:120]
+            title = " ".join(stored_title.split())
             details = loop.setdefault("filed_finding_details", [])
             existing_detail = next((item for item in details if item.get("marker") == marker), None)
             if marker in loop["filed_findings"] and existing_detail and existing_detail.get("url"):
@@ -371,7 +372,7 @@ class AdversarialUatMixin:
                 if existing_detail is not None:
                     existing_detail["url"] = url
                 else:
-                    details.append({"marker": marker, "title": title, "url": url})
+                    details.append({"marker": marker, "title": stored_title, "url": url})
                 log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {url or title}")
                 self.save_adversarial(loop)
                 self.history.update(
@@ -402,7 +403,7 @@ class AdversarialUatMixin:
                     log(f"GitHub did not return an issue URL for the out-of-scope adversarial UAT finding: {output.strip()!r}")
             loop["filed_findings"].append(marker)
             if not any(item.get("marker") == marker for item in details):
-                details.append({"marker": marker, "title": title, "url": url})
+                details.append({"marker": marker, "title": stored_title, "url": url})
             self.save_adversarial(loop)
             self.history.update(
                 iso_timestamp(),
