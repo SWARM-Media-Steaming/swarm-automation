@@ -1,14 +1,15 @@
 use super::{
     audit_test_coverage, automation_log_path, bot_app_slugs_from_config, create_test_definition,
     decide_bot_push_access, detect_test_definition, detect_tools, execution_history_query_args,
-    get_config, get_execution_history, get_prompt_grades, get_test_plan, get_test_runs,
-    grant_apps_request, inspect_repository, issue_branch_pr_is_visible, mark_permission_primed,
-    needs_promotion, parse_pr_ref, promotion_approval_args, prompt_grades_query_args,
-    provider_scheduler_arguments, push_access_message, reconcile_integration_for_promotion,
-    refresh_running_scheduler, repo_status_args, repo_worker_args, request_issue_scan,
-    require_closed_issue, run_now_request_path, save_config, save_test_input, scheduler_arguments,
-    validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
-    ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider,
+    feedback_repository_names, get_config, get_execution_history, get_prompt_grades, get_test_plan,
+    get_test_runs, grant_apps_request, inspect_repository, issue_branch_pr_is_visible,
+    mark_permission_primed, needs_promotion, parse_pr_ref, promotion_approval_args,
+    prompt_grades_query_args, provider_scheduler_arguments, push_access_message,
+    reconcile_integration_for_promotion, refresh_running_scheduler, repo_status_args,
+    repo_worker_args, request_issue_scan, require_closed_issue, run_now_request_path, save_config,
+    save_feedback_repo_filter, save_test_input, scheduler_arguments, validate_worker_script_dir,
+    write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind, ExecutionHistoryPage,
+    PromptGradesQuery, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -566,12 +567,16 @@ fn execution_history_lookup_is_safe_before_any_execution_exists() {
         .join("worker-state")
         .to_string_lossy()
         .into_owned();
+    config.repositories.push(RepoConfig {
+        repo_dir: repo_dir.path().to_string_lossy().into_owned(),
+        ..repo("octocat/other")
+    });
     save_config(app.clone(), app.state(), config).unwrap();
 
     let history = get_execution_history(
         app.clone(),
         app.state(),
-        "octocat__example".into(),
+        vec!["octocat__example".into()],
         None,
         None,
         None,
@@ -581,6 +586,18 @@ fn execution_history_lookup_is_safe_before_any_execution_exists() {
     assert_eq!(history.total, 0);
     assert_eq!(history.offset, 0);
     assert_eq!(history.limit, 10);
+    let global = get_execution_history(app.clone(), app.state(), vec![], None, None, None).unwrap();
+    assert!(global.records.is_empty());
+    let multiple = get_execution_history(
+        app.clone(),
+        app.state(),
+        vec!["octocat__example".into(), "octocat__other".into()],
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(multiple.records.is_empty());
 }
 
 #[test]
@@ -600,7 +617,7 @@ fn prompt_grades_lookup_is_safe_before_any_execution_exists() {
     let grades = get_prompt_grades(
         app.clone(),
         app.state(),
-        "octocat__example".into(),
+        vec!["octocat__example".into()],
         PromptGradesQuery::default(),
     )
     .unwrap();
@@ -609,6 +626,14 @@ fn prompt_grades_lookup_is_safe_before_any_execution_exists() {
     assert_eq!(grades.summary.graded, 0);
     assert_eq!(grades.summary.average_points, None);
     assert!(grades.router_matrix.is_empty());
+    let global = get_prompt_grades(
+        app.clone(),
+        app.state(),
+        vec![],
+        PromptGradesQuery::default(),
+    )
+    .unwrap();
+    assert!(global.records.is_empty());
 }
 
 #[test]
@@ -616,7 +641,7 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
     let args = prompt_grades_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
-        "octocat/example",
+        &["octocat/example".into()],
         PromptGradesQuery {
             offset: Some(-4),
             search: Some("  Widget  ".into()),
@@ -643,7 +668,7 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
     let unfiltered = prompt_grades_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
-        "octocat/example",
+        &[],
         PromptGradesQuery::default(),
     );
     assert!(unfiltered
@@ -658,6 +683,7 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
     assert!(unfiltered
         .windows(2)
         .any(|pair| pair[0] == "--router-model" && pair[1].is_empty()));
+    assert!(!unfiltered.iter().any(|argument| argument == "--repository"));
 }
 
 #[test]
@@ -688,7 +714,7 @@ fn execution_history_query_always_requests_one_page() {
     let args = execution_history_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
-        "octocat/example",
+        &["octocat/example".into()],
         Some(-4),
         Some("  Widget  ".into()),
         Some("rounds_desc".into()),
@@ -707,7 +733,7 @@ fn execution_history_query_always_requests_one_page() {
     let unfiltered = execution_history_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
-        "octocat/example",
+        &[],
         None,
         None,
         None,
@@ -718,6 +744,64 @@ fn execution_history_query_always_requests_one_page() {
     assert!(unfiltered
         .windows(2)
         .any(|pair| pair[0] == "--search" && pair[1].is_empty()));
+    assert!(!unfiltered.iter().any(|argument| argument == "--repository"));
+}
+
+#[test]
+fn feedback_repository_ids_resolve_to_deduplicated_cli_filters() {
+    let config = AppConfig {
+        repositories: vec![repo("octocat/one"), repo("octocat/two")],
+        ..AppConfig::default()
+    };
+    let names = feedback_repository_names(
+        &config,
+        &[
+            "octocat__one".into(),
+            "octocat__two".into(),
+            "octocat__one".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(names, vec!["octocat/one", "octocat/two"]);
+    assert!(feedback_repository_names(&config, &[]).unwrap().is_empty());
+
+    let arguments = execution_history_query_args(
+        Path::new("ai_execution_history.py"),
+        Path::new("history.sqlite3"),
+        &names,
+        None,
+        None,
+        None,
+    );
+    let filters: Vec<_> = arguments
+        .windows(2)
+        .filter(|pair| pair[0] == "--repository")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    assert_eq!(filters, vec!["octocat/one", "octocat/two"]);
+}
+
+#[test]
+fn feedback_repository_filter_persists_without_replacing_other_config() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    config.repositories.push(RepoConfig {
+        repo_dir: repo_dir.path().to_string_lossy().into_owned(),
+        ..repo("octocat/other")
+    });
+    config.schedule_time = "08:30".into();
+    save_config(app.clone(), app.state(), config).unwrap();
+
+    let saved =
+        save_feedback_repo_filter(app.clone(), app.state(), vec!["octocat__other".into()]).unwrap();
+    assert_eq!(saved.feedback_repo_filter, vec!["octocat__other"]);
+    assert_eq!(saved.schedule_time, "08:30");
+
+    let loaded = get_config(app.state()).unwrap();
+    assert_eq!(loaded.feedback_repo_filter, vec!["octocat__other"]);
+    assert_eq!(loaded.schedule_time, "08:30");
 }
 
 #[test]

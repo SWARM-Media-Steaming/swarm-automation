@@ -223,6 +223,9 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .test-run > summary::-webkit-details-marker, .execution-record > summary::-webkit-details-marker { display: none; }
 .test-run[open] > summary, .execution-record[open] > summary { border-bottom: 1px solid var(--line-soft); }
 .test-run-head strong, .execution-head strong { display: block; color: #dce1ed; font-size: 11px; }
+.execution-title-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.execution-title-row > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repository-badge { display: inline-block; max-width: 180px; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 7px; border: 1px solid color-mix(in srgb, var(--cyan) 28%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan); font-size: 8px; font-weight: 750; }
 .test-run-head small, .execution-head small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 9px; }
 .test-run-tally, .execution-tally { display: flex; gap: 5px; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; }
 .test-run-suites, .execution-body { display: grid; gap: 10px; padding: 13px; }
@@ -267,6 +270,15 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .execution-search input { flex: 1; width: auto; min-width: 0; margin: 0; }
 .execution-pager { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
 .execution-pager span { color: var(--muted); font-size: 10px; }
+.feedback-repo-filter { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 18px; padding: 11px 13px; border: 1px solid var(--line-soft); border-radius: 9px; background: #0c111b; }
+.feedback-repo-filter > div:first-child { display: grid; gap: 3px; flex: 0 0 auto; }
+.feedback-repo-filter strong { color: #dce1ed; font-size: 10px; }
+.feedback-repo-filter small { color: var(--muted-2); font-size: 8px; }
+.feedback-repo-chips { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.feedback-repo-chip { display: inline-flex; align-items: center; gap: 6px; margin: 0; padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); font-size: 9px; font-weight: 750; cursor: pointer; }
+.feedback-repo-chip:has(input:checked) { border-color: color-mix(in srgb, var(--violet) 55%, transparent); background: color-mix(in srgb, var(--violet) 14%, transparent); color: var(--text); }
+.feedback-repo-chip input { width: 12px; height: 12px; margin: 0; accent-color: var(--violet); }
+.feedback-repo-chip input:disabled { opacity: .55; }
 .panel-tabs { display: flex; gap: 4px; margin-top: 18px; padding: 4px; border: 1px solid var(--line-soft); border-radius: 9px; background: #0c111b; }
 .panel-tabs button { border: 0; border-radius: 6px; background: transparent; color: var(--muted); padding: 8px 14px; font-size: 10px; font-weight: 750; cursor: pointer; }
 .panel-tabs button:hover { color: #cbd2df; }
@@ -457,6 +469,8 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
 @media (max-width: 820px) {
   .grade-summary { grid-template-columns: 1fr; }
   .router-row { grid-template-columns: 1fr; }
+  .feedback-repo-filter { align-items: flex-start; flex-direction: column; }
+  .feedback-repo-chips { justify-content: flex-start; }
   .panel-tabs { flex-wrap: wrap; }
   .execution-record.grade-record > summary { grid-template-columns: auto minmax(0, 1fr); }.grade-record .execution-tagging { grid-column: 1 / -1; grid-row: 2; }
   .service-grid, .two-column, .settings-grid { grid-template-columns: 1fr; }.span-two { grid-column: auto; }.form-grid.three, .form-grid.four { grid-template-columns: 1fr 1fr; }
