@@ -151,3 +151,24 @@ test("shows current adversarial UAT fix/re-test progress from worker boundary lo
   assert.equal(adversarial.issueNumber, "84");
   assert.equal(adversarial.repository, "acme/app");
 });
+
+test("keeps adversarial UAT progress synchronized with an issue quota pause and resume", () => {
+  const logs = [
+    line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+    line("Adversarial UAT for issue #84: starting re-test for round 3 of 6."),
+    line("Paused issue #84 because Codex usage is unavailable; session abc was preserved."),
+  ];
+  const pausedRows = deriveNowWorking({ workerState: "running", repositories: [repo], logs });
+  assert.equal(pausedRows.find((row) => row.kind === "adversarial").state, "paused");
+
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo],
+    logs: [...logs,
+      line("Codex usage is available again; preparing to resume session abc for issue #84."),
+    ],
+  });
+  const adversarial = rows.find((row) => row.kind === "adversarial");
+  assert.equal(adversarial.state, "running");
+  assert.equal(adversarial.title, "Fix/re-test round 3 of 6");
+});

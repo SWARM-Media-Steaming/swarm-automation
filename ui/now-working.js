@@ -83,6 +83,8 @@
     };
     const find = (repository, number) => items.get(`issue:${repository}#${number}`)
       || [...items.values()].find((item) => item.kind !== "adversarial" && String(item.number) === String(number));
+    const related = (repository, number) => [...items.values()].filter((item) =>
+      String(item.number) === String(number) && (!repository || item.repository === repository));
     const updateAdversarial = (entry, repository, number, round, maximum, title, phase) => {
       const key = `adversarial:${repository}#${number}`;
       const item = {
@@ -160,14 +162,23 @@
           item.state = "paused";
           item.phase = `Waiting for ${providerName} usage`;
         }
+        related(repository, number).forEach((relatedItem) => {
+          if (relatedItem.kind === "adversarial") relatedItem.state = "paused";
+        });
       } else if ((match = message.match(/Shelved quota-paused issue #(\d+)/i))) {
         const item = find(repository, match[1]);
         if (item) item.state = "paused";
+        related(repository, match[1]).forEach((relatedItem) => {
+          if (relatedItem.kind === "adversarial") relatedItem.state = "paused";
+        });
       } else if ((match = message.match(/preparing to resume.*?issue #(\d+)/i))) {
         const item = find(repository, match[1])
           || (start(entry, repository, match[1], "", "Resuming saved session"), lastStarted);
         item.state = "running";
         item.phase = "Resuming saved session";
+        related(repository, match[1]).forEach((relatedItem) => {
+          if (relatedItem.kind === "adversarial") relatedItem.state = "running";
+        });
       } else if ((match = message.match(/Finished issue #(\d+)/i))) {
         items.delete(`issue:${repository}#${match[1]}`);
         clear((item) => String(item.number) === match[1]);
