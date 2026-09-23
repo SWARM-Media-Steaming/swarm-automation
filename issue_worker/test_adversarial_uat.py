@@ -689,8 +689,17 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertIsNone(saved["response"])
         self.assertFalse(saved["active"])
         self.assertEqual(saved["retry_stage_base"], saved["stage_base"])
+        self.assertIn("exactly one SWARM_ADVERSARIAL_RESULT", saved["retry_rejection"]["reason"])
+        self.assertIn(uat.DEFINITION, saved["retry_rejection"]["paths"])
+        self.assertFalse((self.repo / "tests/adversarial/test_issue.py").exists())
+        self.assertEqual(uat.read_definition(self.repo)["suites"], [])
+        rejected_patch = self.state / "last-rejected-adversarial.patch"
+        self.assertTrue(rejected_patch.exists())
+        self.assertIn("test_issue.py", rejected_patch.read_text())
         with self.patches(), mock.patch.object(self.worker, "finalize_issue"):
             self.worker.run_adversarial_delivery()
         self.assertEqual(len(self.calls), 2)
         self.assertFalse(self.calls[-1][3])
+        self.assertIn("A prior tester result was rejected and its edits were rolled back", self.calls[-1][4])
+        self.assertNotIn("retry_rejection", self.worker.read_state()["adversarial"])
         self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")

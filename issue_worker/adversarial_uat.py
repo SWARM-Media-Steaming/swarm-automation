@@ -222,6 +222,14 @@ class AdversarialUatMixin:
         # enters the tester context. It sees the spec, diff and repo conventions.
         diff = self.git("diff", "--no-ext-diff", base, "--", ".", ":(exclude)tests/adversarial")
         amendments = "\n".join(str(c.get("body") or "") for c in loop.get("amendments", []))
+        rejected = loop.get("retry_rejection") or {}
+        rejection_guidance = ""
+        if rejected:
+            rejection_guidance = (
+                "\nA prior tester result was rejected and its edits were rolled back. Do not repeat it.\n"
+                f"Rejection: {rejected.get('reason', 'invalid tester result')}\n"
+                f"Rejected paths: {json.dumps(rejected.get('paths', []))}\n"
+            )
         common = (
             f"Issue #{self.issue.number}: {self.issue.title}\n\n{self.issue.body}\n\n"
             f"Trusted issue amendments (authoritative clarifications):\n{amendments or 'None.'}\n\n"
@@ -229,7 +237,8 @@ class AdversarialUatMixin:
             "Read repository conventions (AGENTS.md, CLAUDE.md, .claude/rules and existing test patterns). "
             "Do not inspect prior agent transcripts, session logs, or completion summaries. "
             "Do not commit, push, open PRs, post comments, or file issues; the worker handles delivery. "
-            "Run checks in the foreground. Do not edit VERSION.\n\nResulting patch:\n" + diff + "\n"
+            "Run checks in the foreground. Do not edit VERSION.\n" + rejection_guidance +
+            "\nResulting patch:\n" + diff + "\n"
         )
         if loop["phase"] == "fix":
             return (
@@ -273,6 +282,34 @@ class AdversarialUatMixin:
         paths = self.git("diff", "--no-renames", "--name-only", "-z", baseline).split("\0")
         paths += self.git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
         return {p for p in paths if p and (not p.startswith(".swarm/") or p == DEFINITION)}
+
+    def reject_adversarial_edits(self, baseline: str, error: Exception) -> tuple[list[str], Path]:
+        """Archive rejected tester work, then restore the guarded baseline.
+
+        A fresh tester must not inherit edits that the validator has already
+        declared invalid.  Keep the patch in worker state for diagnosis, but
+        remove only paths the adversarial role was allowed to touch; unrelated
+        checkout work remains intact.
+        """
+        paths = sorted(self.adversarial_changed_paths(baseline))
+        patch_path = self.state / "last-rejected-adversarial.patch"
+        patch = self.git("diff", "--binary", "--no-ext-diff", baseline, "--", *paths, check=False) if paths else ""
+        untracked = set(self.git("ls-files", "--others", "--exclude-standard", "-z", "--", *paths,
+                                 check=False).split("\0")) if paths else set()
+        for path in sorted(untracked - {""}):
+            result = subprocess.run(
+                [self.config.git_bin, "-C", str(self.config.repo_dir), "diff", "--binary", "--no-index", "--", "/dev/null", path],
+                text=True, capture_output=True, check=False,
+            )
+            patch += ("\n" if patch and not patch.endswith("\n") else "") + result.stdout
+        patch_path.write_text(patch, encoding="utf-8")
+        for path in paths:
+            if self.git_ok("cat-file", "-e", f"{baseline}:{path}"):
+                self.git("restore", f"--source={baseline}", "--staged", "--worktree", "--", path)
+            else:
+                self.git("rm", "-f", "--ignore-unmatch", "--", path, check=False)
+                (self.config.repo_dir / path).unlink(missing_ok=True)
+        return paths, patch_path
 
     def validate_adversarial_edits(self, loop: dict[str, Any], report: dict[str, Any]) -> tuple[int, int]:
         from swarm_issue_worker import WorkerError
@@ -428,11 +465,22 @@ class AdversarialUatMixin:
                     definition = read_definition(self.config.repo_dir)
                 except (ValueError, TypeError, KeyError, WorkerError) as error:
                     # A rejected report must not be replayed forever from the
-                    # checkpoint. Retry with a fresh tester and the same guard
-                    # baseline; preserve all work for inspection/repair.
-                    loop.update(active=False, response=None, retry_stage_base=loop["stage_base"])
+                    # checkpoint, and its invalid edits must not poison every
+                    # subsequent fresh tester. Archive them for inspection,
+                    # restore the guard baseline, and explain the rejection to
+                    # the next tester.
+                    rejected_paths, patch_path = self.reject_adversarial_edits(loop["stage_base"], error)
+                    loop.update(
+                        active=False,
+                        response=None,
+                        retry_stage_base=loop["stage_base"],
+                        retry_rejection={"reason": str(error), "paths": rejected_paths, "patch": str(patch_path)},
+                    )
                     self.save_adversarial(loop)
-                    raise WorkerError(f"Invalid adversarial test result: {error}") from error
+                    raise WorkerError(
+                        f"Invalid adversarial test result: {error}. Rejected edits were restored; "
+                        f"diagnostic patch: {patch_path}"
+                    ) from error
                 # The tester prompt explicitly permits citing a pre-existing,
                 # non-adversarial suite's ID in an out-of-scope finding ("If
                 # an existing suite fails for an unrelated reason ... report
@@ -467,6 +515,7 @@ class AdversarialUatMixin:
                         "this issue's own acceptance suite may not be marked out of scope"
                     )
                 self.file_adversarial_findings(loop, report.get("out_of_scope", []))
+                loop.pop("retry_rejection", None)
                 loop["excluded_suites"] = sorted(candidate_excluded)
                 before = sum(r["exit_code"] != 0 for r in loop["results"])
                 results = run_suites(self.config.repo_dir, [s for s in definition["suites"] if s.get("origin") == "adversarial" and s["id"] not in loop["excluded_suites"]])
