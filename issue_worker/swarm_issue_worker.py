@@ -3334,7 +3334,11 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         environment = self.github.environment(self.choice.key)
         return environment
 
-    def run_ai(self, prompt: str) -> int:
+    def run_ai(self, prompt: str, activity: str = "working") -> int:
+        """``activity`` names what this invocation is doing (e.g. "implementing",
+        "fixing round 2", "testing round 1"), so the log can tell same-issue
+        invocations apart once adversarial UAT lets one issue pass through
+        several roles, sometimes on different providers."""
         assert self.choice
         self.ai_output_file.write_text("", encoding="utf-8")
         self.ai_diagnostic_file.write_text("", encoding="utf-8")
@@ -3350,7 +3354,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         self.record_handoff_event(
             "ai_invocation_started", provider=self.choice.name, model=self.choice.model, resume=self.choice.resume
         )
-        status = runner(prompt, env)
+        status = runner(prompt, env, activity)
         self.record_handoff_event("ai_invocation_finished", provider=self.choice.name, status=status)
         if status != 0 and self.recover_from_rejected_model():
             runner = {
@@ -3362,7 +3366,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 raise WorkerError(f"No runner for provider {self.choice.name}")
             env = os.environ.copy()
             env.update(self.provider_environment())
-            status = runner(prompt, env)
+            status = runner(prompt, env, activity)
         return status
 
     def recover_from_rejected_model(self) -> bool:
@@ -3487,12 +3491,12 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         self.update_state_for_choice(self.choice)
         return True
 
-    def _run_claude(self, prompt: str, env: dict[str, str]) -> int:
+    def _run_claude(self, prompt: str, env: dict[str, str], activity: str = "working") -> int:
         assert self.choice
         claude_bin = self.provider_bin("claude")
         if not claude_bin:
             raise WorkerError("Claude executable is unavailable")
-        log("Claude is working. Detailed implementation output is hidden; its final summary will appear when finished.")
+        log(f"Claude is {activity}. Detailed implementation output is hidden; its final summary will appear when finished.")
         command = [
             claude_bin,
             "--model",
@@ -3550,13 +3554,13 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                     output.write(line)
         return process.wait()
 
-    def _run_grok(self, prompt: str, env: dict[str, str]) -> int:
+    def _run_grok(self, prompt: str, env: dict[str, str], activity: str = "working") -> int:
         assert self.choice
         grok_bin = self.provider_bin("grok")
         if not grok_bin:
             raise WorkerError("Grok executable is unavailable")
         log(
-            "Grok is working. Detailed implementation output is hidden; its final "
+            f"Grok is {activity}. Detailed implementation output is hidden; its final "
             "summary will appear when finished."
         )
         self.ai_prompt_file.write_text(prompt, encoding="utf-8")
@@ -3629,12 +3633,12 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 self.update_state(session_id=session_id, session_started=True)
         return result.returncode
 
-    def _run_codex(self, prompt: str, env: dict[str, str]) -> int:
+    def _run_codex(self, prompt: str, env: dict[str, str], activity: str = "working") -> int:
         assert self.choice
         codex_bin = self.provider_bin("codex")
         if not codex_bin:
             raise WorkerError("Codex executable is unavailable")
-        log("Codex is working. Detailed implementation output is hidden; its final summary will appear when finished.")
+        log(f"Codex is {activity}. Detailed implementation output is hidden; its final summary will appear when finished.")
         command = [codex_bin, "exec"]
         if self.choice.resume:
             command.append("resume")
@@ -5155,7 +5159,8 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         )
         self.history.note("AI execution began", iso_timestamp())
         self.history.update(iso_timestamp(), final_status="running")
-        ai_status = self.run_ai(prompt)
+        implement_activity = "addressing follow-up feedback" if self.issue.work_type == "followup" else "implementing"
+        ai_status = self.run_ai(prompt, activity=implement_activity)
         if ai_status != 0 or not self.ai_output_file.exists() or self.ai_output_file.stat().st_size == 0:
             if self.ai_failure_is_quota():
                 if not self.choice.session_id:

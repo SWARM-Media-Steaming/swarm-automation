@@ -585,6 +585,20 @@ class WorkerTestCase(unittest.TestCase):
         diagnostic = self.worker.ai_diagnostic_file.read_text(encoding="utf-8")
         self.assertIn("shutdown: flushing session", diagnostic)
 
+    def test_runners_log_the_activity_they_were_given(self) -> None:
+        # Adversarial UAT can send the same issue through several roles,
+        # sometimes on different providers; the log line must say which one
+        # this invocation is, not a bare "is working" for all of them.
+        self.worker.issue = IssueContext(360, "Grouping", "body", [], "https://example.invalid/360")
+        self.worker.choice = ProviderChoice("Grok", "test-model", "high", "session-1")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        with mock.patch.object(self.worker, "provider_bin", return_value="/bin/echo"), mock.patch(
+            "swarm_issue_worker.subprocess.run",
+            return_value=subprocess.CompletedProcess(["grok"], 0, stdout=""),
+        ), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker._run_grok("Fix the grouping", {}, activity="fixing adversarial round 1 findings")
+        self.assertIn("Grok is fixing adversarial round 1 findings.", output.getvalue())
+
     def test_dynamic_routing_receives_downloaded_issue_images(self) -> None:
         from issue_images import IssueImage
 
@@ -1055,7 +1069,7 @@ class WorkerTestCase(unittest.TestCase):
         )
         self.worker.issue = IssueContext(142, "Env issue", "Body", [], "https://example.invalid/142")
 
-        def fake_run_ai(_prompt: str) -> int:
+        def fake_run_ai(_prompt: str, activity: str = "") -> int:
             self.worker.ai_output_file.write_text(
                 "## Summary\nThis needs a missing local service.\nSWARM_ENVIRONMENT_ONLY\n",
                 encoding="utf-8",
@@ -1087,7 +1101,7 @@ class WorkerTestCase(unittest.TestCase):
             157, "Signing failure", "Body", ["Ready For Testing"], "https://example.invalid/157"
         )
 
-        def fake_run_ai(_prompt: str) -> int:
+        def fake_run_ai(_prompt: str, activity: str = "") -> int:
             self.worker.ai_output_file.write_text(
                 "## Action required\nConfigure the signing secrets and reply `done`.\n\n"
                 "## Summary\nPublishing cannot sign artifacts without the private key.\n\n"
@@ -1151,7 +1165,7 @@ class WorkerTestCase(unittest.TestCase):
         )
         captured_prompt = ""
 
-        def fake_run_ai(prompt: str) -> int:
+        def fake_run_ai(prompt: str, activity: str = "") -> int:
             nonlocal captured_prompt
             captured_prompt = prompt
             self.worker.ai_output_file.write_text(
@@ -1195,7 +1209,7 @@ class WorkerTestCase(unittest.TestCase):
             "https://example.invalid/160",
         )
 
-        def fake_run_ai(_prompt: str) -> int:
+        def fake_run_ai(_prompt: str, activity: str = "") -> int:
             (self.repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
             self.worker.ai_output_file.write_text(
                 "## Answer\nAn answer.\n\n## Evidence\nEvidence.\n\n"
@@ -1261,7 +1275,7 @@ class WorkerTestCase(unittest.TestCase):
         def capacity(provider: str) -> int:
             return 0 if provider.lower() == "codex" else 1
 
-        def fake_handoff_run(_prompt: str) -> int:
+        def fake_handoff_run(_prompt: str, activity: str = "") -> int:
             self.worker.ai_output_file.write_text("## Summary\nDone.\n", encoding="utf-8")
             return 0
 
@@ -1455,7 +1469,7 @@ class WorkerTestCase(unittest.TestCase):
         """Drive run_ai with scripted (status, diagnostic text) attempts."""
         calls: list[tuple[str, str, str]] = []
 
-        def fake_grok(prompt: str, env: dict[str, str]) -> int:
+        def fake_grok(prompt: str, env: dict[str, str], activity: str = "") -> int:
             calls.append((worker.choice.model, worker.choice.effort, worker.choice.session_id))
             status, diagnostic = outcomes[len(calls) - 1]
             worker.ai_diagnostic_file.write_text(diagnostic, encoding="utf-8")
@@ -1525,7 +1539,7 @@ class WorkerTestCase(unittest.TestCase):
         )
         calls: list[tuple[str, str, str]] = []
 
-        def fake_claude(prompt: str, env: dict[str, str]) -> int:
+        def fake_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
             calls.append(
                 (
                     self.worker.choice.model,
@@ -4647,7 +4661,7 @@ class WorkerTestCase(unittest.TestCase):
             170, "Env issue", "Body", [], "https://example.invalid/170"
         )
 
-        def fake_run_ai(_prompt: str) -> int:
+        def fake_run_ai(_prompt: str, activity: str = "") -> int:
             self.worker.ai_output_file.write_text(
                 "## Summary\nA local service is missing.\nSWARM_ENVIRONMENT_ONLY\n",
                 encoding="utf-8",
@@ -4679,7 +4693,7 @@ class WorkerTestCase(unittest.TestCase):
             "https://example.invalid/171",
         )
 
-        def fake_run_ai(_prompt: str) -> int:
+        def fake_run_ai(_prompt: str, activity: str = "") -> int:
             self.worker.ai_output_file.write_text(
                 "## Answer\nTiers pick the model.\n\n## Evidence\nThe tier table.\n\n"
                 "## Recommendations\n- None.\n\nSWARM_QUESTION_ANSWER\n",
@@ -4712,7 +4726,7 @@ class WorkerTestCase(unittest.TestCase):
             172, "Signing failure", "Body", ["Ready For Testing"], "https://example.invalid/172"
         )
 
-        def fake_run_ai(_prompt: str) -> int:
+        def fake_run_ai(_prompt: str, activity: str = "") -> int:
             self.worker.ai_output_file.write_text(
                 "## Action required\nAdd the signing secrets and reply `done`.\n\n"
                 "## Summary\nNo key is available.\n\n## Recommendations\nDo not paste secrets.\n\n"

@@ -46,6 +46,24 @@ def test_path(path: str) -> bool:
     return path.startswith(TEST_ROOT) and "__pycache__" not in path.split("/") and not path.endswith(".pyc")
 
 
+def adversarial_activity(loop: dict[str, Any]) -> str:
+    """What the log should say a provider is doing right now.
+
+    Adversarial UAT can route implementation, fixing and testing to
+    different providers for the same issue, so a bare "is working" no
+    longer says which of those this invocation is. Round 0 in the "test"
+    phase is the first independent assessment of the fresh implementation,
+    before any fix has happened; every later "test" is a re-test after the
+    fix round of the same number.
+    """
+    round_number = loop["round"]
+    if loop["phase"] == "fix":
+        return f"fixing adversarial round {round_number} findings"
+    if round_number == 0:
+        return "running independent adversarial UAT"
+    return f"re-testing after adversarial fix round {round_number}"
+
+
 def result_payload(output: str) -> dict[str, Any]:
     lines = [line[len(RESULT_MARKER):].strip() for line in output.splitlines() if line.startswith(RESULT_MARKER)]
     if len(lines) != 1:
@@ -388,7 +406,7 @@ class AdversarialUatMixin:
                 # Every tester phase starts with a new CLI session. Only an
                 # interrupted *same phase* resumes its existing session.
                 self.issue_images = []
-                status = self.run_ai(self.adversarial_prompt(loop))
+                status = self.run_ai(self.adversarial_prompt(loop), activity=adversarial_activity(loop))
                 if status != 0 or not self.ai_output_file.exists() or not self.ai_output_file.stat().st_size:
                     if self.ai_failure_is_quota():
                         return self.pause_adversarial()
@@ -415,12 +433,41 @@ class AdversarialUatMixin:
                     loop.update(active=False, response=None, retry_stage_base=loop["stage_base"])
                     self.save_adversarial(loop)
                     raise WorkerError(f"Invalid adversarial test result: {error}") from error
-                known_suites = {s["id"] for s in definition["suites"] if s.get("origin") == "adversarial"}
+                # The tester prompt explicitly permits citing a pre-existing,
+                # non-adversarial suite's ID in an out-of-scope finding ("If
+                # an existing suite fails for an unrelated reason ... report
+                # its ID in that finding's suite_ids array"), so the set of
+                # names this validates against must include every suite in
+                # the definition, not just origin=='adversarial' ones —
+                # otherwise a tester following that instruction to the
+                # letter gets rejected for naming a real, known suite.
+                known_suites = {s["id"] for s in definition["suites"]}
                 excluded = {sid for finding in report.get("out_of_scope", []) for sid in finding.get("suite_ids", [])}
                 if excluded - known_suites:
-                    raise WorkerError("Out-of-scope findings named unknown adversarial suites")
+                    raise WorkerError("Out-of-scope findings named unknown suites")
+                candidate_excluded = set(loop.get("excluded_suites", [])) | excluded
+                runnable = [s for s in definition["suites"] if s.get("origin") == "adversarial" and s["id"] not in candidate_excluded]
+                if not runnable:
+                    # A tester may legitimately register a *new* suite purely
+                    # to formally record a pre-existing, unrelated regression
+                    # for future scheduled runs (test_unrelated_failing_suite_
+                    # remains_scheduled_but_does_not_block) — new suite IDs
+                    # are not disqualified on their own. What must never
+                    # happen is excluding every adversarial suite this round
+                    # would otherwise run: that includes this issue's own
+                    # just-registered acceptance suite, which run_suites then
+                    # fails closed on ("no enabled adversarial suite was
+                    # registered") with nothing able to fix it, burning every
+                    # round until the cap hits and delivery stalls needing
+                    # input — the 2026-09-23 production incident on issue
+                    # #360, where Claude cited its own new suite alongside a
+                    # real pre-existing one in the same out_of_scope finding.
+                    raise WorkerError(
+                        "Out-of-scope findings would exclude every adversarial suite this round; "
+                        "this issue's own acceptance suite may not be marked out of scope"
+                    )
                 self.file_adversarial_findings(loop, report.get("out_of_scope", []))
-                loop["excluded_suites"] = sorted(set(loop.get("excluded_suites", [])) | excluded)
+                loop["excluded_suites"] = sorted(candidate_excluded)
                 before = sum(r["exit_code"] != 0 for r in loop["results"])
                 results = run_suites(self.config.repo_dir, [s for s in definition["suites"] if s.get("origin") == "adversarial" and s["id"] not in loop["excluded_suites"]])
                 completed = iso_timestamp()

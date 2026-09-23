@@ -74,9 +74,9 @@ class AdversarialUatTests(unittest.TestCase):
         }]
         (self.repo / uat.DEFINITION).write_text(json.dumps(definition))
 
-    def role(self, prompt):
+    def role(self, prompt, activity=""):
         loop = self.worker.read_state()["adversarial"]
-        self.calls.append((loop["phase"], self.worker.choice.name, self.worker.choice.session_id, self.worker.choice.resume, prompt))
+        self.calls.append((loop["phase"], self.worker.choice.name, self.worker.choice.session_id, self.worker.choice.resume, prompt, activity))
         self.assertNotIn("SECRET implementer reasoning", prompt)
         self.assertNotIn("--resume", prompt)
         # Mimic the CLI's session capture to exercise persistence.
@@ -112,6 +112,16 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(self.calls[0][1], "Codex")
         self.assertNotEqual(self.calls[1][1], self.calls[2][1])
         self.assertTrue(all(not c[3] for c in self.calls))
+        # Same-issue, cross-provider phase handoffs must be distinguishable in
+        # the log, not just three identical "is working" lines.
+        self.assertEqual(
+            [c[5] for c in self.calls],
+            [
+                "running independent adversarial UAT",
+                "fixing adversarial round 1 findings",
+                "re-testing after adversarial fix round 1",
+            ],
+        )
         push.assert_called_once()
         self.assertEqual(sum(a[:2] == ["pr", "create"] for a in self.api), 1)
         self.assertEqual(len(self.comments_posted), 1)
@@ -125,7 +135,7 @@ class AdversarialUatTests(unittest.TestCase):
 
     def test_cap_publishes_failing_tests_but_never_approves_merges_or_cleans_branch(self):
         self.prepare(auto=True)
-        def never_fix(prompt):
+        def never_fix(prompt, activity=""):
             status = self.role(prompt)
             (self.repo / "tracked.txt").write_text("broken\n")
             return status
@@ -158,7 +168,7 @@ class AdversarialUatTests(unittest.TestCase):
 
     def test_fixer_cannot_edit_or_retire_tests_fresh_tester_adjudicates_dispute(self):
         self.prepare()
-        def disputed(prompt):
+        def disputed(prompt, activity=""):
             loop = self.worker.read_state()["adversarial"]
             if loop["phase"] == "fix":
                 self.calls.append(("fix", self.worker.choice.name, self.worker.choice.session_id, False, prompt))
@@ -188,7 +198,7 @@ class AdversarialUatTests(unittest.TestCase):
 
     def test_tester_may_not_fix_product_code(self):
         self.prepare()
-        def illicit(prompt):
+        def illicit(prompt, activity=""):
             self.role(prompt)
             (self.repo / "tracked.txt").write_text("fixed\n")
             return 0
@@ -200,7 +210,7 @@ class AdversarialUatTests(unittest.TestCase):
     def test_out_of_scope_finding_files_assigned_labelled_issue_once_without_blocking(self):
         self.prepare(fixed=True)
         finding = {"title": "Separate parser bug", "body": "Reproduction: malformed sibling endpoint crashes; unrelated to tracked.txt spec."}
-        def external(prompt):
+        def external(prompt, activity=""):
             self.role(prompt)
             self.worker.ai_output_file.write_text(uat.RESULT_MARKER + json.dumps({"out_of_scope": [finding]}))
             return 0
@@ -212,10 +222,74 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertIn("--assignee", creates[0]); self.assertIn("adversarial-uat", creates[0])
         self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
 
+    def test_out_of_scope_finding_may_cite_a_pre_existing_non_adversarial_suite(self):
+        # The tester prompt tells testers that when an existing suite fails
+        # for an unrelated reason, they must retain it and "report its ID
+        # in that finding's suite_ids array". known_suites used to only
+        # recognize origin=='adversarial' IDs, so a tester following that
+        # instruction to the letter (citing a real, pre-existing suite) was
+        # rejected with "named unknown adversarial suites" — the 2026-09-23
+        # production incident on issue #360, reproduced here.
+        self.prepare(fixed=True)
+        (self.repo / ".swarm").mkdir(exist_ok=True)
+        (self.repo / uat.DEFINITION).write_text(json.dumps({
+            "version": 1,
+            "suites": [{"id": "roku-catalog-grouping", "name": "Roku grouping",
+                        "command": [sys.executable, "-c", "pass"], "enabled": True}],
+        }))
+        finding = {
+            "title": "Roku FirstEpisode() can select a season-0 special",
+            "body": "reproduction evidence, orthogonal to this issue",
+            "suite_ids": ["roku-catalog-grouping"],
+        }
+        def independent_tester(prompt, activity=""):
+            self.role(prompt)
+            self.worker.ai_output_file.write_text(
+                uat.RESULT_MARKER + json.dumps({"dispute_resolution": "", "out_of_scope": [finding]})
+            )
+            return 0
+        with self.patches(independent_tester), mock.patch.object(self.worker, "finalize_issue"):
+            self.worker.run_adversarial_delivery()
+        self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
+
+    def test_out_of_scope_finding_may_not_exclude_every_adversarial_suite(self):
+        # In production, Claude's out-of-scope finding on issue #360 cited
+        # BOTH a pre-existing suite and the one adversarial suite it had just
+        # registered for this same issue — which happened to be the only
+        # adversarial suite that round. Accepting that citation excludes the
+        # only suite covering this issue from every future run_suites call —
+        # run_suites then fails closed with a synthetic "no enabled
+        # adversarial suite was registered" result every round, burning all
+        # 6 rounds on an unfixable, manufactured failure before stalling on
+        # "AI Needs Input". A citation that would leave zero adversarial
+        # suites runnable must instead be rejected immediately so a fresh
+        # tester gets a chance to do it correctly (see the sibling test for
+        # the case that must still be allowed: a *new* suite registered
+        # purely to record an unrelated regression, alongside others that
+        # still cover this issue).
+        self.prepare(fixed=True)
+        finding = {
+            "title": "Self-citation",
+            "body": "cites its own new suite",
+            "suite_ids": ["adversarial-180"],
+        }
+        def self_citing_tester(prompt, activity=""):
+            self.role(prompt)
+            self.worker.ai_output_file.write_text(
+                uat.RESULT_MARKER + json.dumps({"dispute_resolution": "", "out_of_scope": [finding]})
+            )
+            return 0
+        with self.patches(self_citing_tester):
+            with self.assertRaisesRegex(WorkerError, "exclude every adversarial suite"):
+                self.worker.run_adversarial_delivery()
+        # Rejected as invalid, not silently accepted into a doomed loop.
+        self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "")
+        self.assertEqual(self.worker.read_state()["adversarial"]["round"], 0)
+
     def test_quota_resume_preserves_phase_session_history_and_skips_implementer(self):
         self.prepare(fixed=True)
         execution_id = self.worker.history.execution_id
-        def quota(prompt):
+        def quota(prompt, activity=""):
             self.role(prompt)
             self.worker.ai_output_file.write_text("usage limit")
             return 1
@@ -255,6 +329,12 @@ class AdversarialUatTests(unittest.TestCase):
             discovered = ai_test_assist.discover(str(self.repo), "codex", "", "", 1)
         generate.assert_not_called()
         self.assertEqual(discovered["suites"][0]["command"], ["cargo", "test"])
+
+    def test_adversarial_activity_names_phase_and_round(self):
+        self.assertEqual(uat.adversarial_activity({"phase": "test", "round": 0}), "running independent adversarial UAT")
+        self.assertEqual(uat.adversarial_activity({"phase": "fix", "round": 1}), "fixing adversarial round 1 findings")
+        self.assertEqual(uat.adversarial_activity({"phase": "test", "round": 1}), "re-testing after adversarial fix round 1")
+        self.assertEqual(uat.adversarial_activity({"phase": "fix", "round": 3}), "fixing adversarial round 3 findings")
 
     def test_delivery_succeeds_when_swarm_dir_is_locally_excluded(self):
         # The desktop app keeps its own .swarm/ scratch drafts out of `git
@@ -319,7 +399,7 @@ class AdversarialUatTests(unittest.TestCase):
         state = self.worker.read_state()
         state.pop("adversarial")
         self.worker.write_state(state)
-        def implement_then_test(prompt):
+        def implement_then_test(prompt, activity=""):
             if not self.worker.read_state().get("adversarial"):
                 (self.repo / "tracked.txt").write_text("fixed\n")
                 (self.repo / "app.py").write_text("# completed implementation\n")
@@ -516,7 +596,7 @@ class AdversarialUatTests(unittest.TestCase):
 
     def test_unrelated_failing_suite_remains_scheduled_but_does_not_block(self):
         self.prepare(fixed=True)
-        def tester(prompt):
+        def tester(prompt, activity=""):
             self.role(prompt)
             (self.repo / "tests/adversarial/unrelated.py").write_text("raise SystemExit(2)\n")
             definition = uat.read_definition(self.repo)
@@ -538,7 +618,7 @@ class AdversarialUatTests(unittest.TestCase):
 
     def test_cap_delivery_receipt_prevents_second_push_when_terminal_comment_retries(self):
         self.prepare()
-        def never_fix(prompt):
+        def never_fix(prompt, activity=""):
             result = self.role(prompt)
             (self.repo / "tracked.txt").write_text("broken\n")
             return result
@@ -598,7 +678,7 @@ class AdversarialUatTests(unittest.TestCase):
 
     def test_malformed_report_retries_fresh_instead_of_replaying_invalid_checkpoint(self):
         self.prepare(fixed=True)
-        def malformed(prompt):
+        def malformed(prompt, activity=""):
             self.role(prompt)
             self.worker.ai_output_file.write_text("The tests should pass.")
             return 0
