@@ -1,4 +1,4 @@
-"""Deterministic tests for the reusable Dynamic Model Router (issue #195).
+"""Deterministic tests for the reusable Dynamic Model Router (issues #195, #198).
 
 No live API calls: every test constructs a RouteRequest/RoutingAvailability
 and asserts on model_router.route()'s structured output. Most tests use the
@@ -26,10 +26,14 @@ def _fixture_model(
     token_efficiency: int,
     latency: int,
     efforts: tuple[str, ...] = ("medium",),
+    strengths: tuple[str, ...] = (),
+    benchmarks: dict[str, mr.BenchmarkEntry] | None = None,
+    provider: str = "fixture",
+    agent: str = "fixture",
 ) -> mr.ModelSpec:
     return mr.ModelSpec(
-        provider="fixture",
-        agent="fixture",
+        provider=provider,
+        agent=agent,
         model=model,
         model_id=None,
         active=True,
@@ -37,16 +41,29 @@ def _fixture_model(
         deprecated=False,
         superseded_by=None,
         supported_efforts=efforts,
-        strengths=frozenset(),
+        strengths=frozenset(strengths),
         weaknesses=frozenset(),
         relative_capability=capability,
         relative_cost=cost,
         relative_token_efficiency=token_efficiency,
         relative_latency=latency,
-        benchmarks={},
+        benchmarks=benchmarks or {},
         benchmark_source=None,
         benchmark_date=None,
         notes="",
+    )
+
+
+def _measured(**fields: float | None) -> mr.BenchmarkEntry:
+    return mr.BenchmarkEntry(
+        coding_agent_index=fields.get("coding_agent_index"),
+        deep_swe=fields.get("deep_swe"),
+        terminal_bench=fields.get("terminal_bench"),
+        swe_atlas_qna=fields.get("swe_atlas_qna"),
+        benchmark_cost_per_task=fields.get("benchmark_cost_per_task"),
+        benchmark_tokens_per_task=fields.get("benchmark_tokens_per_task"),
+        benchmark_runtime_minutes=fields.get("benchmark_runtime_minutes"),
+        data_quality="MEASURED",
     )
 
 
@@ -199,8 +216,20 @@ class RealCatalogRoutingTests(unittest.TestCase):
     def test_decision_serializes_to_the_documented_shape(self) -> None:
         decision = self._route(mr.RouteRequest("feature", "STANDARD"))
         payload = decision.as_dict()
-        for key in ("provider", "agent", "model", "effort", "complexity", "task_type", "confidence", "reason", "alternatives"):
+        for key in (
+            "provider",
+            "agent",
+            "model",
+            "effort",
+            "complexity",
+            "task_type",
+            "confidence",
+            "reason",
+            "alternatives",
+            "cost_consideration_enabled",
+        ):
             self.assertIn(key, payload)
+        self.assertFalse(payload["cost_consideration_enabled"])
         self.assertLessEqual(len(payload["alternatives"]), 2)
         for alt in payload["alternatives"]:
             self.assertIn("provider", alt)
@@ -244,13 +273,20 @@ class SensitivityFlagTests(unittest.TestCase):
         self.assertEqual(token_sensitive.model, "efficient")
 
     def test_latency_sensitive_prefers_the_faster_model_when_it_flips_the_ranking(self) -> None:
-        cheap_but_slow = _fixture_model("cheap", capability=3, cost=1, token_efficiency=3, latency=1)
+        cheap_but_slow = _fixture_model(
+            "cheap",
+            capability=3,
+            cost=1,
+            token_efficiency=3,
+            latency=1,
+            strengths=("simple_fixes",),
+        )
         pricier_but_fast = _fixture_model("fast", capability=3, cost=3, token_efficiency=3, latency=4)
         catalog = [cheap_but_slow, pricier_but_fast]
 
-        default = mr.route(mr.RouteRequest("general_reasoning", "STANDARD"), catalog=catalog, rules=self.rules)
+        default = mr.route(mr.RouteRequest("simple_bug_fix", "STANDARD"), catalog=catalog, rules=self.rules)
         latency_sensitive = mr.route(
-            mr.RouteRequest("general_reasoning", "STANDARD", latency_sensitive=True), catalog=catalog, rules=self.rules
+            mr.RouteRequest("simple_bug_fix", "STANDARD", latency_sensitive=True), catalog=catalog, rules=self.rules
         )
         self.assertEqual(default.model, "cheap")
         self.assertEqual(latency_sensitive.model, "fast")
@@ -289,6 +325,253 @@ class OverqualificationPenaltyTests(unittest.TestCase):
         )
         decision = mr.route(mr.RouteRequest("general_reasoning", "COMPLEX"), catalog=[model], rules=self.rules)
         self.assertEqual(decision.effort, "high")
+
+
+class CostConsiderationTests(unittest.TestCase):
+    """Issue #198: the UI Cost Consideration setting changes scoring, not architecture."""
+
+    def setUp(self) -> None:
+        self.rules = mr.load_routing_rules()
+
+    def test_shipped_rules_expose_two_weight_sets_and_the_cost_thresholds(self) -> None:
+        self.assertAlmostEqual(self.rules.weights["expected_success"], 0.45)
+        self.assertAlmostEqual(self.rules.weights["cost_efficiency"], 0.0)
+        self.assertAlmostEqual(self.rules.weights["token_efficiency"], 0.0)
+        self.assertAlmostEqual(self.rules.cost_consideration_weights["expected_success"], 0.32)
+        self.assertAlmostEqual(self.rules.cost_consideration_weights["cost_efficiency"], 0.10)
+        self.assertAlmostEqual(self.rules.cost_consideration_weights["token_efficiency"], 0.08)
+        self.assertAlmostEqual(self.rules.minimum_expected_success, 0.80)
+        self.assertAlmostEqual(self.rules.cost_optimization_quality_tolerance, 0.03)
+        self.assertAlmostEqual(self.rules.cost_consideration_unnecessary_reasoning_multiplier, 2.0)
+
+    def test_same_task_cost_off_picks_the_stronger_model(self) -> None:
+        astra, sol = self._astra_and_sol()
+        decision = mr.route(
+            mr.RouteRequest("deep_debugging", "COMPLEX", cost_consideration_enabled=False),
+            catalog=[astra, sol],
+            rules=self.rules,
+        )
+        self.assertEqual(decision.model, "gpt-6-astra")
+        self.assertEqual(decision.effort, "high")
+        self.assertFalse(decision.cost_consideration_enabled)
+        self.assertIn("cost was not considered", decision.reason)
+
+    def test_same_task_cost_on_picks_the_cheaper_capable_model(self) -> None:
+        astra, sol = self._astra_and_sol()
+        decision = mr.route(
+            mr.RouteRequest("deep_debugging", "COMPLEX", cost_consideration_enabled=True),
+            catalog=[astra, sol],
+            rules=self.rules,
+        )
+        self.assertEqual(decision.model, "gpt-5.6-sol")
+        self.assertEqual(decision.effort, "high")
+        self.assertTrue(decision.cost_consideration_enabled)
+        self.assertIn("lower estimated cost", decision.reason)
+        payload = decision.as_dict()
+        self.assertTrue(payload["cost_consideration_enabled"])
+
+    def test_cost_sensitive_alias_enables_the_same_weight_set(self) -> None:
+        astra, sol = self._astra_and_sol()
+        flagged = mr.route(
+            mr.RouteRequest("deep_debugging", "COMPLEX", cost_sensitive=True),
+            catalog=[astra, sol],
+            rules=self.rules,
+        )
+        explicit = mr.route(
+            mr.RouteRequest("deep_debugging", "COMPLEX", cost_consideration_enabled=True),
+            catalog=[astra, sol],
+            rules=self.rules,
+        )
+        self.assertEqual(flagged.model, explicit.model)
+        self.assertEqual(flagged.effort, explicit.effort)
+        self.assertTrue(flagged.cost_consideration_enabled)
+
+    def test_cost_cannot_override_an_underpowered_model(self) -> None:
+        cheap = _fixture_model(
+            "haiku",
+            capability=1,
+            cost=1,
+            token_efficiency=5,
+            latency=5,
+            efforts=("high",),
+            strengths=("trivial_tasks",),
+        )
+        capable = _fixture_model(
+            "fable",
+            capability=5,
+            cost=5,
+            token_efficiency=2,
+            latency=2,
+            efforts=("high",),
+            strengths=("deep_debugging", "difficult_coding", "cross_component_reasoning"),
+        )
+        for cost_on in (False, True):
+            decision = mr.route(
+                mr.RouteRequest("deep_debugging", "COMPLEX", cost_consideration_enabled=cost_on),
+                catalog=[cheap, capable],
+                rules=self.rules,
+            )
+            self.assertEqual(decision.model, "fable", f"cost_consideration_enabled={cost_on}")
+
+    def test_quality_tolerance_rejects_a_large_capability_gap(self) -> None:
+        strong = _fixture_model("astra", capability=5, cost=5, token_efficiency=5, latency=3, efforts=("high",))
+        far_behind = _fixture_model("luna", capability=2, cost=1, token_efficiency=5, latency=5, efforts=("high",))
+        decision = mr.route(
+            mr.RouteRequest("general_reasoning", "COMPLEX", cost_consideration_enabled=True),
+            catalog=[strong, far_behind],
+            rules=self.rules,
+        )
+        self.assertEqual(decision.model, "astra")
+
+    def test_cost_on_prefers_medium_effort_when_high_is_unnecessary(self) -> None:
+        catalog = self._medium_vs_high_catalog()
+        availability = mr.RoutingAvailability(enabled_models=frozenset({"only-option"}))
+        off = mr.route(
+            mr.RouteRequest("architecture", "STANDARD", cost_consideration_enabled=False),
+            catalog=catalog,
+            rules=self.rules,
+            availability=availability,
+        )
+        on = mr.route(
+            mr.RouteRequest("architecture", "STANDARD", cost_consideration_enabled=True),
+            catalog=catalog,
+            rules=self.rules,
+            availability=availability,
+        )
+        self.assertEqual(off.model, "only-option")
+        self.assertEqual(on.model, "only-option")
+        self.assertEqual(off.effort, "high")
+        self.assertEqual(on.effort, "medium")
+
+    def test_lower_api_price_does_not_beat_worse_token_efficiency(self) -> None:
+        wasteful = _fixture_model(
+            "cheap-wasteful",
+            capability=4,
+            cost=2,
+            token_efficiency=1,
+            latency=3,
+            efforts=("high",),
+            benchmarks={"high": _measured(benchmark_tokens_per_task=14_300_000)},
+        )
+        efficient = _fixture_model(
+            "pricier-efficient",
+            capability=4,
+            cost=4,
+            token_efficiency=5,
+            latency=3,
+            efforts=("high",),
+            benchmarks={"high": _measured(benchmark_tokens_per_task=3_300_000)},
+        )
+        decision = mr.route(
+            mr.RouteRequest("general_reasoning", "COMPLEX", cost_consideration_enabled=True),
+            catalog=[wasteful, efficient],
+            rules=self.rules,
+        )
+        self.assertEqual(decision.model, "pricier-efficient")
+
+    def test_unmeasured_effort_does_not_inherit_measured_token_totals(self) -> None:
+        model = _fixture_model(
+            "astra",
+            capability=5,
+            cost=5,
+            token_efficiency=1,
+            latency=3,
+            efforts=("high", "max"),
+            benchmarks={"max": _measured(benchmark_tokens_per_task=3_300_000)},
+        )
+        high_tokens = mr.estimated_tokens_per_task(model, "high")
+        max_tokens = mr.estimated_tokens_per_task(model, "max")
+        self.assertIsNone(high_tokens)
+        self.assertEqual(max_tokens, 3_300_000)
+        self.assertIsNone(mr.estimated_dollar_cost(model, "high"))
+
+    def test_disabled_models_remain_excluded_when_cost_consideration_is_on(self) -> None:
+        astra, sol = self._astra_and_sol()
+        decision = mr.route(
+            mr.RouteRequest("deep_debugging", "COMPLEX", cost_consideration_enabled=True),
+            catalog=[astra, sol],
+            rules=self.rules,
+            availability=mr.RoutingAvailability(disabled_models=frozenset({"gpt-5.6-sol"})),
+        )
+        self.assertEqual(decision.model, "gpt-6-astra")
+        with self.assertRaises(mr.ModelRouterError):
+            mr.route(
+                mr.RouteRequest("deep_debugging", "COMPLEX", cost_consideration_enabled=True),
+                catalog=[astra, sol],
+                rules=self.rules,
+                availability=mr.RoutingAvailability(enabled_agents=frozenset({"claude"})),
+            )
+
+    def test_mechanical_extra_cost_weights_do_not_apply_when_cost_is_off(self) -> None:
+        cheap = _fixture_model("cheap", capability=3, cost=1, token_efficiency=3, latency=3)
+        capable = _fixture_model(
+            "capable",
+            capability=3,
+            cost=5,
+            token_efficiency=3,
+            latency=3,
+            strengths=("documentation", "lightweight_fixes"),
+        )
+        off = mr.route(
+            mr.RouteRequest("documentation", "STANDARD", cost_consideration_enabled=False),
+            catalog=[cheap, capable],
+            rules=self.rules,
+        )
+        on = mr.route(
+            mr.RouteRequest("documentation", "STANDARD", cost_consideration_enabled=True),
+            catalog=[cheap, capable],
+            rules=self.rules,
+        )
+        self.assertEqual(off.model, "capable")
+        self.assertEqual(on.model, "cheap")
+
+    def _astra_and_sol(self) -> tuple[mr.ModelSpec, mr.ModelSpec]:
+        astra = _fixture_model(
+            "gpt-6-astra",
+            capability=5,
+            cost=5,
+            token_efficiency=3,
+            latency=3,
+            efforts=("high",),
+            strengths=("deep_debugging", "difficult_coding", "cross_component_reasoning"),
+            provider="openai",
+            agent="codex",
+        )
+        sol = _fixture_model(
+            "gpt-5.6-sol",
+            capability=4,
+            cost=2,
+            token_efficiency=4,
+            latency=4,
+            efforts=("high",),
+            strengths=("debugging",),
+            provider="openai",
+            agent="codex",
+        )
+        return astra, sol
+
+    def _medium_vs_high_catalog(self) -> list[mr.ModelSpec]:
+        return [
+            _fixture_model(
+                "only-option",
+                capability=3,
+                cost=3,
+                token_efficiency=3,
+                latency=3,
+                efforts=("medium", "high"),
+                strengths=("architecture", "sustained_reasoning"),
+                benchmarks={"high": _measured(deep_swe=1.0)},
+            ),
+            _fixture_model(
+                "range-anchor",
+                capability=3,
+                cost=3,
+                token_efficiency=3,
+                latency=3,
+                efforts=("medium",),
+                benchmarks={"medium": _measured(deep_swe=0.0)},
+            ),
+        ]
 
 
 if __name__ == "__main__":

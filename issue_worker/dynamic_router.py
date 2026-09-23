@@ -311,6 +311,15 @@ def normalize_routing_optimization(value: Any) -> str:
     return key if key in ROUTING_OPTIMIZATIONS else DEFAULT_ROUTING_OPTIMIZATION
 
 
+def cost_consideration_enabled(value: Any) -> bool:
+    """Whether the UI Cost Consideration setting is on.
+
+    Reads ``routing_optimization`` from config (the existing 'Optimize routing
+    for cost' toggle). Never inferred from the issue prompt.
+    """
+    return normalize_routing_optimization(value) == "cost"
+
+
 def model_catalog(
     providers: Sequence[str] = (),
     *,
@@ -640,11 +649,13 @@ def _scored_tier_decision(
             if not allow_usage_credit_models and requires_usage_credits(model.model)
         }
         disabled |= {str(model).strip() for model in candidate.excluded_models}
+        cost_on = cost_consideration_enabled(routing_optimization)
         decision = _model_router.route(
             _model_router.RouteRequest(
                 task_type=_normalize_task_type(task_type),
                 complexity=complexity,
-                cost_sensitive=normalize_routing_optimization(routing_optimization) == "cost",
+                cost_consideration_enabled=cost_on,
+                cost_sensitive=cost_on,
                 quality_requirement="high" if risk == "high" else "normal",
             ),
             availability=_model_router.RoutingAvailability(
@@ -1084,6 +1095,7 @@ def resolve_routing_decision(
         "reasoning_effort": effort,
         "model_source": model_source,
         "routing_optimization": optimization,
+        "cost_consideration_enabled": cost_consideration_enabled(optimization),
         "router_suggested_provider": str(parsed.get("selected_provider") or "").strip().lower(),
         "router_suggested_model": str(parsed.get("selected_model") or "").strip(),
         "router_suggested_effort": str(parsed.get("reasoning_effort") or "").strip(),
@@ -1211,6 +1223,7 @@ def fallback_routing_decision(
         "reasoning_effort": effort,
         "model_source": "configured",
         "routing_optimization": normalize_routing_optimization(routing_optimization),
+        "cost_consideration_enabled": cost_consideration_enabled(routing_optimization),
         "router_suggested_provider": "",
         "router_suggested_model": "",
         "router_suggested_effort": "",
