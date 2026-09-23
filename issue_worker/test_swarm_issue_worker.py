@@ -3699,12 +3699,16 @@ class WorkerTestCase(unittest.TestCase):
         # The router still runs on the provider that was picked for capacity.
         self.assertEqual(router.call_args.kwargs["provider"], "codex")
         self.assertEqual(self.worker.choice.name, "Grok")
-        self.assertEqual(self.worker.choice.model, "grok-4.6")
-        self.assertEqual(self.worker.choice.effort, "high")
+        # The router named Codex's model while handing off to Grok, so the
+        # reusable scorer supplies Grok's capable complexity-7 fallback.
+        self.assertEqual(self.worker.choice.model, "grok-4.7")
+        self.assertEqual(self.worker.choice.effort, "xhigh")
         self.assertTrue(self.worker.choice.session_id)
         self.assertEqual(self.worker.expected_branch(), "ai/xai/issue-506")
         self.assertEqual(self.worker.start_usage, self.worker.provider_usages["Grok"])
         self.assertEqual(self.worker.routing["provider"], "grok")
+        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertFalse(self.worker.routing["cost_consideration_enabled"])
         self.assertEqual(
             self.worker.routing["provider_reason"],
             "Grok is quickest on a small scripted change.",
