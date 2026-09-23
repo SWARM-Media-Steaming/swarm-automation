@@ -28,7 +28,8 @@
     "shortDescription": "Run AI issue workers and closed-loop UAT checks from a native desktop control center.",
     "createUpdaterArtifacts": true,
     "resources": {
-      "issue_worker/*.py": "issue_worker/"
+      "issue_worker/*.py": "issue_worker/",
+      "skills/model-router/*.yaml": "skills/model-router/"
     },
     "icon": [
       "icons/32x32.png",

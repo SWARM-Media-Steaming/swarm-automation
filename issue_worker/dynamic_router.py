@@ -26,6 +26,15 @@ overruled, since its model then belongs to a different tool.
 ``_MODEL_CATALOG`` exists only here: unlike the tier tables and provider
 strengths, it is never sent to the app or persisted in config.json, so there is
 no matching copy to keep in sync in ``src/config.rs``.
+
+Whenever the router's own free-choice model (above) is not usable — its pick
+was outside the catalog, or its tool pick was overruled — the deterministic
+safety net is no longer a flat complexity-band lookup. ``_scored_tier_decision``
+asks the reusable Dynamic Model Router (issue #195, ``model_router.py`` plus
+``skills/model-router/{models,routing-rules}.yaml``) to score every eligible
+model/effort for the chosen tool against the graded complexity, task type, and
+risk, and only falls back to the old ``tier_for_complexity`` table if that
+scoring config cannot be loaded or nothing is eligible.
 """
 
 from __future__ import annotations
@@ -49,6 +58,7 @@ from issue_images import (
     grok_prompt_json,
     inlined_images,
 )
+import model_router as _model_router
 
 
 PROMPT_GRADES = (
@@ -529,6 +539,125 @@ def tier_for_complexity(tiers: tuple[RoutingTier, ...] | list[RoutingTier], comp
     return chosen
 
 
+# Freeform pre-flight task_type text -> the reusable model_router's fixed
+# vocabulary (issue #195). Matched against exact aliases first, then by
+# substring, so "deep debugging" and "debugging deep dive" both land on
+# "deep_debugging"; anything unrecognized falls back to "general_reasoning"
+# rather than failing the routing pass.
+_TASK_TYPE_ALIASES: dict[str, str] = {
+    "doc": "documentation",
+    "docs": "documentation",
+    "documentation": "documentation",
+    "test": "test_generation",
+    "tests": "test_generation",
+    "testing": "test_generation",
+    "bug": "simple_bug_fix",
+    "bugfix": "simple_bug_fix",
+    "fix": "simple_bug_fix",
+    "feature": "feature",
+    "refactor": "refactor",
+    "refactoring": "refactor",
+    "debug": "debugging",
+    "debugging": "debugging",
+    "review": "code_review",
+    "code_review": "code_review",
+    "architecture": "architecture",
+    "design": "architecture",
+    "security": "security_analysis",
+    "performance": "performance_analysis",
+    "perf": "performance_analysis",
+    "infrastructure": "infrastructure",
+    "infra": "infrastructure",
+    "devops": "devops",
+    "deploy": "devops",
+    "deployment": "devops",
+    "research": "research",
+    "planning": "planning",
+    "plan": "planning",
+    "repository_analysis": "repository_analysis",
+    "analysis": "repository_analysis",
+    "mechanical": "mechanical_edit",
+    "formatting": "mechanical_edit",
+    "rename": "mechanical_edit",
+}
+
+
+def _normalize_task_type(raw: str) -> str:
+    key = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if key in _model_router.TASK_TYPES:
+        return key
+    if key in _TASK_TYPE_ALIASES:
+        return _TASK_TYPE_ALIASES[key]
+    for alias, canonical in _TASK_TYPE_ALIASES.items():
+        if alias in key:
+            return canonical
+    return "general_reasoning"
+
+
+def describe_scored_tier(
+    candidate: RouterCandidate,
+    decision: "_model_router.RoutingDecision",
+    complexity: int,
+) -> str:
+    """How the reusable model router (issue #195) reached a tier decision, in plain words."""
+    model_name = display_model_name(decision.model)
+    text = (
+        f"Complexity {complexity}/10 falls in {candidate.name}'s {decision.complexity} band; the "
+        f"model router scored {model_name} at {display_effort(decision.effort)} reasoning as the best fit. "
+        f"{decision.reason}"
+    )
+    description = model_description(decision.model)
+    if description:
+        text += f" {model_name}: {description}"
+    return text
+
+
+def _scored_tier_decision(
+    candidate: RouterCandidate,
+    complexity: int,
+    task_type: str,
+    risk: str,
+    *,
+    routing_optimization: str,
+    allow_usage_credit_models: bool,
+) -> tuple[str, str, str]:
+    """(model, effort, explanation) from the reusable scoring router.
+
+    Falls back to the static complexity-tier table when the scoring router's
+    own config cannot be loaded or nothing is eligible — the same "degrade,
+    never block" rule every other part of this module follows — and also when
+    the operator has explicitly customized this tool's ``routing_tiers``, so
+    that documented per-provider override still takes effect rather than
+    being silently superseded by the scoring engine's own catalog.
+    """
+    if tuple(candidate.tiers) != tuple(default_routing_tiers().get(candidate.key, ())):
+        tier = tier_for_complexity(candidate.tiers, complexity)
+        return tier.model, tier.effort, describe_tier(candidate, tier, complexity)
+    try:
+        disabled = {
+            model.model
+            for model in _model_router.load_model_catalog()
+            if not allow_usage_credit_models and requires_usage_credits(model.model)
+        }
+        disabled |= {str(model).strip() for model in candidate.excluded_models}
+        decision = _model_router.route(
+            _model_router.RouteRequest(
+                task_type=_normalize_task_type(task_type),
+                complexity=complexity,
+                cost_sensitive=normalize_routing_optimization(routing_optimization) == "cost",
+                quality_requirement="high" if risk == "high" else "normal",
+            ),
+            availability=_model_router.RoutingAvailability(
+                enabled_agents=frozenset({candidate.key}),
+                disabled_models=frozenset(disabled),
+            ),
+        )
+        return decision.model, decision.effort, describe_scored_tier(candidate, decision, complexity)
+    except (_model_router.ModelRouterError, _model_router.ModelRouterConfigError):
+        tier = tier_for_complexity(candidate.tiers, complexity)
+        return tier.model, tier.effort, describe_tier(candidate, tier, complexity)
+
+
 def candidate_catalog(
     candidate: RouterCandidate,
     *,
@@ -904,8 +1033,15 @@ def resolve_routing_decision(
         confidence=confidence,
         minimum_same_provider_confidence=minimum_same_provider_confidence,
     )
-    tier = tier_for_complexity(chosen.tiers, complexity)
     optimization = normalize_routing_optimization(routing_optimization)
+    tier_model, tier_effort, tier_explanation = _scored_tier_decision(
+        chosen,
+        complexity,
+        task_type,
+        risk,
+        routing_optimization=optimization,
+        allow_usage_credit_models=allow_usage_credit_models,
+    )
     suggested_model = str(parsed.get("selected_model") or "").strip()
     suggested_effort = str(parsed.get("reasoning_effort") or "").strip()
     allowed = {
@@ -915,11 +1051,11 @@ def resolve_routing_decision(
         )
     }
     if override:
-        model, effort, model_source = tier.model, tier.effort, "tier"
-        explanation = describe_tier(chosen, tier, complexity)
+        model, effort, model_source = tier_model, tier_effort, "tier"
+        explanation = tier_explanation
     elif suggested_model in allowed:
         model = suggested_model
-        effort = _normalize_effort(suggested_effort) or tier.effort
+        effort = _normalize_effort(suggested_effort) or tier_effort
         model_source = "router"
         explanation = describe_model_choice(
             chosen, model, effort, complexity, optimization=optimization
@@ -927,11 +1063,11 @@ def resolve_routing_decision(
     elif not allow_tier_fallback:
         raise InvalidRouterModel(suggested_model, parsed)
     else:
-        model, effort, model_source = tier.model, tier.effort, "tier"
+        model, effort, model_source = tier_model, tier_effort, "tier"
         named = suggested_model or "no model"
         explanation = (
             f"The router named {named}, which is not a model {chosen.name} can run, so its "
-            f"configured complexity tier decided instead. " + describe_tier(chosen, tier, complexity)
+            f"configured routing decided instead. " + tier_explanation
         )
     return {
         "provider": chosen.key,
