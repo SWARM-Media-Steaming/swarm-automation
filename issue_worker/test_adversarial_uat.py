@@ -389,6 +389,33 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertIn("Router recommendation: Grok 4.6 at High reasoning", notice)
         self.assertNotIn("Dynamic Model Routing applied", notice)
 
+    def test_cost_consideration_reaches_scored_routing_on_an_invalid_model_name(self):
+        self.prepare()
+        self.worker.config = dataclasses.replace(
+            self.worker.config, dynamic_model_routing=True, routing_optimization="cost"
+        )
+        payload = json.dumps({
+            "task_type": "debugging",
+            "complexity": 1,
+            "risk": "low",
+            "context_requirement": "small",
+            "selected_provider": "claude",
+            "provider_reason": "Small documentation change.",
+            "selected_model": "not-a-real-model",
+            "reasoning_effort": "low",
+            "confidence": 0.8,
+            "prompt_grade": "B",
+            "grade_reason": "Clear enough to grade.",
+            "complexity_reason": "One-line documentation edit.",
+        })
+        with mock.patch("swarm_issue_worker.run_provider_router", return_value=payload):
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertTrue(self.worker.routing["cost_consideration_enabled"])
+        self.assertEqual(self.worker.routing["routing_optimization"], "cost")
+        self.assertEqual(self.worker.choice.model, "claude-haiku-4-5")
+        self.assertEqual(self.worker.choice.effort, "low")
+
     def test_cost_routing_prompt_holds_frontier_models_to_the_complexity_floor(self):
         self.prepare()
         self.worker.config = dataclasses.replace(

@@ -3475,6 +3475,39 @@ class WorkerTestCase(unittest.TestCase):
         self.assertFalse(self.worker.routing["fallback"])
         self.assertEqual(self.worker.routing["router_suggested_model"], "gpt-5.6-hyperion")
 
+    def test_dynamic_routing_scored_fallback_honors_cost_consideration(self) -> None:
+        payload = dict(
+            task_type="debugging",
+            complexity=1,
+            selected_provider="claude",
+            selected_model="not-a-real-model",
+            reasoning_effort="low",
+        )
+        self.worker.config = dataclasses.replace(
+            self.worker.config, dynamic_model_routing=True, routing_optimization="best"
+        )
+        self.worker.issue = IssueContext(515, "Cost off", "ORIGINAL", [], "https://example.invalid/515")
+        self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5", "medium", "session-515")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(**payload),
+        ):
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertFalse(self.worker.routing["cost_consideration_enabled"])
+        self.assertEqual(self.worker.choice.model, "claude-sonnet-5")
+
+        self.worker.config = dataclasses.replace(self.worker.config, routing_optimization="cost")
+        self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5", "medium", "session-515b")
+        with mock.patch(
+            "swarm_issue_worker.run_provider_router",
+            return_value=self._routing_payload(**payload),
+        ):
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertTrue(self.worker.routing["cost_consideration_enabled"])
+        self.assertEqual(self.worker.choice.model, "claude-haiku-4-5")
+
     def test_dynamic_routing_degrades_to_the_tier_when_the_corrective_call_fails(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
         self.worker.issue = IssueContext(514, "Retry failed", "ORIGINAL", [], "https://example.invalid/514")

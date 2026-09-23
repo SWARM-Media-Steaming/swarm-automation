@@ -1,9 +1,12 @@
 # Dynamic Model Router (issue #195)
 
-A reusable, provider-agnostic component whose only job is choosing the least
-expensive, least token-intensive provider/model/reasoning-effort combination
-reasonably expected to complete a given task — never simply the strongest
-model available. It does not decide *what* a task is; that classification
+A reusable, provider-agnostic component that chooses a
+provider/model/reasoning-effort combination reasonably expected to complete a
+given task. When Cost Consideration is on, it prefers the least expensive,
+least token-intensive combination that still clears a minimum success bar —
+never simply the strongest model, and never a cheaper model that is not
+expected to succeed. When Cost Consideration is off, dollar cost and token
+consumption have no weight. It does not decide *what* a task is; that classification
 (complexity, task type) is produced elsewhere (today, the existing pre-flight
 AI grading call in `issue_worker/dynamic_router.py`). This router answers the
 second question: given that classification and which providers/models/efforts
@@ -91,13 +94,13 @@ score =
   |                         # benchmark exists at that effort — a measured
   |                         # "max" result is never assumed to hold at
   |                         # "medium"/"high"
-  + context_fit              # token efficiency + SWE-Atlas-QnA blend
-  + cost_efficiency           \
-  + token_efficiency           > weighted by relative_cost / _token_efficiency /
-  + latency                   / _latency; the matching weight is multiplied by
-  |                         # sensitivity_boost when the request flags that
-  |                         # dimension (cost_sensitive/token_sensitive/
-  |                         # latency_sensitive)
+  + context_fit              # SWE-Atlas-QnA, else relative_capability
+  + cost_efficiency           \  measured dollars/tokens at this exact effort
+  + token_efficiency           > when data_quality is MEASURED; otherwise
+  + latency                   /  relative_cost / _token_efficiency / _latency
+  |                         # cost/token weights are 0 unless cost
+  |                         # consideration is on; latency_sensitive and
+  |                         # token_sensitive still apply sensitivity_boost
   + reliability              # coding_capability, discounted when its data is
   |                         # HEURISTIC rather than MEASURED — only weighted
   |                         # for task types that need it (deep_reasoning group)
@@ -105,17 +108,41 @@ score =
   - unnecessary_reasoning_penalty    # effort levels beyond the band's floor
 ```
 
-Weights live in `routing-rules.yaml`'s `weights` (the issue's initial BALANCED
-preset) plus each task type group's `extra_weights`. The highest-scoring
-candidate wins; candidates within `tie_break_margin` of the top score are
-treated as equivalent and the cheapest (then lowest-effort) one is chosen —
-"if two adjacent options perform similarly, pick the less expensive one."
-`preferred_provider` in `RoutingAvailability` only breaks ties among those
-near-equal candidates; it never overrides a clearly better-scoring one.
+Weights live in `routing-rules.yaml`'s `weights` as two sets, selected by
+`RouteRequest.cost_consideration_enabled` (the UI "Optimize routing for cost"
+toggle, passed through as `routing_optimization` — never inferred from the
+prompt):
 
-Output matches the issue's documented shape (`RoutingDecision.as_dict()`):
+- `cost_consideration_off` — expected success, task fit, coding, context, and
+  latency. `cost_efficiency` and `token_efficiency` are 0.
+- `cost_consideration_on` — the same capability terms plus independent
+  `cost_efficiency` (estimated dollar cost) and `token_efficiency` weights.
+
+Dollar cost and token efficiency are scored separately. Measured
+`benchmark_cost_per_task` / `benchmark_tokens_per_task` are used only at the
+exact effort they were recorded (`data_quality: MEASURED`); otherwise the
+relative 1–5 ranks are used. Missing prices are never fabricated.
+
+When cost consideration is on, candidates below `minimum_expected_success`
+are removed first, then any remaining candidate more than
+`cost_optimization_quality_tolerance` behind the strongest expected-success
+score is removed, then the cost-aware weights pick the winner. Cost
+optimization therefore cannot select a model the router already considers
+underpowered. `unnecessary_reasoning_penalty_per_level` is multiplied by
+`cost_consideration_unnecessary_reasoning_multiplier` so High is preferred
+over XHigh/Max when both are expected to succeed.
+
+Task type `extra_weights` still apply; cost/token extras are skipped while
+cost consideration is off. The highest-scoring remaining candidate wins.
+Within `tie_break_margin`, cost-on ties break toward cheaper then lower
+effort; cost-off ties break toward higher capability. `preferred_provider`
+in `RoutingAvailability` only breaks ties among those near-equal candidates;
+it never overrides a clearly better-scoring one.
+
+Output matches the documented shape (`RoutingDecision.as_dict()`):
 `provider`, `agent`, `model`, `effort`, `complexity`, `task_type`,
-`confidence`, `reason`, plus up to two `alternatives`.
+`confidence`, `reason`, `cost_consideration_enabled`, plus up to two
+`alternatives`.
 
 ## Availability and unknown models
 
@@ -132,9 +159,13 @@ enough metadata exists" requirement. If nothing is eligible after filtering,
 `issue_worker/test_model_router.py` and `issue_worker/test_model_router_yaml.py`
 — deterministic, no live API calls, covering complexity/task-type routing,
 sensitivity flags, overqualification, disabled providers/models, unsupported
-efforts, and unknown models. Run with `python3 -m unittest test_model_router
+efforts, unknown models, and cost-consideration weight sets / thresholds
+(issue #198). Run with `python3 -m unittest test_model_router
 test_model_router_yaml` from `issue_worker/` (not pytest — see
-`test_swarm_issue_worker.py`'s module docstring for why).
+`test_swarm_issue_worker.py`'s module docstring for why). End-to-end wiring
+from the UI `routing_optimization` toggle is covered in
+`test_dynamic_router.py`, `test_swarm_issue_worker.py`, and
+`test_adversarial_uat.py`.
 
 ## Future tuning
 

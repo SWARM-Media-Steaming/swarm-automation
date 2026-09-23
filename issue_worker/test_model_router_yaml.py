@@ -124,6 +124,10 @@ class RealConfigTests(unittest.TestCase):
         self.assertIsInstance(data, dict)
         self.assertIn("complexity_bands", data)
         self.assertIn("weights", data)
+        self.assertIn("cost_consideration_off", data["weights"])
+        self.assertIn("cost_consideration_on", data["weights"])
+        self.assertIn("minimum_expected_success", data)
+        self.assertIn("cost_optimization_quality_tolerance", data)
 
 
 if __name__ == "__main__":
