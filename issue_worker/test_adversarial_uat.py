@@ -416,6 +416,47 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(self.worker.choice.model, "claude-haiku-4-5")
         self.assertEqual(self.worker.choice.effort, "low")
 
+    def test_best_fit_routing_handoff_uses_the_scored_grok_fallback(self):
+        """A new cross-provider handoff uses the reusable scorer's Grok pick."""
+        self.prepare()
+        self.worker.config = dataclasses.replace(
+            self.worker.config, dynamic_model_routing=True, routing_optimization="best"
+        )
+        # A saved attempt is intentionally pinned to its existing provider.
+        # Remove it to exercise a new-attempt handoff, which is the contract
+        # this UAT covers.
+        self.worker.in_progress_file.unlink()
+        self.worker.choice = ProviderChoice("Codex", "gpt-5.6-luna", "medium", "uat-session")
+        self.worker.provider_usages = {
+            "Claude": ProviderUsage(0, 80.0, "week 80% remaining"),
+            "Codex": ProviderUsage(0, 90.0, "week 90% remaining"),
+            "Grok": ProviderUsage(0, 70.0, "week 70% remaining"),
+        }
+        self.worker.provider_priority = ("Codex", "Claude", "Grok")
+        payload = json.dumps({
+            "task_type": "debugging",
+            "complexity": 7,
+            "risk": "medium",
+            "context_requirement": "large",
+            "selected_provider": "grok",
+            "provider_reason": "Grok is best suited to this debugging task.",
+            # This model belongs to the router provider, not Grok. The retry
+            # path must use the reusable scorer for the selected provider.
+            "selected_model": "gpt-5.6-luna",
+            "reasoning_effort": "low",
+            "confidence": 0.8,
+            "prompt_grade": "B",
+            "grade_reason": "Clear enough to grade.",
+            "complexity_reason": "Requires a multi-file debugging pass.",
+        })
+        with mock.patch("swarm_issue_worker.run_provider_router", return_value=payload):
+            self.worker.maybe_apply_dynamic_routing()
+        self.assertEqual(self.worker.choice.name, "Grok")
+        self.assertEqual(self.worker.choice.model, "grok-4.7")
+        self.assertEqual(self.worker.choice.effort, "xhigh")
+        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertFalse(self.worker.routing["cost_consideration_enabled"])
+
     def test_cost_routing_prompt_holds_frontier_models_to_the_complexity_floor(self):
         self.prepare()
         self.worker.config = dataclasses.replace(
