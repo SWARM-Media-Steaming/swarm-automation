@@ -4171,6 +4171,84 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual([row["issue_number"] for row in cli_page["records"]], [3])
         self.assertEqual(cli_page["summary"]["distribution"]["A"], 1)
 
+    def test_feedback_queries_union_multiple_repositories_and_empty_means_global(self) -> None:
+        database_path = self.state / "global-feedback.sqlite3"
+        rows = [
+            ("octocat/one", 1, "A", "claude", "clean_first_pass", 0),
+            ("octocat/two", 2, "C", "grok", "resolved_after_n", 2),
+            ("octocat/three", 3, "F", "codex", "cap_hit", 6),
+        ]
+        for index, (repository_name, number, grade, router, outcome, rounds) in enumerate(rows):
+            service = ExecutionHistoryService(True, database_path)
+            service.start(
+                ExecutionStart(
+                    repository=repository_name,
+                    issue_number=number,
+                    issue_url=f"https://github.com/{repository_name}/issues/{number}",
+                    issue_title=f"Issue {number}",
+                    issue_body="",
+                    provider="Codex",
+                    model="m",
+                    effort="high",
+                    branch_name="b",
+                    application_version="1",
+                    routing_decision={
+                        "prompt_grade": grade,
+                        "grade_reason": "Reason.",
+                        "fallback": False,
+                        "provider": "codex",
+                        "router_provider": router,
+                        "router_model": f"{router}-model",
+                    },
+                ),
+                f"2026-09-2{index + 1}T10:00:00-05:00",
+            )
+            service.update(
+                f"2026-09-2{index + 1}T10:05:00-05:00",
+                adversarial_round_count=rounds,
+                adversarial_outcome=outcome,
+            )
+
+        repository = ExecutionHistoryRepository(database_path)
+        selected = ["octocat/one", "octocat/two"]
+        page, total, _, _ = repository.page_for_repository(selected)
+        self.assertEqual(total, 2)
+        self.assertEqual([row["repository"] for row in page], ["octocat/two", "octocat/one"])
+        summary = repository.adversarial_summary(selected)
+        self.assertEqual(summary["loops"], 2)
+        self.assertEqual(summary["averageRounds"], 1.0)
+
+        grades = repository.graded_for_repository(selected)
+        self.assertEqual(grades["total"], 2)
+        self.assertEqual({row["repository"] for row in grades["records"]}, set(selected))
+        self.assertEqual(grades["summary"]["graded"], 2)
+        self.assertEqual([row["router"] for row in grades["routerMatrix"]], ["claude", "grok"])
+
+        global_page, global_total, _, _ = repository.page_for_repository([])
+        self.assertEqual(global_total, 3)
+        self.assertEqual([row["repository"] for row in global_page], [row[0] for row in reversed(rows)])
+        self.assertEqual(repository.adversarial_summary([])["loops"], 3)
+        self.assertEqual(repository.graded_for_repository([])["summary"]["graded"], 3)
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = execution_history_main(
+                [
+                    "--db", str(database_path),
+                    "--repository", "octocat/one",
+                    "--repository", "octocat/two",
+                    "--limit", "10",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(buffer.getvalue())["total"], 2)
+
+        global_buffer = io.StringIO()
+        with contextlib.redirect_stdout(global_buffer):
+            exit_code = execution_history_main(["--db", str(database_path), "--limit", "10"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(global_buffer.getvalue())["total"], 3)
+
     def test_router_matrix_counts_who_graded_and_who_they_picked(self) -> None:
         database_path = self.state / "grades-routers.sqlite3"
         service_args = dict(

@@ -67,6 +67,20 @@ Related, still-accurate mechanics:
   heuristic for the UI, not something the worker's own execution path
   branches on.)
 
+## Feedback is app-wide, not tied to the header repository
+
+The Feedback view reads the one app-wide `swarm-automation.sqlite3` database.
+Its repository chips are intentionally independent of the header's active
+repository: `AppConfig.feedback_repo_filter` stores repo ids for that page
+only, with an empty vector meaning all repositories. The Rust history/grade
+commands resolve a non-empty id list to GitHub repository names and pass
+repeated `--repository` arguments to `ai_execution_history.py`; an empty list
+passes no repository argument so Python performs one global SQL query. Keep
+the grade summary, router matrix, adversarial aggregate, paging, and sorting
+server-side over that filtered union rather than merging per-repo responses in
+JavaScript. GitHub backlog import is the exception: it runs once per selected
+configured repository and returns a success/failure result for each one.
+
 ## Dynamic model routing
 
 Optional per-repo setting (`dynamic_model_routing`) that, when on, has one

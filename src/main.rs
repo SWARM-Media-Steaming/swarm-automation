@@ -207,6 +207,17 @@ fn save_config<R: tauri::Runtime>(
     Ok(config)
 }
 
+#[tauri::command]
+fn save_feedback_repo_filter<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_ids: Vec<String>,
+) -> Result<AppConfig, String> {
+    let mut config = current_config(&state)?;
+    config.feedback_repo_filter = repo_ids;
+    save_config(app, state, config)
+}
+
 /// A running scheduler re-reads `repos.json` at the start of each cycle, but
 /// only the app writes it. Without this, a repository added (or a per-repo
 /// setting changed) while the worker is running would be ignored until someone
@@ -1351,21 +1362,40 @@ fn normalize_execution_history_search(search: Option<String>) -> String {
         .collect()
 }
 
+fn feedback_repository_names(
+    config: &AppConfig,
+    repo_ids: &[String],
+) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for repo_id in repo_ids {
+        let repository = resolve_repo(config, repo_id)?.github_repository.clone();
+        if !names.contains(&repository) {
+            names.push(repository);
+        }
+    }
+    Ok(names)
+}
+
+fn append_repository_args(arguments: &mut Vec<String>, repositories: &[String]) {
+    for repository in repositories {
+        arguments.push("--repository".into());
+        arguments.push(repository.clone());
+    }
+}
+
 fn execution_history_query_args(
     script: &Path,
     database: &Path,
-    repository: &str,
+    repositories: &[String],
     offset: Option<i64>,
     search: Option<String>,
     sort: Option<String>,
 ) -> Vec<String> {
     // `--limit` is always sent. Omitting it makes the CLI print every row.
-    vec![
+    let mut arguments = vec![
         script.to_string_lossy().into_owned(),
         "--db".into(),
         database.to_string_lossy().into_owned(),
-        "--repository".into(),
-        repository.to_string(),
         "--limit".into(),
         EXECUTION_HISTORY_PAGE_SIZE.to_string(),
         "--offset".into(),
@@ -1379,7 +1409,9 @@ fn execution_history_query_args(
             _ => "recent",
         }
         .into(),
-    ]
+    ];
+    append_repository_args(&mut arguments, repositories);
+    arguments
 }
 
 fn empty_execution_history_page() -> ExecutionHistoryPage {
@@ -1396,13 +1428,13 @@ fn empty_execution_history_page() -> ExecutionHistoryPage {
 fn get_execution_history<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
-    repo_id: String,
+    repo_ids: Vec<String>,
     offset: Option<i64>,
     search: Option<String>,
     sort: Option<String>,
 ) -> Result<ExecutionHistoryPage, String> {
     let config = current_config(&state)?;
-    let repo = resolve_repo(&config, &repo_id)?;
+    let repositories = feedback_repository_names(&config, &repo_ids)?;
     let database_path = execution_history_db_path(&config);
     if !database_path.is_file() {
         return Ok(empty_execution_history_page());
@@ -1411,14 +1443,7 @@ fn get_execution_history<R: tauri::Runtime>(
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
     let (ok, raw) = run_capture_owned(
         &python,
-        &execution_history_query_args(
-            &script,
-            &database_path,
-            &repo.github_repository,
-            offset,
-            search,
-            sort,
-        ),
+        &execution_history_query_args(&script, &database_path, &repositories, offset, search, sort),
     );
     if !ok {
         return Err(format!("Execution history lookup failed: {raw}"));
@@ -1430,14 +1455,14 @@ fn get_execution_history<R: tauri::Runtime>(
 #[tauri::command]
 async fn get_execution_history_background(
     app: tauri::AppHandle,
-    repo_id: String,
+    repo_ids: Vec<String>,
     offset: Option<i64>,
     search: Option<String>,
     sort: Option<String>,
 ) -> Result<ExecutionHistoryPage, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        get_execution_history(app.clone(), state, repo_id, offset, search, sort)
+        get_execution_history(app.clone(), state, repo_ids, offset, search, sort)
     })
     .await
     .map_err(|error| format!("Execution history lookup failed: {error}"))?
@@ -1631,6 +1656,8 @@ async fn file_diagnostic_issue_background(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
 struct PromptGradeRecord {
+    #[serde(default)]
+    repository: String,
     issue_number: i64,
     #[serde(default)]
     issue_title: String,
@@ -1762,17 +1789,15 @@ struct PromptGradesQuery {
 fn prompt_grades_query_args(
     script: &Path,
     database: &Path,
-    repository: &str,
+    repositories: &[String],
     query: PromptGradesQuery,
 ) -> Vec<String> {
     // `--limit` is always sent, matching execution history. Omitting it would
     // still page grades, but the desktop always asks for one page explicitly.
-    vec![
+    let mut arguments = vec![
         script.to_string_lossy().into_owned(),
         "--db".into(),
         database.to_string_lossy().into_owned(),
-        "--repository".into(),
-        repository.to_string(),
         "--grades".into(),
         "--limit".into(),
         EXECUTION_HISTORY_PAGE_SIZE.to_string(),
@@ -1786,18 +1811,20 @@ fn prompt_grades_query_args(
         normalize_router_filter(query.router),
         "--router-model".into(),
         normalize_router_model_filter(query.router_model),
-    ]
+    ];
+    append_repository_args(&mut arguments, repositories);
+    arguments
 }
 
 #[tauri::command]
 fn get_prompt_grades<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
-    repo_id: String,
+    repo_ids: Vec<String>,
     query: PromptGradesQuery,
 ) -> Result<PromptGradesPage, String> {
     let config = current_config(&state)?;
-    let repo = resolve_repo(&config, &repo_id)?;
+    let repositories = feedback_repository_names(&config, &repo_ids)?;
     let database_path = execution_history_db_path(&config);
     if !database_path.is_file() {
         return Ok(PromptGradesPage {
@@ -1813,7 +1840,7 @@ fn get_prompt_grades<R: tauri::Runtime>(
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
     let (ok, raw) = run_capture_owned(
         &python,
-        &prompt_grades_query_args(&script, &database_path, &repo.github_repository, query),
+        &prompt_grades_query_args(&script, &database_path, &repositories, query),
     );
     if !ok {
         return Err(format!("Prompt grades lookup failed: {raw}"));
@@ -1825,12 +1852,12 @@ fn get_prompt_grades<R: tauri::Runtime>(
 #[tauri::command]
 async fn get_prompt_grades_background(
     app: tauri::AppHandle,
-    repo_id: String,
+    repo_ids: Vec<String>,
     query: PromptGradesQuery,
 ) -> Result<PromptGradesPage, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        get_prompt_grades(app.clone(), state, repo_id, query)
+        get_prompt_grades(app.clone(), state, repo_ids, query)
     })
     .await
     .map_err(|error| format!("Prompt grades lookup failed: {error}"))?
@@ -1847,48 +1874,114 @@ struct ExecutionHistoryImportSummary {
     skipped: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionHistoryImportResult {
+    repo_id: String,
+    repository: String,
+    success: bool,
+    #[serde(default)]
+    total_issues: i64,
+    #[serde(default)]
+    imported: i64,
+    #[serde(default)]
+    skipped: i64,
+    #[serde(default)]
+    error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionHistoryImportBatch {
+    results: Vec<ExecutionHistoryImportResult>,
+}
+
 #[tauri::command]
 fn import_execution_history<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
-    repo_id: String,
-) -> Result<ExecutionHistoryImportSummary, String> {
+    repo_ids: Vec<String>,
+) -> Result<ExecutionHistoryImportBatch, String> {
     let config = current_config(&state)?;
-    let repo = resolve_repo(&config, &repo_id)?;
+    let selected_ids = if repo_ids.is_empty() {
+        config
+            .repositories
+            .iter()
+            .map(|repo| repo.id.clone())
+            .collect()
+    } else {
+        repo_ids
+    };
+    let mut unique_ids = Vec::new();
+    for repo_id in selected_ids {
+        if !unique_ids.contains(&repo_id) {
+            unique_ids.push(repo_id);
+        }
+    }
     let database_path = execution_history_db_path(&config);
     let script = worker_script_dir(&app)?.join("ai_execution_history.py");
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
     let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
-    let (ok, raw) = run_capture_owned(
-        &python,
-        &[
-            script.to_string_lossy().into_owned(),
-            "--db".into(),
-            database_path.to_string_lossy().into_owned(),
-            "--repository".into(),
-            repo.github_repository.clone(),
-            "--import-from-github".into(),
-            "--gh-bin".into(),
-            gh.to_string_lossy().into_owned(),
-        ],
-    );
-    if !ok {
-        return Err(format!(
-            "Importing GitHub issues into execution history failed: {raw}"
-        ));
+    let mut results = Vec::new();
+    for repo_id in unique_ids {
+        let repo = resolve_repo(&config, &repo_id)?;
+        let (ok, raw) = run_capture_owned(
+            &python,
+            &[
+                script.to_string_lossy().into_owned(),
+                "--db".into(),
+                database_path.to_string_lossy().into_owned(),
+                "--repository".into(),
+                repo.github_repository.clone(),
+                "--import-from-github".into(),
+                "--gh-bin".into(),
+                gh.to_string_lossy().into_owned(),
+            ],
+        );
+        if !ok {
+            results.push(ExecutionHistoryImportResult {
+                repo_id: repo.id.clone(),
+                repository: repo.github_repository.clone(),
+                success: false,
+                total_issues: 0,
+                imported: 0,
+                skipped: 0,
+                error: raw.trim().to_string(),
+            });
+            continue;
+        }
+        match serde_json::from_str::<ExecutionHistoryImportSummary>(raw.trim()) {
+            Ok(summary) => results.push(ExecutionHistoryImportResult {
+                repo_id: repo.id.clone(),
+                repository: repo.github_repository.clone(),
+                success: true,
+                total_issues: summary.total_issues,
+                imported: summary.imported,
+                skipped: summary.skipped,
+                error: String::new(),
+            }),
+            Err(error) => results.push(ExecutionHistoryImportResult {
+                repo_id: repo.id.clone(),
+                repository: repo.github_repository.clone(),
+                success: false,
+                total_issues: 0,
+                imported: 0,
+                skipped: 0,
+                error: format!("Import summary could not be parsed: {error}"),
+            }),
+        }
     }
-    serde_json::from_str(raw.trim())
-        .map_err(|error| format!("Import summary could not be parsed: {error}"))
+    Ok(ExecutionHistoryImportBatch { results })
 }
 
 #[tauri::command]
 async fn import_execution_history_background(
     app: tauri::AppHandle,
-    repo_id: String,
-) -> Result<ExecutionHistoryImportSummary, String> {
+    repo_ids: Vec<String>,
+) -> Result<ExecutionHistoryImportBatch, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        import_execution_history(app.clone(), state, repo_id)
+        import_execution_history(app.clone(), state, repo_ids)
     })
     .await
     .map_err(|error| format!("Importing GitHub issues into execution history failed: {error}"))?
@@ -4504,6 +4597,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
+            save_feedback_repo_filter,
             choose_repository,
             inspect_repository,
             prepare_workspace,

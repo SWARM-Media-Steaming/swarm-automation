@@ -504,6 +504,10 @@ pub struct AppConfig {
     pub parallel_repo_workers: bool,
     /// Persist a sanitized lifecycle record for each AI issue execution.
     pub ai_execution_history_enabled: bool,
+    /// Repository ids selected in the Feedback page. Empty means all
+    /// repositories, which keeps old configs global by default.
+    #[serde(default)]
+    pub feedback_repo_filter: Vec<String>,
     /// Allow a future review-platform uploader to transmit eligible records.
     /// Local persistence remains controlled independently above.
     pub prompt_feedback_upload_enabled: bool,
@@ -605,6 +609,7 @@ impl Default for AppConfig {
             minimum_remaining_percent: 10,
             parallel_repo_workers: false,
             ai_execution_history_enabled: false,
+            feedback_repo_filter: Vec::new(),
             prompt_feedback_upload_enabled: false,
             schedule_mode: "continuous".into(),
             schedule_time: "09:00".into(),
@@ -826,6 +831,14 @@ impl AppConfig {
         self.normalize_providers();
         self.normalize_routing();
         self.normalize_repositories();
+        let repository_ids: HashSet<_> = self
+            .repositories
+            .iter()
+            .map(|repo| repo.id.clone())
+            .collect();
+        let mut seen_feedback_ids = HashSet::new();
+        self.feedback_repo_filter
+            .retain(|id| repository_ids.contains(id) && seen_feedback_ids.insert(id.clone()));
         // "off" was removed: every config that had it silently becomes
         // "notify" rather than failing validation on load.
         if self.auto_update.trim().is_empty() || self.auto_update == "off" {
@@ -1221,6 +1234,31 @@ mod tests {
             config.normalize();
             assert_eq!(config.auto_update, "notify");
         }
+    }
+
+    #[test]
+    fn feedback_repository_filter_defaults_global_and_normalizes_saved_ids() {
+        let older: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(older.feedback_repo_filter.is_empty());
+
+        let mut config = AppConfig {
+            repositories: vec![
+                RepoConfig::with_repository("octocat/one"),
+                RepoConfig::with_repository("octocat/two"),
+            ],
+            feedback_repo_filter: vec![
+                "octocat__two".into(),
+                "missing".into(),
+                "octocat__two".into(),
+            ],
+            ..AppConfig::default()
+        };
+        config.normalize();
+        assert_eq!(config.feedback_repo_filter, vec!["octocat__two"]);
+
+        let encoded = serde_json::to_string(&config).unwrap();
+        let decoded: AppConfig = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.feedback_repo_filter, vec!["octocat__two"]);
     }
 
     #[test]
