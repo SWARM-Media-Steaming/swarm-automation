@@ -275,6 +275,106 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_delivery_loop.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-delivery-loop",
+      "name": "Out-of-scope UAT findings logged during delivery remain in execution history after the round outcome is written",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_delivery_loop.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_log_integrity.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-log-integrity",
+      "name": "Out-of-scope UAT finding log lines stay single-line and duplicate findings are filed once",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_log_integrity.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_filed_finding_log_classification.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-log-classification",
+      "name": "Out-of-scope UAT finding log lines stay info milestones even when the title contains 'failed'",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/logging.js",
+          "tests/adversarial/test_filed_finding_log_classification.js"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_filed_finding_history_item_render.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-history-item-render",
+      "name": "Execution History renders separately filed UAT findings from the camelCase desktop payload",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "tests/adversarial/test_filed_finding_history_item_render.js"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
