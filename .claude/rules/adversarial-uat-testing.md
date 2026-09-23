@@ -48,6 +48,10 @@ label from a trusted author; the worker owns VERSION.
   cross-language runners do not share a portable test-case count protocol.
   Capacity consumed is an approximate percentage-point drop across used
   providers' remaining-quota snapshots, never token/dollar cost.
+- Emit the stable `Adversarial UAT for issue #...` boundary logs when an
+  independent test, a fix/re-test round, a completed fix, or its re-test
+  begins. The Overview panel replays these logs to show live progress, so
+  preserve their issue number and round/max values when changing the loop.
 
 Pilot on one repository before enabling across the fleet. Inspect the first
 framework scaffold for each stack, particularly Rust/Tauri and Gradle/JUnit.

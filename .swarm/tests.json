@@ -481,6 +481,58 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_now_working_overview.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-overview",
+      "name": "Now Working shows model/effort and live Adversarial UAT round progress",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "ui/app.js",
+          "tests/adversarial/test_now_working_overview.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_now_working_boundary_logs.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-boundary-logs",
+      "name": "Adversarial UAT emits Overview-panel round boundary logs",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_now_working_boundary_logs.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

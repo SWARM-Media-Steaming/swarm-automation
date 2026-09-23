@@ -489,7 +489,7 @@ class AdversarialUatMixin:
         return f"- Adversarial UAT: {description}, {loop['tests_added']} test files added.\n"
 
     def run_adversarial_delivery(self) -> int:
-        from swarm_issue_worker import ISSUE_COMPLETED_EXIT_CODE, WorkerError, iso_timestamp
+        from swarm_issue_worker import ISSUE_COMPLETED_EXIT_CODE, WorkerError, iso_timestamp, log
         loop = self.read_state()["adversarial"]
         while loop["phase"] != "done":
             if not loop.get("active"):
@@ -502,6 +502,12 @@ class AdversarialUatMixin:
                 self.prepare_adversarial_framework(loop)
                 loop.update(active=True, stage_base=loop.pop("retry_stage_base", None) or self.git("rev-parse", "HEAD"), response=None)
                 self.save_adversarial(loop)
+                if loop["phase"] == "fix":
+                    log(f"Adversarial UAT for issue #{self.issue.number}: starting fix/re-test round {loop['round']} of {MAX_ROUNDS}.")
+                elif loop["round"] == 0:
+                    log(f"Adversarial UAT for issue #{self.issue.number}: starting independent test run (round 0 of {MAX_ROUNDS}).")
+                else:
+                    log(f"Adversarial UAT for issue #{self.issue.number}: starting re-test for round {loop['round']} of {MAX_ROUNDS}.")
             if loop.get("response") is None:
                 # Every tester phase starts with a new CLI session. Only an
                 # interrupted *same phase* resumes its existing session.
@@ -609,6 +615,8 @@ class AdversarialUatMixin:
             completion = self.commit_completed_work(loop["stage_base"])
             self.validate_new_commit_messages(loop["stage_base"], completion)
             loop["completion"] = completion
+            if loop["phase"] == "fix":
+                log(f"Adversarial UAT for issue #{self.issue.number}: fix applied in round {loop['round']} of {MAX_ROUNDS}.")
             usage = self.provider_usage(self.choice.key)
             if usage.remaining_percent is not None:
                 loop["capacity_end"][self.choice.name] = usage.remaining_percent
