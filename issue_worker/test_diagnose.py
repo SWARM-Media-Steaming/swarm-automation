@@ -92,8 +92,7 @@ class DiagnoseTests(unittest.TestCase):
         lines = self.error_log(label, error)
         repos = self.repos_file(label)
         signature = diagnose.problem_signature(label, [f"[{label}] ERROR: {error}"])
-        store = DiagnosticRepository(self.state / "swarm-automation.sqlite3")
-        # Point execution_history_db at this path via the same worker_args the
+        # Point the store at execution_history_db via the same worker_args the
         # real diagnose() call will construct, so it reads/writes the same file.
         from swarm_issue_worker import Config, build_parser
         args = build_parser().parse_args(self._worker_argv(auto=False))
