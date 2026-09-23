@@ -1,0 +1,351 @@
+# Cross-provider model catalog for the SWARM dynamic model router.
+#
+# One entry per (provider, model). `model` is the exact slug the app already
+# invokes providers with — these must stay in sync with the slugs in
+# issue_worker/dynamic_router.py's _MODEL_CATALOG and src/config.rs's
+# default_routing_tiers(); a model missing here cannot be routed to.
+#
+# Scales (all 1-5, comparable across providers):
+#   relative_capability       1 = lightest, 5 = frontier/deepest reasoning
+#   relative_cost              1 = cheapest, 5 = most expensive
+#   relative_token_efficiency  1 = most tokens per task, 5 = fewest
+#   relative_latency           1 = slowest, 5 = fastest
+#
+# data_quality on each benchmark entry: MEASURED (real benchmark run),
+# DERIVED (computed from a MEASURED sibling entry), or HEURISTIC (an
+# estimate from relative_capability, never fabricated benchmark numbers).
+# Unmeasured fields are left null rather than guessed. Benchmarks are keyed
+# by reasoning effort because measured results at one effort (e.g. "max")
+# must not be assumed to hold at another (e.g. "medium").
+
+models:
+  - provider: anthropic
+    agent: claude
+    model: claude-haiku-4-5
+    model_id: claude-haiku-4-5-20251001
+    active: true
+    recommended: true
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [low, medium]
+    strengths: [routing, classification, trivial_tasks, simple_transformations, documentation, lightweight_fixes]
+    weaknesses: [difficult_autonomous_repository_work, deep_debugging, architecture, large_refactor]
+    relative_capability: 1
+    relative_cost: 1
+    relative_token_efficiency: 5
+    relative_latency: 5
+    benchmarks:
+      low:
+        coding_agent_index: null
+        deep_swe: null
+        terminal_bench: null
+        swe_atlas_qna: null
+        benchmark_cost_per_task: null
+        benchmark_tokens_per_task: null
+        benchmark_runtime_minutes: null
+        data_quality: HEURISTIC
+    benchmark_source: null
+    benchmark_date: null
+    notes: "Seeded per issue #195. Fast, cheap, low reasoning depth; keep off difficult autonomous repository work."
+
+  - provider: anthropic
+    agent: claude
+    model: claude-sonnet-5
+    model_id: claude-sonnet-5
+    active: true
+    recommended: true
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [low, medium, high]
+    strengths: [normal_feature_work, tests, refactoring, debugging, general_repository_development]
+    weaknesses: [extreme_ambiguity, cross_repository_architecture]
+    relative_capability: 3
+    relative_cost: 3
+    relative_token_efficiency: 3
+    relative_latency: 3
+    benchmarks:
+      low: {coding_agent_index: null, deep_swe: null, terminal_bench: null, swe_atlas_qna: null, benchmark_cost_per_task: null, benchmark_tokens_per_task: null, benchmark_runtime_minutes: null, data_quality: HEURISTIC}
+      medium: {coding_agent_index: null, deep_swe: null, terminal_bench: null, swe_atlas_qna: null, benchmark_cost_per_task: null, benchmark_tokens_per_task: null, benchmark_runtime_minutes: null, data_quality: HEURISTIC}
+      high: {coding_agent_index: null, deep_swe: null, terminal_bench: null, swe_atlas_qna: null, benchmark_cost_per_task: null, benchmark_tokens_per_task: null, benchmark_runtime_minutes: null, data_quality: HEURISTIC}
+    benchmark_source: null
+    benchmark_date: null
+    notes: "Primary Claude workhorse. Do not automatically escalate STANDARD work to Fable."
+
+  - provider: anthropic
+    agent: claude
+    model: claude-opus-5
+    model_id: claude-opus-5
+    active: true
+    recommended: false
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [high, xhigh, max]
+    strengths: [large_context, sustained_reasoning]
+    weaknesses: [token_efficiency]
+    relative_capability: 4
+    relative_cost: 4
+    relative_token_efficiency: 1
+    relative_latency: 2
+    benchmarks:
+      max:
+        coding_agent_index: 60
+        deep_swe: 0.63
+        terminal_bench: 0.55
+        swe_atlas_qna: 0.62
+        benchmark_cost_per_task: 10.79
+        benchmark_tokens_per_task: 11400000
+        benchmark_runtime_minutes: 41.9
+        data_quality: MEASURED
+    benchmark_source: "Issue #195 seed data (measured Claude Code run)."
+    benchmark_date: "2026-09-22"
+    notes: "Keep available where supported, but do not automatically assume Opus is superior to Fable for coding. Fable 5.1 Max has similar or better measured coding performance using substantially fewer tokens."
+
+  - provider: anthropic
+    agent: claude
+    model: claude-fable-5-1
+    model_id: claude-fable-5-1
+    active: true
+    recommended: true
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [high, xhigh, max]
+    strengths: [difficult_coding, deep_debugging, architecture, large_refactors, high_context_work, difficult_agentic_development]
+    weaknesses: []
+    relative_capability: 5
+    relative_cost: 5
+    relative_token_efficiency: 2
+    relative_latency: 2
+    benchmarks:
+      max:
+        coding_agent_index: 62
+        deep_swe: 0.64
+        terminal_bench: 0.58
+        swe_atlas_qna: 0.65
+        benchmark_cost_per_task: 12.39
+        benchmark_tokens_per_task: 5700000
+        benchmark_runtime_minutes: 34.8
+        data_quality: MEASURED
+    benchmark_source: "Issue #195 seed data (measured Claude Code run)."
+    benchmark_date: "2026-09-22"
+    notes: "Billed against usage credits (see USAGE_CREDIT_FAMILIES in dynamic_router.py). Prefer for general difficult coding unless task-specific evidence favors Opus."
+
+  - provider: anthropic
+    agent: claude
+    model: claude-fable-5
+    model_id: claude-fable-5
+    active: true
+    recommended: false
+    deprecated: false
+    superseded_by: claude-fable-5-1
+    supported_efforts: [high, xhigh, max]
+    strengths: [difficult_coding, deep_debugging]
+    weaknesses: []
+    relative_capability: 5
+    relative_cost: 5
+    relative_token_efficiency: 2
+    relative_latency: 2
+    benchmarks:
+      max: {coding_agent_index: null, deep_swe: null, terminal_bench: null, swe_atlas_qna: null, benchmark_cost_per_task: null, benchmark_tokens_per_task: null, benchmark_runtime_minutes: null, data_quality: HEURISTIC}
+    benchmark_source: null
+    benchmark_date: null
+    notes: "Earlier release, kept only for comparison against claude-fable-5-1. Not preferred by the router."
+
+  - provider: openai
+    agent: codex
+    model: gpt-5.6-luna
+    model_id: gpt-5.6-luna
+    active: true
+    recommended: true
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [low, medium, high]
+    strengths: [trivial_work, simple_fixes, test_generation, transformations, high_volume_low_risk_tasks]
+    weaknesses: [difficult_autonomous_repository_work]
+    relative_capability: 1
+    relative_cost: 1
+    relative_token_efficiency: 5
+    relative_latency: 5
+    benchmarks:
+      low: {coding_agent_index: null, deep_swe: null, terminal_bench: null, swe_atlas_qna: null, benchmark_cost_per_task: null, benchmark_tokens_per_task: null, benchmark_runtime_minutes: null, data_quality: HEURISTIC}
+    benchmark_source: null
+    benchmark_date: null
+    notes: "Codex low-cost tier (Luna/nano-style)."
+
+  - provider: openai
+    agent: codex
+    model: gpt-5.6-terra
+    model_id: gpt-5.6-terra
+    active: true
+    recommended: false
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [low, medium]
+    strengths: [small_scoped_implementation]
+    weaknesses: []
+    relative_capability: 2
+    relative_cost: 2
+    relative_token_efficiency: 4
+    relative_latency: 4
+    benchmarks:
+      medium: {coding_agent_index: null, deep_swe: null, terminal_bench: null, swe_atlas_qna: null, benchmark_cost_per_task: null, benchmark_tokens_per_task: null, benchmark_runtime_minutes: null, data_quality: HEURISTIC}
+    benchmark_source: null
+    benchmark_date: null
+    notes: "Kept for backward compatibility with the existing SIMPLE/STANDARD tiers; GPT-5.6 Sol is now the primary Codex workhorse per issue #195."
+
+  - provider: openai
+    agent: codex
+    model: gpt-5.6-sol
+    model_id: gpt-5.6-sol
+    active: true
+    recommended: true
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [medium, high, xhigh]
+    strengths: [normal_software_engineering, repository_implementation, features, debugging, substantial_code_changes]
+    weaknesses: [terminal_bench]
+    relative_capability: 4
+    relative_cost: 4
+    relative_token_efficiency: 2
+    relative_latency: 4
+    benchmarks:
+      xhigh:
+        coding_agent_index: 55
+        deep_swe: 0.72
+        terminal_bench: 0.37
+        swe_atlas_qna: 0.54
+        benchmark_cost_per_task: 6.35
+        benchmark_tokens_per_task: 10200000
+        benchmark_runtime_minutes: 20.6
+        data_quality: MEASURED
+    benchmark_source: "Issue #195 seed data (measured GPT-5.6 Sol Max run)."
+    benchmark_date: "2026-09-22"
+    notes: "Primary Codex workhorse. Measured DeepSWE performance increases suitability for implementation-heavy tasks. 'Max' measurement recorded against the xhigh effort tier; do not assume it applies unchanged to medium/high."
+
+  - provider: openai
+    agent: codex
+    model: gpt-6-astra
+    model_id: gpt-6-astra
+    active: true
+    recommended: true
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [high, xhigh, max]
+    strengths: [deep_debugging, architecture, complex_repository_work, ambiguous_implementations, cross_component_reasoning, very_high_value_tasks]
+    weaknesses: []
+    relative_capability: 5
+    relative_cost: 5
+    relative_token_efficiency: 5
+    relative_latency: 3
+    benchmarks:
+      max:
+        coding_agent_index: 62
+        deep_swe: 0.68
+        terminal_bench: 0.56
+        swe_atlas_qna: 0.62
+        benchmark_cost_per_task: 7.47
+        benchmark_tokens_per_task: 3300000
+        benchmark_runtime_minutes: 29.4
+        data_quality: MEASURED
+    benchmark_source: "Issue #195 seed data (measured GPT-6 Astra Max run)."
+    benchmark_date: "2026-09-22"
+    notes: "Use for the hardest Codex tasks. Astra Max has excellent measured token efficiency relative to other frontier coding configurations; a lower model price does not always mean lower total task cost."
+
+  - provider: xai
+    agent: grok
+    model: grok-4.5
+    model_id: grok-4.5
+    active: true
+    recommended: false
+    deprecated: false
+    superseded_by: grok-4.6
+    supported_efforts: [low, medium]
+    strengths: [trivial_tasks, classification, simple_reasoning, lightweight_changes]
+    weaknesses: []
+    relative_capability: 1
+    relative_cost: 1
+    relative_token_efficiency: 4
+    relative_latency: 5
+    benchmarks:
+      low: {coding_agent_index: null, deep_swe: null, terminal_bench: null, swe_atlas_qna: null, benchmark_cost_per_task: null, benchmark_tokens_per_task: null, benchmark_runtime_minutes: null, data_quality: HEURISTIC}
+    benchmark_source: null
+    benchmark_date: null
+    notes: "Grok lightweight tier."
+
+  - provider: xai
+    agent: grok
+    model: grok-4.6
+    model_id: grok-4.6
+    active: true
+    recommended: true
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [low, medium, high, xhigh]
+    strengths: [fast_turnarounds, well_scoped_changes, scripting, configuration_work, quick_orientation_unfamiliar_code]
+    weaknesses: [terminal_bench]
+    relative_capability: 3
+    relative_cost: 2
+    relative_token_efficiency: 3
+    relative_latency: 4
+    benchmarks:
+      xhigh:
+        coding_agent_index: 47
+        deep_swe: 0.65
+        terminal_bench: 0.18
+        swe_atlas_qna: 0.58
+        benchmark_cost_per_task: 3.57
+        benchmark_tokens_per_task: 5500000
+        benchmark_runtime_minutes: 19.5
+        data_quality: MEASURED
+    benchmark_source: "Issue #195 seed data (measured Grok 4.6 XHigh run)."
+    benchmark_date: "2026-09-22"
+    notes: "Primary Grok workhorse. Weak measured Terminal-Bench; avoid for terminal/devops-heavy work when a stronger option is available."
+
+  - provider: xai
+    agent: grok
+    model: grok-4.7-build-fast
+    model_id: grok-4.7-build-fast
+    active: true
+    recommended: false
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [medium, high]
+    strengths: [quicker_turnaround_well_scoped_work]
+    weaknesses: []
+    relative_capability: 3
+    relative_cost: 3
+    relative_token_efficiency: 3
+    relative_latency: 4
+    benchmarks:
+      high: {coding_agent_index: null, deep_swe: null, terminal_bench: null, swe_atlas_qna: null, benchmark_cost_per_task: null, benchmark_tokens_per_task: null, benchmark_runtime_minutes: null, data_quality: HEURISTIC}
+    benchmark_source: null
+    benchmark_date: null
+    notes: "Fast variant, trades some depth for turnaround. Not part of the issue #195 seed matrix; kept available at low priority."
+
+  - provider: xai
+    agent: grok
+    model: grok-4.7
+    model_id: grok-4.7
+    active: true
+    recommended: true
+    deprecated: false
+    superseded_by: null
+    supported_efforts: [xhigh]
+    strengths: [hardest_grok_coding_tasks]
+    weaknesses: [token_efficiency, terminal_bench]
+    relative_capability: 5
+    relative_cost: 4
+    relative_token_efficiency: 1
+    relative_latency: 2
+    benchmarks:
+      xhigh:
+        coding_agent_index: 56
+        deep_swe: 0.73
+        terminal_bench: 0.33
+        swe_atlas_qna: 0.63
+        benchmark_cost_per_task: 8.82
+        benchmark_tokens_per_task: 14300000
+        benchmark_runtime_minutes: 39.2
+        data_quality: MEASURED
+    benchmark_source: "Issue #195 seed data (measured Grok 4.7 XHigh run)."
+    benchmark_date: "2026-09-22"
+    notes: "Use selectively for the hardest Grok coding tasks. Meaningfully higher measured coding capability than Grok 4.6 but consumes substantially more tokens; only escalate when the expected quality benefit justifies it."
