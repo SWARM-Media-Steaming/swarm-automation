@@ -4632,7 +4632,11 @@ mod tests {
             app_log.to_string_lossy()
         );
         assert_eq!(
-            arguments[arguments.iter().position(|a| a == "--claude-model").unwrap() + 1],
+            arguments[arguments
+                .iter()
+                .position(|a| a == "--claude-model")
+                .unwrap()
+                + 1],
             "claude-sonnet-5"
         );
         assert!(!arguments.contains(&"--file-issue".to_string()));
