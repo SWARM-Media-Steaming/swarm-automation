@@ -212,6 +212,11 @@
       html: "<p>Settings are stored in a private local file. GitHub and AI sign-in details stay with their own tools and are not copied into logs.</p>",
       links: [],
     },
+    "async-refresh": {
+      title: "Independent refresh",
+      html: "<p>Tool detection and logs refresh independently so slow checks do not block the rest of the interface.</p>",
+      links: [],
+    },
     "work-policy": {
       title: "Issue instructions",
       html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Update Claude assets</strong> — asks the AI to update any Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository that the issue makes relevant.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
@@ -253,6 +258,7 @@
     ["Router activity", "router-activity"],
     ["Execution history", "execution-history"],
     ["Where your data lives", "data-location"],
+    ["Independent refresh", "async-refresh"],
   ];
 
   function byId(id) {
