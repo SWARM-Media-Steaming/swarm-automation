@@ -350,8 +350,9 @@ class AdversarialUatMixin:
         for finding in findings:
             digest = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()[:20]
             marker = f"<!-- swarm-issue-worker:adversarial-finding:issue:{self.issue.number};id:{digest} -->"
+            title = " ".join(finding["title"][:120].split())
             if marker in loop["filed_findings"]:
-                log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {finding['title']}")
+                log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {title}")
                 continue
             existing = json.loads(self.github.gh([
                 "issue", "list", "--repo", self.config.github_repository, "--state", "all",
@@ -360,7 +361,7 @@ class AdversarialUatMixin:
             already_filed = next((item for item in existing if marker in item.get("body", "")), None)
             if already_filed:
                 url = github_issue_url_from_output(str(already_filed.get("url", "")))
-                log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {url or finding['title']}")
+                log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {url or title}")
             else:
                 output = self.file_labelled_issue(finding["title"][:120],
                     f"{marker}\nFound while testing #{self.issue.number}; outside that delivery's scope.\n\n{finding['body']}",
@@ -374,7 +375,7 @@ class AdversarialUatMixin:
             loop["filed_findings"].append(marker)
             details = loop.setdefault("filed_finding_details", [])
             if not any(item.get("marker") == marker for item in details):
-                details.append({"marker": marker, "title": finding["title"][:120], "url": url})
+                details.append({"marker": marker, "title": title, "url": url})
             self.save_adversarial(loop)
             self.history.update(
                 iso_timestamp(),
