@@ -403,6 +403,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_whitespace_normalization.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-whitespace-normalization",
+      "name": "Out-of-scope UAT finding titles preserve raw whitespace to match the GitHub issue actually filed",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_whitespace_normalization.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
