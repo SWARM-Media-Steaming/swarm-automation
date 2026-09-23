@@ -141,6 +141,34 @@
         ]
       },
       "timeoutSeconds": 1800
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_*.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ci-rustfmt",
+      "name": "CI Rust formatting acceptance gate",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "cargo",
+          "python3"
+        ],
+        "files": [
+          "Cargo.toml",
+          "tests/adversarial/test_ci_rustfmt.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
