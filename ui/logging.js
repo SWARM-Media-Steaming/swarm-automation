@@ -58,6 +58,21 @@
     if (match) concise = `Issue #${match[1]} work resumed`;
     match = message.match(/(?:Committed completed issue|Finished issue) #(\d+)/i);
     if (match) concise = `Issue #${match[1]} work completed`;
+    match = message.match(/Filed out-of-scope adversarial UAT finding for #(\d+):\s*(?:\S*\/issues\/(\d+)|(.+))/i);
+    if (match) {
+      concise = match[2]
+        ? `Out-of-scope finding for #${match[1]} filed as issue #${match[2]}`
+        : `Out-of-scope finding for #${match[1]} filed: ${match[3]}`;
+    }
+    match = message.match(/Out-of-scope adversarial UAT finding already filed for #(\d+):\s*(?:\S*\/issues\/(\d+)|(.+))/i);
+    if (match) {
+      concise = match[2]
+        ? `Out-of-scope finding for #${match[1]} already filed as issue #${match[2]}`
+        : `Out-of-scope finding for #${match[1]} already filed: ${match[3]}`;
+    }
+    if (/GitHub did not return an issue URL for the out-of-scope adversarial UAT finding/i.test(message)) {
+      concise = "Out-of-scope adversarial UAT finding was filed, but GitHub did not return its issue URL";
+    }
     if (!concise) return null;
     return {
       ...log,
