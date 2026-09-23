@@ -2694,7 +2694,7 @@
     renderNowWorking();
   }
 
-  const NOW_WORKING_KINDS = { issue: "Issue", tests: "Tests", ci: "CI/CD" };
+  const NOW_WORKING_KINDS = { issue: "Issue", tests: "Tests", ci: "CI/CD", adversarial: "Adversarial UAT" };
   const NOW_WORKING_PILLS = { running: "Running", paused: "Paused", error: "Failing", ok: "Passing", idle: "Idle" };
 
   function nowWorkingRepositories() {

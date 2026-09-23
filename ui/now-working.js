@@ -78,11 +78,25 @@
         state: "running",
         since: entry.time,
       };
-      items.set(key, item);
+      items.set(`${kind}:${key}`, item);
       lastStarted = item;
     };
-    const find = (repository, number) => items.get(`${repository}#${number}`)
-      || [...items.values()].find((item) => String(item.number) === String(number));
+    const find = (repository, number) => items.get(`issue:${repository}#${number}`)
+      || [...items.values()].find((item) => item.kind !== "adversarial" && String(item.number) === String(number));
+    const updateAdversarial = (entry, repository, number, round, maximum, title, phase) => {
+      const key = `adversarial:${repository}#${number}`;
+      const item = {
+        kind: "adversarial",
+        key,
+        number,
+        repository,
+        title,
+        phase,
+        state: "running",
+        since: entry.time,
+      };
+      items.set(key, item);
+    };
 
     (logs || []).forEach((raw) => {
       const entry = logging.parseAutomationLog(raw);
@@ -111,13 +125,25 @@
         start(entry, repository, match[1], match[2], "Working on follow-up feedback");
       } else if ((match = message.match(/Working CI failure issue #(\d+).*?:\s*(.*)$/i))) {
         start(entry, repository, match[1], match[2], "Fixing a failing pipeline", "ci");
-      } else if ((match = message.match(/^Selected (Claude|Codex|Grok) model/i))) {
-        if (lastStarted) lastStarted.provider = match[1];
+      } else if ((match = message.match(/^Selected (Claude|Codex|Grok) model(?:\s+(.+?)\s+with effort\s+(.+?)\s+for this run\.)?/i))) {
+        if (lastStarted) {
+          lastStarted.provider = match[1];
+          lastStarted.model = match[2] || "";
+          lastStarted.effort = match[3] || "";
+        }
       } else if ((match = message.match(/^(Claude|Codex|Grok) is working/i))) {
         if (lastStarted) {
           lastStarted.provider = match[1];
           lastStarted.phase = `${match[1]} is writing the change`;
         }
+      } else if ((match = message.match(/^Adversarial UAT for issue #(\d+): starting fix\/re-test round (\d+) of (\d+)\.$/i))) {
+        updateAdversarial(entry, repository, match[1], match[2], match[3], `Fix/re-test round ${match[2]} of ${match[3]}`, "Fix in progress");
+      } else if ((match = message.match(/^Adversarial UAT for issue #(\d+): starting independent test run \(round (\d+) of (\d+)\)\.$/i))) {
+        updateAdversarial(entry, repository, match[1], match[2], match[3], "Independent test run", `Round ${match[2]} of ${match[3]}`);
+      } else if ((match = message.match(/^Adversarial UAT for issue #(\d+): starting re-test for round (\d+) of (\d+)\.$/i))) {
+        updateAdversarial(entry, repository, match[1], match[2], match[3], `Fix/re-test round ${match[2]} of ${match[3]}`, "Re-test in progress");
+      } else if ((match = message.match(/^Adversarial UAT for issue #(\d+): fix applied in round (\d+) of (\d+)\.$/i))) {
+        updateAdversarial(entry, repository, match[1], match[2], match[3], `Fix/re-test round ${match[2]} of ${match[3]}`, "Fix applied; re-test pending");
       } else if ((match = message.match(/(?:Created issue branch|Continuing issue|Recreated interrupted issue branch).*?(?:#|issue-)(\d+)/i))) {
         const item = find(repository, match[1]);
         if (item) item.phase = "Issue branch ready";
@@ -143,7 +169,7 @@
         item.state = "running";
         item.phase = "Resuming saved session";
       } else if ((match = message.match(/Finished issue #(\d+)/i))) {
-        items.delete(`${repository}#${match[1]}`);
+        items.delete(`issue:${repository}#${match[1]}`);
         clear((item) => String(item.number) === match[1]);
       } else if (/Returned the clean local checkout/i.test(message)) {
         clear((item) => item.state === "running" && (!repository || item.repository === repository));
@@ -157,7 +183,7 @@
           kind: item.kind,
           key: item.key,
           title: item.title,
-          detail: [item.provider, item.phase].filter(Boolean).join(" · "),
+          detail: [item.provider, item.model, item.effort && `${item.effort} effort`, item.phase].filter(Boolean).join(" · "),
           repository: item.repository,
           state: item.state,
           since: item.since,

@@ -6,21 +6,21 @@ const line = (message, source = "Issue worker scheduler") =>
   `[12:34:56] [${source}/stdout] [2026-09-15 12:34:56-0500] ${message}`;
 const repo = { id: "r1", name: "acme/app", uatState: "stopped", monitorActions: false };
 
-test("shows the issue being worked with its provider and phase", () => {
+test("shows the issue being worked with its provider, model, effort, and phase", () => {
   const rows = deriveNowWorking({
     workerState: "running",
     repositories: [repo],
     logs: [
       line("Starting a cycle over 1 repositories"),
       line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
-      line("Selected Claude model claude-x"),
+      line("Selected Claude model claude-sonnet-5 with effort high for this run."),
       line("Claude is working. Detailed implementation output is hidden."),
     ],
   });
   assert.equal(rows.length, 1);
   assert.equal(rows[0].kind, "issue");
   assert.equal(rows[0].title, "#84 Reduce logs");
-  assert.equal(rows[0].detail, "Claude · Claude is writing the change");
+  assert.equal(rows[0].detail, "Claude · claude-sonnet-5 · high effort · Claude is writing the change");
   assert.equal(rows[0].repository, "acme/app");
   assert.equal(rows[0].state, "running");
 });
@@ -131,4 +131,23 @@ test("shows a new issue that starts after an earlier one finished", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].title, "#85 Next one");
   assert.equal(rows[0].detail, "Codex · Codex is writing the change");
+});
+
+test("shows current adversarial UAT fix/re-test progress from worker boundary logs", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo],
+    logs: [
+      line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+      line("Adversarial UAT for issue #84: starting independent test run (round 0 of 6)."),
+      line("Adversarial UAT for issue #84: starting fix/re-test round 3 of 6."),
+      line("Adversarial UAT for issue #84: fix applied in round 3 of 6."),
+      line("Adversarial UAT for issue #84: starting re-test for round 3 of 6."),
+    ],
+  });
+  const adversarial = rows.find((row) => row.kind === "adversarial");
+  assert.equal(adversarial.title, "Fix/re-test round 3 of 6");
+  assert.equal(adversarial.detail, "Re-test in progress");
+  assert.equal(adversarial.issueNumber, "84");
+  assert.equal(adversarial.repository, "acme/app");
 });
