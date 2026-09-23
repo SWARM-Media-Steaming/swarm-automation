@@ -37,6 +37,8 @@ from dynamic_router import (
     RouterError,
 )
 from swarm_issue_worker import (
+    CODEX_QUOTA_CACHE_FILE,
+    CODEX_QUOTA_CACHE_MAX_AGE_SECONDS,
     Config,
     ISSUE_COMPLETED_EXIT_CODE,
     IssueContext,
@@ -1705,29 +1707,102 @@ class WorkerTestCase(unittest.TestCase):
         failed = subprocess.CompletedProcess(
             ["codex-rate-limits"], 1, stdout="", stderr="temporary app-server timeout"
         )
-        succeeded = subprocess.CompletedProcess(
+        usage, run, output = self.codex_usage_with([failed, self.codex_limits(55, 29)])
+        self.assertEqual(usage.status, 0)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(
+            [call.args[0][call.args[0].index("--timeout") + 1] for call in run.call_args_list],
+            ["30", "60"],
+        )
+        self.assertIn("60-second timeout", output)
+
+    @staticmethod
+    def codex_limits(
+        primary_used: float,
+        secondary_used: float,
+        *,
+        reached: str | None = None,
+        spend_control: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
             ["codex-rate-limits"],
             0,
             stdout=json.dumps(
                 {
-                    "primary": {"usedPercent": 55},
-                    "secondary": {"usedPercent": 29},
-                    "rateLimitReachedType": None,
-                    "spendControlReached": False,
+                    "primary": {"usedPercent": primary_used},
+                    "secondary": {"usedPercent": secondary_used},
+                    "rateLimitReachedType": reached,
+                    "spendControlReached": spend_control,
                 }
             ),
             stderr="",
         )
+
+    def codex_usage_with(
+        self,
+        results: list[subprocess.CompletedProcess[str]],
+        *,
+        now: float = 10_000,
+        cached: tuple[float, dict[str, object]] | None = None,
+    ):
+        if cached is not None:
+            captured_at, limits = cached
+            (self.state / CODEX_QUOTA_CACHE_FILE).write_text(
+                json.dumps({"captured_at": captured_at, "rate_limits": limits}), encoding="utf-8"
+            )
+        output = io.StringIO()
         with (
             mock.patch.object(self.worker, "provider_bin", return_value="/test/codex"),
             mock.patch("swarm_issue_worker.command_available", return_value=True),
-            mock.patch("swarm_issue_worker.run_command", side_effect=[failed, succeeded]) as run,
+            mock.patch("swarm_issue_worker.run_command", side_effect=results) as run,
             mock.patch("swarm_issue_worker.time.sleep"),
-            contextlib.redirect_stdout(io.StringIO()),
+            mock.patch("swarm_issue_worker.time.time", return_value=now),
+            contextlib.redirect_stdout(output),
         ):
-            self.assertEqual(self.worker.codex_capacity(), 0)
+            usage = self.worker.codex_usage()
+        return usage, run, output.getvalue()
+
+    def test_codex_success_updates_cache(self) -> None:
+        usage, _, _ = self.codex_usage_with([self.codex_limits(20, 30)], now=12_345)
+        self.assertEqual(usage.status, 0)
+        cached = json.loads((self.state / CODEX_QUOTA_CACHE_FILE).read_text())
+        self.assertEqual(cached["captured_at"], 12_345)
+        self.assertEqual(cached["rate_limits"]["primary"]["usedPercent"], 20)
+
+    def test_codex_transient_failure_uses_fresh_cached_quota(self) -> None:
+        failed = subprocess.CompletedProcess(["codex-rate-limits"], 1, stdout="", stderr="app-server timeout")
+        limits = json.loads(self.codex_limits(40, 25).stdout)
+        usage, run, output = self.codex_usage_with(
+            [failed, failed], now=10_000, cached=(9_940, limits)
+        )
         self.assertEqual(run.call_count, 2)
-        self.assertIn("--timeout", run.call_args.args[0])
+        self.assertEqual(usage.status, 0)
+        self.assertEqual(usage.remaining_percent, 60)
+        self.assertIn("cached 60s old", usage.detail)
+        self.assertIn("quota check unavailable", output)
+        self.assertIn("Using cached quota data", output)
+
+    def test_codex_expired_cache_is_rejected(self) -> None:
+        failed = subprocess.CompletedProcess(["codex-rate-limits"], 1, stdout="", stderr="app-server timeout")
+        limits = json.loads(self.codex_limits(10, 20).stdout)
+        usage, _, output = self.codex_usage_with(
+            [failed, failed],
+            now=10_000,
+            cached=(10_000 - CODEX_QUOTA_CACHE_MAX_AGE_SECONDS - 1, limits),
+        )
+        self.assertEqual(usage.status, 2)
+        self.assertNotIn("Using cached quota data", output)
+
+    def test_codex_logs_confirmed_exhaustion_and_low_reserve_distinctly(self) -> None:
+        exhausted, _, exhausted_output = self.codex_usage_with(
+            [self.codex_limits(40, 30, reached="primary")]
+        )
+        self.assertEqual(exhausted.status, 1)
+        self.assertIn("quota exhausted", exhausted_output)
+
+        low, _, low_output = self.codex_usage_with([self.codex_limits(95, 20)])
+        self.assertEqual(low.status, 1)
+        self.assertIn("quota below configured minimum", low_output)
 
     def test_queued_issue_without_provider_capacity_has_distinct_status(self) -> None:
         self.worker.issue = IssueContext(137, "Queued work", "", [], "https://example.invalid/137")
