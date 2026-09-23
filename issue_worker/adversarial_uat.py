@@ -351,8 +351,36 @@ class AdversarialUatMixin:
             digest = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()[:20]
             marker = f"<!-- swarm-issue-worker:adversarial-finding:issue:{self.issue.number};id:{digest} -->"
             title = " ".join(finding["title"][:120].split())
-            if marker in loop["filed_findings"]:
+            details = loop.setdefault("filed_finding_details", [])
+            existing_detail = next((item for item in details if item.get("marker") == marker), None)
+            if marker in loop["filed_findings"] and existing_detail and existing_detail.get("url"):
                 log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {title}")
+                continue
+            if marker in loop["filed_findings"]:
+                # A prior filing's `gh issue create` succeeded but its stdout
+                # didn't yield a usable URL, so this finding's stored detail
+                # is stuck at "". Re-check search: the issue is genuinely on
+                # GitHub and may now be discoverable, so recover its URL
+                # instead of leaving it permanently blank.
+                recheck = json.loads(self.github.gh([
+                    "issue", "list", "--repo", self.config.github_repository, "--state", "all",
+                    "--search", f'"{digest}" in:body', "--json", "body,url", "--limit", "100",
+                ], self.choice.key))
+                recovered = next((item for item in recheck if marker in item.get("body", "")), None)
+                url = github_issue_url_from_output(str(recovered.get("url", ""))) if recovered else ""
+                if existing_detail is not None:
+                    existing_detail["url"] = url
+                else:
+                    details.append({"marker": marker, "title": title, "url": url})
+                log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {url or title}")
+                self.save_adversarial(loop)
+                self.history.update(
+                    iso_timestamp(),
+                    adversarial_filed_findings=[
+                        {"title": item.get("title", ""), "url": item.get("url", "")}
+                        for item in details
+                    ],
+                )
                 continue
             existing = json.loads(self.github.gh([
                 "issue", "list", "--repo", self.config.github_repository, "--state", "all",
@@ -373,7 +401,6 @@ class AdversarialUatMixin:
                 else:
                     log(f"GitHub did not return an issue URL for the out-of-scope adversarial UAT finding: {output.strip()!r}")
             loop["filed_findings"].append(marker)
-            details = loop.setdefault("filed_finding_details", [])
             if not any(item.get("marker") == marker for item in details):
                 details.append({"marker": marker, "title": title, "url": url})
             self.save_adversarial(loop)
