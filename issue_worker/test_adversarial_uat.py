@@ -230,6 +230,29 @@ class AdversarialUatTests(unittest.TestCase):
             "title": "Separate parser bug", "url": "https://example.invalid/issues/182",
         }])
 
+    def test_malformed_gh_create_output_is_not_logged_as_a_successful_filing(self):
+        self.prepare()
+        finding = {"title": "Separate parser bug", "body": "Reproduction details."}
+        loop = self.worker.read_state()["adversarial"]
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"]:
+                return "[]"
+            if args[:2] == ["issue", "create"]:
+                return "Warning: could not add label to issue\n(no url returned)"
+            return ""
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [finding])
+        log_output = output.getvalue()
+        self.assertNotIn("Filed out-of-scope adversarial UAT finding for #180", log_output)
+        self.assertIn("GitHub did not return an issue URL", log_output)
+        details = self.worker.read_state()["adversarial"]["filed_finding_details"]
+        self.assertEqual(details[0]["url"], "")
+        row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
+        self.assertEqual(json.loads(row["adversarial_filed_findings"]), [{
+            "title": "Separate parser bug", "url": "",
+        }])
+
     def test_out_of_scope_finding_may_cite_a_pre_existing_non_adversarial_suite(self):
         # The tester prompt tells testers that when an existing suite fails
         # for an unrelated reason, they must retain it and "report its ID

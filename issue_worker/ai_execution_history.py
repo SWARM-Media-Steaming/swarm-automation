@@ -965,9 +965,12 @@ def _serialize_adversarial_filed_findings(value: Any) -> str:
     for finding in value:
         if not isinstance(finding, dict):
             raise ValueError("adversarial_filed_findings entries must be objects")
+        url = sanitize_text(finding.get("url", ""))
+        if not re.search(r"/issues/[0-9]+$", url):
+            url = ""
         cleaned.append({
             "title": sanitize_text(finding.get("title", "")),
-            "url": sanitize_text(finding.get("url", "")),
+            "url": url,
         })
     return json.dumps(cleaned)
 

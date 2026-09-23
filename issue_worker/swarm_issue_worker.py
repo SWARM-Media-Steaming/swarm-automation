@@ -275,6 +275,12 @@ def log(message: str) -> None:
     print(f"[{timestamp()}] {message}", file=stream, flush=True)
 
 
+def github_issue_url_from_output(output: str) -> str:
+    """Last stdout line of ``gh issue create`` when it is an ``/issues/<n>`` URL."""
+    url = output.strip().splitlines()[-1] if output.strip() else ""
+    return url if re.search(r"/issues/[0-9]+$", url) else ""
+
+
 def env_value(name: str, fallback: str) -> str:
     return os.environ.get(name, fallback)
 
@@ -5501,7 +5507,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         except (WorkerError, ValueError) as error:
             log(f"Could not check GitHub Actions; continuing with the issue queue: {error}")
             return None
-        url = output.strip().splitlines()[-1] if output.strip() else ""
+        url = github_issue_url_from_output(output)
         match = re.search(r"/issues/([0-9]+)$", url)
         if not match:
             log(f"GitHub did not return an issue URL for the CI failure issue: {output.strip()!r}")

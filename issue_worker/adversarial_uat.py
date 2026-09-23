@@ -346,7 +346,7 @@ class AdversarialUatMixin:
     def file_adversarial_findings(self, loop: dict[str, Any], findings: list[dict[str, str]]) -> None:
         # Same labelled/assigned issue creation path as the Actions monitor,
         # with an idempotent marker so a retry after create cannot duplicate it.
-        from swarm_issue_worker import iso_timestamp, log
+        from swarm_issue_worker import github_issue_url_from_output, iso_timestamp, log
         for finding in findings:
             digest = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()[:20]
             marker = f"<!-- swarm-issue-worker:adversarial-finding:issue:{self.issue.number};id:{digest} -->"
@@ -359,15 +359,18 @@ class AdversarialUatMixin:
             ], self.choice.key))
             already_filed = next((item for item in existing if marker in item.get("body", "")), None)
             if already_filed:
-                url = str(already_filed.get("url", "")).strip()
+                url = github_issue_url_from_output(str(already_filed.get("url", "")))
                 log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {url or finding['title']}")
             else:
                 output = self.file_labelled_issue(finding["title"][:120],
                     f"{marker}\nFound while testing #{self.issue.number}; outside that delivery's scope.\n\n{finding['body']}",
                     (("bug", "d73a4a", "Something is not working"),
                      ("adversarial-uat", "5319e7", "Found by independent adversarial tests")), self.choice.key)
-                url = output.strip().splitlines()[-1] if output.strip() else ""
-                log(f"Filed out-of-scope adversarial UAT finding for #{self.issue.number}: {url or finding['title']}")
+                url = github_issue_url_from_output(output)
+                if url:
+                    log(f"Filed out-of-scope adversarial UAT finding for #{self.issue.number}: {url}")
+                else:
+                    log(f"GitHub did not return an issue URL for the out-of-scope adversarial UAT finding: {output.strip()!r}")
             loop["filed_findings"].append(marker)
             details = loop.setdefault("filed_finding_details", [])
             if not any(item.get("marker") == marker for item in details):
