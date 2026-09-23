@@ -5414,7 +5414,9 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         ]
         return title, "\n".join(lines) + "\n"
 
-    def ensure_label(self, name: str, color: str, description: str, provider: str) -> None:
+    def ensure_label(
+        self, name: str, color: str, description: str, provider: str, *, repo: str | None = None
+    ) -> None:
         try:
             self.github.gh(
                 [
@@ -5422,7 +5424,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                     "create",
                     name,
                     "--repo",
-                    self.config.github_repository,
+                    repo if repo is not None else self.config.github_repository,
                     "--color",
                     color,
                     "--description",
@@ -5435,17 +5437,29 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 raise
 
     def file_labelled_issue(
-        self, title: str, body: str, labels: Sequence[tuple[str, str, str]], provider: str
+        self, title: str, body: str, labels: Sequence[tuple[str, str, str]], provider: str,
+        *, assignee: str | None = None, repo: str | None = None,
     ) -> str:
-        """Shared auto-filing mechanism for CI and out-of-scope UAT findings."""
+        """Shared auto-filing mechanism for CI and out-of-scope UAT findings, and
+        for the diagnostic explainer's self-reported bugs.
+
+        ``repo``/``assignee`` default to ``None``, which preserves today's
+        behavior (``self.config.github_repository`` / ``self.config.github_assignee``)
+        for every existing caller. Pass ``repo`` to target a different
+        repository (e.g. swarm-automation's own, for a bug found in the
+        worker itself rather than in a managed product repo) and
+        ``assignee=""`` to file unassigned instead of to the maintainer.
+        """
+        target_repo = repo if repo is not None else self.config.github_repository
         for label, color, description in labels:
-            self.ensure_label(label, color, description, provider)
-        return self.github.gh(
-            ["issue", "create", "--repo", self.config.github_repository,
-             "--title", title, "--body-file", "-", "--assignee", self.config.github_assignee,
-             *[part for label, _, _ in labels for part in ("--label", label)]],
-            provider, body,
-        )
+            self.ensure_label(label, color, description, provider, repo=target_repo)
+        target_assignee = self.config.github_assignee if assignee is None else assignee
+        args = ["issue", "create", "--repo", target_repo,
+                "--title", title, "--body-file", "-",
+                *[part for label, _, _ in labels for part in ("--label", label)]]
+        if target_assignee:
+            args += ["--assignee", target_assignee]
+        return self.github.gh(args, provider, body)
 
     def monitor_repository_actions(self) -> IssueContext | None:
         """File — and hand straight to this run — an issue for a failing pipeline.

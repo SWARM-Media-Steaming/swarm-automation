@@ -2430,6 +2430,36 @@ class WorkerTestCase(unittest.TestCase):
         self.assertNotIn("Lint", body)
         self.assertEqual(issue.labels, ["bug", "ci-failure"])
 
+    def test_file_labelled_issue_repo_and_assignee_overrides_default_to_todays_behavior(self) -> None:
+        worker = self.monitor_worker()
+        with mock.patch.object(worker.github, "gh", return_value="https://example.invalid/issues/1") as gh:
+            worker.file_labelled_issue("Title", "Body", (("bug", "d73a4a", "desc"),), "claude")
+        create = next(c for c in gh.call_args_list if c.args[0][:2] == ["issue", "create"])
+        arguments = create.args[0]
+        self.assertEqual(arguments[arguments.index("--repo") + 1], worker.config.github_repository)
+        self.assertEqual(arguments[arguments.index("--assignee") + 1], worker.config.github_assignee)
+        label_create = next(c for c in gh.call_args_list if c.args[0][:2] == ["label", "create"])
+        self.assertEqual(
+            label_create.args[0][label_create.args[0].index("--repo") + 1], worker.config.github_repository
+        )
+
+    def test_file_labelled_issue_can_target_another_repo_unassigned(self) -> None:
+        worker = self.monitor_worker()
+        with mock.patch.object(worker.github, "gh", return_value="https://example.invalid/issues/2") as gh:
+            worker.file_labelled_issue(
+                "Title", "Body", (("bug", "d73a4a", "desc"),), "claude",
+                assignee="", repo="SWARM-Media-Steaming/swarm-automation",
+            )
+        create = next(c for c in gh.call_args_list if c.args[0][:2] == ["issue", "create"])
+        arguments = create.args[0]
+        self.assertEqual(arguments[arguments.index("--repo") + 1], "SWARM-Media-Steaming/swarm-automation")
+        self.assertNotIn("--assignee", arguments)
+        label_create = next(c for c in gh.call_args_list if c.args[0][:2] == ["label", "create"])
+        self.assertEqual(
+            label_create.args[0][label_create.args[0].index("--repo") + 1],
+            "SWARM-Media-Steaming/swarm-automation",
+        )
+
     def test_monitor_ignores_healthy_running_and_superseded_failures(self) -> None:
         worker = self.monitor_worker()
         runs = [

@@ -3554,6 +3554,128 @@
     }, { progress: `Promoting ${name} to ${promotion.baseBranch}…` });
   }
 
+  // ----- "What's wrong?" diagnostic modal ---------------------------------
+  let diagnoseReturnFocus = null;
+  let lastDiagnosis = null;
+
+  function openDiagnoseModal() {
+    diagnoseReturnFocus = document.activeElement;
+    byId("diagnose-modal").hidden = false;
+    byId("diagnose-modal-close").focus();
+  }
+
+  function closeDiagnoseModal() {
+    byId("diagnose-modal").hidden = true;
+    if (diagnoseReturnFocus && diagnoseReturnFocus.focus) diagnoseReturnFocus.focus();
+    diagnoseReturnFocus = null;
+  }
+
+  function setDiagnoseModalState({ loading = false, unavailable = "" } = {}) {
+    byId("diagnose-modal-loading").hidden = !loading;
+    byId("diagnose-modal-unavailable").hidden = !unavailable;
+    byId("diagnose-modal-unavailable").textContent = unavailable;
+    byId("diagnose-modal-empty").hidden = true;
+    if (loading || unavailable) byId("diagnose-modal-problems").replaceChildren();
+  }
+
+  function diagnosticProblemCard(problem) {
+    const card = document.createElement("article");
+    card.className = "panel";
+    const header = document.createElement("div");
+    header.className = "panel-header";
+    const title = document.createElement("h3");
+    title.textContent = problem.repository;
+    header.appendChild(title);
+    card.appendChild(header);
+
+    const explanation = document.createElement("p");
+    explanation.className = "panel-copy";
+    explanation.textContent = problem.explanation || "No explanation was returned.";
+    card.appendChild(explanation);
+
+    const confidence = document.createElement("p");
+    confidence.className = "availability";
+    confidence.textContent = window.SwarmDebugDiagnose.confidenceLabel(problem);
+    card.appendChild(confidence);
+
+    const items = window.SwarmDebugDiagnose.actionableList(problem);
+    if (items.length) {
+      const list = document.createElement("ul");
+      items.forEach((item) => {
+        const row = document.createElement("li");
+        row.textContent = item;
+        list.appendChild(row);
+      });
+      card.appendChild(list);
+    }
+
+    const evidence = window.SwarmDebugDiagnose.evidenceList(problem);
+    if (evidence.length) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = "Evidence";
+      details.appendChild(summary);
+      evidence.forEach((entry) => {
+        const pre = document.createElement("pre");
+        pre.className = "debug-log";
+        pre.textContent = `[${entry.source}]\n${entry.excerpt}`;
+        details.appendChild(pre);
+      });
+      card.appendChild(details);
+    }
+
+    if (problem.filedIssueUrl) {
+      const filed = document.createElement("p");
+      filed.className = "panel-copy";
+      filed.append("Filed as a GitHub issue: ");
+      filed.appendChild(button(problem.filedIssueUrl, "text-button", () => openUrl(problem.filedIssueUrl)));
+      card.appendChild(filed);
+    } else if (window.SwarmDebugDiagnose.canFileIssue(problem)) {
+      card.appendChild(
+        button("Post as a GitHub issue", "secondary-button", () => fileDiagnosticIssue(problem))
+      );
+    }
+
+    return card;
+  }
+
+  function renderDiagnoseResult(result) {
+    setDiagnoseModalState({ loading: false, unavailable: "" });
+    if (!result.aiAvailable) {
+      byId("diagnose-modal-unavailable").hidden = false;
+      byId("diagnose-modal-unavailable").textContent = window.SwarmDebugDiagnose.unavailableMessage(result);
+    }
+    const box = byId("diagnose-modal-problems");
+    box.replaceChildren();
+    if (window.SwarmDebugDiagnose.hasNoActiveProblems(result)) {
+      byId("diagnose-modal-empty").hidden = false;
+      return;
+    }
+    result.problems.forEach((problem) => box.appendChild(diagnosticProblemCard(problem)));
+  }
+
+  async function runDiagnostics() {
+    openDiagnoseModal();
+    setDiagnoseModalState({ loading: true });
+    try {
+      const result = await invoke("run_diagnostics_background");
+      lastDiagnosis = result;
+      renderDiagnoseResult(result);
+    } catch (error) {
+      setDiagnoseModalState({ loading: false, unavailable: errorText(error) });
+    }
+  }
+
+  async function fileDiagnosticIssue(problem) {
+    if (!window.confirm(window.SwarmDebugDiagnose.confirmFileIssuePrompt(problem))) return;
+    await withBusy("file-diagnostic-issue", async () => {
+      const filed = await invoke("file_diagnostic_issue_background", { problemId: problem.problemId });
+      showToast(`Filed: ${filed.filedIssueUrl}`, "success");
+      problem.filedIssueUrl = filed.filedIssueUrl;
+      if (lastDiagnosis) renderDiagnoseResult(lastDiagnosis);
+    }, { progress: "Filing the GitHub issue…" });
+  }
+
   // ----- Interactive help modal -------------------------------------------
   let helpReturnFocus = null;
 
@@ -3633,6 +3755,7 @@
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !byId("help-modal").hidden) closeHelp();
+      if (event.key === "Escape" && !byId("diagnose-modal").hidden) closeDiagnoseModal();
       // Clickable panel headings are plain elements with role="button", not
       // real <button>s, so they need Enter/Space activation spelled out.
       const heading = event.target.closest("[data-help][role=\"button\"]");
@@ -3672,6 +3795,11 @@
     byId("save-button").addEventListener("click", () => withBusy("save", () => saveConfig(), { progress: "Saving the configuration…" }));
     byId("hide-button").addEventListener("click", () => invoke("hide_to_tray").catch((error) => showToast(errorText(error), "error")));
     byId("refresh-tools").addEventListener("click", () => refreshTools());
+    byId("diagnose-button").addEventListener("click", () => runDiagnostics());
+    byId("diagnose-modal-close").addEventListener("click", closeDiagnoseModal);
+    byId("diagnose-modal").addEventListener("click", (event) => {
+      if (event.target === byId("diagnose-modal")) closeDiagnoseModal();
+    });
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
     byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
     byId("refresh-execution-history").addEventListener("click", () => {

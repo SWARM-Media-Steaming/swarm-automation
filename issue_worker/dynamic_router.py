@@ -1590,15 +1590,39 @@ def run_provider_router(
     edit the repository. A failure raises ``RouterError`` so the worker can
     keep the manually configured model.
     """
+    return run_provider_oneshot(
+        provider=provider, bin_path=bin_path, model=model, effort=effort, prompt=prompt,
+        cwd=cwd, schema=ROUTER_RESPONSE_SCHEMA, timeout=timeout, images=images,
+    )
+
+
+def run_provider_oneshot(
+    *,
+    provider: str,
+    bin_path: str,
+    model: str,
+    effort: str,
+    prompt: str,
+    cwd: Path,
+    schema: dict[str, Any],
+    timeout: float = 180,
+    images: Sequence[Path] = (),
+) -> str:
+    """Same one-shot, no-tools, no-session-persistence call ``run_provider_router``
+    uses, generalized to an arbitrary JSON response schema. Any caller other
+    than the model router itself (e.g. the diagnostic explainer) should use
+    this directly rather than ``run_provider_router``, which is pinned to
+    ``ROUTER_RESPONSE_SCHEMA``.
+    """
     if not _command_available(bin_path):
         raise RouterError(f"{provider} executable is unavailable")
     if not model.strip():
         raise RouterError(f"{provider} router model is empty")
-    schema = json.dumps(ROUTER_RESPONSE_SCHEMA, separators=(",", ":"))
+    schema_text = json.dumps(schema, separators=(",", ":"))
     with tempfile.TemporaryDirectory(prefix="swarm-router-") as temporary:
         temp = Path(temporary)
         schema_path = temp / "router-schema.json"
-        schema_path.write_text(schema, encoding="utf-8")
+        schema_path.write_text(schema_text, encoding="utf-8")
         last_message = temp / "router-last.txt"
         prompt_path = temp / "router-prompt.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -1630,7 +1654,7 @@ def run_provider_router(
             command.extend(
                 [
                     "--json-schema",
-                    schema,
+                    schema_text,
                     "--tools",
                     "",
                     "--no-session-persistence",
@@ -1684,7 +1708,7 @@ def run_provider_router(
                     "--output-format",
                     "json",
                     "--json-schema",
-                    schema,
+                    schema_text,
                     "--max-turns",
                     "1",
                     "--permission-mode",

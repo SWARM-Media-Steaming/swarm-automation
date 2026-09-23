@@ -1441,6 +1441,189 @@ async fn get_execution_history_background(
     .map_err(|error| format!("Execution history lookup failed: {error}"))?
 }
 
+/// One piece of evidence the diagnostic playbook gathered for a problem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+struct DiagnosticEvidence {
+    source: String,
+    excerpt: String,
+}
+
+/// One thing "What's wrong?" found (or confirmed healthy) for one repository
+/// or the app itself (see `diagnose.py`). Field names deserialize from the
+/// Python CLI's snake_case JSON but serialize to the frontend as camelCase,
+/// matching `AiExecutionRecord`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+struct DiagnosticProblem {
+    problem_id: String,
+    repository: String,
+    source: String,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    explanation: String,
+    #[serde(default)]
+    confidence: String,
+    #[serde(default)]
+    evidence: Vec<DiagnosticEvidence>,
+    #[serde(default)]
+    actionable_items: Vec<String>,
+    is_bug: bool,
+    #[serde(default)]
+    suggested_issue_title: Option<String>,
+    #[serde(default)]
+    suggested_issue_body: Option<String>,
+}
+
+/// Result of one "What's wrong?" run: every currently-active problem across
+/// the managed repos and the app itself, not just the single loudest one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+struct DiagnosticResult {
+    ai_available: bool,
+    run_id: String,
+    generated_at: String,
+    #[serde(default)]
+    problems: Vec<DiagnosticProblem>,
+    #[serde(default)]
+    unavailable_reason: Option<String>,
+}
+
+/// Result of filing one already-diagnosed problem as a GitHub issue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+struct FiledDiagnosticIssue {
+    filed_issue_url: String,
+    already_filed: bool,
+}
+
+/// `diagnose.py` argv for a normal diagnostic run: the same repo spec and
+/// global provider/routing flags the real scheduler uses (`repos_file`,
+/// `provider_scheduler_arguments`), so the diagnosis reasons about the same
+/// live configuration real issue work does — never a separate budget or a
+/// hardcoded cheap model.
+fn diagnose_args(
+    script: &Path,
+    repos_file: &Path,
+    app_log: &Path,
+    providers: &[ResolvedProvider],
+    config: &AppConfig,
+) -> Vec<String> {
+    let mut arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--repos-file".into(),
+        repos_file.to_string_lossy().into_owned(),
+        "--app-log".into(),
+        app_log.to_string_lossy().into_owned(),
+    ];
+    arguments.extend(provider_scheduler_arguments(config, providers));
+    arguments
+}
+
+/// `diagnose.py --file-issue` argv: same repo spec and provider flags as a
+/// normal run (the script only needs them to build a `Worker` to file
+/// through), plus the specific, already-diagnosed problem to post.
+fn file_diagnostic_issue_args(
+    script: &Path,
+    repos_file: &Path,
+    problem_id: &str,
+    providers: &[ResolvedProvider],
+    config: &AppConfig,
+) -> Vec<String> {
+    let mut arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--repos-file".into(),
+        repos_file.to_string_lossy().into_owned(),
+        "--file-issue".into(),
+        "--problem-id".into(),
+        problem_id.to_string(),
+    ];
+    arguments.extend(provider_scheduler_arguments(config, providers));
+    arguments
+}
+
+#[tauri::command]
+fn run_diagnostics<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<DiagnosticResult, String> {
+    let config = current_config(&state)?;
+    config.validate()?;
+    let git = tools::configured_or_detected("", "git")?;
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let script_dir = worker_script_dir(&app)?;
+    let repos_file = write_repos_file(&app, &config, &git, &gh)?;
+    let app_log = automation_log_path(&app)?;
+    let providers = resolve_providers(&config);
+    let script = script_dir.join("diagnose.py");
+    let (ok, raw) = run_capture_owned(
+        &python,
+        &diagnose_args(&script, &repos_file, &app_log, &providers, &config),
+    );
+    if !ok {
+        return Err(format!("Diagnosis failed: {raw}"));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("Diagnosis response could not be parsed: {error}"))
+}
+
+#[tauri::command]
+async fn run_diagnostics_background(app: tauri::AppHandle) -> Result<DiagnosticResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        run_diagnostics(app.clone(), state)
+    })
+    .await
+    .map_err(|error| format!("Diagnosis failed: {error}"))?
+}
+
+/// Read-only and idempotent, unlike `file_diagnostic_issue`: safe to call
+/// repeatedly, and never itself changes anything — the one state-changing
+/// action in this feature is filing, which the frontend only reaches after
+/// showing the user a problem already flagged `is_bug: true` and getting
+/// their explicit confirmation.
+#[tauri::command]
+fn file_diagnostic_issue<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    problem_id: String,
+) -> Result<FiledDiagnosticIssue, String> {
+    let config = current_config(&state)?;
+    let git = tools::configured_or_detected("", "git")?;
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let script_dir = worker_script_dir(&app)?;
+    let repos_file = write_repos_file(&app, &config, &git, &gh)?;
+    let providers = resolve_providers(&config);
+    let script = script_dir.join("diagnose.py");
+    let (ok, raw) = run_capture_owned(
+        &python,
+        &file_diagnostic_issue_args(&script, &repos_file, &problem_id, &providers, &config),
+    );
+    if !ok {
+        return Err(format!("Could not file the GitHub issue: {raw}"));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("Filing response could not be parsed: {error}"))
+}
+
+#[tauri::command]
+async fn file_diagnostic_issue_background(
+    app: tauri::AppHandle,
+    problem_id: String,
+) -> Result<FiledDiagnosticIssue, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        file_diagnostic_issue(app.clone(), state, problem_id)
+    })
+    .await
+    .map_err(|error| format!("Could not file the GitHub issue: {error}"))?
+}
+
 /// One graded execution row from `ai_execution_history.py --grades`: just
 /// what the Feedback grades panel shows, never the issue body or prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4339,6 +4522,10 @@ fn main() {
             get_test_runs_background,
             get_execution_history,
             get_execution_history_background,
+            run_diagnostics,
+            run_diagnostics_background,
+            file_diagnostic_issue,
+            file_diagnostic_issue_background,
             get_prompt_grades,
             get_prompt_grades_background,
             import_execution_history,
@@ -4412,6 +4599,59 @@ mod tests {
     #[test]
     fn shell_quoting_preserves_spaces_and_quotes() {
         assert_eq!(shell_quote("a b'c"), "'a b'\\''c'");
+    }
+
+    fn sample_provider() -> ResolvedProvider {
+        ResolvedProvider {
+            id: "claude".into(),
+            model: "claude-sonnet-5".into(),
+            effort: "medium".into(),
+            router_model: "claude-haiku-4-5".into(),
+            router_effort: "low".into(),
+            strengths: "".into(),
+            bin: PathBuf::from("/usr/local/bin/claude"),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn diagnose_args_carries_the_repo_spec_app_log_and_provider_flags() {
+        let config = AppConfig::default();
+        let script = PathBuf::from("/app/issue_worker/diagnose.py");
+        let repos_file = PathBuf::from("/state/repos.json");
+        let app_log = PathBuf::from("/state/logs/automation.log");
+        let providers = vec![sample_provider()];
+        let arguments = diagnose_args(&script, &repos_file, &app_log, &providers, &config);
+        assert_eq!(arguments[0], script.to_string_lossy());
+        assert_eq!(
+            arguments[arguments.iter().position(|a| a == "--repos-file").unwrap() + 1],
+            repos_file.to_string_lossy()
+        );
+        assert_eq!(
+            arguments[arguments.iter().position(|a| a == "--app-log").unwrap() + 1],
+            app_log.to_string_lossy()
+        );
+        assert_eq!(
+            arguments[arguments.iter().position(|a| a == "--claude-model").unwrap() + 1],
+            "claude-sonnet-5"
+        );
+        assert!(!arguments.contains(&"--file-issue".to_string()));
+    }
+
+    #[test]
+    fn file_diagnostic_issue_args_carries_the_problem_id_and_no_diagnose_only_flags() {
+        let config = AppConfig::default();
+        let script = PathBuf::from("/app/issue_worker/diagnose.py");
+        let repos_file = PathBuf::from("/state/repos.json");
+        let providers = vec![sample_provider()];
+        let arguments =
+            file_diagnostic_issue_args(&script, &repos_file, "problem-123", &providers, &config);
+        assert!(arguments.contains(&"--file-issue".to_string()));
+        assert_eq!(
+            arguments[arguments.iter().position(|a| a == "--problem-id").unwrap() + 1],
+            "problem-123"
+        );
+        assert!(!arguments.contains(&"--app-log".to_string()));
     }
 }
 

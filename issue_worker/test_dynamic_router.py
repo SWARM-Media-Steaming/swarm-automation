@@ -35,6 +35,7 @@ from dynamic_router import (
     resolve_routing_decision,
     router_description,
     routing_history_message,
+    run_provider_oneshot,
     run_provider_router,
 )
 
@@ -651,6 +652,36 @@ class DynamicRouterTest(unittest.TestCase):
     def test_malformed_tier_json_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             load_routing_tiers("{")
+
+    def test_oneshot_uses_the_given_schema_not_the_router_schema(self) -> None:
+        from pathlib import Path
+
+        custom_schema = {"type": "object", "properties": {"explanation": {"type": "string"}},
+                          "required": ["explanation"], "additionalProperties": False}
+        payload = json.dumps({"type": "result", "result": "{\"explanation\": \"it's fine\"}"})
+        with mock.patch("dynamic_router._run", return_value=payload) as runner:
+            text = run_provider_oneshot(
+                provider="claude", bin_path="/usr/bin/true", model="claude-haiku-4-5",
+                effort="low", prompt="explain this", cwd=Path("."), schema=custom_schema,
+            )
+        self.assertEqual(text, "{\"explanation\": \"it's fine\"}")
+        command = runner.call_args.args[0]
+        schema_at = command.index("--json-schema") + 1
+        self.assertEqual(json.loads(command[schema_at]), custom_schema)
+        self.assertNotEqual(json.loads(command[schema_at]), ROUTER_RESPONSE_SCHEMA)
+
+    def test_router_still_sends_the_router_schema_after_the_oneshot_extraction(self) -> None:
+        from pathlib import Path
+
+        payload = json.dumps({"type": "result", "result": "{\"prompt_grade\": \"B\"}"})
+        with mock.patch("dynamic_router._run", return_value=payload) as runner:
+            run_provider_router(
+                provider="claude", bin_path="/usr/bin/true", model="claude-haiku-4-5",
+                effort="low", prompt="grade this", cwd=Path("."),
+            )
+        command = runner.call_args.args[0]
+        schema_at = command.index("--json-schema") + 1
+        self.assertEqual(json.loads(command[schema_at]), ROUTER_RESPONSE_SCHEMA)
 
 
 
