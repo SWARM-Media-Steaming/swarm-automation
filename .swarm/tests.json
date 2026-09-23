@@ -1,42 +1,147 @@
 {
-  "version": 1,
+  "adversarialBootstrap": {
+    "framework": "existing",
+    "instructions": "Use the existing test frameworks and repository conventions.",
+    "suites": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--locked"
+        ],
+        "disruptive": false,
+        "id": "backend",
+        "name": "Rust backend and command integration",
+        "requirements": {
+          "executables": [
+            "cargo"
+          ],
+          "files": [
+            "Cargo.toml",
+            "src/main.rs"
+          ]
+        },
+        "timeoutSeconds": 1800
+      },
+      {
+        "command": [
+          "npm",
+          "test"
+        ],
+        "disruptive": false,
+        "id": "frontend",
+        "name": "Scheduler UI tests",
+        "requirements": {
+          "executables": [
+            "npm"
+          ],
+          "files": [
+            "package.json",
+            "package-lock.json",
+            "ui/logging.test.js"
+          ]
+        },
+        "timeoutSeconds": 300
+      },
+      {
+        "command": [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "issue_worker",
+          "-p",
+          "test_*.py"
+        ],
+        "disruptive": false,
+        "id": "issue-worker",
+        "name": "Issue worker tests",
+        "requirements": {
+          "executables": [
+            "python3",
+            "git"
+          ],
+          "files": [
+            "issue_worker/test_swarm_issue_worker.py",
+            "issue_worker/test_ai_test_assist.py"
+          ]
+        },
+        "timeoutSeconds": 1800
+      }
+    ]
+  },
   "coverageNotes": [
     "cargo test --locked is the single authoritative Rust invocation; no Rust test aliases are scheduled separately.",
     "Frontend and issue-worker tests are independent coverage areas and run once each."
   ],
   "suites": [
     {
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "disruptive": false,
       "id": "backend",
       "name": "Rust backend and command integration",
-      "command": ["cargo", "test", "--locked"],
-      "timeoutSeconds": 1800,
-      "disruptive": false,
       "requirements": {
-        "executables": ["cargo"],
-        "files": ["Cargo.toml", "src/main.rs"]
-      }
+        "executables": [
+          "cargo"
+        ],
+        "files": [
+          "Cargo.toml",
+          "src/main.rs"
+        ]
+      },
+      "timeoutSeconds": 1800
     },
     {
+      "command": [
+        "npm",
+        "test"
+      ],
+      "disruptive": false,
       "id": "frontend",
       "name": "Scheduler UI tests",
-      "command": ["npm", "test"],
-      "timeoutSeconds": 300,
-      "disruptive": false,
       "requirements": {
-        "executables": ["npm"],
-        "files": ["package.json", "package-lock.json", "ui/logging.test.js"]
-      }
+        "executables": [
+          "npm"
+        ],
+        "files": [
+          "package.json",
+          "package-lock.json",
+          "ui/logging.test.js"
+        ]
+      },
+      "timeoutSeconds": 300
     },
     {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "issue_worker",
+        "-p",
+        "test_*.py"
+      ],
+      "disruptive": false,
       "id": "issue-worker",
       "name": "Issue worker tests",
-      "command": ["python3", "-m", "unittest", "discover", "-s", "issue_worker", "-p", "test_*.py"],
-      "timeoutSeconds": 1800,
-      "disruptive": false,
       "requirements": {
-        "executables": ["python3", "git"],
-        "files": ["issue_worker/test_swarm_issue_worker.py", "issue_worker/test_ai_test_assist.py"]
-      }
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/test_ai_test_assist.py"
+        ]
+      },
+      "timeoutSeconds": 1800
     }
-  ]
+  ],
+  "version": 1
 }
