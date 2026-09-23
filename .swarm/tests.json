@@ -225,6 +225,56 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_filed_finding_actionable_log.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-actionable-log",
+      "name": "Out-of-scope UAT finding log lines appear in the Info & Debug actionable log",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/logging.js",
+          "tests/adversarial/test_filed_finding_actionable_log.js"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_surfaces.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-surfaces",
+      "name": "Out-of-scope UAT findings are logged on every filing path and returned by the history CLI",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_surfaces.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
