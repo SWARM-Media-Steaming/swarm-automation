@@ -208,7 +208,11 @@ spawn real child processes (`python3`, `bash`, `npm`) and are better
 verified by an actual `npm run dev`/`npm run build` + launch than by tests
 that would install real software or make real GitHub calls.
 
-Run with `cargo test`.
+Run with `cargo test`. The `test` job in `.github/workflows/release.yml`
+runs `cargo fmt --all -- --check` before clippy, tests, Python, and frontend
+suites; a long line that rustfmt would wrap (common in `src/main.rs` unit
+tests) fails CI even when `cargo test` is green. Format with `cargo fmt
+--all` before committing Rust changes.
 
 `issue_worker/test_swarm_issue_worker.py` is the Python-side counterpart —
 `unittest.TestCase`-based, with a real local git remote/repo fixture per
