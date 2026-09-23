@@ -1260,6 +1260,8 @@ struct AiExecutionRecord {
     capacity_consumed_percent: Option<f64>,
     #[serde(default)]
     adversarial_rounds: Vec<serde_json::Value>,
+    #[serde(default)]
+    adversarial_filed_findings: Vec<serde_json::Value>,
     execution_id: String,
     repository: String,
     issue_number: i64,

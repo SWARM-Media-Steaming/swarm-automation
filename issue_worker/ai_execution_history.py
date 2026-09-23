@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -59,6 +59,7 @@ _JSON_COLUMNS = (
     "operational_notes",
     "warnings_errors",
     "routing_decision",
+    "adversarial_filed_findings",
 )
 
 # The AI platform that graded and routed an issue, and the one that was picked
@@ -86,6 +87,14 @@ _MIGRATION_3_COLUMNS = (
     ("adversarial_round_count", "INTEGER NOT NULL DEFAULT 0"),
     ("adversarial_outcome", "TEXT NOT NULL DEFAULT ''"),
     ("capacity_consumed_percent", "REAL"),
+)
+
+# Migration 4 records the non-blocking issues independently filed by an
+# adversarial tester.  Unlike the checkpoint marker list, this is user-facing
+# execution history: each entry has the finding title and the resulting issue
+# URL so it remains useful after the worker's in-progress state is gone.
+_MIGRATION_4_COLUMNS = (
+    ("adversarial_filed_findings", "TEXT NOT NULL DEFAULT '[]'"),
 )
 
 # Every value ``adversarial_outcome`` may hold. ``""`` means the work-round
@@ -350,6 +359,21 @@ class ExecutionHistoryRepository:
                     "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                     (3,),
                 )
+            if 4 not in applied and 4 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(ai_executions)")
+                }
+                for name, definition in _MIGRATION_4_COLUMNS:
+                    if name not in columns:
+                        database.execute(
+                            f"ALTER TABLE ai_executions ADD COLUMN {name} {definition}"
+                        )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (4,),
+                )
 
     def create(self, start: ExecutionStart, started_at: str) -> str:
         execution_id = str(uuid.uuid4())
@@ -476,6 +500,7 @@ class ExecutionHistoryRepository:
             "adversarial_round_count",
             "adversarial_outcome",
             "capacity_consumed_percent",
+            "adversarial_filed_findings",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -484,6 +509,8 @@ class ExecutionHistoryRepository:
         for key, value in fields.items():
             if key in {"files_changed", "commit_shas", "operational_notes", "warnings_errors"}:
                 serialized[key] = json.dumps(sanitize_values(value))
+            elif key == "adversarial_filed_findings":
+                serialized[key] = _serialize_adversarial_filed_findings(value)
             elif key == "routing_decision":
                 serialized[key] = _serialize_routing(value)
             elif isinstance(value, str):
@@ -927,6 +954,24 @@ def _serialize_routing(value: Any) -> str:
     cleaned: dict[str, Any] = {}
     for key, item in value.items():
         cleaned[str(key)] = sanitize_text(item) if isinstance(item, str) else item
+    return json.dumps(cleaned)
+
+
+def _serialize_adversarial_filed_findings(value: Any) -> str:
+    """Sanitize the small, user-facing receipt for separately filed UAT bugs."""
+    if not isinstance(value, list):
+        raise ValueError("adversarial_filed_findings must be a list")
+    cleaned = []
+    for finding in value:
+        if not isinstance(finding, dict):
+            raise ValueError("adversarial_filed_findings entries must be objects")
+        url = sanitize_text(finding.get("url", ""))
+        if not re.search(r"/issues/[0-9]+$", url):
+            url = ""
+        cleaned.append({
+            "title": sanitize_text(finding.get("title", "")),
+            "url": url,
+        })
     return json.dumps(cleaned)
 
 

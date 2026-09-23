@@ -3,7 +3,9 @@
 Only coding providers and GitHub's API are faked; git delivery uses a local bare
 remote and tests execute real child processes, including failures and timeouts.
 """
+import contextlib
 import dataclasses
+import io
 import json
 import sqlite3
 import sys
@@ -214,13 +216,42 @@ class AdversarialUatTests(unittest.TestCase):
             self.role(prompt)
             self.worker.ai_output_file.write_text(uat.RESULT_MARKER + json.dumps({"out_of_scope": [finding]}))
             return 0
-        with self.patches(external), mock.patch.object(self.worker, "finalize_issue"):
+        with self.patches(external), mock.patch.object(self.worker, "finalize_issue"), contextlib.redirect_stdout(io.StringIO()) as output:
             self.worker.run_adversarial_delivery()
             self.worker.file_adversarial_findings(self.worker.read_state()["adversarial"], [finding])
         creates = [a for a in self.api if a[:2] == ["issue", "create"]]
         self.assertEqual(len(creates), 1)
         self.assertIn("--assignee", creates[0]); self.assertIn("adversarial-uat", creates[0])
         self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
+        self.assertIn("Filed out-of-scope adversarial UAT finding for #180: https://example.invalid/issues/182", output.getvalue())
+        self.assertIn("already filed for #180: Separate parser bug", output.getvalue())
+        row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
+        self.assertEqual(json.loads(row["adversarial_filed_findings"]), [{
+            "title": "Separate parser bug", "url": "https://example.invalid/issues/182",
+        }])
+
+    def test_malformed_gh_create_output_is_not_logged_as_a_successful_filing(self):
+        self.prepare()
+        finding = {"title": "Separate parser bug", "body": "Reproduction details."}
+        loop = self.worker.read_state()["adversarial"]
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"]:
+                return "[]"
+            if args[:2] == ["issue", "create"]:
+                return "Warning: could not add label to issue\n(no url returned)"
+            return ""
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [finding])
+        log_output = output.getvalue()
+        self.assertNotIn("Filed out-of-scope adversarial UAT finding for #180", log_output)
+        self.assertIn("GitHub did not return an issue URL", log_output)
+        details = self.worker.read_state()["adversarial"]["filed_finding_details"]
+        self.assertEqual(details[0]["url"], "")
+        row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
+        self.assertEqual(json.loads(row["adversarial_filed_findings"]), [{
+            "title": "Separate parser bug", "url": "",
+        }])
 
     def test_out_of_scope_finding_may_cite_a_pre_existing_non_adversarial_suite(self):
         # The tester prompt tells testers that when an existing suite fails
@@ -375,11 +406,12 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertNotIn("independent adversarial tester", prompt)
         self.assertIn("read-only", prompt)
 
-    def test_history_migration_three_is_additive_idempotent_and_rounds_cascade(self):
+    def test_history_migration_four_is_additive_idempotent_and_rounds_cascade(self):
         self.prepare()
         repository = self.worker.history.repository
         execution = self.worker.history.execution_id
-        repository.update(execution, iso_timestamp(), adversarial_round_count=3, adversarial_outcome="resolved_after_n", capacity_consumed_percent=4.5)
+        repository.update(execution, iso_timestamp(), adversarial_round_count=3, adversarial_outcome="resolved_after_n", capacity_consumed_percent=4.5,
+                          adversarial_filed_findings=[{"title": "Separate bug", "url": "https://example.invalid/issues/182"}])
         repository.record_adversarial_round(execution, {"round_number": 1, "tester_provider": "Codex", "tests_added": 2})
         repository.record_adversarial_round(execution, {"round_number": 1, "tester_provider": "Grok", "tests_added": 3})
         repository.migrate()
@@ -388,7 +420,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(rows[0]["tester_provider"], "Grok")
         self.assertEqual(repository.adversarial_summary(self.worker.config.github_repository)["averageRounds"], 3)
         with repository.connect() as database:
-            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3})
+            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3, 4})
             database.execute("DELETE FROM ai_executions WHERE execution_id = ?", (execution,))
             self.assertEqual(database.execute("SELECT COUNT(*) FROM adversarial_rounds").fetchone()[0], 0)
 
@@ -439,15 +471,16 @@ class AdversarialUatTests(unittest.TestCase):
         execution = self.worker.history.execution_id
         with repo.connect() as db:
             db.execute("DROP TABLE adversarial_rounds")
-            for column in ("adversarial_round_count", "adversarial_outcome", "capacity_consumed_percent"):
+            for column in ("adversarial_filed_findings", "adversarial_round_count", "adversarial_outcome", "capacity_consumed_percent"):
                 db.execute(f"ALTER TABLE ai_executions DROP COLUMN {column}")
-            db.execute("DELETE FROM schema_migrations WHERE version = 3")
+            db.execute("DELETE FROM schema_migrations WHERE version IN (3, 4)")
         upgraded = ExecutionHistoryRepository(repo.database_path)
         row = upgraded.for_repository(self.worker.config.github_repository)[0]
         self.assertEqual(row["execution_id"], execution)
         self.assertEqual(row["adversarial_round_count"], 0)
         self.assertEqual(row["adversarial_outcome"], "")
         self.assertIsNone(row["capacity_consumed_percent"])
+        self.assertEqual(row["adversarial_filed_findings"], "[]")
         self.assertEqual(upgraded.adversarial_summary(self.worker.config.github_repository)["loops"], 0)
 
     def test_preflight_grade_is_recorded_when_routing_is_off(self):
