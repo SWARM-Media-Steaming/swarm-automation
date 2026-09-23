@@ -46,6 +46,9 @@
     promptGradesRequest: 0,
     promptGradesSearchTimer: null,
     feedbackTab: "grades",
+    // Feedback owns this filter. It never follows or changes activeRepoId.
+    feedbackRepoFilter: [],
+    feedbackRepoSavePromise: Promise.resolve(),
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
     botReadiness: {},
     // repoId -> last BranchPushAccess from branch_push_access.
@@ -216,12 +219,12 @@
     },
     "execution-history": {
       title: "Execution history",
-      html: "<p>Every AI issue execution for the selected repository, newest first. The list loads ten at a time from the local database. Each row shows the AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates; expand an execution for provider pairings, disputes and approximate remaining-quota consumption (not token/dollar cost). Search matches issue number, title, provider, branch, or status, and Previous and Next fetch another page. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
+      html: "<p>Every AI issue execution across all repositories by default, newest first. The repository chips above the tabs independently filter all three reports; the repository dropdown in the header does not affect Feedback. The list loads ten at a time from the local database. Each row shows its repository, AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates over the filtered repositories.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans every repository checked in the Feedback filter and adds a placeholder \"Imported\" entry for any issue with no execution history yet. It reports success or failure for each repository and never overwrites or duplicates a real execution.</p>",
       links: [],
     },
     "prompt-grades": {
       title: "Prompt grades",
-      html: "<p>When <strong>Dynamic Model Routing</strong> is on, the router grades the original issue before any AI works on it — from <strong>A+</strong> down to <strong>F</strong> — and explains what the issue does well, what is missing, and what would raise the grade. This panel lists those grades for the selected repository, newest first. The list loads ten at a time from the local database, the same way execution history does.</p><p>Search matches issue number, title, provider, model, branch, or status, and Previous and Next fetch another page. Click a bar in the chart, such as <strong>B-</strong>, to show only prompts with that grade. Click the same bar again to clear it. The chart keeps counting every grade in the current search, so another bar can be chosen without clearing the search.</p><p>The <strong>average grade</strong> uses a 4.0 scale (A = 4.0, B = 3.0, C = 2.0, D = 1.0, F = 0) across the graded runs in the current search. Each row also shows <strong>Graded by</strong> — the AI platform and model that ran the pre-flight grading and routing pass, which is usually not the platform that then worked the issue. Expand a row to read why it earned its grade, plus the complexity, tool, model, and confidence the router chose, and the grading model's own reasoning effort.</p><p>The <strong>Router activity</strong> tab breaks the same grades down by which platform graded them, and selecting a router there filters this list to that platform's grades.</p><p>Runs without routing, and runs where the router was unavailable, are not graded and do not appear here. An issue that is reworked is graded again, so it can appear more than once. This view only reads the local execution history and never changes issue processing.</p>",
+      html: "<p>When <strong>Dynamic Model Routing</strong> is on, the router grades the original issue before any AI works on it — from <strong>A+</strong> down to <strong>F</strong> — and explains what the issue does well, what is missing, and what would raise the grade. This panel lists grades across all repositories by default, newest first; the repository chips above the tabs filter the list and its server-computed summary.</p><p>Search matches issue number, title, provider, model, branch, or status, and Previous and Next fetch another page. Click a bar in the chart, such as <strong>B-</strong>, to show only prompts with that grade. Click the same bar again to clear it. The chart keeps counting every grade in the current search, so another bar can be chosen without clearing the search.</p><p>The <strong>average grade</strong> uses a 4.0 scale across the filtered runs. Each row identifies its repository and shows <strong>Graded by</strong> — the AI platform and model that ran the pre-flight grading and routing pass.</p><p>The <strong>Router activity</strong> tab breaks the same filtered grades down by which platform graded them. Runs without routing, and runs where the router was unavailable, are not graded and do not appear here.</p>",
       links: [],
     },
     "router-activity": {
@@ -343,7 +346,9 @@
       if (input) input.value = provider.bin;
     });
     ensureRepository(config);
+    restoreFeedbackRepoFilter(config);
     renderRepositorySelector();
+    renderFeedbackRepoFilter();
     document.querySelectorAll("[data-config]").forEach((input) => {
       const key = input.dataset.config;
       const value = config[key];
@@ -423,6 +428,80 @@
     if (!state.config) return null;
     ensureRepository(state.config);
     return state.config.repositories.find((repo) => repo.id === state.activeRepoId) || state.config.repositories[0];
+  }
+
+  function feedbackRepositories() {
+    return (state.config?.repositories || []).filter((repo) => repo.id && repo.github_repository);
+  }
+
+  function restoreFeedbackRepoFilter(config = state.config) {
+    const repositories = (config?.repositories || []).filter((repo) => repo.id && repo.github_repository);
+    const available = new Set(repositories.map((repo) => repo.id));
+    const saved = Array.isArray(config?.feedback_repo_filter)
+      ? [...new Set(config.feedback_repo_filter.filter((id) => available.has(id)))]
+      : [];
+    state.feedbackRepoFilter = saved.length ? saved : repositories.map((repo) => repo.id);
+  }
+
+  function feedbackRepoIdsForQuery() {
+    const allIds = feedbackRepositories().map((repo) => repo.id);
+    const selected = state.feedbackRepoFilter.filter((id) => allIds.includes(id));
+    return selected.length === allIds.length ? [] : selected;
+  }
+
+  function feedbackRepoFilterSignature() {
+    return [...state.feedbackRepoFilter].sort().join("\n");
+  }
+
+  function renderFeedbackRepoFilter() {
+    const box = byId("feedback-repo-chips");
+    if (!box) return;
+    box.replaceChildren();
+    const repositories = feedbackRepositories();
+    const selected = new Set(state.feedbackRepoFilter);
+    const allSelected = repositories.length > 0 && repositories.every((repo) => selected.has(repo.id));
+    const chip = (label, checked, value, disabled = false) => {
+      const wrapper = document.createElement("label");
+      wrapper.className = "feedback-repo-chip";
+      wrapper.title = value ? label : "Include every configured repository";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = checked;
+      input.disabled = disabled;
+      input.dataset.feedbackRepo = value;
+      const text = document.createElement("span");
+      text.textContent = label;
+      wrapper.append(input, text);
+      return wrapper;
+    };
+    box.appendChild(chip("All", allSelected, ""));
+    repositories.forEach((repo) => {
+      const checked = selected.has(repo.id);
+      box.appendChild(chip(repo.github_repository, checked, repo.id, checked && selected.size === 1));
+    });
+  }
+
+  function persistFeedbackRepoFilter() {
+    const persisted = feedbackRepoIdsForQuery();
+    state.feedbackRepoSavePromise = state.feedbackRepoSavePromise
+      .catch(() => {})
+      .then(async () => {
+        const saved = await invoke("save_feedback_repo_filter", { repoIds: persisted });
+        state.config.feedback_repo_filter = saved.feedback_repo_filter || [];
+      });
+    return state.feedbackRepoSavePromise;
+  }
+
+  function selectFeedbackRepositories(repoIds) {
+    const allIds = feedbackRepositories().map((repo) => repo.id);
+    const selected = [...new Set(repoIds.filter((id) => allIds.includes(id)))];
+    state.feedbackRepoFilter = selected.length ? selected : allIds;
+    state.executionHistoryOffset = 0;
+    state.promptGradesOffset = 0;
+    renderFeedbackRepoFilter();
+    void persistFeedbackRepoFilter().catch((error) => showToast(errorText(error), "error"));
+    void refreshPromptGrades({ quiet: true });
+    void refreshExecutionHistory({ quiet: true });
   }
 
   function renderRepositorySelector() {
@@ -798,6 +877,7 @@
   function collectConfig() {
     stashRepositoryForm();
     const next = { ...state.config };
+    next.feedback_repo_filter = feedbackRepoIdsForQuery();
     document.querySelectorAll("[data-config]").forEach((input) => {
       const key = input.dataset.config;
       if (input.type === "checkbox" && input.dataset.checkedValue !== undefined) {
@@ -1541,6 +1621,14 @@
     return facts;
   }
 
+  function repositoryBadge(repository) {
+    const badge = document.createElement("span");
+    badge.className = "repository-badge";
+    badge.textContent = repository || "Repository not recorded";
+    badge.title = repository || "Repository not recorded";
+    return badge;
+  }
+
   function buildExecutionRecordItem(record) {
     const item = document.createElement("details");
     item.className = "execution-record";
@@ -1550,12 +1638,15 @@
     head.className = "execution-head";
     const title = document.createElement("strong");
     title.textContent = `#${record.issueNumber} ${record.issueTitle || ""}`.trim();
+    const titleRow = document.createElement("div");
+    titleRow.className = "execution-title-row";
+    titleRow.append(title, repositoryBadge(record.repository));
     const meta = document.createElement("small");
     meta.textContent = [
       record.attemptNumber ? `Attempt ${record.attemptNumber}` : "",
       record.startedAt ? `Started ${formatIsoTimestamp(record.startedAt)}` : "",
     ].filter(Boolean).join(" · ");
-    head.append(title, meta);
+    head.append(titleRow, meta);
     const tagging = document.createElement("div");
     tagging.className = "execution-tagging";
     [["AI tool", record.aiProvider], ["Model", record.model], ["Effort", record.effort], ["UAT rounds", window.SwarmAdversarialUat.roundCount(record)]].forEach(([label, value]) => {
@@ -1735,10 +1826,11 @@
   }
 
   async function refreshExecutionHistory({ quiet = false } = {}) {
-    const repo = currentRepo();
+    const repoIds = feedbackRepoIdsForQuery();
+    const filterSignature = feedbackRepoFilterSignature();
     const requestId = state.executionHistoryRequest + 1;
     state.executionHistoryRequest = requestId;
-    if (!repo) {
+    if (!feedbackRepositories().length) {
       state.executionHistory = { records: [], total: 0, offset: 0, limit: 10 };
       state.executionHistoryOffset = 0;
       renderExecutionHistory();
@@ -1748,12 +1840,12 @@
     const search = state.executionHistorySearch.trim();
     try {
       const page = await invoke("get_execution_history_background", {
-        repoId: repo.id,
+        repoIds,
         offset,
         search,
         sort: state.executionHistorySort,
       });
-      if (requestId !== state.executionHistoryRequest || repo.id !== state.activeRepoId) return;
+      if (requestId !== state.executionHistoryRequest || filterSignature !== feedbackRepoFilterSignature()) return;
       state.executionHistory = page;
       state.executionHistoryOffset = Number(page.offset) || 0;
       renderExecutionHistory();
@@ -1803,12 +1895,15 @@
     head.className = "execution-head";
     const title = document.createElement("strong");
     title.textContent = `#${record.issueNumber} ${record.issueTitle || ""}`.trim();
+    const titleRow = document.createElement("div");
+    titleRow.className = "execution-title-row";
+    titleRow.append(title, repositoryBadge(record.repository));
     const meta = document.createElement("small");
     meta.textContent = [
       record.attemptNumber > 1 ? `Attempt ${record.attemptNumber}` : "",
       record.startedAt ? `Graded ${formatIsoTimestamp(record.startedAt)}` : "",
     ].filter(Boolean).join(" · ");
-    head.append(title, meta);
+    head.append(titleRow, meta);
     const tagging = document.createElement("div");
     tagging.className = "execution-tagging";
     [
@@ -2151,10 +2246,11 @@
   }
 
   async function refreshPromptGrades({ quiet = false } = {}) {
-    const repo = currentRepo();
+    const repoIds = feedbackRepoIdsForQuery();
+    const filterSignature = feedbackRepoFilterSignature();
     const requestId = state.promptGradesRequest + 1;
     state.promptGradesRequest = requestId;
-    if (!repo) {
+    if (!feedbackRepositories().length) {
       state.promptGrades = null;
       state.promptGradesOffset = 0;
       renderPromptGrades();
@@ -2167,10 +2263,10 @@
     const routerModel = state.promptGradesRouterModel;
     try {
       const page = await invoke("get_prompt_grades_background", {
-        repoId: repo.id,
+        repoIds,
         query: { offset, search, grade, router, routerModel },
       });
-      if (requestId !== state.promptGradesRequest || repo.id !== state.activeRepoId) return;
+      if (requestId !== state.promptGradesRequest || filterSignature !== feedbackRepoFilterSignature()) return;
       state.promptGrades = page;
       state.promptGradesOffset = Number(page.offset) || 0;
       renderPromptGrades();
@@ -2181,17 +2277,17 @@
   }
 
   async function importExecutionHistory() {
-    const repo = currentRepo();
-    if (!repo) return;
+    if (!feedbackRepositories().length) return;
     await withBusy("import-execution-history", async () => {
-      const summary = await invoke("import_execution_history_background", { repoId: repo.id });
+      const batch = await invoke("import_execution_history_background", { repoIds: feedbackRepoIdsForQuery() });
       await refreshExecutionHistory();
-      showToast(
-        summary.imported
-          ? `Imported ${summary.imported} issue${summary.imported === 1 ? "" : "s"} from GitHub (${summary.skipped} already tracked).`
-          : `No new issues to import — all ${summary.totalIssues} are already tracked.`,
-        "success",
-      );
+      await refreshPromptGrades({ quiet: true });
+      const results = Array.isArray(batch.results) ? batch.results : [];
+      const messages = results.map((result) => result.success
+        ? `${result.repository}: ${result.imported} imported, ${result.skipped} already tracked`
+        : `${result.repository}: failed — ${result.error || "unknown error"}`);
+      const failed = results.some((result) => !result.success);
+      showToast(messages.join(" · ") || "No repositories are configured for import.", failed ? "error" : "success");
     }, { progress: "Scanning the GitHub issue backlog…" });
   }
 
@@ -3262,21 +3358,6 @@
     state.testRuns = null;
     state.coverageAudit = null;
     state.testDefinitionDraftOpen = false;
-    state.executionHistory = null;
-    state.promptGrades = null;
-    state.promptGradesOffset = 0;
-    state.promptGradesSearch = "";
-    state.promptGradesGrade = "";
-    state.promptGradesRouter = "";
-    state.promptGradesRouterModel = "";
-    clearTimeout(state.promptGradesSearchTimer);
-    state.executionHistoryOffset = 0;
-    state.executionHistorySearch = "";
-    clearTimeout(state.executionHistorySearchTimer);
-    const executionSearch = byId("execution-history-search");
-    if (executionSearch) executionSearch.value = "";
-    const gradeSearch = byId("prompt-grades-search");
-    if (gradeSearch) gradeSearch.value = "";
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
@@ -3286,10 +3367,6 @@
     if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBranchPushAccess({ quiet: true });
-    if (document.querySelector("#view-feedback.active")) {
-      void refreshPromptGrades({ quiet: true });
-      void refreshExecutionHistory({ quiet: true });
-    }
   }
 
   function branchNode(label, name, tip, meta = "", links = {}) {
@@ -3815,6 +3892,19 @@
     byId("refresh-execution-history").addEventListener("click", () => {
       void refreshPromptGrades();
       void refreshExecutionHistory();
+    });
+    byId("feedback-repo-chips").addEventListener("change", (event) => {
+      const input = event.target.closest("[data-feedback-repo]");
+      if (!input) return;
+      const allIds = feedbackRepositories().map((repo) => repo.id);
+      if (!input.dataset.feedbackRepo) {
+        selectFeedbackRepositories(allIds);
+        return;
+      }
+      const selected = new Set(state.feedbackRepoFilter);
+      if (input.checked) selected.add(input.dataset.feedbackRepo);
+      else selected.delete(input.dataset.feedbackRepo);
+      selectFeedbackRepositories([...selected]);
     });
     const feedbackTabs = Array.from(document.querySelectorAll("[data-feedback-tab]"));
     feedbackTabs.forEach((button) => {

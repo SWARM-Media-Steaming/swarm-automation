@@ -197,6 +197,21 @@ def _search_filter(search: str) -> tuple[str, list[str]]:
     return f" AND ({' OR '.join(clauses)})", params
 
 
+def _repository_filter(repositories: Sequence[str] | str | None) -> tuple[str, list[str]]:
+    """Optional SQL predicate for one or more repositories.
+
+    A string remains accepted for callers using the old single-repository API.
+    An empty sequence deliberately returns no predicate: Feedback's default is
+    the app-wide database, queried as one global aggregate.
+    """
+    values = [repositories] if isinstance(repositories, str) else list(repositories or [])
+    names = list(dict.fromkeys(sanitize_text(value) for value in values if str(value).strip()))
+    if not names:
+        return "", []
+    slots = ", ".join("?" for _ in names)
+    return f"repository IN ({slots})", names
+
+
 def clamp_page_size(limit: int) -> int:
     try:
         size = int(limit)
@@ -644,19 +659,23 @@ class ExecutionHistoryRepository:
                 rounds.setdefault(str(record["execution_id"]), []).append(record)
         return rounds
 
-    def adversarial_summary(self, repository: str, *, search: str = "") -> dict[str, Any]:
-        """How the adversarial UAT loop is performing for one repository.
+    def adversarial_summary(
+        self, repositories: Sequence[str] | str | None = None, *, search: str = ""
+    ) -> dict[str, Any]:
+        """How the adversarial UAT loop is performing for the selected repositories.
 
         Only work-rounds that actually ran the loop are counted (``disabled``
         and rows written before the loop existed are not), so the percentages
         answer "when the loop runs, how often does it settle cleanly?" rather
         than being diluted by every issue worked with it switched off.
         """
-        clause, params = _search_filter(search)
-        where = (
-            " WHERE repository = ? AND adversarial_outcome <> '' "
-            "AND adversarial_outcome <> 'disabled'" + clause
-        )
+        repository_clause, repository_params = _repository_filter(repositories)
+        clause, search_params = _search_filter(search)
+        conditions = ["adversarial_outcome <> ''", "adversarial_outcome <> 'disabled'"]
+        if repository_clause:
+            conditions.insert(0, repository_clause)
+        where = " WHERE " + " AND ".join(conditions) + clause
+        params = [*repository_params, *search_params]
         with self.connect() as database:
             row = database.execute(
                 "SELECT COUNT(*), AVG(adversarial_round_count), "
@@ -664,13 +683,13 @@ class ExecutionHistoryRepository:
                 "SUM(adversarial_outcome = 'cap_hit'), "
                 "AVG(capacity_consumed_percent) "
                 f"FROM ai_executions{where}",
-                (repository, *params),
+                params,
             ).fetchone()
             tests = database.execute(
                 "SELECT COALESCE(SUM(tests_added), 0) FROM adversarial_rounds "
                 "WHERE execution_id IN ("
                 f"SELECT execution_id FROM ai_executions{where})",
-                (repository, *params),
+                params,
             ).fetchone()
         loops = int(row[0] or 0)
         if not loops:
@@ -696,7 +715,7 @@ class ExecutionHistoryRepository:
 
     def page_for_repository(
         self,
-        repository: str,
+        repositories: Sequence[str] | str | None = None,
         *,
         search: str = "",
         limit: int = PAGE_SIZE,
@@ -714,12 +733,15 @@ class ExecutionHistoryRepository:
         order = {"rounds_asc": "adversarial_round_count ASC, started_at DESC, attempt_number DESC",
                  "rounds_desc": "adversarial_round_count DESC, started_at DESC, attempt_number DESC"}.get(
                      sort, "started_at DESC, attempt_number DESC")
-        clause, params = _search_filter(search)
+        repository_clause, repository_params = _repository_filter(repositories)
+        clause, search_params = _search_filter(search)
+        where = f" WHERE {repository_clause}" if repository_clause else " WHERE 1 = 1"
+        params = [*repository_params, *search_params]
         with self.connect() as database:
             total = int(
                 database.execute(
-                    f"SELECT COUNT(*) FROM ai_executions WHERE repository = ?{clause}",
-                    (repository, *params),
+                    f"SELECT COUNT(*) FROM ai_executions{where}{clause}",
+                    params,
                 ).fetchone()[0]
             )
             if total == 0:
@@ -728,10 +750,10 @@ class ExecutionHistoryRepository:
                 offset = ((total - 1) // limit) * limit
             rows = list(
                 database.execute(
-                    "SELECT * FROM ai_executions WHERE repository = ?"
+                    f"SELECT * FROM ai_executions{where}"
                     f"{clause} ORDER BY {order}, execution_id "
                     "LIMIT ? OFFSET ?",
-                    (repository, *params, limit, offset),
+                    (*params, limit, offset),
                 )
             )
         return rows, total, offset, limit
@@ -739,7 +761,7 @@ class ExecutionHistoryRepository:
 
     def graded_for_repository(
         self,
-        repository: str,
+        repositories: Sequence[str] | str | None = None,
         *,
         search: str = "",
         grade: str = "",
@@ -778,12 +800,17 @@ class ExecutionHistoryRepository:
         search_clause, search_params = _search_filter(search)
         grade_names = list(GRADE_POINTS)
         grade_slots = ", ".join("?" for _ in grade_names)
+        repository_clause, repository_params = _repository_filter(repositories)
+        conditions = ["routing_decision <> ''"]
+        if repository_clause:
+            conditions.insert(0, repository_clause)
         where = (
-            " WHERE repository = ? AND routing_decision <> ''"
-            f" AND json_extract(routing_decision, '$.prompt_grade') IN ({grade_slots})"
-            f"{search_clause}"
+            " WHERE "
+            + " AND ".join(conditions)
+            + f" AND json_extract(routing_decision, '$.prompt_grade') IN ({grade_slots})"
+            + search_clause
         )
-        params: list[Any] = [repository, *grade_names, *search_params]
+        params: list[Any] = [*repository_params, *grade_names, *search_params]
         grade_where = where
         grade_params = list(params)
         if selected_router:
@@ -798,7 +825,7 @@ class ExecutionHistoryRepository:
             page_where += " AND json_extract(routing_decision, '$.prompt_grade') = ?"
             page_params.append(selected)
         columns = (
-            "issue_number, issue_title, issue_url, attempt_number, started_at, "
+            "repository, issue_number, issue_title, issue_url, attempt_number, started_at, "
             "ai_provider, model, effort, final_status, routing_decision"
         )
         with self.connect() as database:
@@ -1154,7 +1181,7 @@ def _empty_page() -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`python3 ai_execution_history.py --db PATH --repository OWNER/NAME`.
+    """`python3 ai_execution_history.py --db PATH [--repository OWNER/NAME ...]`.
 
     Without paging flags, prints the repository's executions as a JSON array
     on stdout. `--limit`, `--offset`, or `--search` instead print one page
@@ -1182,7 +1209,12 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True, help="Path to the SQLite database file.")
-    parser.add_argument("--repository", required=True, help="owner/name to filter by.")
+    parser.add_argument(
+        "--repository",
+        action="append",
+        default=[],
+        help="owner/name to filter by; repeat for multiple repositories, or omit for all.",
+    )
     parser.add_argument("--sort", choices=("recent", "rounds_asc", "rounds_desc"), default="recent")
     parser.add_argument(
         "--import-from-github",
@@ -1238,10 +1270,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     database_path = Path(args.db).expanduser()
-    repository_name = sanitize_text(args.repository)
+    repository_names = [sanitize_text(value) for value in args.repository if value.strip()]
     paging = _page_requested(args.limit, args.offset, args.search) or args.sort != "recent"
 
     if args.import_from_github:
+        if len(repository_names) != 1:
+            print(json.dumps({"error": "Import requires exactly one --repository."}))
+            return 1
+        repository_name = repository_names[0]
         repository = ExecutionHistoryRepository(database_path)
         try:
             issues = fetch_github_issues(args.gh_bin, repository_name)
@@ -1260,7 +1296,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         json.dump(
             ExecutionHistoryRepository(database_path).graded_for_repository(
-                repository_name,
+                repository_names,
                 search=args.search,
                 grade=args.grade,
                 router=args.router,
@@ -1281,7 +1317,9 @@ def main(argv: list[str] | None = None) -> int:
 
     repository = ExecutionHistoryRepository(database_path)
     if not paging:
-        rows = repository.for_repository(repository_name)
+        if len(repository_names) != 1:
+            parser.error("unpaged export requires exactly one --repository")
+        rows = repository.for_repository(repository_names[0])
         json.dump(
             attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
             sys.stdout,
@@ -1289,7 +1327,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     rows, total, offset, limit = repository.page_for_repository(
-        repository_name,
+        repository_names,
         sort=args.sort,
         search=args.search,
         limit=PAGE_SIZE if args.limit is None else args.limit,
@@ -1304,7 +1342,7 @@ def main(argv: list[str] | None = None) -> int:
             "offset": offset,
             "limit": limit,
             "adversarial": repository.adversarial_summary(
-                repository_name, search=args.search
+                repository_names, search=args.search
             ),
         },
         sys.stdout,

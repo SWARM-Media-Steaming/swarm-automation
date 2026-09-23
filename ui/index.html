@@ -173,7 +173,11 @@
         </section>
 
         <section id="view-feedback" class="view">
-          <div class="section-intro"><div><p class="eyebrow">FEEDBACK</p><h2>Prompt grades, router activity, and execution history <button class="help-dot" data-help="execution-history" aria-label="About execution history">?</button></h2><p>Three reports over the selected repository's AI work, one tab at a time: how well each issue was written, which AI platform graded it and who that platform picked, and the full execution record. Read-only — this never changes issue processing.</p></div><div class="control-row"><button id="import-execution-history" class="secondary-button">Import from GitHub</button><button id="refresh-execution-history" class="secondary-button">Refresh</button></div></div>
+          <div class="section-intro"><div><p class="eyebrow">FEEDBACK</p><h2>Prompt grades, router activity, and execution history <button class="help-dot" data-help="execution-history" aria-label="About execution history">?</button></h2><p>Three reports over AI work across all repositories by default: how well each issue was written, which AI platform graded it and who that platform picked, and the full execution record. Use the filter below to focus every tab on specific repositories. Read-only — this never changes issue processing.</p></div><div class="control-row"><button id="import-execution-history" class="secondary-button">Import from GitHub</button><button id="refresh-execution-history" class="secondary-button">Refresh</button></div></div>
+          <div class="feedback-repo-filter" aria-labelledby="feedback-repo-filter-label">
+            <div><strong id="feedback-repo-filter-label">Repositories</strong><small>Independent of the repository selected in the header.</small></div>
+            <div id="feedback-repo-chips" class="feedback-repo-chips" role="group" aria-label="Filter Feedback by repository"></div>
+          </div>
           <div class="panel-tabs" role="tablist" aria-label="Feedback reports">
             <button type="button" role="tab" id="feedback-tab-grades" class="active" data-feedback-tab="grades" aria-selected="true" aria-controls="feedback-panel-grades">Prompt grades</button>
             <button type="button" role="tab" id="feedback-tab-routing" data-feedback-tab="routing" aria-selected="false" aria-controls="feedback-panel-routing" tabindex="-1">Router activity</button>
