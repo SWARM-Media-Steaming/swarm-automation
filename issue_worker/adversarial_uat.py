@@ -315,9 +315,12 @@ class AdversarialUatMixin:
         definition = read_definition(self.config.repo_dir)
         definition.setdefault("adversarialBootstrap", plan)
         atomic_write_json(self.config.repo_dir / DEFINITION, definition)
-        # .swarm drafts are normally app-owned/untracked; this is intentionally
-        # a repository artifact, so stage it explicitly for ongoing scheduling.
-        self.git("add", "--", DEFINITION)
+        # .swarm drafts are normally app-owned/untracked (the app excludes
+        # .swarm/ via info/exclude so its own scratch files never show up as
+        # dirty); this file is intentionally a repository artifact, so it
+        # must be force-staged or a plain `git add` fails outright on an
+        # ignored, previously-untracked path.
+        self.git("add", "--force", "--", DEFINITION)
         self.commit_completed_work(self.git("rev-parse", "HEAD"))
         loop["bootstrap"] = definition["adversarialBootstrap"]
         self.save_adversarial(loop)
@@ -437,7 +440,9 @@ class AdversarialUatMixin:
                 loop["tests_added"] = sum(r["tests_added"] for r in loop["rounds"])
                 loop["tests_modified"] = sum(r["tests_modified"] for r in loop["rounds"])
                 loop["results"] = results
-                self.git("add", "--", DEFINITION)
+                # Same as prepare_adversarial_framework: force-stage since a
+                # plain `git add` refuses an app-excluded, untracked path.
+                self.git("add", "--force", "--", DEFINITION)
                 if not round_value["tests_failing_after"]:
                     loop["outcome"] = "clean_first_pass" if loop["round"] == 0 else "resolved_after_n"
                 elif loop["round"] >= MAX_ROUNDS:

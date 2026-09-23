@@ -556,6 +556,35 @@ class WorkerTestCase(unittest.TestCase):
         self.assertNotIn("--prompt-file", grok_command)
         self.assertIn("Fix the layout", self.worker.ai_prompt_file.read_text(encoding="utf-8"))
 
+    def test_run_grok_parses_stdout_json_even_when_stderr_has_tracing_noise(self) -> None:
+        # `--output-format json` prints exactly one JSON object on stdout; the
+        # Grok CLI also writes its own startup/shutdown tracing to stderr.
+        # Merging both streams and json.loads()-ing the combined text (as
+        # _run_grok used to) breaks the instant anything lands on stderr,
+        # silently discarding a completed run's summary — the 2026-09-23
+        # "Grok finished without a final summary" incident, reproduced here.
+        self.worker.issue = IssueContext(360, "Grouping", "body", [], "https://example.invalid/360")
+        self.worker.choice = ProviderChoice("Grok", "test-model", "high", "session-1")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        payload = json.dumps({"text": "## Summary\nDone.\n", "sessionId": "session-42"})
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            kwargs["stderr"].write("INFO startup phase\n")
+            kwargs["stderr"].write("INFO shutdown: flushing session\n")
+            return subprocess.CompletedProcess(command, 0, stdout=payload)
+
+        with mock.patch.object(self.worker, "provider_bin", return_value="/bin/echo"), mock.patch(
+            "swarm_issue_worker.subprocess.run", side_effect=fake_run
+        ):
+            status = self.worker._run_grok("Fix the grouping", {})
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            self.worker.ai_output_file.read_text(encoding="utf-8"), "## Summary\nDone.\n"
+        )
+        self.assertEqual(self.worker.choice.session_id, "session-42")
+        diagnostic = self.worker.ai_diagnostic_file.read_text(encoding="utf-8")
+        self.assertIn("shutdown: flushing session", diagnostic)
+
     def test_dynamic_routing_receives_downloaded_issue_images(self) -> None:
         from issue_images import IssueImage
 

@@ -256,6 +256,24 @@ class AdversarialUatTests(unittest.TestCase):
         generate.assert_not_called()
         self.assertEqual(discovered["suites"][0]["command"], ["cargo", "test"])
 
+    def test_delivery_succeeds_when_swarm_dir_is_locally_excluded(self):
+        # The desktop app keeps its own .swarm/ scratch drafts out of `git
+        # status` by excluding the directory in the managed checkout's local
+        # .git/info/exclude (never the repo's own .gitignore). A plain `git
+        # add` refuses an ignored, previously-untracked path, so both call
+        # sites that stage .swarm/tests.json as a real repository artifact
+        # (bootstrap, and after every test round) must force it, or the
+        # worker crash-loops every retry — the 2026-09-22/23 overnight
+        # incident, reproduced here by excluding .swarm/ before delivery.
+        self.prepare(fixed=True, history=False)
+        (self.repo / ".git/info/exclude").write_text(".swarm/\n")
+        self.worker.config = dataclasses.replace(self.worker.config, providers=tuple(dataclasses.replace(s, enabled=s.key == "claude") for s in self.worker.config.providers))
+        with self.patches(), mock.patch.object(self.worker, "finalize_issue"):
+            self.worker.run_adversarial_delivery()
+        self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
+        self.assertIn(uat.DEFINITION, self.git("ls-files").splitlines())
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_suite_runner_fails_closed_for_disabled_missing_command_and_timeout(self):
         base = {"id": "adversarial-fail", "command": [sys.executable, "-c", "raise SystemExit(3)"]}
         self.assertEqual(uat.run_suites(self.repo, [base])[0]["exit_code"], 3)

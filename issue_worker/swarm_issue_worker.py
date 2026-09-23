@@ -3592,18 +3592,27 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             else ["--session-id", self.choice.session_id]
         )
         self.update_state(session_started=True)
+        # `--output-format json` prints exactly one JSON object on stdout:
+        # {"text": ..., "sessionId": ...}. stderr carries the CLI's own
+        # tracing/log lines (startup/shutdown notices etc.), which can appear
+        # on either side of that object. Capturing both into one stream and
+        # parsing the whole thing as JSON — as this used to do — breaks as
+        # soon as the CLI logs anything to stderr, silently discarding a
+        # completed run's summary. Keep the streams apart: only stdout is
+        # parsed as JSON, stderr goes to the diagnostic file for humans.
         with self.ai_diagnostic_file.open("w", encoding="utf-8") as diagnostic:
             result = subprocess.run(
                 command,
                 cwd=self.config.repo_dir,
                 env=env,
                 text=True,
-                stdout=diagnostic,
-                stderr=subprocess.STDOUT,
+                stdout=subprocess.PIPE,
+                stderr=diagnostic,
                 check=False,
             )
-        # `--output-format json` prints one object: {"text": ..., "sessionId": ...}.
-        raw = self.ai_diagnostic_file.read_text(encoding="utf-8", errors="replace")
+        raw = result.stdout or ""
+        with self.ai_diagnostic_file.open("a", encoding="utf-8") as diagnostic:
+            diagnostic.write(raw)
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
