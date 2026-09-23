@@ -93,6 +93,9 @@ from dynamic_router import (
 ISSUE_COMPLETED_EXIT_CODE = 10
 QUOTA_PAUSED_EXIT_CODE = 11
 PROVIDER_UNAVAILABLE_EXIT_CODE = 12
+CODEX_QUOTA_TIMEOUTS_SECONDS = (30, 60)
+CODEX_QUOTA_CACHE_MAX_AGE_SECONDS = 15 * 60
+CODEX_QUOTA_CACHE_FILE = "codex-rate-limits-cache.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 QUOTA_RE = re.compile(
     r"usage limit|rate[ _-]?limit|quota|credits? (?:are )?(?:exhausted|unavailable)|"
@@ -1038,10 +1041,12 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
     def codex_usage(self) -> ProviderUsage:
         codex_bin = self.provider_bin("codex")
         if not command_available(codex_bin):
-            log("Codex quota unavailable: codex was not found in PATH.")
+            log("Codex quota check unavailable: codex was not found in PATH.")
             return ProviderUsage(2)
         result: subprocess.CompletedProcess[str] | None = None
-        for attempt in range(2):
+        limits: dict[str, Any] | None = None
+        failure_reason = ""
+        for attempt, timeout in enumerate(CODEX_QUOTA_TIMEOUTS_SECONDS):
             result = run_command(
                 [
                     self.config.python_bin,
@@ -1049,45 +1054,93 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                     "--codex-bin",
                     codex_bin,
                     "--timeout",
-                    "30",
+                    str(timeout),
                 ],
                 check=False,
             )
             if result.returncode == 0:
-                break
-            if attempt == 0:
-                log("Codex capacity check did not respond; retrying once.")
+                try:
+                    candidate = json.loads(result.stdout)
+                    if self.codex_usage_from_limits(candidate, log_result=False) is None:
+                        raise ValueError("response had no valid active quota windows")
+                    limits = candidate
+                    break
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    failure_reason = "the local rate-limit response was invalid"
+            else:
+                detail = (result.stderr or result.stdout or "").strip().splitlines()
+                failure_reason = detail[-1] if detail else f"probe exited with status {result.returncode}"
+            if attempt + 1 < len(CODEX_QUOTA_TIMEOUTS_SECONDS):
+                next_timeout = CODEX_QUOTA_TIMEOUTS_SECONDS[attempt + 1]
+                log(f"Codex quota check did not respond; retrying once with a {next_timeout}-second timeout.")
                 time.sleep(0.5)
         assert result is not None
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip().splitlines()
-            reason = f" Details: {detail[-1]}" if detail else ""
-            log(f"Codex quota unavailable after two attempts.{reason}")
-            return ProviderUsage(2)
+        if limits is not None:
+            atomic_write_json(
+                self.config.state_dir / CODEX_QUOTA_CACHE_FILE,
+                {"captured_at": time.time(), "rate_limits": limits},
+            )
+            usage = self.codex_usage_from_limits(limits)
+            assert usage is not None
+            return usage
+
+        cached = self.cached_codex_usage()
+        reason = f" Details: {failure_reason}." if failure_reason else ""
+        if cached is not None:
+            usage, age = cached
+            log(
+                f"Codex quota check unavailable after {len(CODEX_QUOTA_TIMEOUTS_SECONDS)} attempts.{reason} "
+                f"Using cached quota data from {age:g} seconds ago."
+            )
+            return usage
+        log(f"Codex quota check unavailable after {len(CODEX_QUOTA_TIMEOUTS_SECONDS)} attempts.{reason}")
+        return ProviderUsage(2)
+
+    def codex_usage_from_limits(
+        self, limits: Any, *, cache_age: float | None = None, log_result: bool = True
+    ) -> ProviderUsage | None:
         try:
-            limits = json.loads(result.stdout)
+            if not isinstance(limits, dict):
+                return None
             windows = [limits.get(key) for key in ("primary", "secondary") if limits.get(key) is not None]
             used = [float(window["usedPercent"]) for window in windows]
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            log("Codex quota unavailable: the local rate-limit response was invalid.")
-            return ProviderUsage(2)
+        except (KeyError, TypeError, ValueError):
+            return None
         if not used:
-            log("Codex quota unavailable: the local rate-limit response had no active windows.")
-            return ProviderUsage(2)
+            return None
         summary = "; ".join(
             f"{key}: {100 - float(limits[key]['usedPercent']):g}%"
             for key in ("primary", "secondary")
             if limits.get(key) is not None
         )
-        log(f"Codex remaining quota — {summary}.")
         remaining = min(100 - amount for amount in used)
-        detail = f"{summary} remaining"
-        available = (
-            limits.get("rateLimitReachedType") is None
-            and not bool(limits.get("spendControlReached", False))
-            and remaining >= self.config.minimum_remaining_percent
-        )
-        return ProviderUsage(0 if available else 1, remaining, detail)
+        cached_prefix = f"cached {cache_age:g}s old; " if cache_age is not None else ""
+        detail = f"{cached_prefix}{summary} remaining"
+        exhausted = limits.get("rateLimitReachedType") is not None or bool(limits.get("spendControlReached", False))
+        below_minimum = remaining < self.config.minimum_remaining_percent
+        if log_result:
+            if exhausted:
+                log(f"Codex quota exhausted — {summary}.")
+            elif below_minimum:
+                log(
+                    f"Codex quota below configured minimum ({self.config.minimum_remaining_percent:g}%) — {summary}."
+                )
+            else:
+                log(f"Codex remaining quota — {summary}.")
+        return ProviderUsage(1 if exhausted or below_minimum else 0, remaining, detail)
+
+    def cached_codex_usage(self) -> tuple[ProviderUsage, float] | None:
+        try:
+            cached = read_json(self.config.state_dir / CODEX_QUOTA_CACHE_FILE)
+            age = max(0.0, time.time() - float(cached["captured_at"]))
+            if age > CODEX_QUOTA_CACHE_MAX_AGE_SECONDS:
+                return None
+            usage = self.codex_usage_from_limits(cached["rate_limits"], cache_age=round(age), log_result=False)
+            if usage is None:
+                return None
+            return usage, round(age)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     def codex_capacity(self) -> int:
         return self.codex_usage().status
