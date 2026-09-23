@@ -1603,6 +1603,16 @@
     addSummaryParagraph("Requested work", record.requestedWorkSummary);
     addSummaryParagraph("Changes made", record.changesSummary);
     addSummaryParagraph("Adversarial UAT", record.adversarialOutcome?.replaceAll("_", " "));
+    const filedFindings = record.adversarialFiledFindings || [];
+    if (filedFindings.length) {
+      addSummaryParagraph("Out-of-scope UAT findings", `${filedFindings.length} separately filed issue${filedFindings.length === 1 ? "" : "s"}.`);
+      const findingLinks = document.createElement("div");
+      findingLinks.className = "control-row";
+      for (const finding of filedFindings) {
+        if (finding?.url) findingLinks.appendChild(externalLink(finding.title || "Open separately filed issue ↗", finding.url, "text-button"));
+      }
+      if (findingLinks.children.length) body.appendChild(findingLinks);
+    }
     if (record.capacityConsumedPercent != null) {
       addSummaryParagraph("Approximate quota consumed", window.SwarmAdversarialUat.capacity(record.capacityConsumedPercent));
     }

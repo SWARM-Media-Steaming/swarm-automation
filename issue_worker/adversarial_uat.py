@@ -151,7 +151,7 @@ class AdversarialUatMixin:
             "tests_added": 0, "tests_modified": 0, "dispute": self.read_state().get("adversarial_initial_dispute", ""), "rounds": [],
             "capacity_start": ({self.choice.name: self.read_state()["usage_at_start"]["remaining_percent"]}
                                if (self.read_state().get("usage_at_start") or {}).get("remaining_percent") is not None else {}),
-            "capacity_end": {}, "filed_findings": [], "excluded_suites": [],
+            "capacity_end": {}, "filed_findings": [], "filed_finding_details": [], "excluded_suites": [],
         })
 
     def refresh_adversarial_requirements(self) -> None:
@@ -346,22 +346,40 @@ class AdversarialUatMixin:
     def file_adversarial_findings(self, loop: dict[str, Any], findings: list[dict[str, str]]) -> None:
         # Same labelled/assigned issue creation path as the Actions monitor,
         # with an idempotent marker so a retry after create cannot duplicate it.
+        from swarm_issue_worker import iso_timestamp, log
         for finding in findings:
             digest = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()[:20]
             marker = f"<!-- swarm-issue-worker:adversarial-finding:issue:{self.issue.number};id:{digest} -->"
             if marker in loop["filed_findings"]:
+                log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {finding['title']}")
                 continue
             existing = json.loads(self.github.gh([
                 "issue", "list", "--repo", self.config.github_repository, "--state", "all",
                 "--search", f'"{digest}" in:body', "--json", "body,url", "--limit", "100",
             ], self.choice.key))
-            if not any(marker in item.get("body", "") for item in existing):
-                self.file_labelled_issue(finding["title"][:120],
+            already_filed = next((item for item in existing if marker in item.get("body", "")), None)
+            if already_filed:
+                url = str(already_filed.get("url", "")).strip()
+                log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {url or finding['title']}")
+            else:
+                output = self.file_labelled_issue(finding["title"][:120],
                     f"{marker}\nFound while testing #{self.issue.number}; outside that delivery's scope.\n\n{finding['body']}",
                     (("bug", "d73a4a", "Something is not working"),
                      ("adversarial-uat", "5319e7", "Found by independent adversarial tests")), self.choice.key)
+                url = output.strip().splitlines()[-1] if output.strip() else ""
+                log(f"Filed out-of-scope adversarial UAT finding for #{self.issue.number}: {url or finding['title']}")
             loop["filed_findings"].append(marker)
+            details = loop.setdefault("filed_finding_details", [])
+            if not any(item.get("marker") == marker for item in details):
+                details.append({"marker": marker, "title": finding["title"], "url": url})
             self.save_adversarial(loop)
+            self.history.update(
+                iso_timestamp(),
+                adversarial_filed_findings=[
+                    {"title": item.get("title", ""), "url": item.get("url", "")}
+                    for item in details
+                ],
+            )
 
     def pause_adversarial(self) -> int:
         from swarm_issue_worker import QUOTA_PAUSED_EXIT_CODE, iso_timestamp

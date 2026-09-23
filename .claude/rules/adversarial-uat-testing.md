@@ -32,7 +32,9 @@ label from a trusted author; the worker owns VERSION.
   the blocking suites. A finding may name out-of-scope `suite_ids`; these stay
   registered for scheduled runs but are excluded from this issue's blocking
   verdict after the separate issue is filed. A stable finding marker prevents
-  duplicate auto-filing.
+  duplicate auto-filing. Log both newly filed and deduplicated findings; keep
+  each filed issue's title and URL in execution history so the app can surface
+  the non-blocking follow-up to the user.
 - All exchanges finish before delivery. Clean passes use normal delivery;
   cap-hit delivery explicitly disables automation and retains the PR and branch
   while the issue waits for trusted-author adjudication in AI Needs Input.
