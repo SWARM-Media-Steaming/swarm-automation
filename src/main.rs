@@ -1,13 +1,10 @@
 mod config;
 mod processes;
-mod test_discovery;
-mod testing;
 mod tools;
 
 use config::{AppConfig, RepoConfig, CONFIG_FILE};
 use processes::{process_is_running, ProcessManager, ProcessStatus};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -43,8 +40,6 @@ struct AppState {
     /// Always `None` in production — see apps/server/src/gui.rs's
     /// `test_data_dir` for the same pattern.
     test_data_dir: Option<PathBuf>,
-    /// Non-secret values explicitly declared `session-only`, keyed by repo.
-    test_input_sessions: Mutex<HashMap<String, HashMap<String, String>>>,
 }
 
 impl Default for AppState {
@@ -53,7 +48,6 @@ impl Default for AppState {
             config: Mutex::new(AppConfig::default()),
             processes: ProcessManager::default(),
             test_data_dir: None,
-            test_input_sessions: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -67,7 +61,6 @@ struct RepositoryInspection {
     github_repository: String,
     dirty: bool,
     worker_available: bool,
-    uat_available: bool,
     error: String,
 }
 
@@ -78,8 +71,6 @@ struct RepoStatus {
     label: String,
     github_repository: String,
     enabled: bool,
-    /// Per-repo UAT scheduler process (slot `uat:<id>`).
-    uat: ProcessStatus,
     /// Absolute path of the working copy for this repo (a managed clone or the
     /// advanced override).
     workspace_path: String,
@@ -88,7 +79,6 @@ struct RepoStatus {
     /// True when the app manages the clone (no `repo_dir` override).
     workspace_managed: bool,
     worker_available: bool,
-    uat_available: bool,
     bot_config_exists: bool,
     /// Per-repo validation error, if any.
     repo_config_error: String,
@@ -338,24 +328,6 @@ async fn choose_repository(app: tauri::AppHandle) -> Result<Option<RepositoryIns
     }))
 }
 
-#[tauri::command]
-async fn choose_test_input_path(
-    app: tauri::AppHandle,
-    kind: String,
-) -> Result<Option<String>, String> {
-    let (sender, receiver) = tokio_oneshot();
-    if kind == "directory" {
-        app.dialog().file().pick_folder(move |path| {
-            let _ = sender.send(path.map(|value| value.to_string()));
-        });
-    } else {
-        app.dialog().file().pick_file(move |path| {
-            let _ = sender.send(path.map(|value| value.to_string()));
-        });
-    }
-    receiver.recv().map_err(|error| error.to_string())
-}
-
 // tauri-plugin-dialog callbacks are synchronous from this application's
 // perspective. A std channel avoids adding an async runtime solely for a
 // native picker while still keeping the command's JS contract asynchronous.
@@ -379,7 +351,6 @@ fn inspect_repository_path(path: &Path) -> RepositoryInspection {
         worker_available: canonical
             .join("scripts/issue_worker/install_swarm_issue_cron.py")
             .is_file(),
-        uat_available: testing::available(&canonical),
         error: String::new(),
     };
     if !canonical.is_dir() {
@@ -496,17 +467,10 @@ fn get_automation_status<R: tauri::Runtime>(
             label: repo.label(),
             github_repository: repo.github_repository.clone(),
             enabled: repo.enabled,
-            uat: state.processes.status(
-                &app,
-                &format!("uat:{}", repo.id),
-                &format!("Test scheduler · {}", repo.label()),
-                &log_path,
-            )?,
             workspace_path: workspace.to_string_lossy().into_owned(),
             workspace_ready,
             workspace_managed: managed,
             worker_available,
-            uat_available: repository.uat_available,
             bot_config_exists: Path::new(&repo.effective_apps_config()).is_file(),
             repo_config_error: repo_error(&config, repo),
             deferred_reason: workspace_ready
@@ -809,37 +773,6 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
     arguments
 }
 
-/// Builds the test scheduler's view of "can AI help with a gap right now" —
-/// the repository's own on/off switch plus every provider's resolved binary,
-/// so `testing::check_ai_capability`/`generate_suite_ai_test_data` can probe
-/// usage without needing an `AppConfig` of their own. `python3` falls back to
-/// the bare command name (rather than erroring) so a missing interpreter
-/// surfaces as "AI unavailable" for the suites that need it, not as a reason
-/// to refuse deterministic test runs entirely.
-fn resolve_ai_run_options(
-    config: &AppConfig,
-    repo: &RepoConfig,
-    script_dir: &Path,
-) -> testing::AiRunOptions {
-    testing::AiRunOptions {
-        enabled: repo.uat_ai_test_data_enabled,
-        python_bin: tools::find_executable("python3", &config.python_bin)
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "python3".into()),
-        script_dir: script_dir.to_path_buf(),
-        minimum_remaining_percent: config.minimum_remaining_percent,
-        providers: resolve_providers(config)
-            .into_iter()
-            .map(|provider| testing::AiProviderOption {
-                id: provider.id,
-                bin: provider.bin.to_string_lossy().into_owned(),
-                model: provider.model,
-                enabled: provider.enabled,
-            })
-            .collect(),
-    }
-}
-
 /// Global scheduler flags for `install_swarm_issue_cron.py`. Per-repo detail
 /// lives in the `--repos-file`; unknown provider flags added by the
 /// caller are forwarded to every repo's worker invocation.
@@ -1032,228 +965,6 @@ fn repo_worker_args(
         arguments.extend(["--completion-author".into(), author.clone()]);
     }
     arguments
-}
-
-#[tauri::command]
-fn start_uat_scheduler(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    repo_id: String,
-    run_once: bool,
-) -> Result<ProcessStatus, String> {
-    let config = current_config(&state)?;
-    let repo = resolve_repo(&config, &repo_id)?;
-    let workspace = prepared_workspace(&app, &config, repo)?;
-    if !testing::definition_path(&workspace).is_file() {
-        return Err(format!(
-            "Add {} to this repository to describe the tests to run.",
-            testing::TEST_DEFINITION_PATH
-        ));
-    }
-    // Validate before spawning so a malformed repository definition is a clear
-    // configuration error, never an opaque failed test process.
-    testing::load_definition(&workspace)?;
-    // Refresh the non-secret runner handoff on every start. This deliberately
-    // drops session-only values left by an earlier app process.
-    let mut runner_inputs = repo.test_inputs.clone();
-    if let Some(session) = state
-        .test_input_sessions
-        .lock()
-        .map_err(|_| "Test input session lock was poisoned")?
-        .get(&repo.id)
-    {
-        runner_inputs.extend(session.clone());
-    }
-    testing::save_inputs(&repo.effective_run_dir(&workspace), &runner_inputs)?;
-    let program = std::env::current_exe()
-        .map_err(|error| format!("Could not locate the test runner: {error}"))?;
-    let mut arguments = vec![
-        "--swarm-test-runner".into(),
-        "--workspace".into(),
-        workspace.to_string_lossy().into_owned(),
-        "--run-dir".into(),
-        repo.effective_run_dir(&workspace)
-            .to_string_lossy()
-            .into_owned(),
-        "--repository".into(),
-        repo.github_repository.clone(),
-        "--device".into(),
-        repo.test_inputs
-            .get("fireTvSerial")
-            .cloned()
-            .unwrap_or_default(),
-        "--hour".into(),
-        repo.uat_hour.to_string(),
-    ];
-    if repo.allow_disruptive_tests {
-        arguments.push("--allow-disruptive".into());
-    }
-    if repo.uat_triage_enabled {
-        arguments.push("--triage".into());
-    }
-    if run_once {
-        arguments.push("--once".into());
-    }
-    // AI gap-filling is best-effort: a repository with no Python/AI resources
-    // bundled still gets an ordinary, fully deterministic test run — suites
-    // that ask for `aiTestData` simply come back "Not executed".
-    if let Ok(script_dir) = worker_script_dir(&app) {
-        let ai = resolve_ai_run_options(&config, repo, &script_dir);
-        if ai.enabled {
-            arguments.push("--ai-test-data-enabled".into());
-        }
-        arguments.extend([
-            "--python-bin".into(),
-            ai.python_bin,
-            "--script-dir".into(),
-            ai.script_dir.to_string_lossy().into_owned(),
-            "--minimum-remaining-percent".into(),
-            ai.minimum_remaining_percent.to_string(),
-        ]);
-        for provider in &ai.providers {
-            arguments.extend([format!("--{}-bin", provider.id), provider.bin.clone()]);
-            arguments.extend([format!("--{}-model", provider.id), provider.model.clone()]);
-            if provider.enabled {
-                arguments.extend(["--enabled-provider".into(), provider.id.clone()]);
-            }
-        }
-    }
-    state.processes.spawn(
-        &app,
-        &format!("uat:{}", repo.id),
-        &format!("Test scheduler · {}", repo.label()),
-        &program,
-        &arguments,
-        &[("PATH".to_string(), tools::enhanced_path())],
-        &workspace,
-        automation_log_path(&app)?,
-    )
-}
-
-#[tauri::command]
-fn get_test_plan<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    state: State<'_, AppState>,
-    repo_id: String,
-) -> Result<testing::TestPlan, String> {
-    let config = current_config(&state)?;
-    let repo = resolve_repo(&config, &repo_id)?;
-    let workspace = resolve_workspace(&app, &config, repo)?;
-    let mut inputs = repo.test_inputs.clone();
-    if let Some(session) = state
-        .test_input_sessions
-        .lock()
-        .map_err(|_| "Test input session lock was poisoned")?
-        .get(&repo.id)
-    {
-        inputs.extend(session.clone());
-    }
-    Ok(testing::build_plan(
-        &workspace,
-        &repo.effective_run_dir(&workspace),
-        &repo.id,
-        &inputs,
-        repo.allow_disruptive_tests,
-    ))
-}
-
-#[tauri::command]
-fn detect_test_definition<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    state: State<'_, AppState>,
-    repo_id: String,
-) -> Result<testing::TestDefinitionDraft, String> {
-    let config = current_config(&state)?;
-    let repo = resolve_repo(&config, &repo_id)?;
-    let workspace = prepared_workspace(&app, &config, repo)?;
-    // AI-assisted discovery is best-effort: a repository with no Python/AI
-    // resources bundled still gets ordinary deterministic detection.
-    let ai = worker_script_dir(&app)
-        .ok()
-        .map(|script_dir| resolve_ai_run_options(&config, repo, &script_dir));
-    let mut draft = testing::detect_definition(&workspace, ai.as_ref())?;
-    // A committed definition is the authoritative one; detection may be
-    // re-run for review at any time, but `create_test_definition` refuses to
-    // overwrite it, so this is always safe to regenerate.
-    if testing::definition_path(&workspace).exists() {
-        draft.notes.insert(
-            0,
-            format!(
-                "{} already exists and is authoritative; this draft is for review only and will not overwrite it.",
-                testing::TEST_DEFINITION_PATH
-            ),
-        );
-    }
-    Ok(draft)
-}
-
-#[tauri::command]
-fn audit_test_coverage<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    state: State<'_, AppState>,
-    repo_id: String,
-) -> Result<test_discovery::CoverageAudit, String> {
-    let config = current_config(&state)?;
-    let repo = resolve_repo(&config, &repo_id)?;
-    let workspace = resolve_workspace(&app, &config, repo)?;
-    let definition = testing::load_definition(&workspace)?;
-    let candidates = test_discovery::discover_candidates(&workspace)?;
-    Ok(test_discovery::audit_coverage(
-        &candidates,
-        &definition.suites,
-    ))
-}
-
-#[tauri::command]
-fn create_test_definition<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    state: State<'_, AppState>,
-    repo_id: String,
-    definition: String,
-) -> Result<String, String> {
-    let config = current_config(&state)?;
-    let repo = resolve_repo(&config, &repo_id)?;
-    let workspace = prepared_workspace(&app, &config, repo)?;
-    testing::create_definition(&workspace, &definition)
-        .map(|path| path.to_string_lossy().into_owned())
-}
-
-#[tauri::command]
-async fn get_test_plan_background(
-    app: tauri::AppHandle,
-    repo_id: String,
-) -> Result<testing::TestPlan, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        get_test_plan(app.clone(), state, repo_id)
-    })
-    .await
-    .map_err(|error| format!("Test requirement discovery failed: {error}"))?
-}
-
-#[tauri::command]
-fn get_test_runs<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    state: State<'_, AppState>,
-    repo_id: String,
-) -> Result<Vec<testing::TestRunResults>, String> {
-    let config = current_config(&state)?;
-    let repo = resolve_repo(&config, &repo_id)?;
-    let workspace = resolve_workspace(&app, &config, repo)?;
-    Ok(testing::list_runs(&repo.effective_run_dir(&workspace)))
-}
-
-#[tauri::command]
-async fn get_test_runs_background(
-    app: tauri::AppHandle,
-    repo_id: String,
-) -> Result<Vec<testing::TestRunResults>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        get_test_runs(app.clone(), state, repo_id)
-    })
-    .await
-    .map_err(|error| format!("Test run history lookup failed: {error}"))?
 }
 
 /// One sanitized `ai_executions` row (see `ai_execution_history.py`). Field
@@ -1988,96 +1699,6 @@ async fn import_execution_history_background(
 }
 
 #[tauri::command]
-fn save_test_input<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    state: State<'_, AppState>,
-    repo_id: String,
-    key: String,
-    value: Option<String>,
-) -> Result<AppConfig, String> {
-    let mut config = current_config(&state)?;
-    let repo_index = config
-        .repositories
-        .iter()
-        .position(|repo| repo.id == repo_id)
-        .ok_or_else(|| format!("Unknown repository id: {repo_id}"))?;
-    let repo_snapshot = config.repositories[repo_index].clone();
-    let workspace = resolve_workspace(&app, &config, &repo_snapshot)?;
-    let definition = testing::load_definition(&workspace)?;
-    let input = definition
-        .inputs
-        .iter()
-        .find(|input| input.id == key)
-        .ok_or_else(|| format!("The test definition does not declare input '{key}'"))?;
-    let normalized = value
-        .map(|value| {
-            if input.input_type == "secret" {
-                value
-            } else {
-                value.trim().to_string()
-            }
-        })
-        .filter(|value| !value.is_empty());
-    match input.persistence.as_str() {
-        "keychain" | "os-keychain" | "osKeychain" => {
-            testing::save_secret(&repo_id, &key, normalized.as_deref())?;
-            config.repositories[repo_index].test_inputs.remove(&key);
-            if let Some(session) = state
-                .test_input_sessions
-                .lock()
-                .map_err(|_| "Test input session lock was poisoned")?
-                .get_mut(&repo_id)
-            {
-                session.remove(&key);
-            }
-        }
-        "session-only" => {
-            let mut sessions = state
-                .test_input_sessions
-                .lock()
-                .map_err(|_| "Test input session lock was poisoned")?;
-            let repo_values = sessions.entry(repo_id.clone()).or_default();
-            if let Some(value) = normalized {
-                repo_values.insert(key.clone(), value);
-            } else {
-                repo_values.remove(&key);
-            }
-        }
-        _ => {
-            let repo = &mut config.repositories[repo_index];
-            if let Some(value) = normalized {
-                repo.test_inputs.insert(key.clone(), value);
-            } else {
-                repo.test_inputs.remove(&key);
-            }
-        }
-    }
-    // The runner is a separate closed-stdin process. This file is only the
-    // non-secret handoff; keychain values are loaded by the runner itself.
-    let mut selected_inputs = config.repositories[repo_index].test_inputs.clone();
-    if let Some(session) = state
-        .test_input_sessions
-        .lock()
-        .map_err(|_| "Test input session lock was poisoned")?
-        .get(&repo_id)
-    {
-        selected_inputs.extend(session.clone());
-    }
-    if workspace.is_dir() {
-        testing::save_inputs(
-            &repo_snapshot.effective_run_dir(&workspace),
-            &selected_inputs,
-        )?;
-    }
-    config::save(&app_config_path(&app)?, &config)?;
-    *state
-        .config
-        .lock()
-        .map_err(|_| "Configuration state lock was poisoned".to_string())? = config.clone();
-    Ok(config)
-}
-
-#[tauri::command]
 fn pause_process(state: State<'_, AppState>, process: String) -> Result<ProcessStatus, String> {
     state.processes.pause(&process)
 }
@@ -2612,36 +2233,23 @@ async fn install_update_candidate<R: tauri::Runtime>(
     app.restart()
 }
 
-/// True once neither the issue worker nor any enabled repo's test scheduler
-/// has a live process. Both are long-running, self-scheduling processes —
-/// there is no finer "busy this instant" signal than that — but that is
-/// also exactly the granularity that matters here: restarting this app to
-/// apply an update always stops every tracked process (see the `RunEvent::
-/// Exit` handler), so waiting for a slot to already be stopped is what
-/// keeps that restart from ever cutting off live work.
-fn workers_idle<R: tauri::Runtime>(app: &tauri::AppHandle<R>, config: &AppConfig) -> bool {
+/// True once the issue worker has no live process. It is a long-running,
+/// self-scheduling process — there is no finer "busy this instant" signal
+/// than that — but that is also exactly the granularity that matters here:
+/// restarting this app to apply an update always stops every tracked
+/// process (see the `RunEvent::Exit` handler), so waiting for the slot to
+/// already be stopped is what keeps that restart from ever cutting off live
+/// work.
+fn workers_idle<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let Ok(log_path) = automation_log_path(app) else {
         return false;
     };
     let state = app.state::<AppState>();
-    let issue_idle = state
+    state
         .processes
         .status(app, "issue", "Issue worker scheduler", &log_path)
         .map(|status| status.state == "stopped")
-        .unwrap_or(true);
-    issue_idle
-        && config.enabled_repos().all(|repo| {
-            state
-                .processes
-                .status(
-                    app,
-                    &format!("uat:{}", repo.id),
-                    &format!("Test scheduler · {}", repo.label()),
-                    &log_path,
-                )
-                .map(|status| status.state == "stopped")
-                .unwrap_or(true)
-        })
+        .unwrap_or(true)
 }
 
 /// Poll until `workers_idle` — never sends either process a stop signal.
@@ -2652,7 +2260,7 @@ fn workers_idle<R: tauri::Runtime>(app: &tauri::AppHandle<R>, config: &AppConfig
 /// this is waiting.
 async fn wait_for_workers_idle(app: &tauri::AppHandle) {
     loop {
-        let config = {
+        {
             let state = app.state::<AppState>();
             let Ok(config) = state.config.lock() else {
                 return;
@@ -2660,9 +2268,8 @@ async fn wait_for_workers_idle(app: &tauri::AppHandle) {
             if config.auto_update != "auto" {
                 return;
             }
-            config.clone()
-        };
-        if workers_idle(app, &config) {
+        }
+        if workers_idle(app) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -2671,9 +2278,8 @@ async fn wait_for_workers_idle(app: &tauri::AppHandle) {
 
 /// Honour `auto_update` once at startup, off the UI thread. `"notify"`
 /// emits `update-available` for the banner. `"auto"` ("Automatically" in
-/// the UI) waits for the issue worker and every enabled repo's test
-/// scheduler to go idle on their own (see `wait_for_workers_idle`), then
-/// downloads, installs, and relaunches.
+/// the UI) waits for the issue worker to go idle on its own (see
+/// `wait_for_workers_idle`), then downloads, installs, and relaunches.
 fn spawn_startup_update_check(app: &tauri::AppHandle) {
     let mode = {
         let state = app.state::<AppState>();
@@ -4561,10 +4167,6 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
-    let arguments: Vec<String> = std::env::args().collect();
-    if let Some(exit_code) = testing::run_cli(&arguments) {
-        std::process::exit(exit_code);
-    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_main_window(app)
@@ -4608,14 +4210,6 @@ fn main() {
             get_automation_status_background,
             start_issue_worker,
             request_issue_scan,
-            start_uat_scheduler,
-            get_test_plan,
-            get_test_plan_background,
-            detect_test_definition,
-            create_test_definition,
-            audit_test_coverage,
-            get_test_runs,
-            get_test_runs_background,
             get_execution_history,
             get_execution_history_background,
             run_diagnostics,
@@ -4626,8 +4220,6 @@ fn main() {
             get_prompt_grades_background,
             import_execution_history,
             import_execution_history_background,
-            save_test_input,
-            choose_test_input_path,
             pause_process,
             resume_process,
             stop_process,
@@ -4761,8 +4353,8 @@ mod tests {
 /// shape as apps/server/src/gui_tests (see that crate's `mod.rs` for why:
 /// no reliable macOS UI-automation path today, and Tauri's simulated
 /// IPC/ACL layer isn't usable under a bare `mock_context()`). Deliberately
-/// does not cover start_issue_worker/start_uat_scheduler/install_ai_cli/
-/// launch_bot_setup — those spawn real child processes (python3, bash, npm)
+/// does not cover start_issue_worker/install_ai_cli/launch_bot_setup —
+/// those spawn real child processes (python3, bash, npm)
 /// and are exercised by manual `npm run dev`/`npm run build` + launch
 /// verification instead.
 #[cfg(test)]

@@ -5670,29 +5670,6 @@ class RunnerTestCase(unittest.TestCase):
             self.assertEqual(branch, "ai/codex/issue-114")
             self.assertTrue((repo / "dirty.txt").is_file())
 
-    def test_scheduler_defers_checkout_owned_by_test_run(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="swarm-runner-test-lock.") as temporary:
-            root = Path(temporary)
-            repo = root / "repo"
-            state = root / "state"
-            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.name", "runner test"], check=True)
-            subprocess.run(
-                ["git", "-C", str(repo), "config", "user.email", "runner@example.invalid"], check=True
-            )
-            subprocess.run(
-                ["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "base"], check=True
-            )
-            (repo / ".git" / "swarm-test-run.lock").write_text(
-                f"{os.getpid()}\n", encoding="utf-8"
-            )
-            args = runner_module.build_parser().parse_args(
-                ["--repo-dir", str(repo), "--state-dir", str(state)]
-            )
-            runner = runner_module.Runner(args, [])
-
-            self.assertFalse(runner.synchronize_repository(runner.repos[0]))
-
     def test_scheduler_recovers_a_checkout_with_only_harmless_untracked_files(self) -> None:
         """A stale issue branch left over from an interrupted work-round
         (no in-progress-issue.json, so no owner) whose tree already matches

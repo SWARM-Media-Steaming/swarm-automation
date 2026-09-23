@@ -17,16 +17,10 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false, branchPushAccess: false, liveTestRuns: false },
+    refreshing: { status: false, tools: false, branches: false, botReadiness: false, promotions: false, branchPushAccess: false },
     activeRepoId: "",
     branchOverview: null,
     promotions: [],
-    testPlan: null,
-    testRuns: null,
-    // repoId -> test runs, for repos whose scheduler is up (Now working panel).
-    liveTestRuns: {},
-    testDefinitionDraftOpen: false,
-    coverageAudit: null,
     executionHistory: null,
     executionHistorySearch: "",
     executionHistorySort: "recent",
@@ -61,7 +55,6 @@
     overview: "Automation overview",
     repository: "Repository",
     ai: "AI Configuration",
-    scheduler: "Test Scheduler",
     feedback: "Feedback",
     advanced: "Advanced",
     debug: "Info & Debug",
@@ -119,7 +112,7 @@
     },
     "software-update": {
       title: "Software updates",
-      html: "<p>New versions are published automatically after each change passes tests. Updates install in place and restart the app — your configuration is untouched.</p><ul><li><strong>Notify me</strong> — a banner appears when a new version is available; you choose when to install.</li><li><strong>Automatically</strong> — a detected update waits until the issue worker and every test scheduler are idle on their own (never stopped just to make room), then downloads, installs, and restarts.</li></ul><p><strong>Check now</strong> works in either mode and also lists the 3 most recent release builds and 3 most recent beta builds so you can pick a specific version — anything older than what's installed is shown for context but can't be selected.</p>",
+      html: "<p>New versions are published automatically after each change passes tests. Updates install in place and restart the app — your configuration is untouched.</p><ul><li><strong>Notify me</strong> — a banner appears when a new version is available; you choose when to install.</li><li><strong>Automatically</strong> — a detected update waits until the issue worker is idle on its own (never stopped just to make room), then downloads, installs, and restarts.</li></ul><p><strong>Check now</strong> works in either mode and also lists the 3 most recent release builds and 3 most recent beta builds so you can pick a specific version — anything older than what's installed is shown for context but can't be selected.</p>",
       links: [],
     },
     "bot-identities": {
@@ -155,36 +148,6 @@
     "schedule-modes": {
       title: "Pickup schedule",
       html: "<ul><li><strong>Continuous</strong> — checks repeatedly and handles ready issues one after another.</li><li><strong>Daily</strong> — checks once each day.</li><li><strong>Weekdays</strong> — checks Monday through Friday.</li><li><strong>Custom</strong> — checks on the days you choose.</li><li><strong>Manual</strong> — checks only when you select <em>Run now</em>.</li></ul><p><strong>Run now</strong> stays available whatever the schedule says, including while the worker is already running: it checks every enabled repository straight away, then the timer for the next check restarts from the end of that check.</p>",
-      links: [],
-    },
-    "uat-suite": {
-      title: "Test scheduler",
-      html: "<p>Runs whatever tests this repository declares in <code>.swarm/tests.json</code>, on a schedule, without any AI involved. AI only gets involved for a gap plain scanning can't fill on its own:</p><ul><li><strong>Finding tests</strong> — if <strong>Find tests &amp; create draft</strong> can't spot any conventional test command, it asks AI to look at the repository layout for one. Anything AI suggests starts turned off until you review and enable it.</li><li><strong>Filling in test data</strong> — a test can ask for sample data that isn't fixed ahead of time (see <strong>How tests run</strong>). AI makes a best-effort version right before that test runs.</li></ul><p>Both only happen when there's enough AI usage available (the same shared limit set in AI Configuration) — otherwise the app does the deterministic part only and says so.</p><p><strong>Start</strong> keeps a daily cycle running at the chosen hour; <strong>Run now</strong> executes one cycle immediately.</p>",
-      links: [],
-    },
-    "scheduler-run-settings": {
-      title: "How tests run",
-      html: "<ul><li><strong>Allow disruptive tests</strong> — some tests change real state (data, devices, external services). They stay off until you turn this on.</li><li><strong>Let AI fill in test data</strong> — a test's own definition can ask for data that isn't fixed ahead of time (for example, realistic-looking sample records). When this is on and AI has usage available, AI makes a best-effort version and the test run records exactly what it made. When it's off, or usage runs out, that test is marked <strong>Not executed</strong> instead of guessing on its own.</li><li><strong>Explain failures with AI</strong> — separate from the setting above. After a real failure, asks AI to read the results and add a plain-language explanation, at the cost of AI usage.</li></ul>",
-      links: [],
-    },
-    "scheduler-suites": {
-      title: "Every test and its status",
-      html: "<ul><li><strong>Ready</strong> / <strong>Passed</strong> / <strong>Failed</strong> — the normal lifecycle of a test that ran.</li><li><strong>Skipped</strong> — something the test needs (hardware, a file, a setting) is missing; this is not a failure.</li><li><strong>Not executed</strong> — the test asked AI for sample data, but AI was turned off or had no usage left when the run started. Not a failure either — it just didn't get a chance to run this cycle.</li><li><strong>Waiting for input</strong> — more than one eligible device was found; choose one below to continue.</li></ul><p>A test with AI-generated data shows what AI made, and which provider made it, right on that test's entry.</p>",
-      links: [],
-    },
-    "coverage-audit": {
-      title: "Coverage audit",
-      html: "<p>Recursively scans the repository for every plausible test entry point — nested manifests, CI workflow steps, task-runner targets, and conventional test scripts — and compares each one against the committed <code>.swarm/tests.json</code>. It never executes anything it finds and never changes the committed file.</p><ul><li><strong>Mapped &amp; scheduled</strong> — matches an enabled suite in the committed definition.</li><li><strong>Covered by another suite</strong> — an aggregate, alias, or workspace member whose assertions another scheduled or covered command already exercises, so it is intentionally not scheduled again.</li><li><strong>Disabled, pending review</strong> — matches a suite the committed definition has turned off.</li><li><strong>Unmapped</strong> — found by discovery but not accounted for anywhere in the committed definition; coverage cannot be called complete while this list is non-empty.</li></ul>",
-      links: [],
-    },
-    "test-runs": {
-      title: "Past runs",
-      html: "<p>Each completed cycle is listed newest first with when it ran, how it was triggered, its duration, and a pass / fail / skipped tally. Open a run to see every test it ran, that test's outcome, and any AI-generated data used along the way.</p>",
-      links: [],
-    },
-    "test-requirements": {
-      title: "What's ready to run",
-      html: "<p>A repository's tests can each declare things they need: programs, files, healthy servers, mounts, credentials, devices, or AI-generated data.</p><ul><li><strong>Ready</strong> — the requirement was found.</li><li><strong>Waiting for input</strong> — choose between multiple detected devices.</li><li><strong>Blocked</strong> — equipment or configuration is absent; this is not a test failure.</li></ul><p>Selections are saved only for this repository. Test commands receive no interactive input.</p>",
       links: [],
     },
     "repo-profile": {
@@ -252,8 +215,6 @@
     ["Monitor GitHub Actions", "ci-monitoring"],
     ["One worker per repository", "parallel-repo-workers"],
     ["Minimum quota remaining", "quota-threshold"],
-    ["Test scheduler", "uat-suite"],
-    ["Test run history", "test-runs"],
     ["Prompt grades", "prompt-grades"],
     ["Router activity", "router-activity"],
     ["Execution history", "execution-history"],
@@ -311,23 +272,11 @@
     }
     if (view === "repository") void refreshBranches({ quiet: true });
     if (view === "debug") void refreshTools({ quiet: true });
-    if (view === "scheduler") void refreshTestPlan({ quiet: true });
     if (view === "repository") void refreshBotReadiness({ quiet: true });
     if (view === "repository") void refreshBranchPushAccess({ quiet: true });
     if (view === "feedback") {
       void refreshPromptGrades({ quiet: true });
       void refreshExecutionHistory({ quiet: true });
-    }
-  }
-
-  function populateHours() {
-    const select = byId("uat-hour");
-    select.replaceChildren();
-    for (let hour = 0; hour < 24; hour += 1) {
-      const option = document.createElement("option");
-      option.value = String(hour);
-      option.textContent = `${String(hour).padStart(2, "0")}:00`;
-      select.appendChild(option);
     }
   }
 
@@ -413,12 +362,6 @@
       update_claude_assets_enabled: false,
       allow_environment_only_summary: false,
       repo_dir: "",
-      uat_hour: 3,
-      uat_triage_enabled: true,
-      uat_ai_test_data_enabled: true,
-      test_inputs: {},
-      allow_disruptive_tests: false,
-      run_dir: "",
     };
   }
 
@@ -548,7 +491,7 @@
       const key = input.dataset.repoConfig;
       if (input.type === "checkbox") repo[key] = input.checked;
       else if (input.dataset.list !== undefined) repo[key] = input.value.split(",").map((value) => value.trim()).filter(Boolean);
-      else if (input.type === "number" || key === "uat_hour") repo[key] = Number(input.value);
+      else if (input.type === "number") repo[key] = Number(input.value);
       else repo[key] = key === "github_repository" ? normalizeRepoRef(input.value) : input.value.trim();
     });
     // Approval and squash-merging are intentionally one repository setting.
@@ -895,7 +838,7 @@
       } else if (input.type === "checkbox") next[key] = input.checked;
       else if (input.dataset.list !== undefined) {
         next[key] = input.value.split(",").map((value) => value.trim()).filter(Boolean);
-      } else if (input.type === "number" || key === "uat_hour") {
+      } else if (input.type === "number") {
         next[key] = Number(input.value);
       } else next[key] = input.value.trim();
     });
@@ -930,7 +873,6 @@
       manual: "Manual only",
     };
     byId("worker-schedule-summary").textContent = labels[config.schedule_mode] || "Not configured";
-    byId("uat-schedule-summary").textContent = `${String(currentRepo()?.uat_hour ?? 3).padStart(2, "0")}:00 local`;
   }
 
   async function saveConfig({ quiet = false } = {}) {
@@ -977,11 +919,10 @@
 
   // What "Run now" should do for a [data-action] in the current status.
   function runNowModeFor(action) {
-    const isIssue = action.endsWith("issue");
     return window.SwarmRunNow.runNowMode({
-      kind: isIssue ? "issue" : "uat",
-      processState: isIssue ? (state.status?.issue?.state || "stopped") : (currentRepoStatus()?.uat?.state || "stopped"),
-      available: isIssue || Boolean(currentRepoStatus()?.uatAvailable),
+      kind: "issue",
+      processState: state.status?.issue?.state || "stopped",
+      available: true,
       busy: state.busy.has(action),
     });
   }
@@ -989,32 +930,25 @@
   async function runAction(action) {
     const verb = action.startsWith("start-") ? "Starting" : action.startsWith("run-") ? "Running"
       : action.startsWith("pause-") ? "Updating" : "Stopping";
-    const subject = action.endsWith("issue") ? "issue worker" : "test scheduler";
     // Resolved before withBusy marks the action busy, which would read as
     // "disabled" and lose the distinction between starting and interrupting.
     const runMode = action.startsWith("run-") ? runNowModeFor(action) : "";
     const progress = runMode === "request"
       ? "Asking the issue worker to scan now…"
-      : `${verb} the ${subject}…`;
+      : `${verb} the issue worker…`;
     await withBusy(action, async () => {
-      const isIssue = action.endsWith("issue");
-      const repo = currentRepo();
-      if (!isIssue && !repo) throw new Error("Choose a repository first.");
-      const process = isIssue ? "issue" : `uat:${repo.id}`;
+      const process = "issue";
       if (runMode === "request") {
-        // Already running: don't start a second scheduler, ask this one to
+        // Already running: don't start a second worker, ask this one to
         // scan now and restart its timer.
         await saveBeforeAction();
         showToast(await invoke("request_issue_scan"), "success");
       } else if (action.startsWith("start-") || action.startsWith("run-")) {
         await saveBeforeAction();
-        const command = isIssue ? "start_issue_worker" : "start_uat_scheduler";
-        const args = { runOnce: action.startsWith("run-") };
-        if (!isIssue) args.repoId = currentRepo().id;
-        await invoke(command, args);
-        showToast(`${isIssue ? "Issue worker" : "Test scheduler"} started.`, "success");
+        await invoke("start_issue_worker", { runOnce: action.startsWith("run-") });
+        showToast("Issue worker started.", "success");
       } else if (action.startsWith("pause-")) {
-        const current = isIssue ? state.status?.issue?.state : currentRepoStatus()?.uat?.state;
+        const current = state.status?.issue?.state;
         const command = current === "paused" ? "resume_process" : "pause_process";
         await invoke(command, { process });
         showToast(current === "paused" ? "Process resumed." : "Process paused.", "success");
@@ -1023,7 +957,6 @@
         showToast("Process stopped.", "success");
       }
       await refreshStatus();
-      if (!isIssue) await refreshTestPlan({ quiet: true });
     }, { progress });
   }
 
@@ -1061,20 +994,19 @@
     else if (kind === "issue" && status?.exitCode === 11) copy.textContent = "Work was safely saved until the selected AI provider has capacity again.";
     else if (kind === "issue" && status?.exitCode === 12) copy.textContent = "An issue is queued, but the enabled AI providers cannot start it yet. The worker will retry on schedule.";
     else if (status?.exitCode !== null && status?.exitCode !== undefined) copy.textContent = `Last run exited with status ${status.exitCode}. Review Info & Debug for details.`;
-    else copy.textContent = kind === "issue" ? "Ready when your repository and AI providers are configured." : "Discovers repository-defined suites and runs every suite whose requirements are ready.";
+    else copy.textContent = "Ready when your repository and AI providers are configured.";
   }
 
   function renderControls() {
     document.querySelectorAll("[data-action]").forEach((button) => {
       const action = button.dataset.action;
-      const isIssue = action.endsWith("issue");
-      const processState = isIssue ? (state.status?.issue?.state || "stopped") : (currentRepoStatus()?.uat?.state || "stopped");
+      const processState = state.status?.issue?.state || "stopped";
       const busy = state.busy.has(action);
       if (action.startsWith("run-")) {
         // Stays available while the issue worker runs — see runNowMode.
         button.disabled = runNowModeFor(action) === "disabled";
       } else if (action.startsWith("start-")) {
-        button.disabled = busy || processState !== "stopped" || (!isIssue && !currentRepoStatus()?.uatAvailable);
+        button.disabled = busy || processState !== "stopped";
       } else {
         button.disabled = busy || processState === "stopped";
       }
@@ -1084,12 +1016,6 @@
         button.title = processState === "paused" ? "Resume" : "Pause";
       }
     });
-    const detectDefinition = byId("detect-test-definition");
-    const saveDefinition = byId("save-test-definition");
-    const runAudit = byId("run-coverage-audit");
-    if (detectDefinition) detectDefinition.disabled = state.busy.has("detect-test-definition");
-    if (saveDefinition) saveDefinition.disabled = state.busy.has("save-test-definition");
-    if (runAudit) runAudit.disabled = state.busy.has("run-coverage-audit");
   }
 
   function addFact(container, label, value) {
@@ -1123,427 +1049,6 @@
     addFact(container, "Working tree", repo?.valid ? (repo.dirty ? "Uncommitted changes" : "Clean") : "Unknown");
     addFact(container, "GitHub remote", repo?.githubRepository || "Not inferred");
     if (repo?.error) addFact(container, "Problem", repo.error);
-    const availability = byId("uat-availability");
-    availability.textContent = repo?.uatAvailable ? "Test definition found" : "Test definition not present";
-    availability.classList.toggle("ready", Boolean(repo?.uatAvailable));
-  }
-
-  function renderTestPlan() {
-    const plan = state.testPlan;
-    const summary = byId("test-definition-summary");
-    const requirementsBox = byId("test-requirements");
-    const suitesBox = byId("test-suite-list");
-    if (!summary || !requirementsBox || !suitesBox) return;
-    requirementsBox.replaceChildren();
-    suitesBox.replaceChildren();
-    const inputsBox = byId("test-inputs");
-    inputsBox?.replaceChildren();
-    if (!plan) {
-      summary.textContent = "Requirements have not been checked yet.";
-      suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No test plan loaded." }));
-      return;
-    }
-    const availability = byId("uat-availability");
-    availability.textContent = plan.available ? "Definition loaded" : "Definition needed";
-    availability.classList.toggle("ready", Boolean(plan.available));
-    summary.textContent = plan.error || `.swarm/tests.json · structured results: ${plan.resultsPath}`;
-    const onboarding = byId("test-definition-onboarding");
-    const definitionMissing = !plan.available && !plan.definitionPath;
-    onboarding.classList.remove("hidden");
-    byId("test-definition-onboarding-title").textContent = definitionMissing
-      ? "Set up tests for this repository"
-      : "Regenerate the draft for review";
-    byId("test-definition-onboarding-copy").textContent = definitionMissing
-      ? "Finds test commands this project already uses (and asks AI to look harder only if nothing turns up) and lets you review the result before anything is written."
-      : "Re-runs discovery for comparison. This never overwrites the committed .swarm/tests.json — copy anything you want into it by hand.";
-    byId("detect-test-definition").textContent = definitionMissing ? "Find tests & create draft" : "Regenerate draft";
-    if (state.testDefinitionDraftOpen !== true) byId("test-definition-draft").classList.add("hidden");
-
-    (plan.inputs || []).forEach((input) => renderTestInput(inputsBox, input));
-
-    const allRequirements = [];
-    const seen = new Set();
-    (plan.suites || []).forEach((suite) => (suite.requirements || []).forEach((requirement) => {
-      const key = `${requirement.kind}:${requirement.label}:${requirement.detail}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        allRequirements.push(requirement);
-      }
-    }));
-    if (!allRequirements.length) {
-      requirementsBox.appendChild(Object.assign(document.createElement("span"), { className: "fine-print", textContent: "No external requirements declared." }));
-    } else {
-      allRequirements.forEach((requirement) => {
-        const row = document.createElement("div");
-        row.className = `requirement-item ${requirement.state}`;
-        const mark = document.createElement("span");
-        mark.className = "requirement-mark";
-        mark.textContent = requirement.state === "ready" ? "✓" : requirement.state === "waiting" ? "…" : "!";
-        const copy = document.createElement("div");
-        const title = document.createElement("strong");
-        title.textContent = `${requirement.label} · ${requirement.state === "ready" ? "Ready" : requirement.state === "waiting" ? "Waiting for input" : "Blocked"}`;
-        const detail = document.createElement("small");
-        detail.textContent = requirement.action || requirement.detail;
-        copy.append(title, detail);
-        row.append(mark, copy);
-        requirementsBox.appendChild(row);
-      });
-    }
-
-    byId("test-suite-count").textContent = `${(plan.suites || []).length} suite${plan.suites?.length === 1 ? "" : "s"}`;
-    if (!(plan.suites || []).length) {
-      suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No suites discovered." }));
-      return;
-    }
-    plan.suites.forEach((suite) => {
-      const card = document.createElement("article");
-      const stateClass = suite.state.toLowerCase().replaceAll(" ", "-");
-      card.className = `test-suite ${stateClass}${suite.blocked ? " blocked" : ""}`;
-      const heading = document.createElement("div");
-      heading.className = "test-suite-heading";
-      const words = document.createElement("div");
-      const name = document.createElement("strong");
-      name.textContent = suite.name;
-      if (suite.origin === "adversarial") {
-        words.appendChild(Object.assign(document.createElement("span"), {className: "status-pill paused", textContent: "Adversarial"}));
-      }
-      const meta = document.createElement("small");
-      meta.textContent = `${suite.id} · ${suite.timeoutSeconds}s${suite.disruptive ? " · disruptive" : ""}`;
-      words.append(name, meta);
-      const badge = document.createElement("span");
-      badge.className = `suite-state ${stateClass}`;
-      badge.textContent = suite.state;
-      heading.append(words, badge);
-      card.appendChild(heading);
-      if (suite.detail) {
-        const detail = document.createElement("p");
-        detail.textContent = suite.detail;
-        card.appendChild(detail);
-      }
-      const command = document.createElement("code");
-      command.textContent = suite.command;
-      card.appendChild(command);
-      appendAiGeneratedDataNote(card, suite.aiGeneratedData);
-      suitesBox.appendChild(card);
-    });
-  }
-
-  function renderTestInput(container, input) {
-    if (!container) return;
-    const model = window.SwarmTestInputs.controlModel(input);
-    const row = document.createElement("div");
-    row.className = `test-input-item ${input.state || "ready"}`;
-    const head = document.createElement("div");
-    head.className = "test-input-head";
-    const label = document.createElement("strong");
-    label.textContent = `${input.label}${input.required ? " · Required" : ""}`;
-    const stateLabel = document.createElement("span");
-    stateLabel.className = "test-input-state";
-    stateLabel.textContent = model.stateLabel;
-    head.append(label, stateLabel);
-    row.appendChild(head);
-
-    let control;
-    if (model.element === "select") {
-      control = document.createElement("select");
-      control.appendChild(Object.assign(document.createElement("option"), { value: "", textContent: input.required ? "Choose a value…" : "None" }));
-      (input.options || []).forEach((item) => control.appendChild(Object.assign(document.createElement("option"), {
-        value: item.value,
-        textContent: `${item.label}${item.detected ? " · Detected" : ""}`,
-      })));
-      control.value = input.value || "";
-    } else if (input.inputType === "boolean") {
-      const wrapper = document.createElement("label");
-      wrapper.className = "toggle";
-      control = document.createElement("input");
-      control.type = "checkbox";
-      control.checked = input.value === "true";
-      wrapper.append(control, document.createElement("span"), document.createTextNode(" Enabled"));
-      row.appendChild(wrapper);
-    } else {
-      control = document.createElement("input");
-      control.type = model.inputType;
-      control.value = model.value;
-      control.placeholder = model.placeholder;
-    }
-    control.setAttribute("aria-label", input.label);
-    if (input.inputType !== "boolean") row.appendChild(control);
-    const help = document.createElement("small");
-    help.textContent = input.message || input.help || `${input.persistence} persistence`;
-    row.appendChild(help);
-    const actions = document.createElement("div");
-    actions.className = "test-input-actions";
-    if (model.picker) {
-      const browse = Object.assign(document.createElement("button"), { type: "button", className: "secondary-button", textContent: "Browse" });
-      browse.addEventListener("click", async () => {
-        const chosen = await invoke("choose_test_input_path", { kind: input.inputType });
-        if (chosen) control.value = chosen;
-      });
-      actions.appendChild(browse);
-    }
-    const save = Object.assign(document.createElement("button"), { type: "button", className: "primary-button", textContent: "Save" });
-    save.addEventListener("click", () => saveTestInput(input.id, input.inputType === "boolean" ? String(control.checked) : control.value));
-    const clear = Object.assign(document.createElement("button"), { type: "button", className: "secondary-button", textContent: "Clear / reset" });
-    clear.addEventListener("click", () => saveTestInput(input.id, null));
-    actions.append(save, clear);
-    row.appendChild(actions);
-    container.appendChild(row);
-  }
-
-  // Shared by the live suite list and test-run history: a short note on what
-  // AI made up for a suite that asked for best-effort test data, per
-  // "documented in the test run" — never silent about it.
-  function appendAiGeneratedDataNote(container, records) {
-    if (!Array.isArray(records) || !records.length) return;
-    const note = document.createElement("p");
-    note.className = "ai-data-note";
-    note.textContent = `AI-generated data (${records.map((r) => r.provider).join(", ")}): ${records
-      .map((r) => `${r.name} — ${r.summary}`)
-      .join("; ")}`;
-    container.appendChild(note);
-  }
-
-  async function refreshTestPlan({ quiet = false } = {}) {
-    const repo = currentRepo();
-    if (!repo || state.refreshing.tests) return;
-    state.refreshing.tests = true;
-    try {
-      state.testPlan = await invoke("get_test_plan_background", { repoId: repo.id });
-      if (repo.id === state.activeRepoId) renderTestPlan();
-      try {
-        state.testRuns = await invoke("get_test_runs_background", { repoId: repo.id });
-        if (repo.id === state.activeRepoId) renderTestRuns();
-      } catch (_) {
-        /* history is best-effort; the plan is the important part */
-      }
-    } catch (error) {
-      if (!quiet) showToast(errorText(error), "error");
-    } finally {
-      state.refreshing.tests = false;
-    }
-  }
-
-  async function detectTestDefinition() {
-    const repo = currentRepo();
-    if (!repo) return;
-    await withBusy("detect-test-definition", async () => {
-      const draft = await invoke("detect_test_definition", { repoId: repo.id });
-      byId("test-definition-editor").value = draft.definition;
-      byId("test-detection-summary").textContent = draft.detectedSuites
-        ? `Detected ${draft.detectedSuites} test suite${draft.detectedSuites === 1 ? "" : "s"}. Review the draft before saving.`
-        : "No conventional tests were detected. Edit the disabled placeholder before saving.";
-      const notes = byId("test-detection-notes");
-      notes.replaceChildren();
-      (draft.notes || []).forEach((note) => {
-        const item = document.createElement("span");
-        item.textContent = `• ${note}`;
-        notes.appendChild(item);
-      });
-      state.testDefinitionDraftOpen = true;
-      byId("test-definition-draft").classList.remove("hidden");
-      byId("test-definition-editor").focus();
-    }, { progress: "Detecting tests…" });
-  }
-
-  function cancelTestDefinition() {
-    state.testDefinitionDraftOpen = false;
-    byId("test-definition-draft").classList.add("hidden");
-    byId("test-definition-editor").value = "";
-  }
-
-  async function saveTestDefinition() {
-    const repo = currentRepo();
-    if (!repo) return;
-    const definition = byId("test-definition-editor").value;
-    await withBusy("save-test-definition", async () => {
-      const path = await invoke("create_test_definition", { repoId: repo.id, definition });
-      cancelTestDefinition();
-      const repoStatus = currentRepoStatus();
-      if (repoStatus) repoStatus.uatAvailable = true;
-      renderControls();
-      await refreshStatus();
-      await refreshTestPlan();
-      showToast(`Test definition created at ${path}. Commit it to keep it with the repository.`, "success");
-    }, { progress: "Saving the test definition…" });
-  }
-
-  async function runCoverageAudit() {
-    const repo = currentRepo();
-    if (!repo) return;
-    await withBusy("run-coverage-audit", async () => {
-      state.coverageAudit = await invoke("audit_test_coverage", { repoId: repo.id });
-      renderCoverageAudit();
-    }, { progress: "Auditing test coverage…" });
-  }
-
-  function coverageAuditRow(entry) {
-    const row = document.createElement("div");
-    row.className = "requirement-item ready";
-    const mark = document.createElement("span");
-    mark.className = "requirement-mark";
-    mark.textContent = "•";
-    const copy = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = `${entry.name} · ${entry.classification} (${entry.confidence} confidence, ${entry.source})`;
-    const detail = document.createElement("small");
-    detail.textContent = [entry.path, entry.mappedTo ? `→ ${entry.mappedTo}` : "", entry.detail]
-      .filter(Boolean)
-      .join(" — ");
-    copy.append(title, detail);
-    row.append(mark, copy);
-    return row;
-  }
-
-  function renderCoverageAudit() {
-    const audit = state.coverageAudit;
-    const groups = byId("coverage-audit-groups");
-    const count = byId("coverage-audit-count");
-    const warning = byId("coverage-audit-warning");
-    if (!groups || !count || !warning) return;
-    if (!audit) {
-      count.textContent = "Not run";
-      count.classList.remove("ready");
-      warning.classList.add("hidden");
-      return;
-    }
-    const total =
-      audit.mappedScheduled.length + audit.mappedCovered.length + audit.disabledPendingReview.length + audit.unmapped.length;
-    count.textContent = `${total} candidate${total === 1 ? "" : "s"}`;
-    count.classList.toggle("ready", audit.complete);
-    warning.classList.toggle("hidden", audit.complete);
-    if (!audit.complete) {
-      warning.textContent = `${audit.unmapped.length} candidate${audit.unmapped.length === 1 ? "" : "s"} are not accounted for in .swarm/tests.json. Coverage is not complete until every candidate is scheduled, covered, or explicitly disabled pending review.`;
-    }
-    groups.replaceChildren();
-    [
-      ["Mapped & scheduled", audit.mappedScheduled],
-      ["Covered by another suite", audit.mappedCovered],
-      ["Disabled, pending review", audit.disabledPendingReview],
-      ["Unmapped", audit.unmapped],
-    ].forEach(([label, entries]) => {
-      const section = document.createElement("div");
-      section.className = "coverage-audit-group";
-      const heading = document.createElement("p");
-      heading.className = "eyebrow";
-      heading.textContent = `${label} · ${entries.length}`;
-      section.appendChild(heading);
-      if (!entries.length) {
-        section.appendChild(Object.assign(document.createElement("span"), { className: "fine-print", textContent: "None." }));
-      } else {
-        entries.forEach((entry) => section.appendChild(coverageAuditRow(entry)));
-      }
-      groups.appendChild(section);
-    });
-  }
-
-  function formatTimestamp(seconds) {
-    if (!seconds) return "—";
-    return new Date(seconds * 1000).toLocaleString();
-  }
-
-  function formatDuration(startSeconds, endSeconds) {
-    if (!startSeconds || !endSeconds || endSeconds < startSeconds) return "—";
-    const total = endSeconds - startSeconds;
-    if (total < 60) return `${total}s`;
-    const minutes = Math.floor(total / 60);
-    const rest = total % 60;
-    return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
-  }
-
-  const RUN_OUTCOMES = [
-    ["Passed", "passed"],
-    ["Failed", "failed"],
-    ["Blocked", "blocked"],
-    ["Skipped", "skipped"],
-    ["Not executed", "not-executed"],
-  ];
-
-  function renderTestRuns() {
-    const box = byId("test-run-list");
-    if (!box) return;
-    box.replaceChildren();
-    const runs = Array.isArray(state.testRuns) ? state.testRuns : [];
-    byId("test-run-count").textContent = `${runs.length} run${runs.length === 1 ? "" : "s"}`;
-    if (!runs.length) {
-      box.appendChild(Object.assign(document.createElement("p"), {
-        className: "panel-copy",
-        textContent: "No test runs recorded yet. Press Run now, or Start for the daily cycle.",
-      }));
-      return;
-    }
-    runs.forEach((run) => {
-      const suites = run.suites || [];
-      const tally = suites.reduce((counts, suite) => {
-        const key = String(suite.state || "").toLowerCase().replaceAll(" ", "-");
-        if (key === "passed") counts.passed += 1;
-        else if (key === "failed") counts.failed += 1;
-        else if (key === "blocked" || key === "waiting-for-input") counts.blocked += 1;
-        else if (key === "not-executed") counts["not-executed"] += 1;
-        else counts.skipped += 1;
-        return counts;
-      }, { passed: 0, failed: 0, blocked: 0, skipped: 0, "not-executed": 0 });
-
-      const item = document.createElement("details");
-      item.className = "test-run";
-      const summary = document.createElement("summary");
-      const head = document.createElement("div");
-      head.className = "test-run-head";
-      const when = document.createElement("strong");
-      when.textContent = formatTimestamp(run.finishedAt || run.startedAt);
-      const meta = document.createElement("small");
-      const trigger = run.trigger === "manual" ? "Run now" : run.trigger === "scheduled" ? "Scheduled" : "—";
-      const commit = run.testedCommit ? ` · ${run.testedCommit.slice(0, 12)}` : "";
-      meta.textContent = `${trigger} · ${formatDuration(run.startedAt, run.finishedAt)}${commit} · ${suites.length} suite${suites.length === 1 ? "" : "s"}`;
-      head.append(when, meta);
-      const badges = document.createElement("div");
-      badges.className = "test-run-tally";
-      RUN_OUTCOMES.forEach(([label, cls]) => {
-        const badge = document.createElement("span");
-        badge.className = `suite-state ${cls}`;
-        badge.textContent = `${tally[cls]} ${label.toLowerCase()}`;
-        badges.appendChild(badge);
-      });
-      summary.append(head, badges);
-      item.appendChild(summary);
-
-      const list = document.createElement("div");
-      list.className = "test-run-suites";
-      if (!suites.length) {
-        list.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No suites were recorded for this run." }));
-      }
-      suites.forEach((suite) => {
-        const row = document.createElement("div");
-        const stateClass = String(suite.state || "").toLowerCase().replaceAll(" ", "-");
-        row.className = `test-run-suite ${stateClass}`;
-        const words = document.createElement("div");
-        const name = document.createElement("strong");
-        name.textContent = suite.name || suite.id;
-        if (suite.origin === "adversarial") {
-          words.appendChild(Object.assign(document.createElement("span"), {className: "status-pill paused", textContent: "Adversarial"}));
-        }
-        const detail = document.createElement("small");
-        detail.textContent = suite.detail || `${suite.id}${suite.durationMs ? ` · ${Math.round(suite.durationMs / 1000)}s` : ""}`;
-        words.append(name, detail);
-        if (Array.isArray(suite.argv) && suite.argv.length) {
-          const command = document.createElement("code");
-          command.textContent = JSON.stringify(suite.argv);
-          words.appendChild(command);
-        }
-        if (Array.isArray(suite.environment) && suite.environment.length) {
-          const environment = document.createElement("small");
-          environment.textContent = `Environment: ${suite.environment.join(", ")}`;
-          words.appendChild(environment);
-        }
-        appendAiGeneratedDataNote(words, suite.aiGeneratedData);
-        const badge = document.createElement("span");
-        badge.className = `suite-state ${stateClass}`;
-        badge.textContent = suite.state || "Unknown";
-        row.append(words, badge);
-        list.appendChild(row);
-      });
-      item.appendChild(list);
-      box.appendChild(item);
-    });
   }
 
   // ----- Feedback (AI execution history) ------------------------------
@@ -2297,17 +1802,6 @@
     }, { progress: "Scanning the GitHub issue backlog…" });
   }
 
-  async function saveTestInput(key, value) {
-    if (!currentRepo()) return;
-    await withBusy(`test-input-${key}`, async () => {
-      await saveBeforeAction();
-      state.config = await invoke("save_test_input", { repoId: currentRepo().id, key, value });
-      bindConfig(state.config);
-      await refreshTestPlan();
-      showToast(value === null ? "Test input reset." : "Test input saved. Waiting suites can now be retried.", "success");
-    }, { progress: "Saving the test input…" });
-  }
-
   // Accepts "owner/name", a full github.com URL, or an SSH remote; returns
   // "owner/name" or the trimmed input unchanged when it doesn't look like one.
   function normalizeRepoRef(value) {
@@ -2685,7 +2179,6 @@
     if (!state.status) return;
     renderProcess("issue", state.status.issue);
     const repoStatus = currentRepoStatus();
-    renderProcess("uat", repoStatus?.uat);
     renderRepository(repoStatus?.repository);
     const warning = byId("config-warning");
     warning.replaceChildren();
@@ -2700,7 +2193,7 @@
     renderNowWorking();
   }
 
-  const NOW_WORKING_KINDS = { issue: "Issue", tests: "Tests", ci: "CI/CD", adversarial: "Adversarial UAT" };
+  const NOW_WORKING_KINDS = { issue: "Issue", ci: "CI/CD", adversarial: "Adversarial UAT" };
   const NOW_WORKING_PILLS = { running: "Running", paused: "Paused", error: "Failing", ok: "Passing", idle: "Idle" };
 
   function nowWorkingRepositories() {
@@ -2708,7 +2201,6 @@
     return (state.status?.repos || []).filter((repo) => repo.enabled).map((repo) => ({
       id: repo.id,
       name: normalizeRepoRef(repo.githubRepository),
-      uatState: repo.uat?.state || "stopped",
       monitorActions: Boolean(configured.get(repo.id)?.monitor_actions),
     }));
   }
@@ -2720,7 +2212,6 @@
       logs: state.workerLogs,
       workerState: state.status?.issue?.state || "stopped",
       repositories: nowWorkingRepositories(),
-      testRuns: state.liveTestRuns,
     });
     const active = rows.filter((row) => row.state === "running").length;
     const count = byId("now-working-count");
@@ -2759,22 +2250,6 @@
     });
   }
 
-  // Test runs are only read for repos whose scheduler is up, since a stopped
-  // scheduler has nothing in flight.
-  async function refreshLiveTestRuns() {
-    if (state.refreshing.liveTestRuns) return;
-    state.refreshing.liveTestRuns = true;
-    try {
-      const live = nowWorkingRepositories().filter((repo) => repo.uatState !== "stopped" && repo.uatState !== "error");
-      const entries = await Promise.all(live.map(async (repo) => {
-        try { return [repo.id, await invoke("get_test_runs_background", { repoId: repo.id })]; } catch (_) { return [repo.id, []]; }
-      }));
-      state.liveTestRuns = Object.fromEntries(entries);
-      renderNowWorking();
-    } finally {
-      state.refreshing.liveTestRuns = false;
-    }
-  }
 
   async function refreshStatus({ quiet = false } = {}) {
     if (state.refreshing.status) return;
@@ -2816,13 +2291,11 @@
 
   function activityCategory(source) {
     const value = source.toLowerCase();
-    if (value.includes("uat") || value.includes("test")) return "tests";
     if (value.includes("setup") || value.includes("install") || value.includes("github bot")) return "setup";
     return "work";
   }
 
   function activitySourceLabel(source, category) {
-    if (category === "tests") return "Tests";
     if (category === "setup") return source.toLowerCase().includes("github bot") ? "GitHub setup" : "Setup";
     return source.toLowerCase().includes("issue") ? "Issue worker" : "Automation";
   }
@@ -2929,7 +2402,7 @@
       return makeActivity(log, `${source} needs attention`, "Something prevented this step from finishing. Open Info & Debug for the exact error and command output.", "error", category);
     }
     if (/^Started .* as pid \d+/i.test(message)) {
-      return makeActivity(log, `${source} started`, category === "tests" ? "The configured test run is now active." : category === "setup" ? "The requested setup task is now running." : "The app is now watching the configured repositories for ready issues.", "info", category);
+      return makeActivity(log, `${source} started`, category === "setup" ? "The requested setup task is now running." : "The app is now watching the configured repositories for ready issues.", "info", category);
     }
     if (/exited with status 0/i.test(message)) {
       return makeActivity(log, `${source} finished`, "The process completed normally.", "success", category);
@@ -2998,15 +2471,6 @@
     }
     if (/exists, but it cannot access|must be owned by/i.test(message)) {
       return makeActivity(log, "A GitHub bot needs setup", "The existing bot is not installed for this repository or belongs to the wrong GitHub owner.", "waiting", "setup");
-    }
-    if (category === "tests" && /skip(?:ped|ping).*unchanged/i.test(message)) {
-      return makeActivity(log, "Tests skipped because the code has not changed", "There is no new commit to verify.", "waiting", "tests");
-    }
-    if (category === "tests" && /(?:all tests|test suite|uat).*(?:passed|completed|succeeded)|(?:passed|completed|succeeded).*(?:tests|uat)/i.test(message)) {
-      return makeActivity(log, "Tests passed", "The configured repository checks completed successfully.", "success", "tests");
-    }
-    if (category === "tests" && /(?:starting|running).*(?:test|uat|backend|fire tv)/i.test(message)) {
-      return makeActivity(log, "Test run started", "The app is running the repository’s configured checks.", "info", "tests");
     }
     return null;
   }
@@ -3360,17 +2824,11 @@
     stashRepositoryForm();
     state.activeRepoId = repoId;
     state.branchOverview = null;
-    state.testPlan = null;
-    state.testRuns = null;
-    state.coverageAudit = null;
-    state.testDefinitionDraftOpen = false;
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
     renderStatus();
-    renderCoverageAudit();
     if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
-    if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBranchPushAccess({ quiet: true });
   }
@@ -3894,7 +3352,6 @@
       if (event.target === byId("diagnose-modal")) closeDiagnoseModal();
     });
     byId("refresh-branches").addEventListener("click", () => refreshBranches());
-    byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
     byId("refresh-execution-history").addEventListener("click", () => {
       void refreshPromptGrades();
       void refreshExecutionHistory();
@@ -4044,10 +3501,6 @@
       state.executionHistoryOffset = offset + limit;
       void refreshExecutionHistory();
     });
-    byId("detect-test-definition").addEventListener("click", detectTestDefinition);
-    byId("save-test-definition").addEventListener("click", saveTestDefinition);
-    byId("cancel-test-definition").addEventListener("click", cancelTestDefinition);
-    byId("run-coverage-audit").addEventListener("click", runCoverageAudit);
     byId("active-repo-select").addEventListener("change", (event) => selectRepository(event.target.value));
     byId("add-repo").addEventListener("click", addRepository);
     byId("remove-repo").addEventListener("click", removeRepository);
@@ -4082,7 +3535,6 @@
   }
 
   async function initialize() {
-    populateHours();
     renderHelpConcepts();
     bindEvents();
     try {
@@ -4112,9 +3564,8 @@
       // Tool detection and repository inspection run independently. Keeping
       // them out of the startup await path prevents slow CLIs or network-backed
       // Git checks from freezing navigation and configuration editing.
-      void refreshStatus().then(() => refreshLiveTestRuns());
+      void refreshStatus();
       void refreshTools();
-      void refreshTestPlan({ quiet: true });
       void refreshBotReadiness({ quiet: true });
       void refreshBranchPushAccess({ quiet: true });
       void refreshPromotions({ quiet: true });
@@ -4134,12 +3585,6 @@
           void refreshPromotions({ quiet: true });
         }
       });
-      window.setInterval(() => {
-        if (document.querySelector("#view-overview.active")) void refreshLiveTestRuns();
-      }, 5000);
-      window.setInterval(() => {
-        if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
-      }, 4000);
       window.setInterval(() => {
         if (state.busy.size === 0 && !state.botReadinessPoll && document.querySelector("#view-repository.active")) {
           void refreshBotReadiness({ quiet: true });

@@ -1,6 +1,6 @@
 ---
 name: swarm-automation-dev
-description: Use when working on this repository (SWARM Automation, the Tauri desktop control center for AI issue workers and UAT schedulers) — its test conventions, its standalone (non-workspace) Cargo setup, and the history/status of the bundled issue_worker/ directory.
+description: Use when working on this repository (SWARM Automation, the Tauri desktop control center for AI issue workers) — its test conventions, its standalone (non-workspace) Cargo setup, and the history/status of the bundled issue_worker/ directory.
 ---
 
 # Working in this repository
@@ -11,7 +11,7 @@ The issue-worker automation used to live inside the
 issue automation to Python with provider bots" (#90)). It was pulled out
 into this standalone repo/app so it could be built and distributed
 independently of any one target project — it's meant to run an issue worker
-and UAT scheduler against **any** local Git checkout, not just SWARM's own.
+against **any** local Git checkout, not just SWARM's own.
 Once the standalone app existed, SWARM's own copy was deleted from the
 monorepo as dead weight (issue #169, "Clean up old issue worker scripts":
 *"The issue worker was converted into the swarm automation project so we
@@ -217,10 +217,10 @@ testable this way:
    defaults to empty.
 
 Deliberately **not** covered by this suite: `start_issue_worker`,
-`start_uat_scheduler`, `install_ai_cli`, and `launch_bot_setup` — these
-spawn real child processes (`python3`, `bash`, `npm`) and are better
-verified by an actual `npm run dev`/`npm run build` + launch than by tests
-that would install real software or make real GitHub calls.
+`install_ai_cli`, and `launch_bot_setup` — these spawn real child processes
+(`python3`, `bash`, `npm`) and are better verified by an actual `npm run
+dev`/`npm run build` + launch than by tests that would install real software
+or make real GitHub calls.
 
 Run with `cargo test`. The `test` job in `.github/workflows/release.yml`
 runs `cargo fmt --all -- --check` before clippy, tests, Python, and frontend

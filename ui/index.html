@@ -20,7 +20,6 @@
           <button class="nav-item active" data-view-target="overview"><span class="nav-icon">⌂</span>Overview</button>
           <button class="nav-item" data-view-target="repository"><span class="nav-icon">⑂</span>Repository</button>
           <button class="nav-item" data-view-target="ai"><span class="nav-icon">✦</span>AI Configuration</button>
-          <button class="nav-item" data-view-target="scheduler"><span class="nav-icon">✓</span>Test Scheduler</button>
           <button class="nav-item" data-view-target="feedback"><span class="nav-icon">◆</span>Feedback</button>
           <button class="nav-item" data-view-target="advanced"><span class="nav-icon">⚙</span>Advanced</button>
           <button class="nav-item" data-view-target="debug"><span class="nav-icon">≡</span>Info &amp; Debug <span id="log-count" class="nav-count">0</span></button>
@@ -89,13 +88,6 @@
               <div class="service-meta"><span>Schedule</span><strong id="worker-schedule-summary">Continuous</strong></div>
               <div class="control-row"><button class="primary-button compact" data-action="start-issue">Start</button><button class="secondary-button compact" data-action="run-issue">Run now</button><button class="icon-button" title="Pause" data-action="pause-issue">Ⅱ</button><button class="icon-button danger" title="Stop" data-action="stop-issue">■</button></div>
             </article>
-            <article class="service-card" id="uat-service-card">
-              <div class="card-top"><div class="service-icon cyan">✓</div><span id="uat-status-pill" class="status-pill stopped">Stopped</span></div>
-              <h3>Test scheduler</h3><p id="uat-status-copy">Runs every eligible suite the repository declares in <code>.swarm/tests.json</code> and isolates blocked requirements.</p>
-              <div class="service-timing"><label>Run daily at <select data-repo-config="uat_hour" id="uat-hour"></select></label><small class="field-hint">Applies after Start. Run now executes one cycle immediately.</small></div>
-              <div class="service-meta"><span>Daily window</span><strong id="uat-schedule-summary">03:00 local</strong></div>
-              <div class="control-row"><button class="primary-button compact" data-action="start-uat">Start</button><button class="secondary-button compact" data-action="run-uat">Run now</button><button class="icon-button" title="Pause" data-action="pause-uat">Ⅱ</button><button class="icon-button danger" title="Stop" data-action="stop-uat">■</button></div>
-            </article>
           </div>
 
           <article class="panel now-working-panel" id="now-working-panel">
@@ -114,7 +106,7 @@
             <article class="panel activity-panel">
               <div class="panel-header"><div><p class="eyebrow">ACTIVITY</p><h3>Recent activity</h3></div><span id="activity-live-state" class="live-label"><span></span>LIVE</span></div>
               <div class="activity-toolbar" aria-label="Activity filters">
-                <div class="activity-filters"><button class="active" data-activity-filter="all">All</button><button data-activity-filter="work">Work</button><button data-activity-filter="tests">Tests</button><button data-activity-filter="setup">Setup</button><button data-activity-filter="problems">Problems</button></div>
+                <div class="activity-filters"><button class="active" data-activity-filter="all">All</button><button data-activity-filter="work">Work</button><button data-activity-filter="setup">Setup</button><button data-activity-filter="problems">Problems</button></div>
                 <button id="toggle-activity-live" class="activity-live-button">Pause updates</button>
               </div>
               <div id="overview-activity" class="activity-feed" aria-live="polite"><div class="activity-empty"><strong>No activity yet</strong><span>Start a service to see progress here.</span></div></div>
@@ -157,18 +149,6 @@
           <div id="provider-cards" class="provider-card-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div>
           <div class="settings-grid">
             <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">PROTECTED FLOW</p><h3>AI branch delivery <button class="help-dot" data-help="delivery-mode" aria-label="About branch delivery">?</button></h3></div></div><div class="form-grid three"><label>Human-owned branch <span class="req">*</span><input data-repo-config="base_branch" required /></label><label>AI integration branch <span class="req">*</span><input data-repo-config="integration_branch" required /></label><label>Git remote <span class="req">*</span><input data-repo-config="remote_name" required /></label><label>Issue branch prefix <input data-repo-config="branch_prefix" /></label></div><div class="inline-note"><span>ⓘ</span><p>Defaults are <code>main</code>, <code>ai-main</code>, <code>origin</code>, and <code>ai</code>.</p></div></article>
-          </div>
-        </section>
-
-        <section id="view-scheduler" class="view">
-          <div class="section-intro"><div><p class="eyebrow">TEST SCHEDULER</p><h2>Run your tests on a schedule <button class="help-dot" data-help="uat-suite" aria-label="About the test scheduler">?</button></h2><p>Tests run on their own — no AI, no credits used. AI only steps in for a gap plain scanning can't fill, like spotting a test command nothing else finds, or making up sample data a test asked for, and only when there's enough AI usage available to do it.</p></div><span id="uat-page-status" class="status-pill stopped">Stopped</span></div>
-          <div class="banner policy"><strong>Each test stands on its own.</strong><span>If one test is missing something it needs (a device, a file, AI usage), only that test is skipped. Every other test still runs on schedule.</span></div>
-          <div class="settings-grid">
-            <article class="panel"><div class="panel-header"><div><p class="eyebrow">RUN SETTINGS</p><h3 data-help="scheduler-run-settings" tabindex="0" role="button">How tests run</h3></div></div><div class="stacked-form"><label class="toggle"><input type="checkbox" data-repo-config="allow_disruptive_tests" /><span></span>Allow disruptive tests <small>Some tests are marked as disruptive because they change real state. They stay off until you turn this on.</small></label><label class="toggle"><input type="checkbox" data-repo-config="uat_ai_test_data_enabled" /><span></span>Let AI fill in test data <small>When a test asks for sample data that isn't fixed ahead of time, AI makes a best-effort version and the run records what it made. Turn this off to guarantee zero AI usage from tests — those tests run as "Not executed" instead.</small></label><label class="toggle"><input type="checkbox" data-repo-config="uat_triage_enabled" /><span></span>Explain failures with AI <small>Optional and separate from the setting above. After a real failure, asks AI to read the results and add a plain-language explanation. Turn this off for a zero-AI-usage test workflow.</small></label></div></article>
-            <article class="panel"><div class="panel-header"><div><p class="eyebrow">DISCOVERY</p><h3 data-help="test-requirements" tabindex="0" role="button">What's ready to run</h3></div><span id="uat-availability" class="availability">Checking repository…</span></div><p id="test-definition-summary" class="panel-copy">Looking for <code>.swarm/tests.json</code>…</p><div id="test-definition-onboarding" class="definition-onboarding hidden"><strong id="test-definition-onboarding-title">Set up tests for this repository</strong><p id="test-definition-onboarding-copy">Finds test commands this project already uses (and asks AI to look harder only if nothing turns up) and lets you review the result before anything is written.</p><button id="detect-test-definition" class="primary-button compact">Find tests &amp; create draft</button><div id="test-definition-draft" class="definition-draft hidden"><p id="test-detection-summary" class="panel-copy"></p><label>Definition preview<textarea id="test-definition-editor" spellcheck="false" aria-label="Test definition JSON"></textarea></label><div id="test-detection-notes" class="definition-notes"></div><div class="control-row"><button id="save-test-definition" class="primary-button compact">Save definition</button><button id="cancel-test-definition" class="secondary-button compact">Cancel</button></div><small>The file is created in this repository as <code>.swarm/tests.json</code>. Commit it to keep the definition with the project.</small></div></div><div id="test-inputs" class="test-input-list"></div><div id="test-requirements" class="requirement-list"><span class="fine-print">Refreshing requirements…</span></div><div class="control-row"><button id="refresh-test-plan" class="secondary-button">Refresh</button><button class="secondary-button" data-view-jump="overview">Run controls</button></div></article>
-            <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">SUITES</p><h3 data-help="scheduler-suites" tabindex="0" role="button">Every test and its status</h3></div><span id="test-suite-count" class="availability">0 suites</span></div><div id="test-suite-list" class="test-suite-list"><p class="panel-copy">No repository test definition loaded.</p></div></article>
-            <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">COVERAGE AUDIT</p><h3 data-help="coverage-audit" tabindex="0" role="button">Every candidate vs. the committed definition</h3></div><span id="coverage-audit-count" class="availability">Not run</span></div><p class="panel-copy">Recursively scans this repository for every plausible test entry point and shows how each one maps to <code>.swarm/tests.json</code>. Read-only — nothing here is executed and the committed definition is never changed.</p><div id="coverage-audit-warning" class="banner warning hidden"></div><div id="coverage-audit-groups" class="coverage-audit-groups"><p class="panel-copy">Run the audit to see mapped, covered, pending, and unmapped test candidates.</p></div><div class="control-row"><button id="run-coverage-audit" class="secondary-button">Run coverage audit</button></div></article>
-            <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">HISTORY</p><h3 data-help="test-runs" tabindex="0" role="button">Past runs</h3></div><span id="test-run-count" class="availability">0 runs</span></div><div id="test-run-list" class="test-run-list"><p class="panel-copy">No test runs recorded yet.</p></div></article>
           </div>
         </section>
 
@@ -308,7 +288,6 @@
     <script src="now-working.js"></script>
     <script src="prompt-grades.js"></script>
     <script src="run-now.js"></script>
-    <script src="test-inputs.js"></script>
     <script src="adversarial-uat.js"></script>
     <script src="debug-diagnose.js"></script>
     <script src="version.js"></script>

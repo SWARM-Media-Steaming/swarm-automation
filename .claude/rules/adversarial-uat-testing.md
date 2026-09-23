@@ -16,7 +16,9 @@ label from a trusted author; the worker owns VERSION.
   still starts a fresh session. Dispute adjudication is always a new tester.
 - Tests live under `tests/adversarial/`, registered with `adversarial-` IDs and
   `origin: "adversarial"` in `.swarm/tests.json`. Preserve non-adversarial suites.
-  The existing scheduled runner and failure triage keep running these suites.
+  This app has no test scheduler: these suites run only during this issue's own
+  fix/re-test rounds. Nothing here re-runs them after delivery — ongoing
+  regression coverage belongs to the repository's own CI/CD.
 - The fixer cannot change, disable or retire adversarial tests. The worker
   restores attempted edits. A fresh tester may revise earlier expectations
   only in response to a dispute, with a recorded resolution grounded in the
@@ -30,7 +32,7 @@ label from a trusted author; the worker owns VERSION.
 - Out-of-scope findings include reproduction evidence and go through the same
   labelled, assigned issue-creation helper as the CI monitor. They do not enter
   the blocking suites. A finding may name out-of-scope `suite_ids`; these stay
-  registered for scheduled runs but are excluded from this issue's blocking
+  registered in `.swarm/tests.json` but are excluded from this issue's blocking
   verdict after the separate issue is filed. A stable finding marker prevents
   duplicate auto-filing. Log both newly filed and deduplicated findings; keep
   each filed issue's title and URL in execution history so the app can surface
