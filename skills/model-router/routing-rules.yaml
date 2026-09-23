@@ -77,21 +77,51 @@ task_type_groups:
     benchmark_emphasis: {deep_swe: 1.0, terminal_bench: 1.0, swe_atlas_qna: 1.0}
     extra_weights: {}
 
-# Initial BALANCED weights (issue #195). Percentages of the positive side of
-# the score; cost/token/latency act as efficiency bonuses (higher relative_*
-# score contributes positively) rather than raw subtractions, since a cheap
-# model should be rewarded, not merely have expensive models punished twice.
+# Two weight sets selected by the UI Cost Consideration setting
+# (`routing_optimization` in config.json → RouteRequest.cost_consideration_enabled).
+# Percentages of the positive side of the score. cost_efficiency (estimated
+# dollar cost) and token_efficiency are independent: a cheaper API price does
+# not imply fewer tokens. Higher relative_* / measured-efficiency scores
+# contribute positively.
+#
+# OFF: capability, task fit, and reliability decide; dollar cost and token
+# consumption have no weight.
+# ON: still lead with expected success, then prefer lower cost and fewer tokens
+# among candidates that already meet minimum_expected_success.
 weights:
-  expected_success: 0.35
-  task_fit: 0.20
-  coding_capability: 0.15
-  context_fit: 0.10
-  cost_efficiency: 0.08
-  token_efficiency: 0.07
-  latency: 0.05
+  cost_consideration_off:
+    expected_success: 0.45
+    task_fit: 0.25
+    coding_capability: 0.15
+    context_fit: 0.10
+    latency: 0.05
+    cost_efficiency: 0.00
+    token_efficiency: 0.00
+  cost_consideration_on:
+    expected_success: 0.32
+    task_fit: 0.20
+    coding_capability: 0.15
+    context_fit: 0.10
+    cost_efficiency: 0.10
+    token_efficiency: 0.08
+    latency: 0.05
 
-# Multiplier applied to the relevant efficiency weight above when the caller
-# flags a request as sensitive to that dimension (e.g. cost_sensitive=True).
+# A lower-cost candidate may replace a stronger one only when its
+# expected_success is at least this value (cost consideration ON).
+minimum_expected_success: 0.80
+
+# Maximum expected_success gap vs the strongest remaining candidate inside
+# which cost/token savings may decide the winner (cost consideration ON).
+cost_optimization_quality_tolerance: 0.03
+
+# Multiplier on unnecessary_reasoning_penalty_per_level when cost
+# consideration is ON, so High is preferred over XHigh/Max when both are
+# expected to complete the task.
+cost_consideration_unnecessary_reasoning_multiplier: 2.0
+
+# Multiplier applied to token_efficiency / latency when the caller flags a
+# request as sensitive to that dimension (token_sensitive / latency_sensitive).
+# Cost consideration uses the weight sets above rather than this boost.
 sensitivity_boost: 2.5
 
 # Penalty terms, applied after the weighted sum. Both scale with how far past

@@ -125,7 +125,7 @@ class DynamicRouterTest(unittest.TestCase):
             ("codex", 9): ("gpt-6-astra", "xhigh"),
             ("grok", 3): ("grok-4.6", "low"),
             ("grok", 4): ("grok-4.6", "medium"),
-            ("grok", 8): ("grok-4.6", "high"),
+            ("grok", 8): ("grok-4.7", "xhigh"),
             ("grok", 10): ("grok-4.7", "xhigh"),
         }
         for (provider, complexity), (model, effort) in expectations.items():
@@ -151,8 +151,8 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertEqual(decision["provider"], "grok")
         self.assertEqual(decision["provider_name"], "Grok")
         # Grok's own tier table, not the tool that ran the router.
-        self.assertEqual(decision["selected_model"], "grok-4.6")
-        self.assertEqual(decision["reasoning_effort"], "high")
+        self.assertEqual(decision["selected_model"], "grok-4.7")
+        self.assertEqual(decision["reasoning_effort"], "xhigh")
         self.assertEqual(decision["provider_reason"], "Grok is fastest here.")
         self.assertEqual(decision["provider_candidates"], ["claude", "grok", "codex"])
         self.assertEqual(decision["router_provider"], "claude")
@@ -176,7 +176,7 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertEqual(decision["provider"], "grok")
         self.assertIn("Rework", decision["provider_override_reason"])
         self.assertIn("60% confidence", decision["provider_override_reason"])
-        self.assertEqual(decision["selected_model"], "grok-4.6")
+        self.assertEqual(decision["selected_model"], "grok-4.7")
 
     def test_rework_keeps_the_previous_tool_when_the_router_is_sure(self) -> None:
         decision = resolve(
@@ -811,6 +811,39 @@ class CostAwareRoutingTest(unittest.TestCase):
         self.assertIn("optimize for the best fit", prompt)
         decision = resolve(sample_payload(), "codex", routing_optimization="")
         self.assertEqual(decision["routing_optimization"], "best")
+
+    def test_scored_fallback_routes_the_same_task_differently_when_cost_consideration_changes(self) -> None:
+        payload = sample_payload(
+            complexity=1,
+            task_type="debugging",
+            selected_provider="claude",
+            selected_model="no-such-model",
+        )
+        off = resolve(payload, "claude", routing_optimization="best")
+        on = resolve(payload, "claude", routing_optimization="cost")
+        self.assertEqual(off["model_source"], "tier")
+        self.assertEqual(on["model_source"], "tier")
+        self.assertFalse(off["cost_consideration_enabled"])
+        self.assertTrue(on["cost_consideration_enabled"])
+        self.assertEqual(off["selected_model"], "claude-sonnet-5")
+        self.assertEqual(off["reasoning_effort"], "low")
+        self.assertEqual(on["selected_model"], "claude-haiku-4-5")
+        self.assertEqual(on["reasoning_effort"], "low")
+
+    def test_scored_fallback_will_not_pick_an_underpowered_model_when_cost_consideration_is_on(self) -> None:
+        decision = resolve(
+            sample_payload(
+                complexity=8,
+                task_type="debugging",
+                selected_provider="claude",
+                selected_model="no-such-model",
+            ),
+            "claude",
+            routing_optimization="cost",
+        )
+        self.assertTrue(decision["cost_consideration_enabled"])
+        self.assertEqual(decision["selected_model"], "claude-opus-5")
+        self.assertNotEqual(decision["selected_model"], "claude-haiku-4-5")
 
     def test_a_cost_optimized_decision_records_and_reports_the_preference(self) -> None:
         decision = resolve(
