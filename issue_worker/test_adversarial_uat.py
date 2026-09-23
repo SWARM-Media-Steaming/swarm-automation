@@ -703,3 +703,49 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertIn("A prior tester result was rejected and its edits were rolled back", self.calls[-1][4])
         self.assertNotIn("retry_rejection", self.worker.read_state()["adversarial"])
         self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
+
+
+class ResultPayloadTests(unittest.TestCase):
+    """A pure function, tested directly against formatting a tester actually
+    produced in production (2026-09) rather than only the hand-written happy
+    path: a well-formed, double-quoted result whose JSON is pretty-printed
+    across multiple lines instead of packed onto the marker's own line, which
+    used to be silently truncated to its opening brace and rejected as a
+    JSON-decode error even though nothing was wrong with the tester's report.
+    """
+
+    def test_single_line_json_on_the_marker_line(self):
+        output = "All suites passed.\n" + uat.RESULT_MARKER + ' {"dispute_resolution":"","out_of_scope":[]}\n'
+        self.assertEqual(uat.result_payload(output), {"dispute_resolution": "", "out_of_scope": []})
+
+    def test_pretty_printed_json_spanning_multiple_lines(self):
+        output = (
+            "All suites passed.\n"
+            + uat.RESULT_MARKER + " {\n"
+            '  "dispute_resolution": "",\n'
+            '  "out_of_scope": []\n'
+            "}\n"
+        )
+        self.assertEqual(uat.result_payload(output), {"dispute_resolution": "", "out_of_scope": []})
+
+    def test_trailing_markdown_fence_after_the_json(self):
+        output = "```\n" + uat.RESULT_MARKER + ' {"dispute_resolution":"","out_of_scope":[]}\n```\n'
+        self.assertEqual(uat.result_payload(output), {"dispute_resolution": "", "out_of_scope": []})
+
+    def test_indented_marker_line(self):
+        output = "  " + uat.RESULT_MARKER + ' {"dispute_resolution":"","out_of_scope":[]}'
+        self.assertEqual(uat.result_payload(output), {"dispute_resolution": "", "out_of_scope": []})
+
+    def test_no_marker_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly one SWARM_ADVERSARIAL_RESULT"):
+            uat.result_payload("The tests should pass.")
+
+    def test_two_marker_lines_are_rejected(self):
+        output = uat.RESULT_MARKER + " {}\n" + uat.RESULT_MARKER + " {}\n"
+        with self.assertRaisesRegex(ValueError, "exactly one SWARM_ADVERSARIAL_RESULT"):
+            uat.result_payload(output)
+
+    def test_genuinely_invalid_json_still_raises(self):
+        output = uat.RESULT_MARKER + " {'dispute_resolution': ''}\n"
+        with self.assertRaises(ValueError):
+            uat.result_payload(output)

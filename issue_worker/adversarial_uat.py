@@ -65,10 +65,23 @@ def adversarial_activity(loop: dict[str, Any]) -> str:
 
 
 def result_payload(output: str) -> dict[str, Any]:
-    lines = [line[len(RESULT_MARKER):].strip() for line in output.splitlines() if line.startswith(RESULT_MARKER)]
-    if len(lines) != 1:
+    all_lines = output.splitlines()
+    marker_indices = [i for i, line in enumerate(all_lines) if line.strip().startswith(RESULT_MARKER)]
+    if len(marker_indices) != 1:
         raise ValueError("Tester must return exactly one SWARM_ADVERSARIAL_RESULT JSON line")
-    value = json.loads(lines[0])
+    index = marker_indices[0]
+    after_marker = all_lines[index].strip()[len(RESULT_MARKER):].strip()
+    # The prompt asks for the JSON on the marker's own line, but a model
+    # occasionally pretty-prints it across several lines instead; splice in
+    # everything after the marker through the end of the output and parse
+    # with raw_decode so that still works, along with a trailing markdown
+    # fence or prose the model tacks on after the JSON value ends.
+    remainder = "\n".join([after_marker, *all_lines[index + 1:]]).strip()
+    remainder = re.sub(r"^```[\w-]*\n?", "", remainder).strip()
+    try:
+        value, _ = json.JSONDecoder().raw_decode(remainder)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Could not parse SWARM_ADVERSARIAL_RESULT JSON: {error}") from error
     if not isinstance(value, dict) or not isinstance(value.get("out_of_scope", []), list):
         raise ValueError("Invalid adversarial result")
     for finding in value.get("out_of_scope", []):
