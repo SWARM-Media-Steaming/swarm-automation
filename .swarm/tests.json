@@ -169,6 +169,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_url_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-url-validation",
+      "name": "Out-of-scope UAT finding URLs are validated before being logged/persisted",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_url_validation.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
