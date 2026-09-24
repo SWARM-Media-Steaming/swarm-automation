@@ -54,6 +54,12 @@ close. Adding a fourth provider = one entry in `KNOWN_PROVIDERS`, a
 should be reachable by dynamic model routing, see "Dynamic model routing"
 below for the further entries it needs.
 
+Fresh-work usage probes are deliberately isolated per provider through
+`Worker.enabled_provider_usages`: an unexpected usage exception marks only
+that provider unavailable for the current scheduling pass, so a healthy
+enabled provider can still receive the issue. Keep that isolation when
+adding provider-selection callers or changing quota probes.
+
 Related, still-accurate mechanics:
 
 - `tauri.conf.json`'s `bundle.resources` entry (`"issue_worker/*.py":
