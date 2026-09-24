@@ -556,6 +556,60 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_test_scheduler_removal.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-test-scheduler-backend-removal",
+      "name": "Test Scheduler backend is removed while Adversarial UAT remains wired",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "Cargo.toml",
+          "src/main.rs",
+          "src/config.rs",
+          "issue_worker/adversarial_uat.py",
+          "tests/adversarial/test_test_scheduler_removal.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_test_scheduler_removal_ui.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-test-scheduler-ui-removal",
+      "name": "Test Scheduler UI is removed and Adversarial UAT owns Now Working progress",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/now-working.js",
+          "tests/adversarial/test_test_scheduler_removal_ui.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1

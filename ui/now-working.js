@@ -7,49 +7,15 @@
   "use strict";
 
   // Derives the "Now working" overview dashboard: one row per issue the worker
-  // is on right now, each test run actually in flight, and a CI/CD issue the
-  // worker is fixing. Idle processes and finished checks are omitted — a worker
-  // that is only polling the queue, a scheduler waiting for its next window,
-  // and a pipeline that already passed or failed are not current work.
+  // is on right now, and a CI/CD issue the worker is fixing. Idle processes
+  // and finished checks are omitted — a worker that is only polling the queue
+  // is not current work.
   //
   // Issues and CI come from replaying the worker's log lines in order — the
-  // worker has no structured "current work" channel — and tests come from the
-  // repository's test-run results.
+  // worker has no structured "current work" channel.
 
   function normalizeRepo(value) {
     return String(value || "").trim().replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
-  }
-
-  function unfinishedRun(runs) {
-    return (Array.isArray(runs) ? runs : [])
-      .filter((run) => run && !run.finishedAt)
-      .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0] || null;
-  }
-
-  function testRows(repositories, runsByRepo) {
-    const rows = [];
-    repositories.forEach((repo) => {
-      if (!["running", "paused"].includes(repo.uatState)) return;
-      const run = unfinishedRun(runsByRepo[repo.id]);
-      // A live scheduler with nothing in flight is waiting, not working.
-      if (!run) return;
-      const suites = Array.isArray(run.suites) ? run.suites : [];
-      const active = suites.find((suite) => String(suite.state).toLowerCase() === "running");
-      const pending = new Set(["running", "ready", "not executed"]);
-      const finished = suites.filter((suite) => !pending.has(String(suite.state).toLowerCase())).length;
-      const trigger = run.trigger === "manual" ? "Manual run" : run.trigger === "scheduled" ? "Scheduled run" : "Test run";
-      rows.push({
-        kind: "tests",
-        key: `tests:${repo.id}`,
-        title: active ? `Running ${active.name || active.id}` : `${trigger} in progress`,
-        detail: `${trigger} · ${finished} of ${suites.length} suite${suites.length === 1 ? "" : "s"} finished`,
-        repository: repo.name,
-        state: repo.uatState === "paused" ? "paused" : "running",
-        startedAt: run.startedAt || 0,
-        since: "",
-      });
-    });
-    return rows;
   }
 
   function logRows(logs, repositories, workerState) {
@@ -205,10 +171,10 @@
     return rows;
   }
 
-  function deriveNowWorking({ logs = [], workerState = "stopped", repositories = [], testRuns = {} } = {}) {
+  function deriveNowWorking({ logs = [], workerState = "stopped", repositories = [] } = {}) {
     // A pipeline the worker is fixing is already a row from "Working CI failure
     // issue". A finished Actions check is a result, so it is not listed here.
-    return [...logRows(logs, repositories, workerState), ...testRows(repositories, testRuns)];
+    return logRows(logs, repositories, workerState);
   }
 
   return { deriveNowWorking };

@@ -274,24 +274,6 @@ pub struct RepoConfig {
     /// Advanced: an existing local checkout to operate on as-is instead of a
     /// managed clone.
     pub repo_dir: String,
-    /// Hour of the day (local, 0-23) the test scheduler runs its daily cycle
-    /// once **Start** has been pressed. **Run now** ignores it.
-    pub uat_hour: u8,
-    /// Run the repository-defined `failureTriage` command after a real failure.
-    pub uat_triage_enabled: bool,
-    /// Let a suite that declares `requirements.aiTestData` ask an enabled AI
-    /// provider to fill in best-effort sample data before it runs. Off means
-    /// every such suite is marked "Not executed" instead, guaranteeing zero
-    /// AI usage from tests regardless of provider capacity.
-    pub uat_ai_test_data_enabled: bool,
-    /// Repository-local selections used only by the deterministic test runner.
-    /// Values are deliberately limited to non-secret discovery choices (for
-    /// example an adb serial); credentials remain in the environment/files
-    /// declared by the repository test definition.
-    pub test_inputs: HashMap<String, String>,
-    /// Disruptive suites are visible but blocked until explicitly enabled.
-    pub allow_disruptive_tests: bool,
-    pub run_dir: String,
 }
 
 impl Default for RepoConfig {
@@ -321,12 +303,6 @@ impl Default for RepoConfig {
             update_claude_assets_enabled: false,
             allow_environment_only_summary: false,
             repo_dir: String::new(),
-            uat_hour: 3,
-            uat_triage_enabled: true,
-            uat_ai_test_data_enabled: true,
-            test_inputs: HashMap::new(),
-            allow_disruptive_tests: false,
-            run_dir: String::new(),
         }
     }
 }
@@ -388,15 +364,6 @@ impl RepoConfig {
             .into_owned()
     }
 
-    /// Where the test runner keeps its state. Defaults to `<workspace>/.run`.
-    pub fn effective_run_dir(&self, workspace: &Path) -> PathBuf {
-        if self.run_dir.trim().is_empty() {
-            workspace.join(".run")
-        } else {
-            PathBuf::from(&self.run_dir)
-        }
-    }
-
     fn validate(&self) -> Result<(), String> {
         let repository = self.github_repository.trim();
         if repository.is_empty() {
@@ -430,9 +397,6 @@ impl RepoConfig {
         }
         if self.remote_name.trim().is_empty() {
             return Err("git remote cannot be empty".into());
-        }
-        if self.uat_hour > 23 {
-            return Err("the daily test hour must be between 0 and 23".into());
         }
         let override_path = self.repo_dir.trim();
         if !override_path.is_empty() {
@@ -573,12 +537,6 @@ pub struct AppConfig {
     #[serde(default, skip_serializing)]
     pub branch_prefix: String,
     #[serde(default, skip_serializing)]
-    pub uat_hour: u8,
-    #[serde(default, skip_serializing)]
-    pub uat_triage_enabled: bool,
-    #[serde(default, skip_serializing)]
-    pub run_dir: String,
-    #[serde(default, skip_serializing)]
     pub claude_model: String,
     #[serde(default, skip_serializing)]
     pub claude_effort: String,
@@ -645,9 +603,6 @@ impl Default for AppConfig {
             update_claude_assets_enabled: false,
             allow_environment_only_summary: false,
             branch_prefix: String::new(),
-            uat_hour: 0,
-            uat_triage_enabled: false,
-            run_dir: String::new(),
             claude_model: String::new(),
             claude_effort: String::new(),
             codex_model: String::new(),
@@ -955,11 +910,6 @@ impl AppConfig {
             if !self.branch_prefix.trim().is_empty() {
                 repo.branch_prefix = std::mem::take(&mut self.branch_prefix);
             }
-            if self.uat_hour <= 23 {
-                repo.uat_hour = self.uat_hour;
-            }
-            repo.uat_triage_enabled = self.uat_triage_enabled;
-            repo.run_dir = std::mem::take(&mut self.run_dir);
             self.repositories.push(repo);
         }
 

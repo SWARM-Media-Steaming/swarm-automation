@@ -1,8 +1,9 @@
 # SWARM Automation
 
 SWARM Automation is a macOS-first native desktop control center for running
-an AI issue worker and (when the target repository has one) a deterministic
-test scheduler against **any GitHub repository** — not just SWARM's own. You
+an AI issue worker against **any GitHub repository** — not just SWARM's own.
+Test scheduling and execution belong in CI/CD, not this tool; per-issue
+verification instead comes from **Adversarial UAT** (see below). You
 give it `owner/name` and it clones the repo into a workspace it manages
 itself (never a checkout you work in); a power-user override can point it at
 an existing checkout instead. It bundles its own Python issue-worker
@@ -23,8 +24,8 @@ The application can:
   switch on its card. Choose **No preference** when you do not care who goes
   first, or pick one provider to win ties when remaining usage is equal;
 - monitor multiple GitHub repositories in one scheduler, with an independent
-  managed clone, assignee, branch policy, bot identities, and test scheduler for
-  each repository;
+  managed clone, assignee, branch policy, and bot identities for each
+  repository;
 - work the repositories one at a time with a single shared worker (the
   default), or turn on **One worker per repository** to run a worker for every
   repository at once — faster through a backlog, but AI credits are spent
@@ -40,11 +41,6 @@ The application can:
   optionally approve and squash issue pull requests into the AI-integration
   branch (a per-repository policy), delete their branches once the linked
   issue is closed, and expose the explicit human promotion gate;
-- discover and run every suite a target repository declares in
-  `.swarm/tests.json` — not just UAT — resolving tools, files, services, mounts,
-  credentials, and Fire TV devices independently for each suite without using
-  AI credits, and keeping a per-run history with per-suite pass / fail /
-  skipped outcomes;
 - explain any control in place through a click-to-open help modal, and carry a
   **Help** tab with a "how to get started" walkthrough; and
 - stream child output to the UI and a local log.
@@ -61,9 +57,11 @@ Repository Work Policy includes **Adversarial UAT** (off by default; CLI
 replaces the same-session test instruction with a fresh independent coding
 agent that derives tests from the issue specification. Tests live under
 `tests/adversarial/` and are registered in `.swarm/tests.json` with an
-`adversarial-` ID and `origin: "adversarial"`, so scheduled runs and failure
-triage continue after delivery. Framework selection is persisted in that
-manifest; the coding agent scaffolds it without a sign-off gate.
+`adversarial-` ID and `origin: "adversarial"`. Framework selection is
+persisted in that manifest; the coding agent scaffolds it without a sign-off
+gate. These suites run during the issue's own fix/re-test rounds only —
+there is no scheduler in this app to re-run them afterward, so ongoing
+regression coverage belongs in the repository's own CI/CD.
 
 After the initial assessment, up to six implementer-fix/tester-retest rounds
 run locally. Only a fresh tester can adjudicate disputed tests; the implementer
@@ -220,9 +218,7 @@ npm run build
 
 The packaged application includes the vendored Python issue-worker
 implementation, so a selected repository does not need to contain any
-automation scripts of its own. Test controls are repository-specific and driven
-entirely by the repository's `.swarm/tests.json`; environment gates belong to
-each suite's own `requirements`, not to this tool.
+automation scripts of its own.
 
 ## Releases and self-update
 
@@ -267,122 +263,18 @@ the repository secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`). Re-running rotates both — see the script
 header for the consequences.
 
-## Repository test definitions
+## `.swarm/tests.json`
 
-Add `.swarm/tests.json` to a repository to make its test inventory explicit and
-portable. The checked-in definition in this repository is a working example.
-When the selected repository does not have one yet, open **Test Scheduler** and
-choose **Detect tests & create draft**. The app recognizes conventional Rust,
-JavaScript, Python, Go, Gradle/Android, and `scripts/tests` entry points, then
-shows an editable JSON preview. Detection never executes a discovered command.
-After validation, **Save definition** creates `.swarm/tests.json` in the
-repository and enables the scheduler immediately; commit the new file to keep
-it with the project.
-Schema version `2` adds reusable UI inputs; version `1` definitions such as the
-following remain readable without migration:
-
-```json
-{
-  "version": 1,
-  "coverageNotes": [
-    "Aggregate wrappers are omitted; this list contains each coverage area once."
-  ],
-  "suites": [
-    {
-      "id": "backend",
-      "name": "Backend tests",
-      "command": ["cargo", "test"],
-      "timeoutSeconds": 1800,
-      "disruptive": false,
-      "requirements": {
-        "executables": ["cargo"],
-        "files": ["Cargo.toml"],
-        "servers": [
-          { "name": "API", "url": "http://127.0.0.1:8080/health", "timeoutSeconds": 3 }
-        ],
-        "mounts": [
-          { "name": "ROM share", "path": "/Volumes/roms", "kind": "smb" }
-        ],
-        "paths": [
-          { "name": "Library database", "path": "~/Library/Application Support/example/library.sqlite", "kind": "file", "readable": true }
-        ],
-        "androidSdk": { "project": "clients/tv-android" },
-        "credentials": [
-          { "name": "Test token", "environment": "TEST_TOKEN" },
-          { "name": "Device key", "file": "~/.config/example/device-key.json" }
-        ],
-        "devices": [
-          { "type": "fireTv", "input": "fireTvSerial", "argument": "--device" }
-        ]
-      }
-    }
-  ],
-  "reporting": {
-    "command": ["scripts/tests/report_results.sh"],
-    "timeoutSeconds": 300
-  },
-  "failureTriage": {
-    "command": ["scripts/tests/triage_failure_read_only.sh"],
-    "timeoutSeconds": 300
-  }
-}
-```
-
-A v2 definition adds a top-level `inputs` array. Each input declares an `id`,
-`label`, optional `help`, `type`, `required`, `default`, `validation`,
-`discovery`, consuming `suites`, `persistence`, and `binding`. For example,
-an Android SDK can bind `{ "environment": "ANDROID_HOME" }`, a Fire TV can
-discover `adbDevices` and bind `{ "arguments": ["--device", "{value}"] }`,
-and a boolean can bind `{ "arguments": ["--all"] }`. Argument entries are
-appended directly and `{value}` is replaced inside one argv element; strings
-are never parsed or evaluated by a shell.
-
-Supported types are `text`, `number`, `boolean`, `file`, `directory`, `select`,
-`device`, `environment`, and `secret`. Non-secret values use `repository` or
-`session-only` persistence. Secrets must use `keychain`; their values are not
-written to config, definitions, results, history, previews, or logs. Numeric
-bounds, length bounds, and regular-expression patterns are supported. Missing
-required values produce Waiting for input, while invalid paths, selections, or
-external prerequisites produce Blocked for only the suites that consume them.
-
-Suite IDs must be unique and use letters, digits, `-`, or `_`. Commands are
-argument arrays and run directly from the repository root with closed stdin;
-they are never placed in an interactive shell. `timeoutSeconds` defaults to
-1800. Disabled suites and disruptive suites that have not been allowed in the
-repository profile are skipped.
-
-Every requirement is evaluated per suite. HTTP server requirements validate
-the declared endpoint's response, Android SDK requirements require installed
-platform/build tools and `platform-tools/adb`, and file/directory/mount checks
-perform a real read rather than accepting metadata alone. Missing equipment or configuration
-marks only that suite as Blocked; it does not create a test failure or
-stop eligible suites. When exactly one authorized device is returned by
-`adb devices -l`, it is selected automatically. A saved repository choice is
-reused when present, while multiple eligible devices produce Waiting for input
-until a device is selected in Test Scheduler. The selected serial is exposed to
-each hardware command through its declared argument (by default, two argv
-entries: `--device` and the exact serial).
-
-Runs require a clean Git checkout with a tracked `.swarm/tests.json`. The
-runner records `testedCommit`, holds a checkout lock that the issue scheduler
-respects, and stops remaining execution as blocked if HEAD or its branch moves.
-Results are updated atomically after each state change in
-`<run-dir>/test-results.json`. States are Ready, Running, Passed, Failed,
-Blocked, Skipped, and Waiting for input. Suite logs are retained in full beside
-the result file, while results and history carry only a bounded output preview.
-On Unix, suite children receive a safe file-descriptor soft limit (up to 8192,
-without lowering a higher inherited limit).
-Each completed cycle is also archived under `<run-dir>/test-runs/` (newest 50)
-and shown in the **Test runs** history in Test Scheduler, where opening a run
-lists every suite it executed with its pass / fail / skipped outcome.
-An optional deterministic reporting command runs after the cycle and receives
-the result path in `SWARM_TEST_RESULTS`, allowing an existing GitHub issue
-reporter to remain in place. Reporting and triage commands default to a
-300-second timeout and also receive closed stdin. AI is never used for discovery, preflight,
-execution, or structured reporting. `failureTriage.command` is invoked only
-after a real failure and only when **Read-only AI triage on failure** is enabled;
-it receives the same results environment variable and must not change the
-checkout. Disable triage for an entirely zero-credit workflow.
+There is no in-app test scheduler, discovery UI, or suite runner — test
+scheduling and execution belong in the repository's own CI/CD. The file
+`.swarm/tests.json` still exists, but only as the registry **Adversarial
+UAT** (above) writes to when it derives tests from an issue: suites there
+carry an `adversarial-` ID and `origin: "adversarial"`, plus a persisted
+`adversarialBootstrap` framework choice. Those suites run during that
+issue's own fix/re-test rounds; nothing in this app re-runs them
+afterward. A `.swarm/tests.json` left over from an older release of this
+app (which did include a scheduler) is otherwise inert — it configures
+nothing here.
 
 The initial release targets macOS. Most backend supervision is Unix-compatible,
 but interactive provider sign-in, Keychain integration, and packaging need

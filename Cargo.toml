@@ -1,6 +1,6 @@
 [package]
 name = "swarm-automation"
-description = "Desktop control center for AI issue workers and deterministic test schedulers on any local Git checkout."
+description = "Desktop control center for AI issue workers on any local Git checkout."
 # Placeholder: the published version is computed from VERSION (see
 # .claude/rules/versioning.md) and stamped in by the release workflow.
 version = "0.1.0"
@@ -26,7 +26,6 @@ libc = "0.2"
 semver = "1"
 tokio = { version = "1", features = ["time"] }
 url = "2"
-keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }
 regex = "1"
 
 [build-dependencies]
