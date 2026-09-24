@@ -41,15 +41,37 @@ CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing aft
 # substituted content word removes one token and adds a different one (the
 # symmetric difference is at least 2). Require both: high overlap and a small
 # symmetric difference, so a substitution can't hide behind a high ratio.
+#
+# Symmetric difference alone still misses *insertion*: a second, genuinely
+# distinct bug whose title is the first bug's title plus one qualifying word
+# ("Export fails silently" -> "CSV export fails silently") only adds one
+# token, so it clears the symmetric-difference bar too even though the
+# inserted word is exactly what makes it a different bug. A pure rewording
+# only ever appends/drops a word that further describes the *same* already-
+# named subject ("YAML" -> "YAML file"), which barely disturbs adjacent-word
+# pairings; a distinguishing qualifier is inserted next to the head noun it
+# narrows, which breaks most of the title's word-adjacency pairs. Comparing
+# bigrams (adjacent-token pairs, in title order) catches that: require high
+# bigram overlap in addition to the unigram checks above.
 FINDING_TITLE_SIMILARITY_THRESHOLD = 0.6
 FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE = 1
+FINDING_TITLE_BIGRAM_SIMILARITY_THRESHOLD = 0.75
 FINDING_TITLE_STOPWORDS = {
     "a", "an", "and", "are", "at", "by", "for", "in", "is", "of", "on", "or", "the", "to", "with",
 }
 
 
+def _finding_title_token_sequence(title: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z0-9]+", title.lower()) if t not in FINDING_TITLE_STOPWORDS]
+
+
 def _finding_title_tokens(title: str) -> set[str]:
-    return {t for t in re.findall(r"[a-z0-9]+", title.lower()) if t not in FINDING_TITLE_STOPWORDS}
+    return set(_finding_title_token_sequence(title))
+
+
+def _finding_title_bigrams(title: str) -> set[tuple[str, str]]:
+    tokens = _finding_title_token_sequence(title)
+    return {(tokens[i], tokens[i + 1]) for i in range(len(tokens) - 1)}
 
 
 def _finding_title_similarity(a: str, b: str) -> float:
@@ -65,8 +87,14 @@ def _finding_title_is_reworded_duplicate(a: str, b: str) -> bool:
         return False
     similarity = len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
     symmetric_difference = len(tokens_a ^ tokens_b)
-    return (similarity >= FINDING_TITLE_SIMILARITY_THRESHOLD
-            and symmetric_difference <= FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE)
+    if not (similarity >= FINDING_TITLE_SIMILARITY_THRESHOLD
+            and symmetric_difference <= FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE):
+        return False
+    bigrams_a, bigrams_b = _finding_title_bigrams(a), _finding_title_bigrams(b)
+    if not bigrams_a or not bigrams_b:
+        return True
+    bigram_similarity = len(bigrams_a & bigrams_b) / len(bigrams_a | bigrams_b)
+    return bigram_similarity >= FINDING_TITLE_BIGRAM_SIMILARITY_THRESHOLD
 # Framework wiring is the only non-test code a tester may scaffold. This list
 # is deliberately explicit: adding a test framework must not grant product edits.
 FRAMEWORK_FILES = {
