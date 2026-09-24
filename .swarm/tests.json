@@ -1257,6 +1257,35 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_integration_branch_deletion_ruleset_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-integration-branch-deletion-ruleset-validation",
+      "name": "A same-named GitHub ruleset that does not actually block deletion must not be mistaken for an installed safeguard",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_integration_branch_deletion_ruleset_validation.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
