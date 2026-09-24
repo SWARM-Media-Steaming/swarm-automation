@@ -2433,7 +2433,7 @@ fn require_closed_issue(
 fn issue_branch_pr_is_visible(pull_request_state: Option<&str>) -> bool {
     // A branch may appear briefly before its PR is created. Keep that useful
     // in-progress state, but once GitHub associates a PR with the branch only
-    // an open PR belongs in the active Branches and promotion tree.
+    // an open PR counts as an active issue branch.
     pull_request_state
         .map(|state| state.trim().eq_ignore_ascii_case("open"))
         .unwrap_or(true)
@@ -3631,9 +3631,9 @@ struct RepoPromotion {
 }
 
 /// Every configured repository whose AI integration branch is ahead of its
-/// human-owned branch and waiting to be promoted. Backs the Overview page's
+/// human-owned branch and waiting to be promoted. Backs the Repository page's
 /// "Repositories ready to promote" panel; selecting a row runs the same
-/// `open_integration_pr` flow as the Repository branch tree button.
+/// `open_integration_pr` flow.
 #[tauri::command]
 fn promotion_overview<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
