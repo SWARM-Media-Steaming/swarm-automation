@@ -610,6 +610,30 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_repository_page_consolidation.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-repository-page-consolidation",
+      "name": "Repository page consolidates repo-specific settings into tabs; Advanced and the branch tree are fully removed",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/style.css",
+          "tests/adversarial/test_repository_page_consolidation.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
