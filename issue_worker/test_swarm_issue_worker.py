@@ -395,6 +395,29 @@ class WorkerTestCase(unittest.TestCase):
         assert only_claude is not None
         self.assertEqual(only_claude.name, "Claude")
 
+    def test_run_keeps_scheduling_when_one_provider_usage_probe_raises(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dry_run=True)
+        issue = IssueContext(140, "Probe isolation", "", [], "https://example.invalid/140")
+        with (
+            mock.patch("swarm_issue_worker.command_available", return_value=True),
+            mock.patch.object(self.worker, "deliver_pending"),
+            mock.patch.object(self.worker, "reconcile_issue_pull_requests"),
+            mock.patch.object(self.worker, "reconcile_orphan_issue_branches"),
+            mock.patch.object(self.worker, "prepare_paused_resume", return_value=False),
+            mock.patch.object(self.worker, "monitor_repository_actions", return_value=None),
+            mock.patch.object(self.worker, "select_issue", return_value=issue),
+            mock.patch.object(self.worker, "claude_usage", return_value=ProviderUsage(0, 80.0)),
+            mock.patch.object(self.worker, "codex_usage", side_effect=RuntimeError("probe broke")),
+            mock.patch.object(self.worker, "grok_usage", return_value=ProviderUsage(0, 70.0)),
+            mock.patch.object(self.worker, "ensure_bot_auth"),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(self.worker.run(), 0)
+
+        self.assertEqual(self.worker.choice.name, "Claude")
+        self.assertEqual(self.worker.provider_usages["Codex"], ProviderUsage(2))
+        self.assertIn("Codex quota unavailable: usage probe failed: probe broke", output.getvalue())
+
     def test_prompt_policy_toggles_add_issue_instructions(self) -> None:
         self.worker.config = dataclasses.replace(
             self.worker.config,
