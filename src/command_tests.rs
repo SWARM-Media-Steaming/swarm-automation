@@ -287,6 +287,32 @@ fn save_config_then_get_config_round_trips_through_a_real_file() {
 }
 
 #[test]
+fn adversarial_security_toggle_persists_through_a_real_config_file() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    assert!(
+        !config.repositories[0].adversarial_security_enabled,
+        "the review is off until an operator turns it on"
+    );
+    config.repositories[0].adversarial_security_enabled = true;
+
+    save_config(app.clone(), app.state(), config).expect("save a valid config");
+    // Read back through the file, not the in-memory state, so a missing
+    // serde field would surface as the setting silently reverting.
+    let on_disk: crate::config::AppConfig = serde_json::from_str(
+        &std::fs::read_to_string(test_app._data_dir.path().join(crate::config::CONFIG_FILE))
+            .expect("config.json is readable"),
+    )
+    .expect("config.json parses");
+    assert!(on_disk.repositories[0].adversarial_security_enabled);
+
+    let loaded = get_config(app.state()).expect("get_config should succeed");
+    assert!(loaded.repositories[0].adversarial_security_enabled);
+}
+
+#[test]
 fn mark_permission_primed_persists_the_flag_and_is_idempotent() {
     let test_app = test_app();
     let app = test_app.handle();
@@ -1127,6 +1153,30 @@ fn repo_worker_args_carries_advanced_issue_policy() {
     assert!(args.contains(&"--require-issue-tests".to_string()));
     assert!(args.contains(&"--adversarial-uat-enabled".to_string()));
     assert!(args.contains(&"--allow-environment-only-summary".to_string()));
+}
+
+#[test]
+fn repo_worker_args_carries_each_adversarial_stage_independently() {
+    let both = args_for(&RepoConfig {
+        adversarial_uat_enabled: true,
+        adversarial_security_enabled: true,
+        ..repo("octocat/example")
+    });
+    assert!(both.contains(&"--adversarial-uat-enabled".to_string()));
+    assert!(both.contains(&"--adversarial-security-enabled".to_string()));
+
+    // Security is its own switch: a repository can attack a change for
+    // vulnerabilities without also running the UAT loop, and vice versa.
+    let security_only = args_for(&RepoConfig {
+        adversarial_security_enabled: true,
+        ..repo("octocat/example")
+    });
+    assert!(security_only.contains(&"--no-adversarial-uat-enabled".to_string()));
+    assert!(security_only.contains(&"--adversarial-security-enabled".to_string()));
+
+    let neither = args_for(&repo("octocat/example"));
+    assert!(neither.contains(&"--no-adversarial-uat-enabled".to_string()));
+    assert!(neither.contains(&"--no-adversarial-security-enabled".to_string()));
 }
 
 #[test]

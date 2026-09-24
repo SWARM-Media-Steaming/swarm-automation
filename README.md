@@ -3,7 +3,8 @@
 SWARM Automation is a macOS-first native desktop control center for running
 an AI issue worker against **any GitHub repository** — not just SWARM's own.
 Test scheduling and execution belong in CI/CD, not this tool; per-issue
-verification instead comes from **Adversarial UAT** (see below). You
+verification instead comes from the adversarial agents — **Adversarial UAT**
+and **Adversarial cybersecurity** (see below). You
 give it `owner/name` and it clones the repo into a workspace it manages
 itself (never a checkout you work in); a power-user override can point it at
 an existing checkout instead. It bundles its own Python issue-worker
@@ -71,6 +72,42 @@ branch and PR, bypasses automatic approval/merge/promotion, and marks the issue
 **AI Needs Input** for a trusted-author adjudication. Quota pauses preserve the
 phase and remaining rounds. Pilot this setting on one repository per stack
 before enabling it broadly.
+
+Work Policy also includes **Adversarial cybersecurity** (off by default; CLI
+`--adversarial-security-enabled`, environment
+`SWARM_ADVERSARIAL_SECURITY_ENABLED`). It is a second adversarial agent on the
+same loop, with security as its only focus, and runs after the implementation
+— and after Adversarial UAT when both are on:
+
+    issue -> implementation -> adversarial UAT -> adversarial cybersecurity -> delivery
+
+Each stage is an independent switch; either can run without the other. A
+fresh, independent security engineer attacks the change and the surface it
+exposes — authentication and authorization, injection, secrets, cryptography,
+deserialization, path handling, dependencies and supply chain, IaC and cloud
+permissions, and the rest of the OWASP-shaped surface — reasoning about the
+actual stack rather than walking a checklist. Findings carry a severity
+(Critical/High/Medium/Low) and a confidence; only high- and medium-confidence
+findings act, so a speculative observation is recorded but never fixed, never
+blocks, and never reaches GitHub.
+
+A vulnerability this issue introduced or exposed is fixed inside this issue,
+then re-verified by a *new* reviewer — the fixer's own claim is never the
+evidence. A legitimate weakness elsewhere in the repository becomes its own
+GitHub issue labelled `adversarial-security` (created if missing), carrying
+the description, affected files, attack scenario, impact, evidence,
+remediation, severity and confidence, deduplicated against this issue's
+earlier rounds *and* against still-open `adversarial-security` issues. The
+security agent's regression tests live under `tests/adversarial/security/`
+with `adversarial-security-` IDs and `origin: "adversarial-security"`; its
+rounds re-run the UAT suites too, so a hardening change that breaks behaviour
+fails the round.
+
+Each review ends as `PASS`, `FIXED`, `FINDINGS_CREATED`, or `FAILED`, recorded
+both on the issue and in execution history. A review that could not execute is
+`FAILED` — never a pass. Like UAT, it uses the dynamic model router (as a
+security/adversarial code-analysis task), survives quota pauses, and is capped
+at six fix/re-test rounds.
 
 Optional AI execution history can be enabled under AI Configuration. It stores the
 original issue, sanitized effective prompt, provider settings, lifecycle,
@@ -276,12 +313,14 @@ header for the consequences.
 
 There is no in-app test scheduler, discovery UI, or suite runner — test
 scheduling and execution belong in the repository's own CI/CD. The file
-`.swarm/tests.json` still exists, but only as the registry **Adversarial
-UAT** (above) writes to when it derives tests from an issue: suites there
-carry an `adversarial-` ID and `origin: "adversarial"`, plus a persisted
-`adversarialBootstrap` framework choice. Those suites run during that
-issue's own fix/re-test rounds; nothing in this app re-runs them
-afterward. A `.swarm/tests.json` left over from an older release of this
+`.swarm/tests.json` still exists, but only as the registry the adversarial
+agents (above) write to when they derive tests from an issue: **Adversarial
+UAT** suites carry an `adversarial-` ID and `origin: "adversarial"`, and
+**Adversarial cybersecurity** suites carry an `adversarial-security-` ID and
+`origin: "adversarial-security"`. Both share the persisted
+`adversarialBootstrap` framework choice, and neither agent may touch the
+other's suites. Those suites run during that issue's own fix/re-test rounds;
+nothing in this app re-runs them afterward. A `.swarm/tests.json` left over from an older release of this
 app (which did include a scheduler) is otherwise inert — it configures
 nothing here.
 

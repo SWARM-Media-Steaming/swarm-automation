@@ -1427,6 +1427,147 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue278",
+        "-p",
+        "test_review_contract.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-review-contract",
+      "name": "Cybersecurity verdict, recovery, scope and local attack/fix integration",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_review_contract.py",
+          "tests/adversarial/issue278/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/issue278/test_review_surfaces.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-review-surfaces",
+      "name": "Cybersecurity failed and completed review visibility",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_review_surfaces.js"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue278",
+        "-p",
+        "test_security_evidence_lifecycle.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-evidence-lifecycle",
+      "name": "Cybersecurity distinct vulnerabilities and verified remediation lifecycle",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_security_evidence_lifecycle.py",
+          "tests/adversarial/issue278/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue278",
+        "-p",
+        "test_security_failure_recovery.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-failure-recovery",
+      "name": "Cybersecurity execution failures, invalid reports, retry and secret-safe logging",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_security_failure_recovery.py",
+          "tests/adversarial/issue278/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue278",
+        "-p",
+        "test_multi_stage_cap_release_gate.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-multi-stage-cap-gate",
+      "name": "Cybersecurity multi-stage cap-hit PR release gate",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_multi_stage_cap_release_gate.py",
+          "tests/adversarial/issue278/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

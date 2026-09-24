@@ -69,6 +69,7 @@ resume) always gets its own comment.
 - Commit: `<sha>` — <commit message>
 <usage report line(s)>
 - Adversarial UAT: <clean first pass|resolved after N rounds>, <N> test files added.
+- Adversarial Cybersecurity: <PASS|FIXED|FINDINGS_CREATED|FAILED> — <N> in-scope finding(s), <N> fixed, <N> follow-up issue(s) filed; Critical <N> / High <N> / Medium <N> / Low <N>; <N> security test file(s) added.
 <details><summary>AI completion summary</summary>
 
 <the AI's own final output>
@@ -160,10 +161,14 @@ No repository changes were made.
   may resume the issue. Automated CI comments may add evidence but are not a
   user answer unless explicitly configured as trusted.
 
-### Adversarial UAT is one work-round
+### The adversarial stages are one work-round
 
-The independent assessment and every fixer/tester exchange share one Started
-comment and one terminal comment. Omit the UAT line when disabled. Quota pauses
+The independent assessment and every fixer/tester exchange of *every* enabled
+adversarial stage — UAT and cybersecurity — share one Started comment and one
+terminal comment. Omit a stage's line when that stage is disabled. The
+cybersecurity line is followed by a collapsed `Adversarial Cybersecurity
+review` block with the counts, summary, remediations, filed issue links and
+validation results; raw reviewer reasoning never goes on the issue. Quota pauses
 and resumes use the existing idempotent notices and retain the current role,
 phase, round count, test definition and execution-history row.
 

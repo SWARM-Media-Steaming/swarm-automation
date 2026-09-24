@@ -53,7 +53,9 @@ if __name__ == "__main__":
 
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
 from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
-from adversarial_uat import AdversarialUatMixin, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE
+from adversarial_core import AdversarialStage
+from adversarial_security import AdversarialSecurityMixin, SECURITY_STAGE
+from adversarial_uat import UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE
 from handoff_context import HandoffContextMixin
 from handoff_context import render_prompt_section as render_handoff_prompt_section
 from issue_images import (
@@ -456,6 +458,7 @@ class Config:
     monitor_actions: bool
     require_issue_tests: bool
     adversarial_uat_enabled: bool
+    adversarial_security_enabled: bool
     update_claude_assets_enabled: bool
     allow_environment_only_summary: bool
     branch_prefix: str
@@ -508,6 +511,7 @@ class Config:
             monitor_actions=args.monitor_actions,
             require_issue_tests=args.require_issue_tests,
             adversarial_uat_enabled=args.adversarial_uat_enabled,
+            adversarial_security_enabled=args.adversarial_security_enabled,
             update_claude_assets_enabled=args.update_claude_assets_enabled,
             allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
@@ -821,6 +825,12 @@ def latest_terminal_outcome(
     return outcome
 
 
+#: Every adversarial agent the worker knows about, in the order an issue
+#: passes through them: implementation -> UAT -> cybersecurity -> delivery.
+#: Each is enabled independently; see `Worker.adversarial_stages`.
+ADVERSARIAL_STAGES: tuple[AdversarialStage, ...] = (UAT_STAGE, SECURITY_STAGE)
+
+
 def extract_followup_metadata(
     comments: Iterable[dict[str, Any]],
     trusted_followup_authors: set[str],
@@ -907,7 +917,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker(AdversarialUatMixin, HandoffContextMixin):
+class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -948,6 +958,42 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         )
         if self.history.error:
             log(f"WARNING: AI execution history is unavailable: {self.history.error}")
+
+    def adversarial_stages(self) -> list[AdversarialStage]:
+        """The adversarial agents this repository runs, in pipeline order.
+
+        Each stage is an independent repository setting, so a repository can
+        run UAT only, cybersecurity only, both, or neither. The order is fixed:
+        an implementation is verified for behaviour before it is attacked for
+        vulnerabilities, and the security agent's fixes are the last product
+        change before delivery.
+        """
+        enabled = {
+            UAT_STAGE.key: self.config.adversarial_uat_enabled,
+            SECURITY_STAGE.key: self.config.adversarial_security_enabled,
+        }
+        return [stage for stage in ADVERSARIAL_STAGES if enabled[stage.key]]
+
+    def adversarial_state_present(self) -> bool:
+        """Whether any adversarial stage already owns this work-round.
+
+        Checked against every known stage rather than the enabled ones so a
+        setting flipped off mid-issue still resumes the checkpoint it left.
+        """
+        if not self.in_progress_file.exists():
+            return False
+        state = self.read_state()
+        return any(state.get(stage.key) for stage in ADVERSARIAL_STAGES)
+
+    def record_disabled_adversarial_stages(self) -> None:
+        """Say so explicitly when a stage was switched off for this work-round."""
+        active = {stage.key for stage in self.adversarial_stages()}
+        fields: dict[str, Any] = {}
+        for stage in ADVERSARIAL_STAGES:
+            if stage.key not in active:
+                fields.update(stage.disabled_history_fields())
+        if fields:
+            self.history.update(iso_timestamp(), **fields)
 
     def git(self, *arguments: str, env: dict[str, str] | None = None, check: bool = True) -> str:
         return run_command(
@@ -1526,9 +1572,10 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             # would hide the test definition for every other issue that runs
             # while this one is paused.
             exclusions = [":(exclude).swarm"]
-            if state.get("adversarial"):
-                # UAT owns the tracked suite definition. Shelve that along with
-                # the tests, while keeping unrelated untracked app drafts local.
+            if any(state.get(stage.key) for stage in ADVERSARIAL_STAGES):
+                # The adversarial stages own the tracked suite definition.
+                # Shelve that along with the tests, while keeping unrelated
+                # untracked app drafts local.
                 exclusions = [f":(exclude){path}" for path in self.git(
                     "ls-files", "--others", "--exclude-standard", "-z", "--", ".swarm"
                 ).split("\0") if path and path != ".swarm/tests.json"]
@@ -2498,7 +2545,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             ),
             iso_timestamp(),
             existing_id=(str(self.read_state().get("execution_id") or "")
-                         if self.in_progress_file.exists() and self.read_state().get("adversarial") else ""),
+                         if self.in_progress_file.exists() and self.adversarial_state_present() else ""),
         )
         if execution_id and self.in_progress_file.exists():
             self.update_state(execution_id=execution_id)
@@ -3113,6 +3160,16 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 "Do not edit, disable, or retire tests under tests/adversarial/ or suites with "
                 "origin=adversarial in .swarm/tests.json. Dispute incorrect expectations with "
                 "issue/spec evidence; only a fresh tester may adjudicate them."
+            )
+        if self.config.adversarial_security_enabled and not question_issue:
+            lines.append(
+                "An independent adversarial security engineer will attack this patch before delivery "
+                "and any vulnerability it introduces will be fixed in this issue. Write it securely: "
+                "validate and encode untrusted input, keep secrets out of the repository and out of "
+                "logs, and do not widen permissions, network exposure, or trust boundaries beyond what "
+                "the issue needs. Do not edit, disable, or retire tests under tests/adversarial/ "
+                "(including its security/ subtree) or suites with origin=adversarial-security in "
+                ".swarm/tests.json."
             )
         if self.config.update_claude_assets_enabled and not question_issue:
             lines.append(
@@ -4713,9 +4770,14 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             log(f"Reusing existing pull request {pr_url} for issue #{self.issue.number}.")
             existing_body = str(existing[0].get("body") or "")
             if allow_automation and CAP_HIT_PR_MARKER in existing_body:
-                # Only a successful UAT follow-up may release a failed head.
-                loop = self.read_state().get("adversarial", {})
-                if loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"}:
+                # Only a successful adversarial follow-up may release a failed
+                # head, and every stage that ran has to be clean — a green UAT
+                # re-run must not release a PR its security review capped out on.
+                state = self.read_state()
+                loops = [state[stage.key] for stage in ADVERSARIAL_STAGES if state.get(stage.key)]
+                if not loops or any(
+                    loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"} for loop in loops
+                ):
                     raise WorkerError("An adversarial cap-hit PR requires a passing UAT follow-up before automatic delivery")
                 self.github.gh(
                     ["pr", "edit", pr_url, "--repo", self.config.github_repository, "--body-file", "-"],
@@ -5035,15 +5097,21 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         )
         return merge_sha
 
-    def finalize_issue(self, commit_sha: str, ai_output: str) -> None:
+    def finalize_issue(self, commit_sha: str, ai_output: str, *, allow_automation: bool = True) -> None:
         assert self.issue and self.choice
         base_sha = str(self.read_state().get("base_sha") or "")
         commits = list(reversed(self.git("rev-list", f"{base_sha}..{commit_sha}").splitlines()))
         files = self.git("diff", "--name-only", base_sha, commit_sha).splitlines()
-        pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha)
+        pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha, allow_automation=allow_automation)
         if commit_sha not in commits:
             commits.append(commit_sha)
         self.history.note("Commit and pull request delivery completed", iso_timestamp())
+        if not allow_automation:
+            # A cap-hit delivery is not a verified-clean pass: the PR and
+            # branch are retained for a trusted author to adjudicate rather
+            # than reported as a normal "Completed" (see issue-branch-delivery.md).
+            self.finalize_needs_input(ai_output, delivery=(pr_url, branch, commit_sha))
+            return
         usage_at_start = self.read_state().get("usage_at_start")
         pending = {
             "issue_number": self.issue.number,
@@ -5337,7 +5405,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             log(f"Dry run complete: would run {self.choice.name} for {self.issue.url}.")
             return 0
 
-        if not (self.in_progress_file.exists() and self.read_state().get("adversarial")):
+        if not (self.in_progress_file.exists() and self.adversarial_state_present()):
             self.maybe_apply_dynamic_routing()
         if self.issue.work_type == "followup":
             self.clear_needs_input_label()
@@ -5359,12 +5427,12 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         self.history.note("Repository prepared", iso_timestamp())
         # The loop is part of this work-round, with one Started comment even
         # when a different tester or fixer owns the active quota checkpoint.
-        if not self.read_state().get("adversarial"):
+        if not self.adversarial_state_present():
             self.post_started_comment()
         self.post_resumed_comment()
-        if self.read_state().get("adversarial"):
+        if self.adversarial_state_present():
             self.refresh_adversarial_requirements()
-            return self.run_adversarial_delivery()
+            return self.run_adversarial_pipeline()
         prompt = self.build_prompt(recovery_mode, candidate, recovery_dirty)
         self.history.update(
             iso_timestamp(), effective_prompt=prompt, final_status="prompt_generated"
@@ -5437,11 +5505,11 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                     f"{self.choice.name} did not return {QUESTION_ANSWER_MARKER} or a genuine input request "
                     f"for this '{QUESTION_LABEL}' issue"
                 )
-        if self.config.adversarial_uat_enabled and not question_issue:
+        for stage in (self.adversarial_stages() if not question_issue else []):
             protection = {"phase": "fix", "stage_base": run_start, "dispute": ""}
-            self.validate_adversarial_edits(protection, {})
+            self.validate_stage_edits(stage, protection, {})
             if protection["dispute"]:
-                self.update_state(adversarial_initial_dispute=protection["dispute"])
+                self.update_state(**{f"{stage.key}_initial_dispute": protection["dispute"]})
         after = self.commit_completed_work(run_start)
         completion = after
         recovered = False
@@ -5493,10 +5561,11 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             raise WorkerError(
                 f"Issue #{self.issue.number} cannot be delivered with uncommitted changes"
             )
-        if self.config.adversarial_uat_enabled:
-            self.initialize_adversarial(completion, output)
-            return self.run_adversarial_delivery()
-        self.history.update(iso_timestamp(), adversarial_outcome="disabled")
+        self.record_disabled_adversarial_stages()
+        stages = self.adversarial_stages()
+        if stages:
+            self.initialize_stage(stages[0], completion, output)
+            return self.run_adversarial_pipeline()
         self.finalize_issue(completion, output)
         return ISSUE_COMPLETED_EXIT_CODE
 
@@ -5927,6 +5996,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--adversarial-uat-enabled",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_ADVERSARIAL_UAT_ENABLED", False),
+    )
+    parser.add_argument(
+        "--adversarial-security-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_ADVERSARIAL_SECURITY_ENABLED", False),
     )
     parser.add_argument(
         "--update-claude-assets-enabled",
