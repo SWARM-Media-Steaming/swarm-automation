@@ -56,9 +56,18 @@ CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing aft
 # A word appended at the end, or folded into a reordered clause a fresh-
 # context tester wrote from scratch ("Config parser crashes on empty YAML"
 # -> "Empty YAML file crashes config parser"), is an elaboration or a
-# paraphrase of the same bug. So: once similarity and symmetric difference
-# both clear their bars, only reject the match when the single differing
-# token is the very first token of the title that contains it.
+# paraphrase of the same bug -- but that is only true when the extra word is
+# itself a plain, lowercase filler noun. A specific format/platform qualifier
+# ("XML", "Safari") reads as a proper noun or acronym in the original title
+# even when it lands mid-sentence or at the end ("Export crashes on large
+# XML files", "Video playback stutters on Safari"), and *that* capitalization
+# is what marks it as the distinguishing content of a genuinely separate bug
+# rather than incidental elaboration -- ordinary English filler words like
+# "file" stay lowercase wherever they land. So: once similarity and symmetric
+# difference both clear their bars, reject the match (treat as distinct) when
+# the single differing token is either the very first token of the title
+# that contains it, or is capitalized/acronym-cased in that title's original
+# wording.
 FINDING_TITLE_SIMILARITY_THRESHOLD = 0.6
 FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE = 1
 FINDING_TITLE_STOPWORDS = {
@@ -76,16 +85,21 @@ def _finding_title_stem(token: str) -> str:
     return token
 
 
-def _finding_title_token_sequence(title: str) -> list[str]:
-    return [
-        _finding_title_stem(t)
-        for t in re.findall(r"[a-z0-9]+", title.lower())
-        if t not in FINDING_TITLE_STOPWORDS
-    ]
+def _finding_title_token_sequence(title: str) -> list[tuple[str, str]]:
+    # Each entry pairs the stemmed/lowered token used for set comparison
+    # with its original-cased spelling, so a caller can tell a plain filler
+    # word from a proper noun or acronym occupying the same slot.
+    tokens = []
+    for raw in re.findall(r"[A-Za-z0-9]+", title):
+        lowered = raw.lower()
+        if lowered in FINDING_TITLE_STOPWORDS:
+            continue
+        tokens.append((_finding_title_stem(lowered), raw))
+    return tokens
 
 
 def _finding_title_tokens(title: str) -> set[str]:
-    return set(_finding_title_token_sequence(title))
+    return {stem for stem, _raw in _finding_title_token_sequence(title)}
 
 
 def _finding_title_similarity(a: str, b: str) -> float:
@@ -96,8 +110,9 @@ def _finding_title_similarity(a: str, b: str) -> float:
 
 
 def _finding_title_is_reworded_duplicate(a: str, b: str) -> bool:
-    tokens_a, tokens_b = _finding_title_token_sequence(a), _finding_title_token_sequence(b)
-    set_a, set_b = set(tokens_a), set(tokens_b)
+    sequence_a, sequence_b = _finding_title_token_sequence(a), _finding_title_token_sequence(b)
+    set_a = {stem for stem, _raw in sequence_a}
+    set_b = {stem for stem, _raw in sequence_b}
     if not set_a or not set_b:
         return False
     symmetric_difference = set_a ^ set_b
@@ -108,8 +123,12 @@ def _finding_title_is_reworded_duplicate(a: str, b: str) -> bool:
     if not symmetric_difference:
         return True
     extra_token = next(iter(symmetric_difference))
-    extra_sequence = tokens_a if extra_token in set_a else tokens_b
-    return extra_sequence[0] != extra_token
+    extra_sequence = sequence_a if extra_token in set_a else sequence_b
+    extra_index = next(i for i, (stem, _raw) in enumerate(extra_sequence) if stem == extra_token)
+    if extra_index == 0:
+        return False
+    extra_raw = extra_sequence[extra_index][1]
+    return extra_raw == extra_raw.lower()
 # Framework wiring is the only non-test code a tester may scaffold. This list
 # is deliberately explicit: adding a test framework must not grant product edits.
 FRAMEWORK_FILES = {
