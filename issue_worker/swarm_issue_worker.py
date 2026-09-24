@@ -5873,14 +5873,23 @@ def check_usage(config: Config) -> int:
                 # not discard the already-collected results for every other
                 # enabled provider.
                 usage = ProviderUsage(2)
-            if usage.status == 2:
+            if (
+                type(usage.status) is not int
+                or usage.status not in (0, 1, 2)
+                or (usage.detail is not None and not isinstance(usage.detail, str))
+            ):
+                # Runtime type hints do not protect this JSON boundary:
+                # Python bools are ints, floats compare equal to ints, and
+                # json.dumps accepts non-string detail values that Rust's
+                # serde schema rejects. Canonicalize only the malformed row.
+                usage = ProviderUsage(2)
+            elif usage.status == 2:
                 # Keep unavailable rows canonical. In particular, never let
                 # stale or malformed probe data leak through this JSON
                 # boundary alongside an unavailable status.
                 usage = ProviderUsage(2)
             elif (
-                usage.status not in (0, 1)
-                or isinstance(usage.remaining_percent, bool)
+                isinstance(usage.remaining_percent, bool)
                 or not isinstance(usage.remaining_percent, (int, float))
                 or not math.isfinite(usage.remaining_percent)
                 or not 0 <= usage.remaining_percent <= 100
