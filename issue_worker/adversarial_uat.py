@@ -46,32 +46,46 @@ CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing aft
 # distinct bug whose title is the first bug's title plus one qualifying word
 # ("Export fails silently" -> "CSV export fails silently") only adds one
 # token, so it clears the symmetric-difference bar too even though the
-# inserted word is exactly what makes it a different bug. A pure rewording
-# only ever appends/drops a word that further describes the *same* already-
-# named subject ("YAML" -> "YAML file"), which barely disturbs adjacent-word
-# pairings; a distinguishing qualifier is inserted next to the head noun it
-# narrows, which breaks most of the title's word-adjacency pairs. Comparing
-# bigrams (adjacent-token pairs, in title order) catches that: require high
-# bigram overlap in addition to the unigram checks above.
+# inserted word is exactly what makes it a different bug. But an appended
+# elaboration of the same subject ("... empty YAML" -> "... empty YAML
+# file") also only adds one token, and that *is* the same bug reworded --
+# so symmetric difference can't be resolved by "is it inserted" alone; where
+# the extra word lands matters. A word prepended ahead of everything else
+# narrows the sentence's own subject/verb ("CSV export...", "Settings
+# sidebar..."), which is how a genuinely distinct, more specific bug reads.
+# A word appended at the end, or folded into a reordered clause a fresh-
+# context tester wrote from scratch ("Config parser crashes on empty YAML"
+# -> "Empty YAML file crashes config parser"), is an elaboration or a
+# paraphrase of the same bug. So: once similarity and symmetric difference
+# both clear their bars, only reject the match when the single differing
+# token is the very first token of the title that contains it.
 FINDING_TITLE_SIMILARITY_THRESHOLD = 0.6
 FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE = 1
-FINDING_TITLE_BIGRAM_SIMILARITY_THRESHOLD = 0.75
 FINDING_TITLE_STOPWORDS = {
     "a", "an", "and", "are", "at", "by", "for", "in", "is", "of", "on", "or", "the", "to", "with",
 }
 
 
+def _finding_title_stem(token: str) -> str:
+    # Plain suffix stripping so morphological variants of the same word
+    # ("upload"/"uploads", "time"/"times") land on the same token instead of
+    # being counted as unrelated content words when a reworded rediscovery
+    # changes verb tense or number.
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
 def _finding_title_token_sequence(title: str) -> list[str]:
-    return [t for t in re.findall(r"[a-z0-9]+", title.lower()) if t not in FINDING_TITLE_STOPWORDS]
+    return [
+        _finding_title_stem(t)
+        for t in re.findall(r"[a-z0-9]+", title.lower())
+        if t not in FINDING_TITLE_STOPWORDS
+    ]
 
 
 def _finding_title_tokens(title: str) -> set[str]:
     return set(_finding_title_token_sequence(title))
-
-
-def _finding_title_bigrams(title: str) -> set[tuple[str, str]]:
-    tokens = _finding_title_token_sequence(title)
-    return {(tokens[i], tokens[i + 1]) for i in range(len(tokens) - 1)}
 
 
 def _finding_title_similarity(a: str, b: str) -> float:
@@ -82,19 +96,20 @@ def _finding_title_similarity(a: str, b: str) -> float:
 
 
 def _finding_title_is_reworded_duplicate(a: str, b: str) -> bool:
-    tokens_a, tokens_b = _finding_title_tokens(a), _finding_title_tokens(b)
-    if not tokens_a or not tokens_b:
+    tokens_a, tokens_b = _finding_title_token_sequence(a), _finding_title_token_sequence(b)
+    set_a, set_b = set(tokens_a), set(tokens_b)
+    if not set_a or not set_b:
         return False
-    similarity = len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
-    symmetric_difference = len(tokens_a ^ tokens_b)
+    symmetric_difference = set_a ^ set_b
+    similarity = len(set_a & set_b) / len(set_a | set_b)
     if not (similarity >= FINDING_TITLE_SIMILARITY_THRESHOLD
-            and symmetric_difference <= FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE):
+            and len(symmetric_difference) <= FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE):
         return False
-    bigrams_a, bigrams_b = _finding_title_bigrams(a), _finding_title_bigrams(b)
-    if not bigrams_a or not bigrams_b:
+    if not symmetric_difference:
         return True
-    bigram_similarity = len(bigrams_a & bigrams_b) / len(bigrams_a | bigrams_b)
-    return bigram_similarity >= FINDING_TITLE_BIGRAM_SIMILARITY_THRESHOLD
+    extra_token = next(iter(symmetric_difference))
+    extra_sequence = tokens_a if extra_token in set_a else tokens_b
+    return extra_sequence[0] != extra_token
 # Framework wiring is the only non-test code a tester may scaffold. This list
 # is deliberately explicit: adding a test framework must not grant product edits.
 FRAMEWORK_FILES = {
