@@ -40,19 +40,37 @@ calls. So for a real GitHub response, `existing.get("conditions", {})` and
 `[]`, `has_deletion_rule` is always `False`, and the `if` above always fails
 -- even for the exact ruleset this same code installed moments earlier.
 
-The practical consequence: on the very first run after this fix ships, the
-worker installs the safeguard correctly (creation path, `existing is None`).
-On every run after that, it re-lists rulesets, finds its own ruleset by name,
-misreads the summary as "does not protect deletion", and raises
+The practical consequence, if the implementation stopped at the list
+endpoint alone: on the very first run after this fix ships, the worker
+installs the safeguard correctly (creation path, `existing is None`). On
+every run after that, it would re-list rulesets, find its own ruleset by
+name, misread the summary as "does not protect deletion", and raise
 `WorkerError`, which per issue-branch-delivery.md aborts delivery before any
-push. That turns issue #267's fix -- meant to make the safeguard reliably
-present for pre-existing integration branches -- into a permanent hard
-failure on exactly those repositories, worse than the bug it fixes (which at
-least let the worker keep operating, just unprotected).
+push.
+
+Revision (adjudicated dispute): the first draft of this test asserted that a
+list-summary match alone -- `id`/`name`/`target`/`enforcement` only, no
+`conditions`/`rules` -- must be accepted as proof of protection, using a
+fixture that left the worker's `gh` binary as the default `/usr/bin/false`
+stub with no mock for a detail call. That is not a fixture bug to paper
+over: issue #261 exists specifically because a same-named ruleset was once
+trusted without checking whether it actually blocks deletion, and
+`test_integration_branch_ruleset_summary_trust_bypass.py` (also #267)
+requires that any summary-shaped match be positively verified against the
+single-ruleset detail endpoint (`GET .../rulesets/{id}`) before it is
+trusted. A test that expects the summary shape to be accepted on its own
+would demand reopening that exact bypass. The correct fix for the shape
+problem this test identified is what the implementation actually does:
+fetch the detail record by `id` and evaluate `conditions`/`rules` from
+*that* response. This test now verifies that outcome -- a genuinely
+installed ruleset, encountered through the list endpoint's summary shape,
+is not misread as broken once its detail record confirms real protection --
+without granting the list summary blind trust.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -83,6 +101,15 @@ REAL_LIST_RULESETS_SUMMARY = {
     },
 }
 
+# What that same ruleset's own detail endpoint (GET .../rulesets/4242)
+# actually reveals: it really does target ai-main for deletion. Only this
+# response -- not the list summary -- can prove that.
+REAL_DETAIL_CONFIRMING_PROTECTION = {
+    **REAL_LIST_RULESETS_SUMMARY,
+    "conditions": {"ref_name": {"include": ["refs/heads/ai-main"], "exclude": []}},
+    "rules": [{"type": "deletion"}],
+}
+
 
 class IntegrationBranchRulesetListResponseShapeTests(unittest.TestCase):
     setUp = fixtures.WorkerTestCase.setUp
@@ -96,15 +123,27 @@ class IntegrationBranchRulesetListResponseShapeTests(unittest.TestCase):
         """A ruleset that genuinely protects the branch from deletion --
         active, right name, right branch, has a deletion rule -- must not be
         flagged as broken merely because the list endpoint's response omits
-        the detail fields needed to prove that. Whatever the implementation
-        does to establish the real state (e.g. fetching the single-ruleset
-        detail endpoint by id), the end result must be that a genuinely safe
-        branch is treated as safe."""
-        with mock.patch.object(
-            self.worker.github, "api_list", return_value=[REAL_LIST_RULESETS_SUMMARY]
+        the detail fields needed to prove that. The implementation must
+        establish the real state by fetching the single-ruleset detail
+        endpoint by id (not by trusting the list summary alone), and the
+        end result must be that a genuinely safe branch is treated as
+        safe."""
+        with (
+            mock.patch.object(
+                self.worker.github, "api_list", return_value=[REAL_LIST_RULESETS_SUMMARY]
+            ),
+            mock.patch.object(
+                self.worker.github,
+                "gh",
+                return_value=json.dumps(REAL_DETAIL_CONFIRMING_PROTECTION),
+            ) as github_gh,
         ):
-            # Must not raise: the branch really is protected.
+            # Must not raise: the branch really is protected, once verified.
             self.worker.protect_new_integration_branch("ai-main")
+
+        # The list summary alone must not have been enough -- a real detail
+        # fetch is required to reach that conclusion.
+        github_gh.assert_called_once()
 
     def test_repo_with_preexisting_integration_branch_keeps_working_after_first_run(self) -> None:
         """End-to-end version of the same defect: on a repository where
@@ -113,11 +152,17 @@ class IntegrationBranchRulesetListResponseShapeTests(unittest.TestCase):
         every run. A second, later run must still be able to push -- it must
         not be permanently blocked just because the ruleset it is looking at
         now comes back in the summary shape instead of the full-detail shape
-        it might have seen when the ruleset was first created."""
+        it might have seen when the ruleset was first created -- provided
+        the detail endpoint, once consulted, confirms real protection."""
         with (
             mock.patch.object(self.worker, "remote_is_github_host", return_value=True),
             mock.patch.object(
                 self.worker.github, "api_list", return_value=[REAL_LIST_RULESETS_SUMMARY]
+            ),
+            mock.patch.object(
+                self.worker.github,
+                "gh",
+                return_value=json.dumps(REAL_DETAIL_CONFIRMING_PROTECTION),
             ),
         ):
             try:
