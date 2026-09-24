@@ -241,7 +241,7 @@ Deliberately **not** covered by this suite: `start_issue_worker`,
 dev`/`npm run build` + launch than by tests that would install real software
 or make real GitHub calls.
 
-Run with `cargo test`. The `test` job in `.github/workflows/release.yml`
+Run with `cargo test`. The `test` job in `.github/workflows/ci.yml`
 runs `cargo fmt --all -- --check` before clippy, tests, Python, and frontend
 suites; a long line that rustfmt would wrap (common in `src/main.rs` unit
 tests) fails CI even when `cargo test` is green. Format with `cargo fmt
