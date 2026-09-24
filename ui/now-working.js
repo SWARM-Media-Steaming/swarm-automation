@@ -176,8 +176,13 @@
           if (relatedItem.kind === "adversarial") relatedItem.state = "running";
         });
       } else if ((match = message.match(/Finished issue #(\d+)/i))) {
-        clear((item) => String(item.number) === match[1]
-          && (!repository || item.repository === repository));
+        // Issue numbers are repository-local.  A terminal line without a
+        // repository label is unsafe to apply when several repositories are
+        // configured, so leave the rows intact until an identified terminal
+        // event arrives.
+        if (repository) {
+          clear((item) => String(item.number) === match[1] && item.repository === repository);
+        }
       } else if (/Returned the clean local checkout/i.test(message)) {
         clear((item) => item.state === "running" && (!repository || item.repository === repository));
       }
