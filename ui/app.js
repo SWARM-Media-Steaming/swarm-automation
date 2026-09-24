@@ -2325,9 +2325,8 @@
 
       let headline;
       if (working.length) {
-        const first = working[0];
-        const where = first.repository ? `${first.title} in ${first.repository}` : first.title;
-        headline = working.length > 1 ? `Working ${where} (+${working.length - 1} more)` : `Working ${where}`;
+        const locations = working.map((row) => row.repository ? `${row.title} in ${row.repository}` : row.title);
+        headline = `Working ${locations.join("; ")}`;
       } else if (!ready) {
         headline = "Not ready";
       } else if (usage && usage.status === 2) {

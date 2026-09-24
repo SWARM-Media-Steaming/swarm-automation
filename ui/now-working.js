@@ -96,9 +96,15 @@
       let match;
 
       if (/exited with status|process stopped|Ctrl\+C received/i.test(message)) {
-        items.clear();
-        lastStartedByRepository.clear();
-        lastStarted = null;
+        if (repository) {
+          clear((item) => item.repository === repository);
+          lastStartedByRepository.delete(repository);
+          if (lastStarted?.repository === repository) lastStarted = null;
+        } else {
+          items.clear();
+          lastStartedByRepository.clear();
+          lastStarted = null;
+        }
       } else if (/Starting a cycle over/i.test(message)) {
         clear((item) => item.state === "running");
       } else if (/Starting a worker run/i.test(message)) {
