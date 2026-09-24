@@ -370,7 +370,8 @@ class AdversarialStage:
     filed_findings_column = "adversarial_filed_findings"
 
     def record_round(self, worker, loop: dict[str, Any], report: dict[str, Any],
-                     round_value: dict[str, Any], blocking: list[dict[str, Any]]) -> None:
+                     round_value: dict[str, Any], blocking: list[dict[str, Any]],
+                     results: list[dict[str, Any]] | None = None) -> None:
         """Fold this round's report into the durable loop state.
 
         UAT carries no structured findings beyond the tests it writes, so there
@@ -429,8 +430,8 @@ class AdversarialStage:
             "## Summary\nAdversarial UAT did not pass after six fix/re-test rounds. Delivered as best "
             "effort: this is the last fix attempt, not a verified-clean pass.\n\n" +
             self.summary_line(loop) + "\n" + failures +
-            "\n\n## Still failing\nThese adversarial tests were not satisfied. Review the linked PR when "
-            "convenient; it was merged and promoted automatically like any other completed issue.\n"
+            "\n\n## Still failing\nThese adversarial tests were not satisfied. Automatic approval, "
+            "merging and promotion are held; review the linked PR and adjudicate the failing tests.\n"
         )
 
 
@@ -453,7 +454,8 @@ class AdversarialStageMixin:
         return self.read_state().get(stage.key)
 
     def initialize_stage(self, stage: AdversarialStage, completion: str, output: str,
-                         delivery_choice: dict[str, Any] | None = None) -> None:
+                         delivery_choice: dict[str, Any] | None = None,
+                         excluded_suites: list[str] | None = None) -> None:
         from swarm_issue_worker import iso_timestamp
         import dataclasses
         state = self.read_state()
@@ -469,7 +471,14 @@ class AdversarialStageMixin:
             "dispute": state.get(f"{stage.key}_initial_dispute", ""), "rounds": [],
             "capacity_start": ({self.choice.name: state["usage_at_start"]["remaining_percent"]}
                                if (state.get("usage_at_start") or {}).get("remaining_percent") is not None else {}),
-            "capacity_end": {}, "filed_findings": [], "filed_finding_details": [], "excluded_suites": [],
+            "capacity_end": {}, "filed_findings": [], "filed_finding_details": [],
+            # A prior stage's out-of-scope scope decision (a pre-existing,
+            # unrelated suite failure it already excluded from blocking) still
+            # describes the same repository state for a later stage of the
+            # same pipeline run. Without carrying it forward, a later stage
+            # would re-discover that same unrelated failure as its own blocker
+            # and burn its rounds on a bug the earlier stage already scoped out.
+            "excluded_suites": sorted(set(excluded_suites or [])),
             "findings": [], "advisory_findings": [], "fixed_findings": [], "status": "",
         })
 
@@ -713,6 +722,7 @@ class AdversarialStageMixin:
         # network) must never escape this loop: it would otherwise abort the
         # whole adversarial round from inside the stage loop, stalling the
         # original issue over a problem that isn't its own.
+        from ai_execution_history import sanitize_text
         from swarm_issue_worker import WorkerError, github_issue_url_from_output, iso_timestamp, log
 
         def find_existing_finding(digest: str, marker: str) -> dict[str, Any] | None:
@@ -738,10 +748,15 @@ class AdversarialStageMixin:
             marker = f"<!-- swarm-issue-worker:{stage.finding_marker_kind}:issue:{self.issue.number};id:{digest} -->"
             stored_title = finding["title"][:120]
             title = " ".join(stored_title.split())
+            # A finding's title can itself quote the vulnerability (a
+            # credential, a token) — the log is operator-visible output, not
+            # the filed issue body, so it goes through the same secret
+            # scrubber persisted history uses rather than the raw title.
+            safe_title = sanitize_text(title)
             details = loop.setdefault("filed_finding_details", [])
             existing_detail = next((item for item in details if item.get("marker") == marker), None)
             if marker in loop["filed_findings"] and existing_detail and existing_detail.get("url"):
-                log(f"Out-of-scope {stage.log_name} finding already filed for #{self.issue.number}: {title}")
+                log(f"Out-of-scope {stage.log_name} finding already filed for #{self.issue.number}: {safe_title}")
                 continue
             # A fresh-context tester in a later round rediscovering the same
             # underlying bug almost never reproduces round 0's exact wording,
@@ -755,7 +770,8 @@ class AdversarialStageMixin:
             )
             if reworded_duplicate:
                 log(f"Out-of-scope {stage.log_name} finding already filed for #{self.issue.number} "
-                    f"(reworded rediscovery of \"{reworded_duplicate.get('title')}\"): {reworded_duplicate.get('url')}")
+                    f"(reworded rediscovery of \"{sanitize_text(reworded_duplicate.get('title', ''))}\"): "
+                    f"{reworded_duplicate.get('url')}")
                 continue
             try:
                 if marker in loop["filed_findings"]:
@@ -770,7 +786,7 @@ class AdversarialStageMixin:
                         existing_detail["url"] = url
                     else:
                         details.append({"marker": marker, "title": stored_title, "url": url})
-                    log(f"Out-of-scope {stage.log_name} finding already filed for #{self.issue.number}: {url or title}")
+                    log(f"Out-of-scope {stage.log_name} finding already filed for #{self.issue.number}: {url or safe_title}")
                     self.save_stage(stage, loop)
                     self.history.update(
                         iso_timestamp(),
@@ -783,7 +799,7 @@ class AdversarialStageMixin:
                 already_filed = find_existing_finding(digest, marker)
                 if already_filed:
                     url = github_issue_url_from_output(str(already_filed.get("url", "")))
-                    log(f"Out-of-scope {stage.log_name} finding already filed for #{self.issue.number}: {url or title}")
+                    log(f"Out-of-scope {stage.log_name} finding already filed for #{self.issue.number}: {url or safe_title}")
                 else:
                     # A vulnerability class rediscovered while working a
                     # different issue carries a different marker, so the digest
@@ -796,7 +812,7 @@ class AdversarialStageMixin:
                     )
                     if open_duplicate:
                         log(f"Out-of-scope {stage.log_name} finding suppressed as a duplicate of the open "
-                            f"issue \"{open_duplicate['title']}\": {open_duplicate['url']}")
+                            f"issue \"{sanitize_text(open_duplicate['title'])}\": {open_duplicate['url']}")
                         continue
                     output = self.file_labelled_issue(
                         finding["title"][:120],
@@ -857,12 +873,20 @@ class AdversarialStageMixin:
                     return self.pause_adversarial()
                 self.choice = choice
                 self.update_state_for_choice(choice)
-                self.ensure_bot_auth()
-                self.prepare_adversarial_framework(stage, loop)
-                loop.update(active=True, stage_base=loop.pop("retry_stage_base", None) or self.git("rev-parse", "HEAD"), response=None)
-                self.save_stage(stage, loop)
-                log(stage.round_start_log(self.issue.number, loop))
-                stage.on_round_start(self, loop)
+                try:
+                    self.ensure_bot_auth()
+                    self.prepare_adversarial_framework(stage, loop)
+                    loop.update(active=True, stage_base=loop.pop("retry_stage_base", None) or self.git("rev-parse", "HEAD"), response=None)
+                    self.save_stage(stage, loop)
+                    log(stage.round_start_log(self.issue.number, loop))
+                    stage.on_round_start(self, loop)
+                except WorkerError as error:
+                    # Setup/auth/provider errors happen before any report is
+                    # even attempted, so the narrow report/session failure
+                    # checks below never see them. Record the failure here too
+                    # or a broken setup silently bypasses failure recording.
+                    self.record_stage_failure(stage, loop, str(error))
+                    raise
             if loop.get("response") is None:
                 # Every tester phase starts with a new CLI session. Only an
                 # interrupted *same phase* resumes its existing session.
@@ -907,6 +931,11 @@ class AdversarialStageMixin:
                         f"Invalid adversarial test result: {error}. Rejected edits were restored; "
                         f"diagnostic patch: {patch_path}"
                     ) from error
+                # A successfully parsed and validated report is a completed
+                # analysis attempt; a prior failed attempt's error must not go
+                # on masquerading as the stage's current verdict once a fresh
+                # attempt actually completes, whatever that attempt concludes.
+                loop.pop("review_error", None)
                 # The tester prompt explicitly permits citing a pre-existing,
                 # non-adversarial suite's ID in an out-of-scope finding ("If
                 # an existing suite fails for an unrelated reason ... report
@@ -963,7 +992,7 @@ class AdversarialStageMixin:
                     "started_at": loop["round_started"], "completed_at": completed,
                     "duration_seconds": max(0, (dt.datetime.fromisoformat(completed) - dt.datetime.fromisoformat(loop["round_started"])).total_seconds()),
                 }
-                stage.record_round(self, loop, report, round_value, blocking)
+                stage.record_round(self, loop, report, round_value, blocking, results)
                 # Do not append until the phase is durably complete; repeated
                 # reporting of this round is an upsert in the existing store.
                 self.history.adversarial_round(round_value)
@@ -1036,7 +1065,7 @@ class AdversarialStageMixin:
                 if previous is None:
                     continue
                 self.initialize_stage(stage, previous["completion"], previous["implementation_output"],
-                                      previous["delivery_choice"])
+                                      previous["delivery_choice"], previous.get("excluded_suites"))
                 loop = self.read_stage(stage)
             early = self.run_adversarial_stage(stage)
             if early is not None:
@@ -1054,7 +1083,14 @@ class AdversarialStageMixin:
         capped = next(((stage, loop) for stage, loop in finished
                        if loop.get("outcome") == "cap_hit"), None)
         if capped:
-            self.finalize_issue(last["completion"], capped[0].cap_hit_output(capped[1]))
+            stage, loop = capped
+            # A cap hit is not a verified-clean pass, so it must not enter the
+            # same automatic approve/merge/promote path a clean delivery does
+            # (see issue-branch-delivery.md). finalize_issue still owns the
+            # push/PR step, but with automation held it hands off to
+            # trusted-author adjudication instead of reporting a misleading
+            # "Completed".
+            self.finalize_issue(last["completion"], stage.cap_hit_output(loop), allow_automation=False)
         else:
             self.finalize_issue(last["completion"], finished[0][1]["implementation_output"])
         return ISSUE_COMPLETED_EXIT_CODE

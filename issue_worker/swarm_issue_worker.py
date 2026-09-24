@@ -5097,15 +5097,21 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         )
         return merge_sha
 
-    def finalize_issue(self, commit_sha: str, ai_output: str) -> None:
+    def finalize_issue(self, commit_sha: str, ai_output: str, *, allow_automation: bool = True) -> None:
         assert self.issue and self.choice
         base_sha = str(self.read_state().get("base_sha") or "")
         commits = list(reversed(self.git("rev-list", f"{base_sha}..{commit_sha}").splitlines()))
         files = self.git("diff", "--name-only", base_sha, commit_sha).splitlines()
-        pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha)
+        pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha, allow_automation=allow_automation)
         if commit_sha not in commits:
             commits.append(commit_sha)
         self.history.note("Commit and pull request delivery completed", iso_timestamp())
+        if not allow_automation:
+            # A cap-hit delivery is not a verified-clean pass: the PR and
+            # branch are retained for a trusted author to adjudicate rather
+            # than reported as a normal "Completed" (see issue-branch-delivery.md).
+            self.finalize_needs_input(ai_output, delivery=(pr_url, branch, commit_sha))
+            return
         usage_at_start = self.read_state().get("usage_at_start")
         pending = {
             "issue_number": self.issue.number,

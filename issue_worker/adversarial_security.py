@@ -111,8 +111,21 @@ def severity_counts(findings: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def finding_identity(finding: dict[str, Any]) -> str:
-    """How a rediscovery of the same vulnerability is recognised across rounds."""
+def finding_identity(finding: dict[str, Any]) -> tuple[str, ...] | str:
+    """How a rediscovery of the same vulnerability is recognised across rounds.
+
+    Keyed on the affected files, not the title: a fresh reviewer's wording for
+    the same vulnerability varies round to round, but which files it lives in
+    does not. Keying on title alone lets a reviewer's mere rewording of an
+    unresolved finding read as two different findings, one of which then
+    appears to "disappear" and get credited as fixed. A finding with no
+    identified files falls back to its normalized title, its only remaining
+    stable signal.
+    """
+    files = tuple(sorted({" ".join(str(path).split()).strip().lower()
+                          for path in finding.get("files", []) if str(path).strip()}))
+    if files:
+        return files
     return " ".join(str(finding.get("title") or "").split()).strip().lower()
 
 
@@ -192,8 +205,11 @@ class SecurityStage(AdversarialStage):
         report = parse_result(self.result_marker, output)
         report["in_scope"] = normalize_findings(report.get("in_scope", []), scope="in-scope")
         report["out_of_scope"] = normalize_findings(report.get("out_of_scope", []), scope="out-of-scope")
-        if not isinstance(report.get("summary", ""), str):
-            raise ValueError("Security review summary must be a string")
+        # An empty payload (e.g. bare `{}`) must not read as "analysis ran and
+        # found nothing" — a real review always has something to say, even a
+        # one-paragraph clean bill of health.
+        if not isinstance(report.get("summary", ""), str) or not str(report.get("summary") or "").strip():
+            raise ValueError("Security review summary must be a non-empty string")
         return report
 
     def blocking_findings(self, report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -208,7 +224,8 @@ class SecurityStage(AdversarialStage):
                 if finding["confidence"] in ACTIONABLE_CONFIDENCES]
 
     def record_round(self, worker, loop: dict[str, Any], report: dict[str, Any],
-                     round_value: dict[str, Any], blocking: list[dict[str, Any]]) -> None:
+                     round_value: dict[str, Any], blocking: list[dict[str, Any]],
+                     results: list[dict[str, Any]] | None = None) -> None:
         from swarm_issue_worker import log
         discovered = loop.setdefault("discovered_findings", [])
         fixed = loop.setdefault("fixed_findings", [])
@@ -225,11 +242,23 @@ class SecurityStage(AdversarialStage):
                 advisory.append(finding)
         # A fresh reviewer that no longer reports a previously blocking finding
         # is the verification that the fix worked — the fixer's own claim is
-        # never accepted as evidence.
+        # never accepted as evidence. But when the finding named its own
+        # reproduction suite, that suite still failing overrides the
+        # reviewer's silence: a failing regression test is stronger evidence
+        # of an unresolved vulnerability than a fresh reviewer not mentioning it.
         still_open = {finding_identity(finding) for finding in blocking}
-        newly_fixed = [item for item in discovered
-                       if finding_identity(item) not in still_open
-                       and not any(finding_identity(f) == finding_identity(item) for f in fixed)]
+        exit_codes = {str(result.get("id")): result.get("exit_code") for result in (results or [])}
+        newly_fixed = []
+        for item in discovered:
+            identity = finding_identity(item)
+            if identity in still_open:
+                continue
+            if any(finding_identity(f) == identity for f in fixed):
+                continue
+            suite_ids = item.get("suite_ids") or []
+            if suite_ids and any(exit_codes.get(sid, 1) != 0 for sid in suite_ids):
+                continue
+            newly_fixed.append(item)
         fixed.extend(newly_fixed)
         loop["open_findings"] = blocking
         loop["summary"] = str(report.get("summary") or "").strip()
@@ -260,6 +289,10 @@ class SecurityStage(AdversarialStage):
             "security_outcome": loop.get("outcome", ""),
             "security_round_count": loop.get("round", 0),
             "security_review_status": loop.get("status", ""),
+            # A completed round (successful or not) is the current verdict; an
+            # earlier failed attempt's error must not linger once this round
+            # writes its own outcome.
+            "security_review_error": loop.get("review_error", ""),
             "security_findings": self.findings_metadata(loop),
         }
 

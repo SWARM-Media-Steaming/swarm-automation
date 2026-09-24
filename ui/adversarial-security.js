@@ -9,11 +9,17 @@
 
   // A review that could not run and a review that ran and found nothing must
   // never render the same way, so an execution with no recorded status reads
-  // as "—" rather than silently as a pass.
+  // as "—" rather than silently as a pass. securityReviewStatus is the
+  // authoritative verdict whenever it is set — it is written on both the
+  // success path and the early-failure path (setup/auth/session failures
+  // before any round completes, where securityOutcome is never set at all).
+  // Only fall back to securityOutcome when no status was ever recorded: a
+  // known-but-unstatused outcome still must not silently read as blank/pass.
   function reviewStatus(record) {
+    if (record.securityReviewStatus) return record.securityReviewStatus;
     const outcome = record.securityOutcome;
     if (!outcome || outcome === "disabled") return "—";
-    return record.securityReviewStatus || "FAILED";
+    return "FAILED";
   }
 
   function roundCount(record) {

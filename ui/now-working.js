@@ -65,6 +65,21 @@
     return null;
   }
 
+  // The two terminal boundary logs every adversarial stage emits once its
+  // review either fails outright or reaches a verdict. Neither is a round
+  // update, so `adversarialRound` never matches them (it returns null once a
+  // stage's label matches but no round phrasing does) — they need their own
+  // parse so a failed or finished review does not keep showing as running.
+  function adversarialTerminal(message) {
+    for (const stage of ADVERSARIAL_STAGES) {
+      const failed = message.match(new RegExp(`^${stage.label} for issue #(\\d+): review failed — (.+)$`, "i"));
+      if (failed) return { stage, number: failed[1], type: "failed", reason: failed[2] };
+      const completed = message.match(new RegExp(`^${stage.label} for issue #(\\d+): review completed with status (\\S+)\\.$`, "i"));
+      if (completed) return { stage, number: completed[1], type: "completed", status: completed[2] };
+    }
+    return null;
+  }
+
   function normalizeRepo(value) {
     return String(value || "").trim().replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
   }
@@ -189,6 +204,22 @@
       } else if ((adversarial = adversarialRound(message))) {
         updateAdversarial(entry, repository, adversarial.number, adversarial.round,
           adversarial.maximum, adversarial.title, adversarial.phase, adversarial.stage.kind);
+      } else if ((adversarial = adversarialTerminal(message))) {
+        const key = `${adversarial.stage.kind}:${repository}#${adversarial.number}`;
+        if (adversarial.type === "failed") {
+          const item = items.get(key) || [...items.values()].find((candidate) =>
+            candidate.kind === adversarial.stage.kind && String(candidate.number) === adversarial.number
+            && (!repository || candidate.repository === repository));
+          if (item) {
+            item.state = "error";
+            item.phase = adversarial.reason;
+          }
+        } else {
+          // A finished review (any verdict) is no longer active work; drop
+          // its row rather than leave it looking like it is still running.
+          clear((item) => item.kind === adversarial.stage.kind && String(item.number) === adversarial.number
+            && (!repository || item.repository === repository));
+        }
       } else if ((match = message.match(/(?:Created issue branch|Continuing issue|Recreated interrupted issue branch).*?(?:#|issue-)(\d+)/i))) {
         const item = find(repository, match[1]);
         if (item) item.phase = "Issue branch ready";

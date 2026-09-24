@@ -859,7 +859,14 @@ class ExecutionHistoryRepository:
         """
         repository_clause, repository_params = _repository_filter(repositories)
         clause, search_params = _search_filter(search)
-        conditions = ["security_outcome <> ''", "security_outcome <> 'disabled'"]
+        # A review attempt is counted by whether a verdict was recorded at
+        # all, not by whether a round completed: a reviewer failure writes
+        # security_review_status without ever setting security_outcome (that
+        # column only exists for rounds that actually reached an outcome), so
+        # filtering on security_outcome silently drops failed attempts from
+        # the failure rate. security_review_status stays '' for both "this
+        # stage never ran" and "disabled", so a single check on it covers both.
+        conditions = ["security_review_status <> ''"]
         if repository_clause:
             conditions.insert(0, repository_clause)
         where = " WHERE " + " AND ".join(conditions) + clause
