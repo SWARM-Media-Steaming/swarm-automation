@@ -1344,6 +1344,62 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_integration_branch_ruleset_list_response_shape.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-integration-branch-ruleset-list-response-shape",
+      "name": "Existing deletion ruleset is not misread as unprotected due to GitHub list-endpoint response shape",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_integration_branch_ruleset_list_response_shape.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_integration_branch_ruleset_summary_trust_bypass.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-integration-branch-ruleset-summary-trust-bypass",
+      "name": "Same-named summary-shaped ruleset is verified, not blindly trusted, before being treated as an installed deletion safeguard",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_integration_branch_ruleset_summary_trust_bypass.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

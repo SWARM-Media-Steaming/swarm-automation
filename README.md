@@ -119,13 +119,14 @@ the branch through the issue so it appears as a linked branch in the issue's
 Development section. AI commit subjects start with the tool
 identifier, such as `[codex]`, and the worker refuses to push an untagged commit.
 
-When the worker creates an AI integration branch on GitHub, it first creates a
-narrow, active repository ruleset that blocks deletion of that branch. It does
+On GitHub, the worker ensures a narrow, active repository ruleset blocks
+deletion of the AI integration branch, including branches that already exist.
+It does
 not restrict normal pushes or pull requests. Deleting the branch remains
 possible, but a repository administrator must first deliberately disable or
 remove SWARM's named safeguard. The GitHub CLI identity that starts this first
 run needs repository-administrator access; if it does not, SWARM stops before
-pushing the new integration branch so the branch is never created unprotected.
+continuing so the integration branch is never used without the safeguard.
 
 Issue pull requests target `ai-main`; automatic approval and merging are both
 off by default. An issue
