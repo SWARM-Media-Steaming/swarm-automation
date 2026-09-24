@@ -230,6 +230,41 @@ class AdversarialUatTests(unittest.TestCase):
             "title": "Separate parser bug", "url": "https://example.invalid/issues/182",
         }])
 
+    def test_reworded_rediscovery_of_a_prior_finding_is_not_refiled(self):
+        # Issue #222: each tester round runs with fresh context and never sees
+        # a prior round's exact finding wording, so a later round rediscovering
+        # the same real bug produces a different title/body and thus a
+        # different exact-digest marker. Dedup must not depend solely on that
+        # digest matching byte-for-byte.
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        first = {"title": "Config parser crashes on empty YAML",
+                 "body": "Repro: run parse_config() with an empty file. Traceback at line 42."}
+        second = {"title": "Config parser crashes on empty YAML file",
+                  "body": 'Steps to reproduce: call parse_config("") -- raises KeyError at config.py:42.'}
+        with mock.patch.object(self.worker.github, "gh", side_effect=self.gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [first])
+            self.worker.file_adversarial_findings(loop, [second])
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        self.assertEqual(len(creates), 1)
+        self.assertIn("reworded rediscovery", output.getvalue())
+        details = self.worker.read_state()["adversarial"]["filed_finding_details"]
+        self.assertEqual(len(details), 1)
+
+    def test_unrelated_findings_are_both_filed(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        first = {"title": "Config parser crashes on empty YAML", "body": "Repro details."}
+        second = {"title": "Sidebar icon misaligned on hover", "body": "Unrelated UI glitch."}
+        with mock.patch.object(self.worker.github, "gh", side_effect=self.gh):
+            self.worker.file_adversarial_findings(loop, [first])
+            self.worker.file_adversarial_findings(loop, [second])
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        self.assertEqual(len(creates), 2)
+        details = self.worker.read_state()["adversarial"]["filed_finding_details"]
+        self.assertEqual(len(details), 2)
+
     def test_malformed_gh_create_output_is_not_logged_as_a_successful_filing(self):
         self.prepare()
         finding = {"title": "Separate parser bug", "body": "Reproduction details."}

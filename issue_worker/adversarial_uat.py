@@ -24,6 +24,28 @@ RESULT_MARKER = "SWARM_ADVERSARIAL_RESULT:"
 CAP_HIT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-cap-hit -->"
 CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing after six fix/re-test rounds. "
                      "Automation is held; review the failing tests and adjudicate on the linked issue.\n\n")
+# A later round's fresh-context tester rediscovering an earlier round's
+# out-of-scope bug almost never reproduces the same title/body wording, so an
+# exact-digest marker match cannot dedup it. Title token overlap is a coarse
+# but wording-independent stand-in: it survives rewording ("crashes on empty
+# YAML" vs "crashes on empty YAML file") without a semantic model. The
+# threshold trades a few merged near-duplicates for not spamming GitHub with
+# repeat issues for the same bug.
+FINDING_TITLE_SIMILARITY_THRESHOLD = 0.6
+FINDING_TITLE_STOPWORDS = {
+    "a", "an", "and", "are", "at", "by", "for", "in", "is", "of", "on", "or", "the", "to", "with",
+}
+
+
+def _finding_title_tokens(title: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]+", title.lower()) if t not in FINDING_TITLE_STOPWORDS}
+
+
+def _finding_title_similarity(a: str, b: str) -> float:
+    tokens_a, tokens_b = _finding_title_tokens(a), _finding_title_tokens(b)
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
 # Framework wiring is the only non-test code a tester may scaffold. This list
 # is deliberately explicit: adding a test framework must not grant product edits.
 FRAMEWORK_FILES = {
@@ -411,6 +433,21 @@ class AdversarialUatMixin:
             existing_detail = next((item for item in details if item.get("marker") == marker), None)
             if marker in loop["filed_findings"] and existing_detail and existing_detail.get("url"):
                 log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {title}")
+                continue
+            # A fresh-context tester in a later round rediscovering the same
+            # underlying bug almost never reproduces round 0's exact wording,
+            # so the digest above will differ. Check title similarity against
+            # everything already filed for this issue (accumulated across
+            # rounds and resumes in `details`) before trusting the digest.
+            reworded_duplicate = next(
+                (item for item in details
+                 if item.get("url") and _finding_title_similarity(title, item.get("title", ""))
+                 >= FINDING_TITLE_SIMILARITY_THRESHOLD),
+                None,
+            )
+            if reworded_duplicate:
+                log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number} "
+                    f"(reworded rediscovery of \"{reworded_duplicate.get('title')}\"): {reworded_duplicate.get('url')}")
                 continue
             try:
                 if marker in loop["filed_findings"]:
