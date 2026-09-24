@@ -530,6 +530,28 @@
     },
     {
       "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_now_working_pinned_continuations.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-pinned-continuations",
+      "name": "Now Working restores model and effort from pinned continuation logs",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "tests/adversarial/test_now_working_pinned_continuations.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
         "python3",
         "-m",
         "unittest",
