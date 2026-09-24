@@ -1568,6 +1568,35 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_branch_creation_ruleset_mocking.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-279-branch-creation-ruleset-mocking",
+      "name": "Branch-creation tests omit integration ruleset API fixtures (issue #279)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_branch_creation_ruleset_mocking.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
