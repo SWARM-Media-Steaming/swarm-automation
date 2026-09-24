@@ -789,6 +789,31 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_ai_agents_parallel_activity_completeness.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-parallel-activity-completeness",
+      "name": "AI agents panel: parallel repository exits are isolated and every concurrent work location is identified",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "ui/logging.js",
+          "ui/now-working.js",
+          "issue_worker/install_swarm_issue_cron.py",
+          "tests/adversarial/test_ai_agents_parallel_activity_completeness.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
