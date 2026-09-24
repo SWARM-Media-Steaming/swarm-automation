@@ -574,6 +574,28 @@
     },
     {
       "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_now_working_cold_restart_resume.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-cold-restart-resume",
+      "name": "Cold-restart quota restores resume matching Now Working and UAT rows",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "tests/adversarial/test_now_working_cold_restart_resume.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
         "python3",
         "-m",
         "unittest",

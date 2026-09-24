@@ -185,3 +185,24 @@ test("keeps adversarial UAT progress synchronized with an issue quota pause and 
   assert.equal(adversarial.state, "running");
   assert.equal(adversarial.title, "Fix/re-test round 3 of 6");
 });
+
+test("clears a quota pause after a cold-restart session restore", () => {
+  const baseLogs = [
+    line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+    line("Adversarial UAT for issue #84: starting re-test for round 3 of 6."),
+    line("Paused issue #84 because Codex usage is unavailable; session abc was preserved."),
+  ];
+
+  for (const restored of [
+    "Codex restored session abc for issue #84.",
+    "Codex restored quota-paused issue #84 on the existing branch.",
+  ]) {
+    const rows = deriveNowWorking({
+      workerState: "running",
+      repositories: [repo],
+      logs: [...baseLogs, line(restored)],
+    });
+    assert.equal(rows.find((row) => row.kind === "issue").state, "running");
+    assert.equal(rows.find((row) => row.kind === "adversarial").state, "running");
+  }
+});
