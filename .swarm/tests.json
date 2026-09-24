@@ -801,6 +801,35 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_qualifier_insertion_false_positive.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-qualifier-insertion-false-positive",
+      "name": "Reworded-rediscovery dedup does not suppress a distinct finding whose title only inserts one qualifying word",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_qualifier_insertion_false_positive.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
