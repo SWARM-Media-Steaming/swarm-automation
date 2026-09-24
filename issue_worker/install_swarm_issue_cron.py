@@ -726,6 +726,13 @@ class Runner:
                 if self.stop_requested or state.retired:
                     break
                 while not self.stop_requested and not state.retired:
+                    if self.transcode_active():
+                        label = str(state.repo["label"])
+                        self.log(
+                            f"{label}: a SWARM media transcode is active; deferring "
+                            "this repository's next check until it clears."
+                        )
+                        break
                     status = self.work_repo(state.repo)
                     if (
                         self.args.schedule_mode == "continuous"
