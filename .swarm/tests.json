@@ -1012,6 +1012,35 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_provider_usage_probe_scheduling_isolation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-provider-usage-probe-scheduling-isolation",
+      "name": "A failed quota probe cannot block fresh scheduling on healthy providers",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_provider_usage_probe_scheduling_isolation.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
