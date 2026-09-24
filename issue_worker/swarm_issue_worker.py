@@ -30,6 +30,7 @@ import dataclasses
 import datetime as dt
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -5872,6 +5873,24 @@ def check_usage(config: Config) -> int:
                 # not discard the already-collected results for every other
                 # enabled provider.
                 usage = ProviderUsage(2)
+            if usage.status == 2:
+                # Keep unavailable rows canonical. In particular, never let
+                # stale or malformed probe data leak through this JSON
+                # boundary alongside an unavailable status.
+                usage = ProviderUsage(2)
+            elif (
+                usage.status not in (0, 1)
+                or isinstance(usage.remaining_percent, bool)
+                or not isinstance(usage.remaining_percent, (int, float))
+                or not math.isfinite(usage.remaining_percent)
+                or not 0 <= usage.remaining_percent <= 100
+            ):
+                # Python's JSON encoder accepts NaN and infinities by default,
+                # while serde_json correctly rejects them. A usable/low-quota
+                # row also requires an actual percentage in its valid domain.
+                # Degrade only the malformed provider so healthy rows remain
+                # available to the consolidated panel.
+                usage = ProviderUsage(2)
             providers.append(
                 {
                     "provider": spec.key,
@@ -5881,7 +5900,7 @@ def check_usage(config: Config) -> int:
                     "detail": usage.detail,
                 }
             )
-    print(json.dumps({"providers": providers}))
+    print(json.dumps({"providers": providers}, allow_nan=False))
     return 0
 
 
