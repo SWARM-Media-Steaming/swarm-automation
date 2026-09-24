@@ -12,10 +12,13 @@ stays a strictly increasing plain semver (`MAJOR.MINOR.PATCH`).
   On `main` that means every push: a direct commit, or the merge commit an
   `ai-main` → `main` promotion lands as (however many issue commits it
   carries). `ai-main` publishes betas as `<version>-beta.<run>`.
-- `scripts/compute_version.py` does the arithmetic, and the release workflow
-  calls it. It needs full git history (`fetch-depth: 0`). `Cargo.toml` and
-  `tauri.conf.json` versions are placeholders the workflow overwrites — do not
-  keep them in sync by hand and do not touch `Cargo.lock` for a version.
+- `scripts/compute_version.py` does the arithmetic; `.github/workflows/ci.yml`
+  only runs its test suite (`test_compute_version`), it does not call the
+  script itself — GitHub Actions no longer builds or publishes releases (that
+  moves to the web long term). Whatever calls the script needs full git
+  history (`fetch-depth: 0`). `Cargo.toml` and `tauri.conf.json` versions are
+  placeholders — do not hand-sync them and do not touch `Cargo.lock` for a
+  version.
 
 ### Who changes `VERSION`
 

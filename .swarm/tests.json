@@ -1400,6 +1400,33 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ci_without_releases.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ci-without-releases",
+      "name": "CI retains all test gates while GitHub release stages are absent",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".github/workflows/ci.yml",
+          "tests/adversarial/test_ci_without_releases.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
