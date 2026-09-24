@@ -634,6 +634,29 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_repository_tabs_wiring.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-repository-tabs-wiring",
+      "name": "Repository page tab wiring: REPOSITORY_TABS matches markup, tabs/panels linked both ways, no duplicate config bindings",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "tests/adversarial/test_repository_tabs_wiring.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
