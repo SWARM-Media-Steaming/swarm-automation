@@ -3882,21 +3882,15 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         integ = self.config.integration_branch
         self.git("fetch", remote, check=False)
         base_head = self.synchronize_base_branch()
-        # A missing remote ref means this worker is about to create the
-        # integration branch. Install its deletion safeguard before the first
-        # push, so there is never a remotely-created worker branch without the
-        # corresponding deliberate-delete gate.
-        creating_remote_integration_branch = not self.git_ok(
-            "show-ref", "--verify", f"refs/remotes/{remote}/{integ}"
-        )
-
         if not self.git_ok("show-ref", "--verify", f"refs/heads/{integ}"):
             if self.git_ok("show-ref", "--verify", f"refs/remotes/{remote}/{integ}"):
                 self.git("branch", integ, f"{remote}/{integ}")
             else:
                 self.git("branch", integ, base)
                 log(f"Created integration branch {integ} from {base}.")
-        if creating_remote_integration_branch and self.remote_is_github_host():
+        # Reconcile the safeguard on every GitHub run, including existing
+        # integration branches that predate the safeguard.
+        if self.remote_is_github_host():
             self.protect_new_integration_branch(integ)
         if self.git("branch", "--show-current") != integ:
             if self.worktree_status():
@@ -3936,8 +3930,8 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         return head
 
     def protect_new_integration_branch(self, branch: str) -> None:
-        """Install SWARM's narrow, managed deletion safeguard for a new
-        integration branch.
+        """Ensure SWARM's narrow, managed deletion safeguard is installed for
+        the integration branch.
 
         A repository ruleset leaves normal pushes, pull requests, and existing
         branch policy untouched. An administrator can still deliberately
@@ -3952,20 +3946,20 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             rulesets = self.github.api_list(endpoint)
         except json.JSONDecodeError as error:
             raise WorkerError(
-                f"Could not verify the deletion safeguard for new integration branch {branch}: {error}"
+                f"Could not verify the deletion safeguard for integration branch {branch}: {error}"
             ) from error
         except WorkerError as error:
             if str(error) == "GitHub returned a non-list response":
                 raise WorkerError(
-                    f"Could not verify the deletion safeguard for new integration branch {branch}: "
+                    f"Could not verify the deletion safeguard for integration branch {branch}: "
                     "GitHub returned an unexpected ruleset list"
                 ) from error
             raise WorkerError(
-                f"Could not verify the deletion safeguard for new integration branch {branch}: {error}"
+                f"Could not verify the deletion safeguard for integration branch {branch}: {error}"
             ) from error
         if not isinstance(rulesets, list):
             raise WorkerError(
-                f"Could not verify the deletion safeguard for new integration branch {branch}: "
+                f"Could not verify the deletion safeguard for integration branch {branch}: "
                 "GitHub returned an unexpected ruleset list"
             )
         existing = next(
@@ -4013,7 +4007,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             )
         except WorkerError as error:
             raise WorkerError(
-                f"Could not install the deletion safeguard for new integration branch {branch}. "
+                f"Could not install the deletion safeguard for integration branch {branch}. "
                 "Authorize the configured GitHub CLI identity as a repository administrator, then retry: "
                 f"{error}"
             ) from error

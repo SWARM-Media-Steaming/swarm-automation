@@ -3500,6 +3500,18 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.protect_new_integration_branch("ai-main")
         github.assert_called_once()
 
+    def test_existing_integration_branch_gets_a_missing_deletion_ruleset(self) -> None:
+        with (
+            mock.patch.object(self.worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(self.worker.github, "gh", side_effect=["[]", "{}"]) as github,
+        ):
+            self.worker.synchronize_integration_branch()
+
+        self.assertEqual(github.call_count, 2)
+        ruleset = json.loads(github.call_args_list[1].kwargs["input_text"])
+        self.assertEqual(ruleset["conditions"]["ref_name"]["include"], ["refs/heads/ai-main"])
+        self.assertEqual(ruleset["rules"], [{"type": "deletion"}])
+
     def test_new_integration_branch_is_not_pushed_when_safeguard_creation_fails(self) -> None:
         self.git("switch", "-q", "main")
         self.git("branch", "-D", "ai-main")
