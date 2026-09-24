@@ -213,6 +213,41 @@ and live `repos.json` reloads are supervisor concerns and must not reintroduce
 a shared completion barrier. `--once` remains finite and uses `run_cycle` so
 the caller can receive one aggregate exit status.
 
+## Adversarial agents share one loop
+
+Pre-delivery verification is an open set of adversarial agents, not a single
+UAT feature. The durable loop — round counting, provider choice and dynamic
+routing, quota pause/resume, framework bootstrap, edit validation, out-of-scope
+finding dedup and filing, and hand-off to delivery — lives **once** in
+`issue_worker/adversarial_core.py`. `AdversarialStage` describes one agent;
+`AdversarialStageMixin` runs any of them.
+
+Today there are two stages, each its own repository setting, run in this order
+when both are on:
+
+| | `adversarial_uat.py` | `adversarial_security.py` |
+| --- | --- | --- |
+| Setting | `adversarial_uat_enabled` | `adversarial_security_enabled` |
+| State key | `adversarial` | `adversarial_security` |
+| Test root | `tests/adversarial/` | `tests/adversarial/security/` |
+| Suite origin | `adversarial` | `adversarial-security` |
+| Result marker | `SWARM_ADVERSARIAL_RESULT:` | `SWARM_SECURITY_RESULT:` |
+| Finding label | `adversarial-uat` | `adversarial-security` |
+| Verdict | suite exit codes | suite exit codes **and** structured in-scope findings |
+
+Adding a third agent should be a new `AdversarialStage` subclass, an entry in
+`ADVERSARIAL_STAGES` and `Worker.adversarial_stages()`, a `RepoConfig` flag
+plus its `--…-enabled` argument, and a UI toggle — not a second copy of the
+loop. Anything that treats `"adversarial"` as a literal state key, suite
+origin, or log prefix is a latent bug; use the stage. The rules files
+`.claude/rules/adversarial-uat-testing.md` and
+`.claude/rules/adversarial-security-testing.md` are the behavioural contract.
+
+`adversarial_uat.py` re-exports the core's shared names (`MAX_ROUNDS`,
+`DEFINITION`, `RESULT_MARKER`, `read_definition`, `run_suites`, …) because
+registered adversarial suites under `tests/adversarial/` import them from
+there; keep those aliases when moving code around.
+
 ## Test suite
 
 `src/command_tests.rs` (registered from `src/main.rs` via `#[path]`)

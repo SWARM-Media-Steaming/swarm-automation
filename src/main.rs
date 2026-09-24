@@ -16,7 +16,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 11] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 13] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
@@ -25,6 +25,8 @@ const REQUIRED_WORKER_RESOURCES: [&str; 11] = [
     "grok_rate_limits.py",
     "ai_execution_history.py",
     "ai_test_assist.py",
+    "adversarial_core.py",
+    "adversarial_security.py",
     "adversarial_uat.py",
     "issue_images.py",
     "handoff_context.py",
@@ -1001,6 +1003,12 @@ fn repo_worker_args(
             "--no-adversarial-uat-enabled"
         }
         .into(),
+        if repo.adversarial_security_enabled {
+            "--adversarial-security-enabled"
+        } else {
+            "--no-adversarial-security-enabled"
+        }
+        .into(),
         if repo.update_claude_assets_enabled {
             "--update-claude-assets-enabled"
         } else {
@@ -1078,6 +1086,21 @@ struct AiExecutionRecord {
     adversarial_rounds: Vec<serde_json::Value>,
     #[serde(default)]
     adversarial_filed_findings: Vec<serde_json::Value>,
+    /// Adversarial cybersecurity review. `security_review_status` is
+    /// deliberately separate from `security_outcome`: a review that could not
+    /// execute must never render like one that ran and found nothing.
+    #[serde(default)]
+    security_outcome: String,
+    #[serde(default)]
+    security_review_status: String,
+    #[serde(default)]
+    security_review_error: String,
+    #[serde(default)]
+    security_round_count: i64,
+    #[serde(default)]
+    security_findings: serde_json::Value,
+    #[serde(default)]
+    security_filed_findings: Vec<serde_json::Value>,
     execution_id: String,
     repository: String,
     issue_number: i64,
@@ -1152,6 +1175,8 @@ const EXECUTION_HISTORY_PAGE_SIZE: i64 = 10;
 struct ExecutionHistoryPage {
     #[serde(default)]
     adversarial: serde_json::Value,
+    #[serde(default)]
+    security: serde_json::Value,
     records: Vec<AiExecutionRecord>,
     total: i64,
     offset: i64,
@@ -1222,6 +1247,7 @@ fn execution_history_query_args(
 fn empty_execution_history_page() -> ExecutionHistoryPage {
     ExecutionHistoryPage {
         adversarial: serde_json::Value::Null,
+        security: serde_json::Value::Null,
         records: Vec::new(),
         total: 0,
         offset: 0,

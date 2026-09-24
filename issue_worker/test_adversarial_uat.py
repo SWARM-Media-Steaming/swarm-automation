@@ -558,7 +558,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertNotIn("independent adversarial tester", prompt)
         self.assertIn("read-only", prompt)
 
-    def test_history_migration_four_is_additive_idempotent_and_rounds_cascade(self):
+    def test_history_migration_five_is_additive_idempotent_and_rounds_cascade(self):
         self.prepare()
         repository = self.worker.history.repository
         execution = self.worker.history.execution_id
@@ -572,7 +572,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(rows[0]["tester_provider"], "Grok")
         self.assertEqual(repository.adversarial_summary(self.worker.config.github_repository)["averageRounds"], 3)
         with repository.connect() as database:
-            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3, 4})
+            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3, 4, 5})
             database.execute("DELETE FROM ai_executions WHERE execution_id = ?", (execution,))
             self.assertEqual(database.execute("SELECT COUNT(*) FROM adversarial_rounds").fetchone()[0], 0)
 

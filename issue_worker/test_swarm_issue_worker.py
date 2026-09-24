@@ -912,7 +912,10 @@ class WorkerTestCase(unittest.TestCase):
             json.loads(page_buffer.getvalue()),
             {"records": [], "total": 0, "offset": 0, "limit": 10,
              "adversarial": {"loops": 0, "averageRounds": None, "cleanFirstPassPercent": None,
-                             "capHitPercent": None, "averageCapacityConsumedPercent": None, "testsAdded": 0}},
+                             "capHitPercent": None, "averageCapacityConsumedPercent": None, "testsAdded": 0},
+             "security": {"reviews": 0, "averageRounds": None, "passPercent": None,
+                          "fixedPercent": None, "findingsCreatedPercent": None, "failedPercent": None,
+                          "findingsFound": 0, "findingsFixed": 0, "testsAdded": 0}},
         )
 
     def test_execution_history_page_fetches_ten_records_and_filters_in_sqlite(self) -> None:

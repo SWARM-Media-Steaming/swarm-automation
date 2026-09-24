@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -60,6 +60,8 @@ _JSON_COLUMNS = (
     "warnings_errors",
     "routing_decision",
     "adversarial_filed_findings",
+    "security_findings",
+    "security_filed_findings",
 )
 
 # The AI platform that graded and routed an issue, and the one that was picked
@@ -97,6 +99,34 @@ _MIGRATION_4_COLUMNS = (
     ("adversarial_filed_findings", "TEXT NOT NULL DEFAULT '[]'"),
 )
 
+# Migration 5 adds the adversarial cybersecurity review alongside UAT. The two
+# stages share one loop (``adversarial_core.py``) and therefore one round
+# table; ``stage`` is what tells a UAT round apart from a security round, so
+# the table's uniqueness moves from (execution, round) to
+# (execution, stage, round) and the table has to be rebuilt to widen it.
+# ``security_review_status`` is deliberately separate from
+# ``security_outcome``: a review that could not execute must never be
+# indistinguishable from one that ran and found nothing.
+_MIGRATION_5_COLUMNS = (
+    ("security_outcome", "TEXT NOT NULL DEFAULT ''"),
+    ("security_review_status", "TEXT NOT NULL DEFAULT ''"),
+    ("security_review_error", "TEXT NOT NULL DEFAULT ''"),
+    ("security_round_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("security_findings", "TEXT NOT NULL DEFAULT '{}'"),
+    ("security_filed_findings", "TEXT NOT NULL DEFAULT '[]'"),
+)
+
+# Every value ``security_review_status`` may hold. ``""`` means the stage never
+# ran for this work-round. ``FAILED`` covers both a review that could not
+# execute and one that ended with unresolved findings — the accompanying
+# ``security_outcome``/``security_review_error`` say which.
+SECURITY_REVIEW_STATUSES = (
+    "PASS",
+    "FIXED",
+    "FINDINGS_CREATED",
+    "FAILED",
+)
+
 # Every value ``adversarial_outcome`` may hold. ``""`` means the work-round
 # predates the loop or never reached it; ``disabled`` means it ran with the
 # setting off. The loop in ``adversarial_uat.py`` writes these outcomes.
@@ -107,7 +137,13 @@ ADVERSARIAL_OUTCOMES = (
     "disabled",
 )
 
+#: Which adversarial agent produced a round row. ``uat`` is the historical
+#: default so rows written before the cybersecurity stage existed keep meaning
+#: exactly what they meant.
+ADVERSARIAL_STAGE_SLUGS = ("uat", "security")
+
 _ADVERSARIAL_ROUND_COLUMNS = (
+    "stage",
     "round_number",
     "fixer_provider",
     "fixer_model",
@@ -122,6 +158,10 @@ _ADVERSARIAL_ROUND_COLUMNS = (
     "started_at",
     "completed_at",
     "duration_seconds",
+    "findings_found",
+    "findings_fixed",
+    "findings_filed",
+    "severity_counts",
 )
 
 _SECRET_PATTERNS = (
@@ -346,10 +386,14 @@ class ExecutionHistoryRepository:
                         )
                 database.executescript(
                     """
+                    -- Created in the widened, stage-aware shape migration 5
+                    -- introduced, so a database that first appears after that
+                    -- migration never needs the rebuild below.
                     CREATE TABLE IF NOT EXISTS adversarial_rounds (
                         round_id TEXT PRIMARY KEY,
                         execution_id TEXT NOT NULL
                             REFERENCES ai_executions(execution_id) ON DELETE CASCADE,
+                        stage TEXT NOT NULL DEFAULT 'uat',
                         round_number INTEGER NOT NULL,
                         fixer_provider TEXT NOT NULL DEFAULT '',
                         fixer_model TEXT NOT NULL DEFAULT '',
@@ -364,10 +408,14 @@ class ExecutionHistoryRepository:
                         started_at TEXT NOT NULL DEFAULT '',
                         completed_at TEXT NOT NULL DEFAULT '',
                         duration_seconds REAL,
-                        UNIQUE(execution_id, round_number)
+                        findings_found INTEGER NOT NULL DEFAULT 0,
+                        findings_fixed INTEGER NOT NULL DEFAULT 0,
+                        findings_filed INTEGER NOT NULL DEFAULT 0,
+                        severity_counts TEXT NOT NULL DEFAULT '{}',
+                        UNIQUE(execution_id, stage, round_number)
                     );
                     CREATE INDEX IF NOT EXISTS adversarial_rounds_execution_idx
-                        ON adversarial_rounds(execution_id, round_number);
+                        ON adversarial_rounds(execution_id, stage, round_number);
                     """
                 )
                 database.execute(
@@ -388,6 +436,76 @@ class ExecutionHistoryRepository:
                 database.execute(
                     "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                     (4,),
+                )
+            if 5 not in applied and 5 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(ai_executions)")
+                }
+                for name, definition in _MIGRATION_5_COLUMNS:
+                    if name not in columns:
+                        database.execute(
+                            f"ALTER TABLE ai_executions ADD COLUMN {name} {definition}"
+                        )
+                round_columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(adversarial_rounds)")
+                }
+                if round_columns and "stage" not in round_columns:
+                    # SQLite cannot widen a table-level UNIQUE constraint in
+                    # place, and (execution_id, round_number) has to become
+                    # (execution_id, stage, round_number) or a security round 0
+                    # would collide with the UAT round 0 of the same execution.
+                    # Rebuild, backfilling every existing row as a UAT round.
+                    database.executescript(
+                        """
+                        CREATE TABLE adversarial_rounds_v5 (
+                            round_id TEXT PRIMARY KEY,
+                            execution_id TEXT NOT NULL
+                                REFERENCES ai_executions(execution_id) ON DELETE CASCADE,
+                            stage TEXT NOT NULL DEFAULT 'uat',
+                            round_number INTEGER NOT NULL,
+                            fixer_provider TEXT NOT NULL DEFAULT '',
+                            fixer_model TEXT NOT NULL DEFAULT '',
+                            tester_provider TEXT NOT NULL DEFAULT '',
+                            tester_model TEXT NOT NULL DEFAULT '',
+                            tests_added INTEGER NOT NULL DEFAULT 0,
+                            tests_modified INTEGER NOT NULL DEFAULT 0,
+                            tests_failing_before INTEGER NOT NULL DEFAULT 0,
+                            tests_failing_after INTEGER NOT NULL DEFAULT 0,
+                            disputed INTEGER NOT NULL DEFAULT 0,
+                            dispute_resolution TEXT NOT NULL DEFAULT '',
+                            started_at TEXT NOT NULL DEFAULT '',
+                            completed_at TEXT NOT NULL DEFAULT '',
+                            duration_seconds REAL,
+                            findings_found INTEGER NOT NULL DEFAULT 0,
+                            findings_fixed INTEGER NOT NULL DEFAULT 0,
+                            findings_filed INTEGER NOT NULL DEFAULT 0,
+                            severity_counts TEXT NOT NULL DEFAULT '{}',
+                            UNIQUE(execution_id, stage, round_number)
+                        );
+                        INSERT INTO adversarial_rounds_v5 (
+                            round_id, execution_id, stage, round_number, fixer_provider,
+                            fixer_model, tester_provider, tester_model, tests_added,
+                            tests_modified, tests_failing_before, tests_failing_after,
+                            disputed, dispute_resolution, started_at, completed_at,
+                            duration_seconds
+                        )
+                        SELECT round_id, execution_id, 'uat', round_number, fixer_provider,
+                               fixer_model, tester_provider, tester_model, tests_added,
+                               tests_modified, tests_failing_before, tests_failing_after,
+                               disputed, dispute_resolution, started_at, completed_at,
+                               duration_seconds
+                        FROM adversarial_rounds;
+                        DROP TABLE adversarial_rounds;
+                        ALTER TABLE adversarial_rounds_v5 RENAME TO adversarial_rounds;
+                        CREATE INDEX IF NOT EXISTS adversarial_rounds_execution_idx
+                            ON adversarial_rounds(execution_id, stage, round_number);
+                        """
+                    )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (5,),
                 )
 
     def create(self, start: ExecutionStart, started_at: str) -> str:
@@ -516,6 +634,12 @@ class ExecutionHistoryRepository:
             "adversarial_outcome",
             "capacity_consumed_percent",
             "adversarial_filed_findings",
+            "security_outcome",
+            "security_review_status",
+            "security_review_error",
+            "security_round_count",
+            "security_findings",
+            "security_filed_findings",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -524,8 +648,10 @@ class ExecutionHistoryRepository:
         for key, value in fields.items():
             if key in {"files_changed", "commit_shas", "operational_notes", "warnings_errors"}:
                 serialized[key] = json.dumps(sanitize_values(value))
-            elif key == "adversarial_filed_findings":
+            elif key in {"adversarial_filed_findings", "security_filed_findings"}:
                 serialized[key] = _serialize_adversarial_filed_findings(value)
+            elif key == "security_findings":
+                serialized[key] = _serialize_security_findings(value)
             elif key == "routing_decision":
                 serialized[key] = _serialize_routing(value)
             elif isinstance(value, str):
@@ -621,14 +747,21 @@ class ExecutionHistoryRepository:
         for column in _ADVERSARIAL_ROUND_COLUMNS:
             value = round_values.get(column)
             if column in {"round_number", "tests_added", "tests_modified",
-                          "tests_failing_before", "tests_failing_after"}:
+                          "tests_failing_before", "tests_failing_after",
+                          "findings_found", "findings_fixed", "findings_filed"}:
                 values[column] = int(value or 0)
             elif column == "disputed":
                 values[column] = 1 if value else 0
             elif column == "duration_seconds":
                 values[column] = None if value is None else float(value)
+            elif column == "severity_counts":
+                values[column] = sanitize_text(value) or "{}"
+            elif column == "stage":
+                values[column] = sanitize_text(value) or "uat"
             else:
                 values[column] = sanitize_text(value)
+        if values["stage"] not in ADVERSARIAL_STAGE_SLUGS:
+            raise ValueError(f"Unknown adversarial stage: {values['stage']}")
         columns = ", ".join(("round_id", "execution_id", *_ADVERSARIAL_ROUND_COLUMNS))
         slots = ", ".join("?" for _ in range(len(_ADVERSARIAL_ROUND_COLUMNS) + 2))
         if not 0 <= values["round_number"] <= 6:
@@ -637,7 +770,7 @@ class ExecutionHistoryRepository:
         with self.connect() as database:
             database.execute(
                 f"INSERT INTO adversarial_rounds ({columns}) VALUES ({slots}) "
-                f"ON CONFLICT(execution_id, round_number) DO UPDATE SET {assignments}",
+                f"ON CONFLICT(execution_id, stage, round_number) DO UPDATE SET {assignments}",
                 (str(uuid.uuid4()), execution_id, *(values[column] for column in _ADVERSARIAL_ROUND_COLUMNS)),
             )
 
@@ -651,7 +784,7 @@ class ExecutionHistoryRepository:
         with self.connect() as database:
             for row in database.execute(
                 f"SELECT * FROM adversarial_rounds WHERE execution_id IN ({slots}) "
-                "ORDER BY execution_id, round_number",
+                "ORDER BY execution_id, stage DESC, round_number",
                 ids,
             ):
                 record = dict(row)
@@ -687,7 +820,7 @@ class ExecutionHistoryRepository:
             ).fetchone()
             tests = database.execute(
                 "SELECT COALESCE(SUM(tests_added), 0) FROM adversarial_rounds "
-                "WHERE execution_id IN ("
+                "WHERE stage = 'uat' AND execution_id IN ("
                 f"SELECT execution_id FROM ai_executions{where})",
                 params,
             ).fetchone()
@@ -711,6 +844,56 @@ class ExecutionHistoryRepository:
                 None if capacity is None else round(float(capacity), 2)
             ),
             "testsAdded": int(tests[0] or 0),
+        }
+
+    def security_summary(
+        self, repositories: Sequence[str] | str | None = None, *, search: str = ""
+    ) -> dict[str, Any]:
+        """How the adversarial cybersecurity review is performing.
+
+        Counted the same way as ``adversarial_summary``: only work-rounds that
+        actually ran the review. ``failedPercent`` deliberately separates a
+        review that could not execute or left findings unresolved from a clean
+        pass, so the dashboard can never present a broken reviewer as a secure
+        codebase.
+        """
+        repository_clause, repository_params = _repository_filter(repositories)
+        clause, search_params = _search_filter(search)
+        conditions = ["security_outcome <> ''", "security_outcome <> 'disabled'"]
+        if repository_clause:
+            conditions.insert(0, repository_clause)
+        where = " WHERE " + " AND ".join(conditions) + clause
+        params = [*repository_params, *search_params]
+        with self.connect() as database:
+            row = database.execute(
+                "SELECT COUNT(*), AVG(security_round_count), "
+                "SUM(security_review_status = 'PASS'), "
+                "SUM(security_review_status = 'FIXED'), "
+                "SUM(security_review_status = 'FINDINGS_CREATED'), "
+                "SUM(security_review_status = 'FAILED') "
+                f"FROM ai_executions{where}",
+                params,
+            ).fetchone()
+            rounds = database.execute(
+                "SELECT COALESCE(SUM(findings_found), 0), COALESCE(SUM(findings_fixed), 0), "
+                "COALESCE(SUM(tests_added), 0) FROM adversarial_rounds "
+                "WHERE stage = 'security' AND execution_id IN ("
+                f"SELECT execution_id FROM ai_executions{where})",
+                params,
+            ).fetchone()
+        reviews = int(row[0] or 0)
+        if not reviews:
+            return _empty_security_summary()
+        return {
+            "reviews": reviews,
+            "averageRounds": round(float(row[1] or 0.0), 2),
+            "passPercent": round(int(row[2] or 0) * 100 / reviews, 1),
+            "fixedPercent": round(int(row[3] or 0) * 100 / reviews, 1),
+            "findingsCreatedPercent": round(int(row[4] or 0) * 100 / reviews, 1),
+            "failedPercent": round(int(row[5] or 0) * 100 / reviews, 1),
+            "findingsFound": int(rounds[0] or 0),
+            "findingsFixed": int(rounds[1] or 0),
+            "testsAdded": int(rounds[2] or 0),
         }
 
     def page_for_repository(
@@ -1002,6 +1185,29 @@ def _serialize_adversarial_filed_findings(value: Any) -> str:
     return json.dumps(cleaned)
 
 
+def _serialize_security_findings(value: Any) -> str:
+    """Sanitize the structured cybersecurity review metadata.
+
+    Findings quote real code, so every string goes through the same secret
+    scrubber the rest of the history uses before it is persisted.
+    """
+    if not value:
+        return "{}"
+    if not isinstance(value, dict):
+        raise ValueError("security_findings must be an object")
+
+    def clean(item: Any) -> Any:
+        if isinstance(item, str):
+            return sanitize_text(item)
+        if isinstance(item, dict):
+            return {str(key): clean(entry) for key, entry in item.items()}
+        if isinstance(item, list):
+            return [clean(entry) for entry in item]
+        return item
+
+    return json.dumps(clean(value))
+
+
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     """A `sqlite3.Row` as a plain, JSON-ready dict with JSON text columns decoded."""
     record = dict(row)
@@ -1170,6 +1376,20 @@ def _empty_adversarial_summary() -> dict[str, Any]:
     }
 
 
+def _empty_security_summary() -> dict[str, Any]:
+    return {
+        "reviews": 0,
+        "averageRounds": None,
+        "passPercent": None,
+        "fixedPercent": None,
+        "findingsCreatedPercent": None,
+        "failedPercent": None,
+        "findingsFound": 0,
+        "findingsFixed": 0,
+        "testsAdded": 0,
+    }
+
+
 def _empty_page() -> dict[str, Any]:
     return {
         "records": [],
@@ -1177,6 +1397,7 @@ def _empty_page() -> dict[str, Any]:
         "offset": 0,
         "limit": PAGE_SIZE,
         "adversarial": _empty_adversarial_summary(),
+        "security": _empty_security_summary(),
     }
 
 
@@ -1185,7 +1406,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Without paging flags, prints the repository's executions as a JSON array
     on stdout. `--limit`, `--offset`, or `--search` instead print one page
-    object (`records`/`total`/`offset`/`limit`/`adversarial`) of at most 10
+    object (`records`/`total`/`offset`/`limit`/`adversarial`/`security`) of at most 10
     rows — the desktop Feedback view always uses that form so it never
     receives the full history. Every record carries its `adversarial_rounds`,
     and `adversarial` summarizes the adversarial UAT loop across the whole
@@ -1342,6 +1563,9 @@ def main(argv: list[str] | None = None) -> int:
             "offset": offset,
             "limit": limit,
             "adversarial": repository.adversarial_summary(
+                repository_names, search=args.search
+            ),
+            "security": repository.security_summary(
                 repository_names, search=args.search
             ),
         },

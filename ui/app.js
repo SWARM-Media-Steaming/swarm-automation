@@ -179,7 +179,7 @@
     },
     "work-policy": {
       title: "Issue instructions",
-      html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Update Claude assets</strong> — asks the AI to update any Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository that the issue makes relevant.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
+      html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Adversarial cybersecurity</strong> — after the implementation (and after Adversarial UAT when that is on too), a fresh security engineer attacks the change. Vulnerabilities it introduced are fixed and re-verified inside the issue; legitimate findings elsewhere become their own <code>adversarial-security</code> issues instead of widening this one. A review that could not run is reported as failed, never as a pass.</li><li><strong>Update Claude assets</strong> — asks the AI to update any Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository that the issue makes relevant.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
       links: [],
     },
     "execution-history": {
@@ -361,6 +361,7 @@
       monitor_actions: false,
       require_issue_tests: false,
       adversarial_uat_enabled: false,
+      adversarial_security_enabled: false,
       update_claude_assets_enabled: false,
       allow_environment_only_summary: false,
       repo_dir: "",
@@ -1161,7 +1162,7 @@
     head.append(titleRow, meta);
     const tagging = document.createElement("div");
     tagging.className = "execution-tagging";
-    [["AI tool", record.aiProvider], ["Model", record.model], ["Effort", record.effort], ["UAT rounds", window.SwarmAdversarialUat.roundCount(record)]].forEach(([label, value]) => {
+    [["AI tool", record.aiProvider], ["Model", record.model], ["Effort", record.effort], ["UAT rounds", window.SwarmAdversarialUat.roundCount(record)], ["Security review", window.SwarmAdversarialSecurity.reviewStatus(record)]].forEach(([label, value]) => {
       const cell = document.createElement("div");
       cell.className = "execution-tag";
       const name = document.createElement("span");
@@ -1206,6 +1207,20 @@
     addSummaryParagraph("Requested work", record.requestedWorkSummary);
     addSummaryParagraph("Changes made", record.changesSummary);
     addSummaryParagraph("Adversarial UAT", record.adversarialOutcome?.replaceAll("_", " "));
+    addSummaryParagraph("Adversarial cybersecurity", window.SwarmAdversarialSecurity.findingsSummary(record));
+    const securityFindings = record.securityFiledFindings || [];
+    if (securityFindings.length) {
+      addSummaryParagraph("Out-of-scope security findings", `${securityFindings.length} separately filed issue${securityFindings.length === 1 ? "" : "s"}.`);
+      const securityLinks = document.createElement("div");
+      securityLinks.className = "control-row";
+      for (const finding of securityFindings) {
+        if (finding?.url) securityLinks.appendChild(externalLink(finding.title || "Open separately filed issue ↗", finding.url, "text-button"));
+      }
+      if (securityLinks.children.length) body.appendChild(securityLinks);
+    }
+    if (record.securityReviewError) {
+      addSummaryParagraph("Security review failure", record.securityReviewError);
+    }
     const filedFindings = record.adversarialFiledFindings || [];
     if (filedFindings.length) {
       addSummaryParagraph("Out-of-scope UAT findings", `${filedFindings.length} separately filed issue${filedFindings.length === 1 ? "" : "s"}.`);
@@ -1220,8 +1235,12 @@
       addSummaryParagraph("Approximate quota consumed", window.SwarmAdversarialUat.capacity(record.capacityConsumedPercent));
     }
     for (const round of record.adversarialRounds || []) {
-      addSummaryParagraph(`UAT ${round.round_number === 0 ? "initial assessment" : `round ${round.round_number}`}`,
-        window.SwarmAdversarialUat.roundDetail(round));
+      const label = round.round_number === 0 ? "initial assessment" : `round ${round.round_number}`;
+      if (round.stage === "security") {
+        addSummaryParagraph(`Security ${label}`, window.SwarmAdversarialSecurity.roundDetail(round));
+      } else {
+        addSummaryParagraph(`UAT ${label}`, window.SwarmAdversarialUat.roundDetail(round));
+      }
     }
     const routing = record.routingDecision;
     if (routing && typeof routing === "object") {
@@ -1297,7 +1316,9 @@
     const page = executionHistoryView();
     const aggregate = byId("adversarial-history-summary");
     const stats = page.adversarial;
-    if (aggregate) aggregate.textContent = window.SwarmAdversarialUat.aggregate(stats);
+    if (aggregate) {
+      aggregate.textContent = `${window.SwarmAdversarialUat.aggregate(stats)} ${window.SwarmAdversarialSecurity.aggregate(page.security)}`;
+    }
     const searching = state.executionHistorySearch.trim().length > 0;
     const total = Number(page.total) || 0;
     const limit = Number(page.limit) || 10;
@@ -2216,7 +2237,7 @@
     renderAiAgents();
   }
 
-  const NOW_WORKING_KINDS = { issue: "Issue", ci: "CI/CD", adversarial: "Adversarial UAT" };
+  const NOW_WORKING_KINDS = { issue: "Issue", ci: "CI/CD", adversarial: "Adversarial UAT", security: "Adversarial security" };
   const NOW_WORKING_PILLS = { running: "Running", paused: "Paused", error: "Failing", ok: "Passing", idle: "Idle" };
 
   function nowWorkingRepositories() {
