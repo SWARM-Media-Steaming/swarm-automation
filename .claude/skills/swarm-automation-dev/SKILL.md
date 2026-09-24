@@ -194,6 +194,19 @@ without requiring a previous commit SHA. See
 `.claude/rules/issue-lifecycle-comments.md` before changing their comment,
 label, cursor, or resumption behavior.
 
+## Multi-repository scheduling
+
+`install_swarm_issue_cron.py` has two deliberately different scheduling
+models. With the default sequential setting, the outer cycle visits each
+repository once. With `--parallel-repos`, a long-running scheduler gives each
+repository a persistent thread supervised by `run_parallel_repos`: after a
+worker reports progress in continuous mode, that repository checks for its
+next issue immediately and never waits for another repository's worker.
+Polling intervals, scheduled wakeups, Run now requests, transcode deferrals,
+and live `repos.json` reloads are supervisor concerns and must not reintroduce
+a shared completion barrier. `--once` remains finite and uses `run_cycle` so
+the caller can receive one aggregate exit status.
+
 ## Test suite
 
 `src/command_tests.rs` (registered from `src/main.rs` via `#[path]`)
