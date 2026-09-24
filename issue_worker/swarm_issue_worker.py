@@ -28,7 +28,9 @@ import argparse
 import contextlib
 import dataclasses
 import datetime as dt
+import io
 import json
+import math
 import os
 import re
 import shutil
@@ -297,6 +299,25 @@ def env_bool(name: str, fallback: bool = False) -> bool:
 
 def csv_values(value: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+class ReplaceDefaultAppendAction(argparse.Action):
+    """Append explicit values, replacing rather than extending the default."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        value: Any,
+        option_string: str | None = None,
+    ) -> None:
+        del parser, option_string
+        seen_attribute = f"_{self.dest}_explicit"
+        values = getattr(namespace, self.dest, None)
+        if not getattr(namespace, seen_attribute, False):
+            values = []
+            setattr(namespace, seen_attribute, True)
+        setattr(namespace, self.dest, [*(values or []), value])
 
 
 def command_available(command: str | None) -> bool:
@@ -1215,9 +1236,6 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             return self.grok_usage()
         raise WorkerError(f"Invalid AI provider in saved state: {provider}")
 
-    def provider_capacity(self, provider: str) -> int:
-        return self.provider_usage(provider).status
-
     def enabled_provider_usages(self) -> dict[str, ProviderUsage]:
         """Probe every enabled provider without letting one failure block the rest.
 
@@ -1233,6 +1251,9 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 log(f"{spec.name} quota unavailable: usage probe failed: {error}")
                 usages[spec.name] = ProviderUsage(2)
         return usages
+
+    def provider_capacity(self, provider: str) -> int:
+        return self.provider_usage(provider).status
 
     def usage_snapshot(self, provider: str) -> dict[str, Any] | None:
         """Probe a provider's remaining usage and return a JSON-safe snapshot.
@@ -5697,10 +5718,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
     parser.add_argument(
         "--enabled-provider",
-        action="append",
+        action=ReplaceDefaultAppendAction,
         choices=KNOWN_PROVIDER_KEYS,
         default=list(csv_values(env_value("SWARM_ENABLED_PROVIDERS", ""))) or None,
-        help="Provider id to include in the rotation (repeatable). Defaults to all known providers.",
+        help=(
+            "Provider id to include in the rotation (repeatable). Explicit flags replace "
+            "SWARM_ENABLED_PROVIDERS; defaults to all known providers when neither is set."
+        ),
     )
     parser.add_argument(
         "--preferred-provider",
@@ -5733,6 +5757,13 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_ALLOW_USAGE_CREDIT_MODELS", False),
         help="Offer models that bill against a separate usage-credit balance to the router.",
+    )
+    parser.add_argument(
+        "--check-usage",
+        action="store_true",
+        default=False,
+        help="Probe remaining quota for each enabled provider, print it as JSON, and exit "
+        "without running a work cycle.",
     )
     parser.add_argument("--dry-run", action="store_true", default=env_bool("SWARM_ISSUE_WORKER_DRY_RUN"))
     parser.add_argument("--gh-bin", default=env_value("GH_BIN", executable_default("gh")))
@@ -5828,6 +5859,79 @@ def resolve_preferred_provider(preferred: str, enabled: Iterable[str]) -> str:
     return next(key for key in KNOWN_PROVIDER_KEYS if key in enabled_set)
 
 
+def check_usage(config: Config) -> int:
+    """Probe remaining quota for each enabled provider and print it as one JSON
+    line on stdout, for the desktop app's Overview panel (see #218). Runs no
+    work cycle and touches no GitHub or git state; ``Worker`` is only
+    constructed for its usage-probing methods, which are per-CLI-account and
+    machine-wide rather than per-repository.
+
+    ``claude_usage``/``codex_usage``/``grok_usage`` narrate their own progress
+    through ``log()``, which prints to stdout — fine for the scheduler's log
+    stream, fatal here since a caller parsing this process's stdout as JSON
+    would choke on interleaved log lines. Redirect stdout for the duration of
+    the probe and print the JSON payload afterwards, once, as the only line.
+    """
+    worker = Worker(config)
+    providers: list[dict[str, Any]] = []
+    with contextlib.redirect_stdout(io.StringIO()):
+        for spec in config.providers:
+            if not spec.enabled:
+                continue
+            try:
+                usage = worker.provider_usage(spec.key)
+            except Exception:
+                # Each provider uses an independent CLI/helper. A broken or
+                # transiently unavailable probe must degrade only that row,
+                # not discard the already-collected results for every other
+                # enabled provider.
+                usage = ProviderUsage(2)
+            if not isinstance(usage, ProviderUsage):
+                # Runtime type hints do not protect this JSON boundary:
+                # a probe may return None, a dict, a tuple, or other objects
+                # that don't satisfy the ProviderUsage contract. Degrade only
+                # the malformed provider so healthy rows remain available.
+                usage = ProviderUsage(2)
+            elif (
+                type(usage.status) is not int
+                or usage.status not in (0, 1, 2)
+                or (usage.detail is not None and not isinstance(usage.detail, str))
+            ):
+                # Runtime type hints do not protect this JSON boundary:
+                # Python bools are ints, floats compare equal to ints, and
+                # json.dumps accepts non-string detail values that Rust's
+                # serde schema rejects. Canonicalize only the malformed row.
+                usage = ProviderUsage(2)
+            elif usage.status == 2:
+                # Keep unavailable rows canonical. In particular, never let
+                # stale or malformed probe data leak through this JSON
+                # boundary alongside an unavailable status.
+                usage = ProviderUsage(2)
+            elif (
+                isinstance(usage.remaining_percent, bool)
+                or not isinstance(usage.remaining_percent, (int, float))
+                or not math.isfinite(usage.remaining_percent)
+                or not 0 <= usage.remaining_percent <= 100
+            ):
+                # Python's JSON encoder accepts NaN and infinities by default,
+                # while serde_json correctly rejects them. A usable/low-quota
+                # row also requires an actual percentage in its valid domain.
+                # Degrade only the malformed provider so healthy rows remain
+                # available to the consolidated panel.
+                usage = ProviderUsage(2)
+            providers.append(
+                {
+                    "provider": spec.key,
+                    "name": spec.name,
+                    "status": usage.status,
+                    "remaining_percent": usage.remaining_percent,
+                    "detail": usage.detail,
+                }
+            )
+    print(json.dumps({"providers": providers}, allow_nan=False))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not 0 <= args.minimum_remaining_percent <= 100:
@@ -5837,6 +5941,12 @@ def main(argv: list[str] | None = None) -> int:
     enabled = set(args.enabled_provider or KNOWN_PROVIDER_KEYS)
     if not enabled:
         raise WorkerError("At least one --enabled-provider is required")
+    if args.check_usage:
+        # check_usage's stdout contract is one JSON line, nothing else. It
+        # never picks a provider, so it must not reach the preferred-provider
+        # log() below — that call is real stdout narration a JSON-only caller
+        # cannot tell apart from the payload.
+        return check_usage(Config.from_args(args))
     resolved_preferred = resolve_preferred_provider(args.preferred_provider, enabled)
     if resolved_preferred != args.preferred_provider:
         log(
