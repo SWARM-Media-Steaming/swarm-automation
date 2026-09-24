@@ -6066,6 +6066,61 @@ class RunnerTestCase(unittest.TestCase):
             self.assertEqual(status, runner_module.ISSUE_COMPLETED_EXIT_CODE)
             self.assertIn("repositories in parallel", output.getvalue())
 
+    def test_parallel_repositories_continue_without_waiting_for_a_slow_sibling(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-independent-test.") as temporary:
+            root = Path(temporary)
+            repos_file = self._repos_file(root, ("fast", "slow"))
+            args = runner_module.build_parser().parse_args(
+                [
+                    "--repos-file", str(repos_file), "--state-dir", str(root / "state"),
+                    "--parallel-repos", "--interval-seconds", "600", "--pgrep-bin", "",
+                ]
+            )
+            runner = runner_module.Runner(args, [])
+            slow_started = threading.Event()
+            release_slow = threading.Event()
+            fast_drained = threading.Event()
+            calls: dict[str, int] = {"fast": 0, "slow": 0}
+            calls_lock = threading.Lock()
+
+            def work_repo(repo: dict[str, object]) -> int:
+                label = str(repo["label"])
+                with calls_lock:
+                    calls[label] += 1
+                    call = calls[label]
+                if label == "slow":
+                    slow_started.set()
+                    release_slow.wait(5)
+                    return 0
+                if call <= 2:
+                    return runner_module.ISSUE_COMPLETED_EXIT_CODE
+                fast_drained.set()
+                return 0
+
+            supervisor = threading.Thread(
+                target=runner.run_parallel_repos,
+                kwargs={"start_immediately": True},
+            )
+            with (
+                mock.patch.object(runner, "work_repo", side_effect=work_repo),
+                mock.patch.object(runner, "transcode_active", return_value=False),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                supervisor.start()
+                self.assertTrue(slow_started.wait(2), "the slow repository should start")
+                self.assertTrue(
+                    fast_drained.wait(2),
+                    "the fast repository should drain while its sibling is still blocked",
+                )
+                self.assertFalse(release_slow.is_set())
+                self.assertEqual(calls["fast"], 3)
+                self.assertEqual(calls["slow"], 1)
+                runner.stop_requested = True
+                release_slow.set()
+                supervisor.join(5)
+
+            self.assertFalse(supervisor.is_alive())
+
     def test_sequential_cycle_is_the_default(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-sequential-test.") as temporary:
             root = Path(temporary)
