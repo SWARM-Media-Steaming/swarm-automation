@@ -76,6 +76,24 @@ test("keeps issues of different repositories apart", () => {
   assert.deepEqual(rows.map((row) => `${row.repository}${row.title}`), ["acme/app#1 One", "acme/site#1 Other"]);
 });
 
+test("finishing an issue preserves same-number work in another repository", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo, { ...repo, id: "r2", name: "acme/site" }],
+    logs: [
+      labeled("acme/app", "Selected oldest unprocessed assigned issue: #4 App work"),
+      labeled("acme/app", "Adversarial UAT for issue #4: starting independent test run (round 0 of 6)."),
+      labeled("acme/site", "Selected oldest unprocessed assigned issue: #4 Site work"),
+      labeled("acme/site", "Adversarial UAT for issue #4: starting re-test for round 2 of 6."),
+      labeled("acme/app", "Finished issue #4 with Codex: done"),
+    ],
+  });
+  assert.deepEqual(rows.map((row) => `${row.kind}:${row.repository}${row.title}`), [
+    "issue:acme/site#4 Site work",
+    "adversarial:acme/siteFix/re-test round 2 of 6",
+  ]);
+});
+
 test("shows a CI failure only while the worker is fixing it", () => {
   const checked = [
     line("GitHub Actions on ai-main are passing."),
