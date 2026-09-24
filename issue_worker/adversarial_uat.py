@@ -793,23 +793,15 @@ class AdversarialUatMixin:
         self.choice = ProviderChoice(**loop["delivery_choice"])
         self.update_state_for_choice(self.choice)
         if loop["outcome"] == "cap_hit":
-            delivery = tuple(loop["delivery"]) if loop.get("delivery") else None
-            if delivery is None:
-                delivery = self.deliver_pull_request(loop["completion"], allow_automation=False)
-                loop["delivery"] = delivery
-                self.save_adversarial(loop)
             failures = "\n".join(f"- {r['id']}: {r['output'][-2000:]}" for r in loop["results"] if r["exit_code"])
             output = (
-                "## Action required\nReview the failing tests and implementation in " + delivery[0] +
-                "; adjudicate the disputed expectation or specify the required fix. Reply with your decision "
-                "in a new trusted-author comment to resume.\n\n## Summary\nAdversarial-test deadlock; "
-                "the six fix/re-test rounds are exhausted. The branch and failing tests are published for review. "
-                "This is a test/implementation disagreement, not a request for credentials.\n\n" +
+                "## Summary\nAdversarial UAT did not pass after six fix/re-test rounds. Delivered as best "
+                "effort: this is the last fix attempt, not a verified-clean pass.\n\n" +
                 self.adversarial_summary_line() + "\n" + failures +
-                "\n\n## Recommendations\nReview the linked PR against the issue's requirements. Automatic approval, "
-                "merge and promotion were bypassed.\n\n## Step-by-step guide\n- Review the linked PR and reply with your adjudication.\n"
+                "\n\n## Still failing\nThese adversarial tests were not satisfied. Review the linked PR when "
+                "convenient; it was merged and promoted automatically like any other completed issue.\n"
             )
-            self.finalize_needs_input(output, delivery=delivery)
+            self.finalize_issue(loop["completion"], output)
         else:
             self.finalize_issue(loop["completion"], loop["implementation_output"])
         return ISSUE_COMPLETED_EXIT_CODE

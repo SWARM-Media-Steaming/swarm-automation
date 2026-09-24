@@ -22,6 +22,7 @@
     const known = repositories.map((repo) => normalizeRepo(repo.name)).filter((name) => name.split("/").length === 2);
     const items = new Map();
     const repoBySource = new Map();
+    const lastStartedByRepository = new Map();
     let lastStarted = null;
 
     const resolveRepo = (source, message, label) => {
@@ -45,10 +46,22 @@
         since: entry.time,
       };
       items.set(`${kind}:${key}`, item);
+      if (repository) lastStartedByRepository.set(repository, item);
       lastStarted = item;
+      return item;
     };
-    const find = (repository, number) => items.get(`issue:${repository}#${number}`)
-      || [...items.values()].find((item) => item.kind !== "adversarial" && String(item.number) === String(number));
+    const find = (repository, number) => {
+      if (repository) {
+        return items.get(`issue:${repository}#${number}`)
+          || [...items.values()].find((item) => item.kind !== "adversarial"
+            && item.repository === repository && String(item.number) === String(number));
+      }
+      return [...items.values()].find((item) => item.kind !== "adversarial" && String(item.number) === String(number));
+    };
+    const current = (repository) => {
+      const item = repository ? lastStartedByRepository.get(repository) : lastStarted;
+      return item && items.get(item.key) === item ? item : null;
+    };
     const related = (repository, number) => [...items.values()].filter((item) =>
       String(item.number) === String(number) && (!repository || item.repository === repository));
     const updateAdversarial = (entry, repository, number, round, maximum, title, phase) => {
@@ -83,10 +96,19 @@
       let match;
 
       if (/exited with status|process stopped|Ctrl\+C received/i.test(message)) {
-        items.clear();
-        lastStarted = null;
-      } else if (/Starting (?:a worker run|a cycle over)/i.test(message)) {
+        if (repository) {
+          clear((item) => item.repository === repository);
+          lastStartedByRepository.delete(repository);
+          if (lastStarted?.repository === repository) lastStarted = null;
+        } else {
+          items.clear();
+          lastStartedByRepository.clear();
+          lastStarted = null;
+        }
+      } else if (/Starting a cycle over/i.test(message)) {
         clear((item) => item.state === "running");
+      } else if (/Starting a worker run/i.test(message)) {
+        clear((item) => item.state === "running" && (!repository || item.repository === repository));
       } else if ((match = message.match(/Selected oldest unprocessed assigned issue:\s*#(\d+)\s*(.*)$/i))) {
         start(entry, repository, match[1], match[2], "Picked up from the queue");
       } else if ((match = message.match(/Selected issue #(\d+) for rework.*?:\s*(.*)$/i))) {
@@ -94,10 +116,11 @@
       } else if ((match = message.match(/Working CI failure issue #(\d+).*?:\s*(.*)$/i))) {
         start(entry, repository, match[1], match[2], "Fixing a failing pipeline", "ci");
       } else if ((match = message.match(/^Selected (Claude|Codex|Grok) model(?:\s+(.+?)\s+with effort\s+(.+?)\s+for this run\.)?/i))) {
-        if (lastStarted) {
-          lastStarted.provider = match[1];
-          lastStarted.model = match[2] || "";
-          lastStarted.effort = match[3] || "";
+        const item = current(repository);
+        if (item) {
+          item.provider = match[1];
+          item.model = match[2] || "";
+          item.effort = match[3] || "";
         }
       } else if ((match = message.match(/^Pinned (Claude|Codex|Grok) model\s+(.+?)\s+session\s+\S+\s+with effort\s+(.+?)\s+for this continuation\.$/i))) {
         if (lastStarted) {
@@ -106,9 +129,10 @@
           lastStarted.effort = match[3];
         }
       } else if ((match = message.match(/^(Claude|Codex|Grok) is working/i))) {
-        if (lastStarted) {
-          lastStarted.provider = match[1];
-          lastStarted.phase = `${match[1]} is writing the change`;
+        const item = current(repository);
+        if (item) {
+          item.provider = match[1];
+          item.phase = `${match[1]} is writing the change`;
         }
       } else if ((match = message.match(/^Adversarial UAT for issue #(\d+): starting fix\/re-test round (\d+) of (\d+)\.$/i))) {
         updateAdversarial(entry, repository, match[1], match[2], match[3], `Fix/re-test round ${match[2]} of ${match[3]}`, "Fix in progress");
@@ -145,15 +169,15 @@
         });
       } else if ((match = message.match(/(?:preparing to resume.*?issue|restored session \S+ for issue|restored quota-paused issue) #(\d+)/i))) {
         const item = find(repository, match[1])
-          || (start(entry, repository, match[1], "", "Resuming saved session"), lastStarted);
+          || start(entry, repository, match[1], "", "Resuming saved session");
         item.state = "running";
         item.phase = "Resuming saved session";
         related(repository, match[1]).forEach((relatedItem) => {
           if (relatedItem.kind === "adversarial") relatedItem.state = "running";
         });
       } else if ((match = message.match(/Finished issue #(\d+)/i))) {
-        items.delete(`issue:${repository}#${match[1]}`);
-        clear((item) => item.repository === repository && String(item.number) === match[1]);
+        clear((item) => String(item.number) === match[1]
+          && (!repository || item.repository === repository));
       } else if (/Returned the clean local checkout/i.test(message)) {
         clear((item) => item.state === "running" && (!repository || item.repository === repository));
       }
@@ -171,6 +195,7 @@
           state: item.state,
           since: item.since,
           issueNumber: item.number,
+          provider: item.provider || "",
         });
       });
     }

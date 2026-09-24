@@ -1398,6 +1398,65 @@ fn repo_status_args_are_accepted_by_the_vendored_worker_script() {
     assert_eq!(parsed["state"], "unconfigured");
 }
 
+#[test]
+fn check_usage_probe_args_are_accepted_by_the_vendored_worker_script_and_list_only_enabled_providers(
+) {
+    let python = match which_python() {
+        Some(python) => python,
+        None => return,
+    };
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("issue_worker/swarm_issue_worker.py");
+    let scratch = tempfile::tempdir().expect("temp dir");
+    let config = AppConfig::default();
+    // Claude disabled, Codex enabled: since this command never passes
+    // `--preferred-provider` itself, the script falls back to its own
+    // default ("claude") and, finding it disabled here, used to log a
+    // tie-break notice to stdout ahead of check_usage's JSON line. Exercises
+    // that regression at the same Rust/Python argv boundary
+    // `check_provider_usage` actually calls through.
+    let providers = vec![
+        ResolvedProvider {
+            enabled: false,
+            ..resolved_provider("claude", "/nonexistent/claude")
+        },
+        resolved_provider("codex", "/nonexistent/codex"),
+    ];
+    let mut arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--check-usage".into(),
+    ];
+    arguments.extend(provider_scheduler_arguments(&config, &providers));
+    arguments.extend([
+        "--minimum-remaining-percent".into(),
+        "10".into(),
+        "--state-dir".into(),
+        scratch.path().to_string_lossy().into_owned(),
+    ]);
+    let output = std::process::Command::new(&python)
+        .args(&arguments)
+        .output()
+        .expect("run swarm_issue_worker.py --check-usage");
+    assert!(
+        output.status.success(),
+        "--check-usage exited with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The probed providers each narrate their own progress through the
+    // worker's normal log() calls, which print to stdout — this asserts
+    // check_usage's contract that its own stdout is nonetheless exactly one
+    // JSON line, never that narration interleaved with (or instead of) it.
+    assert_eq!(stdout.trim().lines().count(), 1, "stdout was: {stdout}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("--check-usage prints one JSON line");
+    let providers = parsed["providers"].as_array().expect("providers array");
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["provider"], "codex");
+    assert_eq!(providers[0]["status"], 2);
+    assert!(providers[0]["remaining_percent"].is_null());
+}
+
 fn which_python() -> Option<PathBuf> {
     for candidate in ["python3", "/usr/bin/python3", "/opt/homebrew/bin/python3"] {
         let found = std::process::Command::new(candidate)

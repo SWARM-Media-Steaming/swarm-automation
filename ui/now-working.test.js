@@ -23,6 +23,7 @@ test("shows the issue being worked with its provider, model, effort, and phase",
   assert.equal(rows[0].detail, "Claude · claude-sonnet-5 · high effort · Claude is writing the change");
   assert.equal(rows[0].repository, "acme/app");
   assert.equal(rows[0].state, "running");
+  assert.equal(rows[0].provider, "Claude");
 });
 
 test("shows pinned continuation model and effort after the original selection rotates out", () => {
@@ -127,6 +128,36 @@ test("reads worker lines from parallel-repo runs that carry a repository label",
   });
   assert.deepEqual(rows.map((row) => `${row.repository}${row.title}`), ["acme/app#4 One", "acme/site#9 Two"]);
   assert.equal(rows[0].detail, "Claude · Picked up from the queue");
+});
+
+test("keeps provider selection attached to its repository when parallel logs interleave", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo, { ...repo, id: "r2", name: "acme/site" }],
+    logs: [
+      labeled("acme/app", "Selected oldest unprocessed assigned issue: #4 One"),
+      labeled("acme/site", "Selected oldest unprocessed assigned issue: #9 Two"),
+      labeled("acme/app", "Selected Claude model claude-x with effort high for this run."),
+      labeled("acme/site", "Selected Codex model gpt-x with effort medium for this run."),
+    ],
+  });
+  const app = rows.find((row) => row.repository === "acme/app");
+  const site = rows.find((row) => row.repository === "acme/site");
+  assert.equal(app.provider, "Claude");
+  assert.equal(site.provider, "Codex");
+});
+
+test("finishing an issue only removes that repository's matching issue number", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo, { ...repo, id: "r2", name: "acme/site" }],
+    logs: [
+      labeled("acme/app", "Selected oldest unprocessed assigned issue: #4 One"),
+      labeled("acme/site", "Selected oldest unprocessed assigned issue: #4 Two"),
+      labeled("acme/app", "Finished issue #4 with Claude: done"),
+    ],
+  });
+  assert.deepEqual(rows.map((row) => `${row.repository}${row.title}`), ["acme/site#4 Two"]);
 });
 
 test("shows a new issue that starts after an earlier one finished", () => {
