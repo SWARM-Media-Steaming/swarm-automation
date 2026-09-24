@@ -772,6 +772,151 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_false_positive.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-false-positive",
+      "name": "Reworded-rediscovery dedup does not merge two distinct real findings that share a phrasing template",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_false_positive.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_qualifier_insertion_false_positive.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-qualifier-insertion-false-positive",
+      "name": "Reworded-rediscovery dedup does not suppress a distinct finding whose title only inserts one qualifying word",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_qualifier_insertion_false_positive.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_word_order_false_negative.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-word-order-false-negative",
+      "name": "Reworded-rediscovery dedup does not fail to merge the same bug when a later round reorders the title",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_word_order_false_negative.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_nonleading_qualifier_insertion_false_positive.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-nonleading-qualifier-insertion-false-positive",
+      "name": "Reworded-rediscovery dedup does not suppress a distinct finding whose distinguishing word is inserted mid-title or appended, not just prepended",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_nonleading_qualifier_insertion_false_positive.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_verb_stem_false_negative.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-verb-stem-false-negative",
+      "name": "Reworded-rediscovery dedup recognizes the same bug when a later round uses a different verb form (crashes/crash, fixes/fix)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_verb_stem_false_negative.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
