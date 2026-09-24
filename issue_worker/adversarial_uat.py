@@ -75,11 +75,23 @@ FINDING_TITLE_STOPWORDS = {
 }
 
 
+_FINDING_TITLE_ES_SUFFIX_STEMS = ("s", "x", "z", "ch", "sh")
+
+
 def _finding_title_stem(token: str) -> str:
     # Plain suffix stripping so morphological variants of the same word
     # ("upload"/"uploads", "time"/"times") land on the same token instead of
     # being counted as unrelated content words when a reworded rediscovery
     # changes verb tense or number.
+    #
+    # A base ending in a sibilant (s/x/z/ch/sh) takes "-es", not "-s"
+    # ("crash"/"crashes", "fix"/"fixes", "catch"/"catches") -- stripping only
+    # the trailing "s" leaves a dangling "e" ("crashe") that never matches
+    # the base form, so an ordinary verb-form rewording between rounds would
+    # wrongly look like a distinct content word. Strip the full "-es" first
+    # when the remaining stem itself ends in one of those sibilants.
+    if len(token) > 4 and token.endswith("es") and token[:-2].endswith(_FINDING_TITLE_ES_SUFFIX_STEMS):
+        return token[:-2]
     if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
         return token[:-1]
     return token
