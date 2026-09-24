@@ -736,6 +736,30 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_ai_agents_parallel_repositories.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-parallel-repositories",
+      "name": "AI agents panel: interleaved parallel-repository work remains attributed and scoped to the correct provider",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/logging.js",
+          "ui/now-working.js",
+          "issue_worker/install_swarm_issue_cron.py",
+          "tests/adversarial/test_ai_agents_parallel_repositories.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
