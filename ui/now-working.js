@@ -99,6 +99,12 @@
           lastStarted.model = match[2] || "";
           lastStarted.effort = match[3] || "";
         }
+      } else if ((match = message.match(/^Pinned (Claude|Codex|Grok) model\s+(.+?)\s+session\s+\S+\s+with effort\s+(.+?)\s+for this continuation\.$/i))) {
+        if (lastStarted) {
+          lastStarted.provider = match[1];
+          lastStarted.model = match[2];
+          lastStarted.effort = match[3];
+        }
       } else if ((match = message.match(/^(Claude|Codex|Grok) is working/i))) {
         if (lastStarted) {
           lastStarted.provider = match[1];

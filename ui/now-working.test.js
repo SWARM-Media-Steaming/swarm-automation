@@ -25,6 +25,19 @@ test("shows the issue being worked with its provider, model, effort, and phase",
   assert.equal(rows[0].state, "running");
 });
 
+test("shows pinned continuation model and effort after the original selection rotates out", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo],
+    logs: [
+      line("Preparing to resume saved session abc for issue #84."),
+      line("Pinned Claude model claude-sonnet-5 session abc with effort high for this continuation."),
+    ],
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].detail, "Claude · claude-sonnet-5 · high effort · Resuming saved session");
+});
+
 test("drops an issue once it finishes instead of leaving a queue-check row", () => {
   const rows = deriveNowWorking({
     workerState: "running",
