@@ -1236,9 +1236,6 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             return self.grok_usage()
         raise WorkerError(f"Invalid AI provider in saved state: {provider}")
 
-    def provider_capacity(self, provider: str) -> int:
-        return self.provider_usage(provider).status
-
     def enabled_provider_usages(self) -> dict[str, ProviderUsage]:
         """Probe every enabled provider without letting one failure block the rest.
 
@@ -1254,6 +1251,9 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 log(f"{spec.name} quota unavailable: usage probe failed: {error}")
                 usages[spec.name] = ProviderUsage(2)
         return usages
+
+    def provider_capacity(self, provider: str) -> int:
+        return self.provider_usage(provider).status
 
     def usage_snapshot(self, provider: str) -> dict[str, Any] | None:
         """Probe a provider's remaining usage and return a JSON-safe snapshot.
@@ -5886,7 +5886,13 @@ def check_usage(config: Config) -> int:
                 # not discard the already-collected results for every other
                 # enabled provider.
                 usage = ProviderUsage(2)
-            if (
+            if not isinstance(usage, ProviderUsage):
+                # Runtime type hints do not protect this JSON boundary:
+                # a probe may return None, a dict, a tuple, or other objects
+                # that don't satisfy the ProviderUsage contract. Degrade only
+                # the malformed provider so healthy rows remain available.
+                usage = ProviderUsage(2)
+            elif (
                 type(usage.status) is not int
                 or usage.status not in (0, 1, 2)
                 or (usage.detail is not None and not isinstance(usage.detail, str))
