@@ -153,7 +153,7 @@
         });
       } else if ((match = message.match(/Finished issue #(\d+)/i))) {
         items.delete(`issue:${repository}#${match[1]}`);
-        clear((item) => String(item.number) === match[1]);
+        clear((item) => item.repository === repository && String(item.number) === match[1]);
       } else if (/Returned the clean local checkout/i.test(message)) {
         clear((item) => item.state === "running" && (!repository || item.repository === repository));
       }
