@@ -17,9 +17,8 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false, botReadiness: false, promotions: false, branchPushAccess: false },
+    refreshing: { status: false, tools: false, botReadiness: false, promotions: false, branchPushAccess: false },
     activeRepoId: "",
-    branchOverview: null,
     promotions: [],
     executionHistory: null,
     executionHistorySearch: "",
@@ -40,6 +39,7 @@
     promptGradesRequest: 0,
     promptGradesSearchTimer: null,
     feedbackTab: "grades",
+    repositoryTab: "source",
     // Feedback owns this filter. It never follows or changes activeRepoId.
     feedbackRepoFilter: [],
     feedbackRepoSavePromise: Promise.resolve(),
@@ -56,7 +56,6 @@
     repository: "Repository",
     ai: "AI Configuration",
     feedback: "Feedback",
-    advanced: "Advanced",
     debug: "Info & Debug",
     help: "Help",
   };
@@ -160,11 +159,6 @@
       html: "<p>These settings decide which comments and labels the worker trusts.</p><ul><li><strong>Trusted follow-up authors</strong> — GitHub users allowed to ask the AI for another pass. Separate names with commas.</li><li><strong>Completion authors</strong> — accounts whose completion messages the app accepts as proof that a pass finished. Separate names with commas.</li><li><strong>Ready label</strong> — the label added when AI work is ready for testing.</li></ul><p>Blank author lists use the repository assignee.</p>",
       links: [],
     },
-    "repo-branches": {
-      title: "Branches and promotion",
-      html: "<p>The tree shows the protected human branch, the shared AI branch, and each active issue branch.</p><ul><li><strong>Refresh</strong> — reloads branch and pull-request information from GitHub.</li><li><strong>Squash into AI integration</strong> — combines a closed issue’s work into one commit and removes its issue branch.</li><li><strong>Create or open promotion PR</strong> — prepares the final move from the AI branch to the human branch.</li><li><strong>Raw Git graph</strong> — shows the same history in Git’s compact text format.</li></ul>",
-      links: [],
-    },
     "promotion-queue": {
       title: "Repositories ready to promote",
       html: "<p>This list appears on the Overview page whenever one or more repositories have finished AI work waiting to reach the human-owned branch. It refreshes automatically while the Overview is visible.</p><ul><li>A repository shows up when its AI integration branch (usually <code>ai-main</code>) is <strong>ahead</strong> of the human-owned branch.</li><li><strong>Create PR</strong> creates or opens the promotion pull request in your browser.</li><li><strong>Merge to Main</strong> first merges the latest human-owned branch into the AI branch, favoring human-owned changes if the same lines conflict. It then creates the PR, approves it with a configured bot, and merges it.</li></ul><p>Promotion reconciles and merges in its own isolated clone, so it is safe to run while the issue worker keeps working — it never touches the worker's checkout.</p>",
@@ -187,7 +181,7 @@
     },
     "execution-history": {
       title: "Execution history",
-      html: "<p>Every AI issue execution across all repositories by default, newest first. The repository chips above the tabs independently filter all three reports; the repository dropdown in the header does not affect Feedback. The list loads ten at a time from the local database. Each row shows its repository, AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates over the filtered repositories.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans every repository checked in the Feedback filter and adds a placeholder \"Imported\" entry for any issue with no execution history yet. It reports success or failure for each repository and never overwrites or duplicates a real execution.</p>",
+      html: "<p>Every AI issue execution across all repositories by default, newest first. The repository chips above the tabs independently filter all three reports; the repository dropdown in the header does not affect Feedback. The list loads ten at a time from the local database. Each row shows its repository, AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates over the filtered repositories.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see AI Configuration). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans every repository checked in the Feedback filter and adds a placeholder \"Imported\" entry for any issue with no execution history yet. It reports success or failure for each repository and never overwrites or duplicates a real execution.</p>",
       links: [],
     },
     "prompt-grades": {
@@ -266,14 +260,12 @@
       section.classList.toggle("active", section.id === `view-${view}`);
     });
     byId("page-title").textContent = pageTitles[view] || pageTitles.overview;
-    if (view === "overview") {
+    if (view === "debug") void refreshTools({ quiet: true });
+    if (view === "repository") {
       void refreshPromotions({ quiet: true });
+      void refreshBotReadiness({ quiet: true });
       void refreshBranchPushAccess({ quiet: true });
     }
-    if (view === "repository") void refreshBranches({ quiet: true });
-    if (view === "debug") void refreshTools({ quiet: true });
-    if (view === "repository") void refreshBotReadiness({ quiet: true });
-    if (view === "repository") void refreshBranchPushAccess({ quiet: true });
     if (view === "feedback") {
       void refreshPromptGrades({ quiet: true });
       void refreshExecutionHistory({ quiet: true });
@@ -887,7 +879,6 @@
     if (!quiet) showToast("Configuration saved.", "success");
     void refreshStatus({ quiet: true });
     void refreshPromotions({ quiet: true });
-    if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     return saved;
   }
 
@@ -1329,7 +1320,7 @@
         className: "panel-copy",
         textContent: searching
           ? "No executions match this search."
-          : "No AI executions recorded yet. Turn on “Store AI execution history” in Advanced, then run an issue.",
+          : "No AI executions recorded yet. Turn on “Store AI execution history” in AI Configuration, then run an issue.",
       }));
       return;
     }
@@ -1751,6 +1742,26 @@
     });
     document.querySelectorAll("[data-feedback-panel]").forEach((panel) => {
       const active = panel.dataset.feedbackPanel === state.feedbackTab;
+      panel.classList.toggle("active", active);
+      panel.hidden = !active;
+    });
+  }
+
+  // The Repository view is a tablist over repo-specific setting groups
+  // instead of one long scroll, same shape as the Feedback view above.
+  const REPOSITORY_TABS = ["source", "bots", "queue", "delivery"];
+
+  function showRepositoryTab(tab, { focus = false } = {}) {
+    state.repositoryTab = REPOSITORY_TABS.includes(String(tab || "")) ? tab : REPOSITORY_TABS[0];
+    document.querySelectorAll("[data-repository-tab]").forEach((button) => {
+      const active = button.dataset.repositoryTab === state.repositoryTab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      button.tabIndex = active ? 0 : -1;
+      if (active && focus) button.focus();
+    });
+    document.querySelectorAll("[data-repository-panel]").forEach((panel) => {
+      const active = panel.dataset.repositoryPanel === state.repositoryTab;
       panel.classList.toggle("active", active);
       panel.hidden = !active;
     });
@@ -2794,11 +2805,9 @@
     const repo = defaultRepository();
     state.config.repositories.push(repo);
     state.activeRepoId = repo.id;
-    state.branchOverview = null;
     renderRepositorySelector();
     bindRepositoryForm();
     renderStatus();
-    renderBranchOverview(null);
     setDirty();
     navigate("repository");
     byId("github-repository-input").focus();
@@ -2812,219 +2821,24 @@
     state.config.repositories = state.config.repositories.filter((entry) => entry.id !== repo.id);
     if (!state.config.repositories.length) state.config.repositories.push(defaultRepository());
     state.activeRepoId = state.config.repositories[0].id;
-    state.branchOverview = null;
     renderRepositorySelector();
     bindRepositoryForm();
     renderStatus();
-    renderBranchOverview(null);
     setDirty();
   }
 
   function selectRepository(repoId) {
     stashRepositoryForm();
     state.activeRepoId = repoId;
-    state.branchOverview = null;
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
     renderStatus();
-    if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBranchPushAccess({ quiet: true });
   }
 
-  function branchNode(label, name, tip, meta = "", links = {}) {
-    const row = document.createElement("div");
-    row.className = "branch-node";
-    const rail = document.createElement("span");
-    rail.className = "branch-rail";
-    const body = document.createElement("div");
-    body.className = "branch-node-body";
-    const kicker = links.labelUrl
-      ? externalLink(label, links.labelUrl, "branch-kind branch-kind-link")
-      : document.createElement("span");
-    if (!links.labelUrl) kicker.className = "branch-kind";
-    kicker.textContent = label;
-    const title = links.nameUrl
-      ? externalLink(name, links.nameUrl, "branch-name branch-name-link")
-      : document.createElement("strong");
-    if (!links.nameUrl) title.className = "branch-name";
-    title.textContent = name;
-    const detail = document.createElement("span");
-    detail.className = "branch-detail";
-    detail.textContent = tip?.sha ? `${tip.sha.slice(0, 8)} · ${tip.subject || "No subject"}${meta ? ` · ${meta}` : ""}` : (meta || "No commit available");
-    body.append(kicker, title, detail);
-    row.append(rail, body);
-    return { row, body };
-  }
-
-  function renderBranchOverview(overview) {
-    const tree = byId("branch-tree");
-    const graph = byId("raw-git-graph");
-    const warning = byId("branch-warning");
-    tree.replaceChildren();
-    graph.textContent = overview?.graph || "No branch data loaded.";
-    warning.classList.add("hidden");
-    if (!overview) {
-      const empty = document.createElement("article");
-      empty.className = "panel";
-      empty.textContent = "Save and clone this repository to inspect its branches.";
-      tree.appendChild(empty);
-      return;
-    }
-    if (overview.error) {
-      warning.textContent = overview.error;
-      warning.classList.remove("hidden");
-    }
-
-    const panel = document.createElement("article");
-    panel.className = "panel branch-map";
-    const base = branchNode("HUMAN-OWNED", overview.baseBranch, overview.baseTip, "", {
-      nameUrl: githubUrl(overview.githubRepository, "tree", overview.baseBranch),
-    });
-    panel.appendChild(base.row);
-
-    const relation = overview.integrationExists
-      ? `${overview.integrationVsBase.ahead} ahead · ${overview.integrationVsBase.behind} behind ${overview.baseBranch}`
-      : "Created automatically before the next issue";
-    const integration = branchNode("AI INTEGRATION", overview.integrationBranch, overview.integrationTip, relation, {
-      nameUrl: githubUrl(overview.githubRepository, "tree", overview.integrationBranch),
-    });
-    integration.row.classList.add("integration-node");
-    const integrationActions = document.createElement("div");
-    integrationActions.className = "branch-actions";
-    if (overview.integrationVsBase.behind > 0) {
-      const badge = document.createElement("span");
-      badge.className = "branch-alert";
-      badge.textContent = `Behind ${overview.baseBranch} — next issue run will attempt parity merge`;
-      integrationActions.appendChild(badge);
-    }
-    if (overview.integrationVsBase.ahead > 0) {
-      integrationActions.appendChild(button(
-        overview.integrationPrUrl ? "Open promotion PR" : "Create promotion PR",
-        "secondary-button compact",
-        () => openIntegrationPullRequest(),
-      ));
-      if (overview.integrationPrNumber) {
-        integrationActions.appendChild(button(
-          `Merge into ${overview.baseBranch}`,
-          "primary-button compact",
-          () => mergeIntegrationPullRequest(overview.integrationPrNumber),
-        ));
-      }
-    }
-    integration.body.appendChild(integrationActions);
-    panel.appendChild(integration.row);
-
-    const issueList = document.createElement("div");
-    issueList.className = "issue-branch-list";
-    if (!overview.issueBranches.length) {
-      const empty = document.createElement("p");
-      empty.className = "panel-copy branch-empty";
-      empty.textContent = "No active issue branches. Squash-merged branches disappear from this tree.";
-      issueList.appendChild(empty);
-    }
-    overview.issueBranches.forEach((branch) => {
-      const issueClosed = branch.issueState === "CLOSED";
-      const issueStatus = issueClosed ? "issue closed" : branch.issueState === "OPEN" ? "issue open" : "issue state unknown";
-      const meta = `${providerLabel(branch.aiTool)} · ${issueStatus} · ${branch.aheadOfIntegration} ahead · ${branch.behindIntegration} behind`;
-      const branchName = branch.name.replace(/^origin\//, "");
-      const node = branchNode(`ISSUE #${branch.issueNumber}`, branchName, branch.lastCommit, meta, {
-        labelUrl: githubUrl(overview.githubRepository, "issues", branch.issueNumber),
-        nameUrl: githubUrl(overview.githubRepository, "tree", branchName),
-      });
-      node.row.classList.add("issue-node");
-      const actions = document.createElement("div");
-      actions.className = "branch-actions";
-      if (branch.prUrl) {
-        actions.appendChild(button(`Open PR #${branch.prNumber}`, "secondary-button compact", () => openUrl(branch.prUrl)));
-        const canMerge = issueClosed && branch.mergeable !== "CONFLICTING";
-        const merge = button("Squash into AI integration", "primary-button compact", () => mergeIssuePullRequest(branch));
-        merge.disabled = !canMerge;
-        merge.title = canMerge
-          ? "Squash-merge this closed issue branch"
-          : !issueClosed
-            ? `Close issue #${branch.issueNumber} before merging`
-            : "GitHub reports merge conflicts";
-        actions.appendChild(merge);
-        if (!issueClosed) {
-          const status = document.createElement("span");
-          status.className = "branch-alert";
-          status.textContent = `Close issue #${branch.issueNumber} to unlock merge`;
-          actions.appendChild(status);
-        }
-      } else {
-        const status = document.createElement("span");
-        status.className = "branch-alert";
-        status.textContent = "Waiting for pull request";
-        actions.appendChild(status);
-      }
-      node.body.appendChild(actions);
-      issueList.appendChild(node.row);
-    });
-    panel.appendChild(issueList);
-    tree.appendChild(panel);
-  }
-
-  async function refreshBranches({ quiet = false } = {}) {
-    const repo = currentRepo();
-    if (!repo || repo.id.startsWith("draft-")) {
-      renderBranchOverview(null);
-      return;
-    }
-    if (state.refreshing.branches) return;
-    state.refreshing.branches = true;
-    const requestedRepoId = repo.id;
-    try {
-      const overview = await invoke("git_overview_background", { repoId: requestedRepoId });
-      if (currentRepo()?.id !== requestedRepoId) return;
-      state.branchOverview = overview;
-      renderBranchOverview(state.branchOverview);
-    } catch (error) {
-      if (currentRepo()?.id === requestedRepoId && !state.branchOverview) renderBranchOverview(null);
-      if (!quiet) showToast(errorText(error), "error");
-    } finally {
-      state.refreshing.branches = false;
-      if (currentRepo()?.id !== requestedRepoId && document.querySelector("#view-repository.active")) {
-        void refreshBranches({ quiet: true });
-      }
-    }
-  }
-
-  async function mergeIssuePullRequest(branch) {
-    if (!window.confirm(`Issue #${branch.issueNumber} is closed. Squash PR #${branch.prNumber} into ${currentRepo().integration_branch} and delete ${branch.name.replace(/^origin\//, "")}?`)) return;
-    await withBusy(`merge-${branch.prNumber}`, async () => {
-      state.branchOverview = await invoke("merge_issue_branch", {
-        repoId: currentRepo().id,
-        prNumber: branch.prNumber,
-        issueNumber: branch.issueNumber,
-      });
-      renderBranchOverview(state.branchOverview);
-      showToast(`Closed issue #${branch.issueNumber}'s PR was squash-merged.`, "success");
-    }, { progress: `Squash-merging PR #${branch.prNumber}…` });
-  }
-
-  async function openIntegrationPullRequest() {
-    await withBusy("integration-pr", async () => {
-      const url = await invoke("open_integration_pr", { repoId: currentRepo().id });
-      showToast(`Promotion pull request ready: ${url}`, "success");
-      await refreshBranches({ quiet: true });
-      void refreshPromotions({ quiet: true });
-    }, { progress: "Preparing the promotion pull request…" });
-  }
-
-  async function mergeIntegrationPullRequest(prNumber) {
-    const repo = currentRepo();
-    if (!window.confirm(`Merge ${repo.integration_branch} into ${repo.base_branch} via PR #${prNumber}? This is the explicit human promotion gate.`)) return;
-    await withBusy("merge-integration", async () => {
-      state.branchOverview = await invoke("merge_integration_branch", { repoId: repo.id, prNumber });
-      renderBranchOverview(state.branchOverview);
-      showToast(`${repo.integration_branch} was merged into ${repo.base_branch}.`, "success");
-      void refreshPromotions({ quiet: true });
-    }, { progress: `Merging promotion PR #${prNumber}…` });
-  }
-
-  // ----- Overview promotion queue --------------------------------------------
+  // ----- Repository promotion queue -------------------------------------------
 
   function renderPromotions() {
     const panel = byId("promotion-panel");
@@ -3086,9 +2900,6 @@
       const url = await invoke("open_integration_pr", { repoId: promotion.repoId });
       showToast(`Promotion pull request ready: ${url}`, "success");
       void refreshPromotions({ quiet: true });
-      if (currentRepo()?.id === promotion.repoId && document.querySelector("#view-repository.active")) {
-        void refreshBranches({ quiet: true });
-      }
     }, { progress: "Preparing the promotion pull request…" });
   }
 
@@ -3099,9 +2910,6 @@
       await invoke("promote_integration_branch_background", { repoId: promotion.repoId });
       showToast(`${name} was promoted to ${promotion.baseBranch}.`, "success");
       await refreshPromotions({ quiet: true });
-      if (currentRepo()?.id === promotion.repoId && document.querySelector("#view-repository.active")) {
-        void refreshBranches({ quiet: true });
-      }
     }, { progress: `Promoting ${name} to ${promotion.baseBranch}…` });
   }
 
@@ -3351,7 +3159,6 @@
     byId("diagnose-modal").addEventListener("click", (event) => {
       if (event.target === byId("diagnose-modal")) closeDiagnoseModal();
     });
-    byId("refresh-branches").addEventListener("click", () => refreshBranches());
     byId("refresh-execution-history").addEventListener("click", () => {
       void refreshPromptGrades();
       void refreshExecutionHistory();
@@ -3385,6 +3192,22 @@
       });
     });
     showFeedbackTab(state.feedbackTab);
+    const repositoryTabs = Array.from(document.querySelectorAll("[data-repository-tab]"));
+    repositoryTabs.forEach((button) => {
+      button.addEventListener("click", () => showRepositoryTab(button.dataset.repositoryTab));
+      button.addEventListener("keydown", (event) => {
+        const steps = { ArrowRight: 1, ArrowLeft: -1, Home: "first", End: "last" };
+        const step = steps[event.key];
+        if (step === undefined) return;
+        event.preventDefault();
+        const current = repositoryTabs.indexOf(button);
+        const index = step === "first" ? 0
+          : step === "last" ? repositoryTabs.length - 1
+          : (current + step + repositoryTabs.length) % repositoryTabs.length;
+        showRepositoryTab(repositoryTabs[index].dataset.repositoryTab, { focus: true });
+      });
+    });
+    showRepositoryTab(state.repositoryTab);
     byId("prompt-grades-router-matrix").addEventListener("click", (event) => {
       const model = event.target.closest("[data-router-model]");
       if (model) {
@@ -3571,17 +3394,17 @@
       void refreshPromotions({ quiet: true });
       window.setInterval(() => void refreshStatus({ quiet: true }), 2000);
       window.setInterval(() => {
-        if (state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+        if (state.busy.size === 0 && document.querySelector("#view-repository.active")) {
           void refreshPromotions({ quiet: true });
         }
       }, 15000);
       window.addEventListener("focus", () => {
-        if (state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+        if (state.busy.size === 0 && document.querySelector("#view-repository.active")) {
           void refreshPromotions({ quiet: true });
         }
       });
       document.addEventListener("visibilitychange", () => {
-        if (!document.hidden && state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+        if (!document.hidden && state.busy.size === 0 && document.querySelector("#view-repository.active")) {
           void refreshPromotions({ quiet: true });
         }
       });
