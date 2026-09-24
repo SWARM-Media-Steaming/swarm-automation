@@ -258,3 +258,12 @@ not `pytest`** — pytest's module-level `setup_module` auto-detection
 collides with this file importing `setup_github_bots` under a name pytest
 mistakes for that hook, failing every test at collection with
 `AttributeError: module 'setup_github_bots' has no attribute '__code__'`.
+
+When testing or changing integration-branch creation, preserve its GitHub
+deletion safeguard: before the worker first pushes a new integration branch,
+it adds SWARM's named active repository ruleset with the `deletion` rule for
+that exact ref. It deliberately uses the operator's administrator-authorized
+GitHub CLI identity, not a worker GitHub App token, and must fail before the
+first push if the safeguard cannot be verified or created. Do not replace this
+with a broad branch-protection update, which could overwrite an existing
+repository policy.

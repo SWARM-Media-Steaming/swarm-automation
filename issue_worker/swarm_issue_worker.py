@@ -99,6 +99,7 @@ CODEX_QUOTA_TIMEOUTS_SECONDS = (30, 60)
 CODEX_QUOTA_CACHE_MAX_AGE_SECONDS = 15 * 60
 CODEX_QUOTA_CACHE_FILE = "codex-rate-limits-cache.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+INTEGRATION_BRANCH_RULESET_PREFIX = "SWARM safeguard: prevent deletion of "
 QUOTA_RE = re.compile(
     r"usage limit|rate[ _-]?limit|quota|credits? (?:are )?(?:exhausted|unavailable)|"
     r"limit (?:has been )?reached|hit your .*limit|resets? at|insufficient_quota",
@@ -3881,6 +3882,13 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         integ = self.config.integration_branch
         self.git("fetch", remote, check=False)
         base_head = self.synchronize_base_branch()
+        # A missing remote ref means this worker is about to create the
+        # integration branch. Install its deletion safeguard before the first
+        # push, so there is never a remotely-created worker branch without the
+        # corresponding deliberate-delete gate.
+        creating_remote_integration_branch = not self.git_ok(
+            "show-ref", "--verify", f"refs/remotes/{remote}/{integ}"
+        )
 
         if not self.git_ok("show-ref", "--verify", f"refs/heads/{integ}"):
             if self.git_ok("show-ref", "--verify", f"refs/remotes/{remote}/{integ}"):
@@ -3888,6 +3896,8 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             else:
                 self.git("branch", integ, base)
                 log(f"Created integration branch {integ} from {base}.")
+        if creating_remote_integration_branch and self.remote_is_github_host():
+            self.protect_new_integration_branch(integ)
         if self.git("branch", "--show-current") != integ:
             if self.worktree_status():
                 raise WorkerError(f"Cannot switch to {integ}: the checkout is dirty")
@@ -3924,6 +3934,87 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         self.push_integration_branch()
         head = self.git("rev-parse", "HEAD")
         return head
+
+    def protect_new_integration_branch(self, branch: str) -> None:
+        """Install SWARM's narrow, managed deletion safeguard for a new
+        integration branch.
+
+        A repository ruleset leaves normal pushes, pull requests, and existing
+        branch policy untouched. An administrator can still deliberately
+        disable or remove this named ruleset before deleting the branch.
+        This uses the operator's ``gh`` identity rather than a worker bot:
+        ruleset administration is intentionally an administrator action and
+        is not among the GitHub App permissions SWARM needs for issue work.
+        """
+        name = f"{INTEGRATION_BRANCH_RULESET_PREFIX}{branch}"
+        endpoint = f"repos/{self.config.github_repository}/rulesets"
+        arguments = [
+            "api", "--method", "GET", "--hostname", self.config.github_host, endpoint,
+        ]
+        try:
+            rulesets = json.loads(self.github.gh(arguments))
+        except (json.JSONDecodeError, WorkerError) as error:
+            raise WorkerError(
+                f"Could not verify the deletion safeguard for new integration branch {branch}: {error}"
+            ) from error
+        if not isinstance(rulesets, list):
+            raise WorkerError(
+                f"Could not verify the deletion safeguard for new integration branch {branch}: "
+                "GitHub returned an unexpected ruleset list"
+            )
+        existing = next(
+            (item for item in rulesets if isinstance(item, dict) and item.get("name") == name), None
+        )
+        if existing is not None:
+            protected_refs = (
+                existing.get("conditions", {})
+                .get("ref_name", {})
+                .get("include", [])
+            )
+            has_deletion_rule = any(
+                isinstance(rule, dict) and rule.get("type") == "deletion"
+                for rule in existing.get("rules", [])
+            )
+            if (
+                existing.get("target") == "branch"
+                and existing.get("enforcement") == "active"
+                and f"refs/heads/{branch}" in protected_refs
+                and has_deletion_rule
+            ):
+                log(f"Deletion safeguard already exists for integration branch {branch}.")
+                return
+            raise WorkerError(
+                f"The existing ruleset {name!r} does not protect {branch} from deletion; "
+                "correct or remove it before retrying."
+            )
+
+        payload = {
+            "name": name,
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+                "ref_name": {"include": [f"refs/heads/{branch}"], "exclude": []},
+            },
+            "rules": [{"type": "deletion"}],
+        }
+        try:
+            self.github.gh(
+                [
+                    "api", "--method", "POST", "--hostname", self.config.github_host,
+                    endpoint, "--input", "-",
+                ],
+                input_text=json.dumps(payload),
+            )
+        except WorkerError as error:
+            raise WorkerError(
+                f"Could not install the deletion safeguard for new integration branch {branch}. "
+                "Authorize the configured GitHub CLI identity as a repository administrator, then retry: "
+                f"{error}"
+            ) from error
+        log(
+            f"Installed GitHub deletion safeguard for integration branch {branch}; "
+            "an administrator must deliberately change the named ruleset before deleting it."
+        )
 
     def push_integration_branch(self) -> None:
         integ = self.config.integration_branch
