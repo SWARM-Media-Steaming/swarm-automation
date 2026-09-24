@@ -843,6 +843,35 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ai_agents_usage_schema_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-usage-schema-validation",
+      "name": "AI agents panel: malformed status/detail fields degrade only their provider at the Rust JSON boundary",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_usage_schema_validation.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
