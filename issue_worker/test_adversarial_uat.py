@@ -135,25 +135,26 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual([r["tests_failing_after"] for r in rounds], [1, 0])
         self.assertEqual(self.git("rev-parse", "refs/remotes/origin/ai/claude/issue-180"), self.git("rev-parse", "HEAD"))
 
-    def test_cap_publishes_failing_tests_but_never_approves_merges_or_cleans_branch(self):
+    def test_cap_delivers_best_effort_and_auto_merges_like_a_clean_pass(self):
         self.prepare(auto=True)
         def never_fix(prompt, activity=""):
             status = self.role(prompt)
             (self.repo / "tracked.txt").write_text("broken\n")
             return status
-        with self.patches(never_fix), mock.patch.object(self.worker, "approve_pull_request") as approve, mock.patch.object(self.worker, "merge_pull_request") as merge, mock.patch.object(self.worker, "auto_promote_integration_branch") as promote, mock.patch.object(self.worker, "push_ref", wraps=self.worker.push_ref) as push, mock.patch.object(self.worker, "cleanup_no_code_branch") as cleanup:
+        head = self.git("rev-parse", "HEAD")
+        with self.patches(never_fix), mock.patch.object(self.worker, "approve_pull_request") as approve, mock.patch.object(self.worker, "merge_pull_request", return_value=head) as merge, mock.patch.object(self.worker, "auto_promote_integration_branch") as promote, mock.patch.object(self.worker, "push_ref", wraps=self.worker.push_ref) as push, mock.patch.object(self.worker, "cleanup_no_code_branch") as cleanup:
             self.assertEqual(self.worker.run_adversarial_delivery(), 10)
         self.assertEqual([c[0] for c in self.calls].count("fix"), 6)
         self.assertEqual([c[0] for c in self.calls].count("test"), 7)
-        push.assert_called_once()
-        approve.assert_not_called(); merge.assert_not_called(); promote.assert_not_called(); cleanup.assert_not_called()
-        self.assertEqual(self.git("branch", "--show-current"), "ai/claude/issue-180")
+        # One push delivers the branch; the second deletes it post-merge.
+        self.assertEqual(push.call_count, 2)
+        approve.assert_called_once(); merge.assert_called_once(); promote.assert_called_once(); cleanup.assert_not_called()
         self.assertEqual(len(self.comments_posted), 1)
-        self.assertIn("Adversarial-test deadlock", self.comments_posted[0])
-        self.assertIn("https://example.invalid/pull/181", self.comments_posted[0])
-        self.assertTrue(any("AI Needs Input" in args for args in self.api))
+        self.assertIn("did not pass after six fix/re-test rounds", self.comments_posted[0])
+        self.assertIn("Delivered as best effort", self.comments_posted[0])
+        self.assertFalse(any("AI Needs Input" in args for args in self.api))
         row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
-        self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (6, "cap_hit", "awaiting_input"))
+        self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (6, "cap_hit", "completed"))
         self.assertEqual(row["pull_request_url"], "https://example.invalid/pull/181")
 
     def test_first_pass_same_provider_is_a_fresh_context_and_history_can_be_off(self):
@@ -799,20 +800,6 @@ class AdversarialUatTests(unittest.TestCase):
         unrelated = [s for s in uat.read_definition(self.repo)["suites"] if s["id"] == "adversarial-unrelated"]
         self.assertEqual(uat.run_suites(self.repo, unrelated)[0]["exit_code"], 2)
         self.assertTrue(any(args[:2] == ["issue", "create"] for args in self.api))
-
-    def test_cap_delivery_receipt_prevents_second_push_when_terminal_comment_retries(self):
-        self.prepare()
-        def never_fix(prompt, activity=""):
-            result = self.role(prompt)
-            (self.repo / "tracked.txt").write_text("broken\n")
-            return result
-        with self.patches(never_fix), mock.patch.object(self.worker, "deliver_pull_request", return_value=("https://example.invalid/pull/181", "ai/claude/issue-180", self.git("rev-parse", "HEAD"))) as delivery, mock.patch.object(self.worker, "finalize_needs_input", side_effect=[WorkerError("temporary GitHub comment failure"), None]):
-            with self.assertRaisesRegex(WorkerError, "temporary GitHub"):
-                self.worker.run_adversarial_delivery()
-            calls = len(self.calls)
-            self.worker.run_adversarial_delivery()
-        self.assertEqual(len(self.calls), calls)
-        delivery.assert_called_once()
 
     def test_unknown_stack_bootstrap_uses_portable_harness_without_waiting_for_access(self):
         with mock.patch.object(ai_test_assist, "generate", return_value={"ok": False, "error": "unsupported provider"}):
