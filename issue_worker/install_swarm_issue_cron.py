@@ -12,6 +12,7 @@ import atexit
 import datetime as dt
 import json
 import os
+import queue
 import shutil
 import signal
 import subprocess
@@ -35,6 +36,16 @@ WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 # waiting, scans every repository immediately, and restarts its timer from the
 # end of that cycle.
 RUN_NOW_REQUEST_FILE = "run-now.request"
+
+
+class RepoWorkerState:
+    """Mutable supervisor state for one persistent repository worker."""
+
+    def __init__(self, repo: dict[str, object]) -> None:
+        self.repo = repo
+        self.wake = threading.Event()
+        self.retired = False
+        self.thread: threading.Thread | None = None
 
 
 def saved_routing_overrides(worker_args: Sequence[object]) -> list[str]:
@@ -116,7 +127,8 @@ class Runner:
 
         # A single scheduler services every configured repo. By default the
         # repos are worked one at a time; with --parallel-repos each repo gets
-        # its own worker in the same cycle (faster, but AI credits burn faster).
+        # a persistent, independently scheduled worker (faster, but AI credits
+        # burn faster).
         self.repos = self._load_repos()
         self.parallel_repos = self._parallel_for(self.repos)
 
@@ -629,7 +641,14 @@ class Runner:
         status = self.run_worker(repo, prefix)
         self.prune_cargo_target(repo)
         if status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE):
-            self.log(f"{label}: made progress; will re-check on the next cycle.")
+            if (
+                self.parallel_repos
+                and not self.args.once
+                and self.args.schedule_mode == "continuous"
+            ):
+                self.log(f"{label}: made progress; checking this repository again immediately.")
+            else:
+                self.log(f"{label}: made progress; will re-check on the next cycle.")
         elif status == PROVIDER_UNAVAILABLE_EXIT_CODE:
             self.log(
                 f"{label}: an issue is queued, but no enabled AI provider has "
@@ -666,22 +685,187 @@ class Runner:
 
     def run_cycle(self) -> list[int | None]:
         """Work every configured repo once. Sequentially by default; with
-        --parallel-repos, one worker per repository runs at the same time."""
+        --parallel-repos and --once, one worker per repository runs at the
+        same time. Long-running parallel schedulers use run_parallel_repos so
+        one repository never gates another repository's next check."""
         if self.parallel_repos:
             self.log(
                 f"Working {len(self.repos)} repositories in parallel "
                 "(one worker each); AI credits are consumed faster this way."
             )
             with ThreadPoolExecutor(max_workers=len(self.repos)) as executor:
-                return list(
-                    executor.map(self.work_repo, self.repos)
-                )
+                futures = [executor.submit(self.work_repo, repo) for repo in self.repos]
+                return [future.result() for future in futures]
         results: list[int | None] = []
         for repo in self.repos:
             if self.stop_requested:
                 break
             results.append(self.work_repo(repo))
         return results
+
+    @staticmethod
+    def _repo_worker_key(repo: dict[str, object]) -> str:
+        """Identity that stays stable when a repository's saved options change."""
+        return str(repo["workspace_dir"])
+
+    def _parallel_repo_loop(
+        self,
+        state: RepoWorkerState,
+        failures: queue.SimpleQueue[Exception],
+    ) -> None:
+        """Run one repository independently until it is retired or stopped.
+
+        A scheduler tick wakes an idle repository once. In continuous mode a
+        successful issue immediately causes another check of this repository,
+        without waiting for any sibling repository to finish.
+        """
+        try:
+            while not self.stop_requested and not state.retired:
+                state.wake.wait()
+                state.wake.clear()
+                if self.stop_requested or state.retired:
+                    break
+                while not self.stop_requested and not state.retired:
+                    status = self.work_repo(state.repo)
+                    if (
+                        self.args.schedule_mode == "continuous"
+                        and status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE)
+                    ):
+                        continue
+                    break
+        except Exception as error:
+            failures.put(error)
+            self.stop_requested = True
+
+    def _sync_parallel_repo_workers(
+        self,
+        active: dict[str, RepoWorkerState],
+        all_states: list[RepoWorkerState],
+        failures: queue.SimpleQueue[Exception],
+    ) -> None:
+        """Apply the latest repos file to the persistent worker set."""
+        self.reload_repos()
+        current: set[str] = set()
+        for repo in self.repos:
+            key = self._repo_worker_key(repo)
+            current.add(key)
+            state = active.get(key)
+            if state is not None:
+                # The desktop may have changed this repo's worker arguments.
+                # Assignment is atomic, and the worker reads it between issues.
+                state.repo = repo
+                continue
+            state = RepoWorkerState(repo)
+            thread = threading.Thread(
+                target=self._parallel_repo_loop,
+                args=(state, failures),
+                name=f"swarm-repo-{repo['label']}",
+            )
+            state.thread = thread
+            active[key] = state
+            all_states.append(state)
+            thread.start()
+
+        for key in set(active) - current:
+            state = active.pop(key)
+            state.retired = True
+            state.wake.set()
+
+    def run_parallel_repos(self, *, start_immediately: bool) -> int:
+        """Supervise persistent per-repository loops without a cycle barrier."""
+        active: dict[str, RepoWorkerState] = {}
+        all_states: list[RepoWorkerState] = []
+        failures: queue.SimpleQueue[Exception] = queue.SimpleQueue()
+
+        def synchronize_and_wake() -> None:
+            self._sync_parallel_repo_workers(active, all_states, failures)
+            self.log(
+                f"Starting independent checks for {len(active)} repository(ies); "
+                "each repository continues as soon as its own worker finishes."
+            )
+            for state in active.values():
+                state.wake.set()
+
+        def defer_for_transcode() -> bool:
+            if not self.transcode_active():
+                return False
+            self.log(
+                "A SWARM media transcode is active; deferring AI and build work for "
+                f"{self.args.interval_seconds} seconds."
+            )
+            return True
+
+        continuous = self.args.schedule_mode == "continuous"
+        next_interval = time.monotonic()
+        next_schedule: dt.datetime | None = None
+        if not start_immediately and not continuous:
+            next_schedule = self.next_scheduled_run()
+            self.log(f"Next scheduled issue-worker check: {next_schedule:%A, %Y-%m-%d at %H:%M %Z}.")
+
+        try:
+            initial_deferred = start_immediately and defer_for_transcode()
+            if start_immediately and not initial_deferred:
+                synchronize_and_wake()
+            if continuous:
+                next_interval = time.monotonic() + self.args.interval_seconds
+            elif start_immediately:
+                if initial_deferred:
+                    next_schedule = dt.datetime.now().astimezone() + dt.timedelta(
+                        seconds=self.args.interval_seconds
+                    )
+                else:
+                    next_schedule = self.next_scheduled_run()
+                    self.log(
+                        f"Next scheduled issue-worker check: "
+                        f"{next_schedule:%A, %Y-%m-%d at %H:%M %Z}."
+                    )
+
+            while not self.stop_requested:
+                try:
+                    failure = failures.get_nowait()
+                except queue.Empty:
+                    failure = None
+                if failure is not None:
+                    raise failure
+
+                run_now = self.run_now_requested()
+                now = dt.datetime.now().astimezone()
+                due = (
+                    time.monotonic() >= next_interval
+                    if continuous
+                    else next_schedule is not None and now >= next_schedule
+                )
+                if run_now or due:
+                    if defer_for_transcode():
+                        next_interval = time.monotonic() + self.args.interval_seconds
+                        if not continuous:
+                            next_schedule = now + dt.timedelta(seconds=self.args.interval_seconds)
+                    else:
+                        synchronize_and_wake()
+                        if continuous:
+                            next_interval = time.monotonic() + self.args.interval_seconds
+                        else:
+                            next_schedule = self.next_scheduled_run()
+                            self.log(
+                                f"Next scheduled issue-worker check: "
+                                f"{next_schedule:%A, %Y-%m-%d at %H:%M %Z}."
+                            )
+                time.sleep(0.2)
+        finally:
+            self.stop_requested = True
+            for state in all_states:
+                state.wake.set()
+            for state in all_states:
+                if state.thread is not None:
+                    state.thread.join()
+
+        try:
+            failure = failures.get_nowait()
+        except queue.Empty:
+            failure = None
+        if failure is not None:
+            raise failure
+        return 130 if self.stop_requested else 0
 
     def run(self) -> int:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -714,12 +898,20 @@ class Runner:
         self.log(f"Live output is also appended to {self.log_path}. Press Ctrl+C to stop.")
         scheduled_tick_active = self.args.once or self.args.schedule_mode == "continuous"
         try:
+            if self.parallel_repos and not self.args.once:
+                status = self.run_parallel_repos(start_immediately=scheduled_tick_active)
+                self.log("Ctrl+C received; stopped the SWARM issue worker.")
+                return status
             while not self.stop_requested:
                 if not scheduled_tick_active:
                     if not self.wait_for_schedule():
                         break
                     scheduled_tick_active = True
                 self.reload_repos()
+                if self.parallel_repos and not self.args.once:
+                    status = self.run_parallel_repos(start_immediately=True)
+                    self.log("Ctrl+C received; stopped the SWARM issue worker.")
+                    return status
                 self.log(f"Starting a cycle over {len(self.repos)} repository(ies).")
                 if self.transcode_active():
                     self.log(
