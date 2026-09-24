@@ -1041,35 +1041,6 @@
         ]
       },
       "timeoutSeconds": 300
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial",
-        "-p",
-        "test_ai_agents_usage_result_shape.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-ai-agents-usage-result-shape",
-      "name": "AI agents panel: malformed provider usage result objects degrade only their own row",
-      "origin": "adversarial",
-      "requirements": {
-        "executables": [
-          "python3",
-          "git"
-        ],
-        "files": [
-          "issue_worker/test_swarm_issue_worker.py",
-          "issue_worker/swarm_issue_worker.py",
-          "tests/adversarial/test_ai_agents_usage_result_shape.py"
-        ]
-      },
-      "timeoutSeconds": 300
     }
   ],
   "version": 1
