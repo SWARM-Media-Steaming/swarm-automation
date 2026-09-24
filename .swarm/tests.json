@@ -118,6 +118,28 @@
     },
     {
       "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_now_working_finish_repository_scope.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-finish-repository-scope",
+      "name": "Finishing an issue clears only same-repository Now Working rows",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "tests/adversarial/test_now_working_finish_repository_scope.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
         "python3",
         "-m",
         "unittest",
