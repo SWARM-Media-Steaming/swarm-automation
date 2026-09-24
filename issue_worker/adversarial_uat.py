@@ -31,7 +31,18 @@ CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing aft
 # YAML" vs "crashes on empty YAML file") without a semantic model. The
 # threshold trades a few merged near-duplicates for not spamming GitHub with
 # repeat issues for the same bug.
+#
+# Jaccard similarity alone is not enough: two *distinct* bugs that share a
+# phrasing template ("<subject> crashes on empty <field>") can clear a high
+# similarity bar purely from the shared scaffolding words even though the one
+# differing word is the entire distinguishing content (Login vs. Signup form,
+# JSON vs. XML parser). A pure rewording only ever adds or drops filler words
+# (the symmetric difference between the two token sets is small), whereas a
+# substituted content word removes one token and adds a different one (the
+# symmetric difference is at least 2). Require both: high overlap and a small
+# symmetric difference, so a substitution can't hide behind a high ratio.
 FINDING_TITLE_SIMILARITY_THRESHOLD = 0.6
+FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE = 1
 FINDING_TITLE_STOPWORDS = {
     "a", "an", "and", "are", "at", "by", "for", "in", "is", "of", "on", "or", "the", "to", "with",
 }
@@ -46,6 +57,16 @@ def _finding_title_similarity(a: str, b: str) -> float:
     if not tokens_a or not tokens_b:
         return 0.0
     return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+
+def _finding_title_is_reworded_duplicate(a: str, b: str) -> bool:
+    tokens_a, tokens_b = _finding_title_tokens(a), _finding_title_tokens(b)
+    if not tokens_a or not tokens_b:
+        return False
+    similarity = len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+    symmetric_difference = len(tokens_a ^ tokens_b)
+    return (similarity >= FINDING_TITLE_SIMILARITY_THRESHOLD
+            and symmetric_difference <= FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE)
 # Framework wiring is the only non-test code a tester may scaffold. This list
 # is deliberately explicit: adding a test framework must not grant product edits.
 FRAMEWORK_FILES = {
@@ -441,8 +462,7 @@ class AdversarialUatMixin:
             # rounds and resumes in `details`) before trusting the digest.
             reworded_duplicate = next(
                 (item for item in details
-                 if item.get("url") and _finding_title_similarity(title, item.get("title", ""))
-                 >= FINDING_TITLE_SIMILARITY_THRESHOLD),
+                 if item.get("url") and _finding_title_is_reworded_duplicate(title, item.get("title", ""))),
                 None,
             )
             if reworded_duplicate:
