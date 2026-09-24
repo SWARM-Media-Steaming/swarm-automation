@@ -602,6 +602,13 @@ class GitHubClient:
             arguments.extend([flag, f"{key}={value}"])
         return flatten_pages(json.loads(self.gh(arguments)))
 
+    def api_get(self, endpoint: str) -> dict[str, Any]:
+        """Return one GitHub API object, rejecting non-object responses."""
+        response = json.loads(self.gh(["api", "--method", "GET", endpoint]))
+        if not isinstance(response, dict):
+            raise WorkerError("GitHub returned a non-object response")
+        return response
+
 
 @dataclasses.dataclass
 class IssueContext:
@@ -3966,12 +3973,26 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             (item for item in rulesets if isinstance(item, dict) and item.get("name") == name), None
         )
         if existing is not None:
-            # The repository-ruleset list endpoint returns summaries.  In
-            # particular, a real summary omits both ``conditions`` and
-            # ``rules`` even though the single-ruleset response contains
-            # them.  Do not mistake those omitted fields for an explicitly
-            # incomplete safeguard on every later reconciliation run.
-            is_list_summary = "conditions" not in existing and "rules" not in existing
+            # GitHub's list-rulesets endpoint returns summaries, which omit
+            # the conditions and rules that prove this safeguard is real.
+            # Fetch the named ruleset's detail record before trusting it.
+            if "conditions" not in existing and "rules" not in existing:
+                ruleset_id = existing.get("id")
+                if not isinstance(ruleset_id, int):
+                    raise WorkerError(
+                        f"Could not verify the deletion safeguard for integration branch {branch}: "
+                        f"the existing ruleset {name!r} has no numeric id"
+                    )
+                try:
+                    existing = self.github.api_get(f"{endpoint}/{ruleset_id}")
+                except json.JSONDecodeError as error:
+                    raise WorkerError(
+                        f"Could not verify the deletion safeguard for integration branch {branch}: {error}"
+                    ) from error
+                except WorkerError as error:
+                    raise WorkerError(
+                        f"Could not verify the deletion safeguard for integration branch {branch}: {error}"
+                    ) from error
             protected_refs = (
                 existing.get("conditions", {})
                 .get("ref_name", {})
@@ -3982,15 +4003,11 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 for rule in existing.get("rules", [])
             )
             if (
-                existing.get("target") == "branch"
+                existing.get("name") == name
+                and existing.get("target") == "branch"
                 and existing.get("enforcement") == "active"
-                and (
-                    is_list_summary
-                    or (
-                        f"refs/heads/{branch}" in protected_refs
-                        and has_deletion_rule
-                    )
-                )
+                and f"refs/heads/{branch}" in protected_refs
+                and has_deletion_rule
             ):
                 log(f"Deletion safeguard already exists for integration branch {branch}.")
                 return

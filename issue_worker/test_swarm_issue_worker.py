@@ -3502,7 +3502,8 @@ class WorkerTestCase(unittest.TestCase):
 
     def test_existing_deletion_safeguard_list_summary_is_not_rejected(self) -> None:
         # GitHub's list-rulesets endpoint omits conditions and rules; those
-        # fields are present only in a single-ruleset detail response.
+        # fields are present only in a single-ruleset detail response, which
+        # must be verified before the summary can be trusted.
         ruleset_summary = {
             "id": 42,
             "name": "SWARM safeguard: prevent deletion of ai-main",
@@ -3511,9 +3512,20 @@ class WorkerTestCase(unittest.TestCase):
         }
         with mock.patch.object(
             self.worker.github, "api_list", return_value=[ruleset_summary]
-        ) as api_list:
+        ) as api_list, mock.patch.object(
+            self.worker.github,
+            "api_get",
+            return_value={
+                **ruleset_summary,
+                "conditions": {"ref_name": {"include": ["refs/heads/ai-main"]}},
+                "rules": [{"type": "deletion"}],
+            },
+        ) as api_get:
             self.worker.protect_new_integration_branch("ai-main")
         api_list.assert_called_once()
+        api_get.assert_called_once_with(
+            f"repos/{self.worker.config.github_repository}/rulesets/42"
+        )
 
     def test_existing_integration_branch_gets_a_missing_deletion_ruleset(self) -> None:
         with (
