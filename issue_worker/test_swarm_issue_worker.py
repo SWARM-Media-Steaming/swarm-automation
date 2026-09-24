@@ -3458,6 +3458,63 @@ class WorkerTestCase(unittest.TestCase):
             worker.git_ok("merge-base", "--is-ancestor", "main", "ai/claude/issue-410")
         )
 
+    def test_new_integration_branch_gets_a_deletion_ruleset_before_first_push(self) -> None:
+        self.git("switch", "-q", "main")
+        self.git("branch", "-D", "ai-main")
+        self.git("push", "-q", "origin", ":ai-main")
+        self.git("fetch", "-q", "--prune", "origin")
+
+        with (
+            mock.patch.object(self.worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(self.worker.github, "gh", side_effect=["[]", "{}"]) as github,
+        ):
+            self.worker.synchronize_integration_branch()
+
+        list_args = github.call_args_list[0].args[0]
+        create_call = github.call_args_list[1]
+        create_args = create_call.args[0]
+        self.assertIn("repos/" + self.worker.config.github_repository + "/rulesets", list_args)
+        self.assertIn("--method", create_args)
+        self.assertIn("POST", create_args)
+        ruleset = json.loads(create_call.kwargs["input_text"])
+        self.assertEqual(ruleset["target"], "branch")
+        self.assertEqual(ruleset["enforcement"], "active")
+        self.assertEqual(ruleset["rules"], [{"type": "deletion"}])
+        self.assertEqual(
+            ruleset["conditions"]["ref_name"]["include"], ["refs/heads/ai-main"]
+        )
+        self.assertEqual(self.remote_heads(self.remote), ["ai-main", "main"])
+
+    def test_existing_deletion_safeguard_is_not_recreated(self) -> None:
+        ruleset_name = "SWARM safeguard: prevent deletion of ai-main"
+        ruleset = {
+            "name": ruleset_name,
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["refs/heads/ai-main"]}},
+            "rules": [{"type": "deletion"}],
+        }
+        with mock.patch.object(
+            self.worker.github, "gh", return_value=json.dumps([ruleset])
+        ) as github:
+            self.worker.protect_new_integration_branch("ai-main")
+        github.assert_called_once()
+
+    def test_new_integration_branch_is_not_pushed_when_safeguard_creation_fails(self) -> None:
+        self.git("switch", "-q", "main")
+        self.git("branch", "-D", "ai-main")
+        self.git("push", "-q", "origin", ":ai-main")
+        self.git("fetch", "-q", "--prune", "origin")
+
+        with (
+            mock.patch.object(self.worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(self.worker.github, "gh", side_effect=WorkerError("admin required")),
+        ):
+            with self.assertRaisesRegex(WorkerError, "deletion safeguard"):
+                self.worker.synchronize_integration_branch()
+
+        self.assertEqual(self.remote_heads(self.remote), ["main"])
+
     def test_followup_reworks_after_branch_was_merged_into_integration(self) -> None:
         # First pass creates + pushes the branch, then it is merged into
         # ai-main (a real merge commit, as `gh pr merge --merge` produces) and
