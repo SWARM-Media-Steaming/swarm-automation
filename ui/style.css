@@ -377,7 +377,7 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
 .raw-graph-panel summary { cursor: pointer; padding: 12px 14px; color: var(--muted); font-size: 10px; font-weight: 700; }
 .branch-graph { height: auto; max-height: 360px; min-height: 120px; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0 0 10px 10px; }
 
-.now-working-panel { margin-top: 16px; }
+.ai-agents-panel, .now-working-panel { margin-top: 16px; }
 .now-working-list { display: grid; gap: 1px; margin-top: 10px; }
 .now-working-row { display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 12px; border-top: 1px solid var(--line-soft); }
 .now-working-row:first-child { border-top: 0; }

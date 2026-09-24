@@ -17,9 +17,12 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, botReadiness: false, promotions: false, branchPushAccess: false },
+    refreshing: { status: false, tools: false, botReadiness: false, promotions: false, branchPushAccess: false, providerUsage: false },
     activeRepoId: "",
     promotions: [],
+    // AI agents panel (Overview): ProviderUsageInfo[] from check_provider_usage_background,
+    // one entry per enabled provider. Scoped to all configured repositories, not activeRepoId.
+    providerUsage: [],
     executionHistory: null,
     executionHistorySearch: "",
     executionHistorySort: "recent",
@@ -199,8 +202,14 @@
       html: "<p>The app normally finds Claude, Codex, and Grok automatically. Enter a full program path only when an installed provider is not detected or when you want to use a specific copy.</p>",
       links: [],
     },
+    "ai-agents-panel": {
+      title: "AI agents",
+      html: "<p>One row per <strong>enabled</strong> AI provider, combining what is otherwise scattered across the app: install/sign-in status from AI Configuration, live remaining quota, and whether the provider is currently working an issue (and where).</p><p>This covers every configured repository, not only the one selected above — quota is per account on this machine, and a provider can only be working one issue at a time across all of them. Quota is probed periodically rather than on every refresh, since each check runs the provider's own CLI.</p>",
+      links: [],
+    },
   };
   const HELP_CONCEPTS = [
+    ["AI agents (Overview)", "ai-agents-panel"],
     ["Including / excluding a provider", "provider-include-exclude"],
     ["GitHub App bot identities", "bot-identities"],
     ["Protected branch flow", "delivery-mode"],
@@ -261,6 +270,7 @@
     });
     byId("page-title").textContent = pageTitles[view] || pageTitles.overview;
     if (view === "debug") void refreshTools({ quiet: true });
+    if (view === "overview") void refreshProviderUsage({ quiet: true });
     if (view === "repository") {
       void refreshPromotions({ quiet: true });
       void refreshBotReadiness({ quiet: true });
@@ -1899,6 +1909,7 @@
       if (!state.dirty) state.config = await invoke("get_config");
       renderTools();
       renderReadiness();
+      renderAiAgents();
     } catch (error) {
       if (!quiet) showToast(errorText(error), "error");
     } finally {
@@ -2202,6 +2213,7 @@
     renderControls();
     renderReadiness();
     renderNowWorking();
+    renderAiAgents();
   }
 
   const NOW_WORKING_KINDS = { issue: "Issue", ci: "CI/CD", adversarial: "Adversarial UAT" };
@@ -2261,6 +2273,111 @@
     });
   }
 
+  const AI_AGENT_PILLS = { running: "Working", paused: "Low quota", stopped: "Not ready", error: "Usage unknown", idle: "Idle" };
+
+  // Which enabled providers are currently working, across every configured
+  // repository (not just activeRepoId) — reuses the same row derivation as
+  // the Now Working panel, grouped by provider instead of by issue.
+  function aiAgentsWorkingByProvider() {
+    const rows = window.SwarmNowWorking.deriveNowWorking({
+      logs: state.workerLogs,
+      workerState: state.status?.issue?.state || "stopped",
+      repositories: nowWorkingRepositories(),
+    });
+    const byProvider = new Map();
+    rows.filter((row) => row.state === "running" && row.provider).forEach((row) => {
+      const key = row.provider.toLowerCase();
+      if (!byProvider.has(key)) byProvider.set(key, []);
+      byProvider.get(key).push(row);
+    });
+    return byProvider;
+  }
+
+  function renderAiAgents() {
+    const list = byId("ai-agents-list");
+    if (!list || !state.config) return;
+    const enabled = providerList(state.config).filter((provider) => provider.enabled);
+    const usageByProvider = new Map((state.providerUsage || []).map((entry) => [entry.provider, entry]));
+    const workingByProvider = aiAgentsWorkingByProvider();
+    list.replaceChildren();
+    if (!enabled.length) {
+      const empty = document.createElement("div");
+      empty.className = "now-working-empty";
+      empty.append(
+        Object.assign(document.createElement("strong"), { textContent: "No AI providers enabled" }),
+        Object.assign(document.createElement("span"), { textContent: "Enable a provider on AI Configuration to see it here." }),
+      );
+      list.appendChild(empty);
+      return;
+    }
+    enabled.forEach((provider) => {
+      const meta = PROVIDER_META[provider.id];
+      const tool = state.tools.find((entry) => entry.id === provider.id);
+      const usage = usageByProvider.get(provider.id);
+      const working = workingByProvider.get(provider.id) || [];
+      const ready = Boolean(tool?.installed && tool?.authenticated);
+
+      let pillState = "idle";
+      if (working.length) pillState = "running";
+      else if (!ready) pillState = "stopped";
+      else if (usage && usage.status === 2) pillState = "error";
+      else if (usage && usage.status === 1) pillState = "paused";
+
+      let headline;
+      if (working.length) {
+        const locations = working.map((row) => row.repository ? `${row.title} in ${row.repository}` : row.title);
+        headline = `Working ${locations.join("; ")}`;
+      } else if (!ready) {
+        headline = "Not ready";
+      } else if (usage && usage.status === 2) {
+        headline = "Usage unknown";
+      } else if (usage && usage.status === 1) {
+        headline = "Low quota";
+      } else {
+        headline = "Idle";
+      }
+
+      const detailParts = [tool ? tool.status : "Checking…"];
+      if (usage?.remainingPercent != null) {
+        detailParts.push(usage.detail || `${Math.round(usage.remainingPercent)}% remaining`);
+      } else if (usage && usage.status === 2) {
+        detailParts.push("Usage unavailable");
+      } else if (ready) {
+        detailParts.push("Checking quota…");
+      }
+
+      const item = document.createElement("div");
+      item.className = "now-working-row ai-agent-row";
+      const kind = document.createElement("span");
+      kind.className = "now-working-kind";
+      kind.textContent = meta.label;
+      const words = document.createElement("div");
+      words.className = "now-working-words";
+      const title = document.createElement("strong");
+      title.textContent = headline;
+      const detail = document.createElement("span");
+      detail.textContent = detailParts.filter(Boolean).join(" · ");
+      words.append(title, detail);
+      const pill = document.createElement("span");
+      pill.className = `status-pill ${pillState}`;
+      pill.textContent = AI_AGENT_PILLS[pillState] || pillState;
+      item.append(kind, words, pill);
+      list.appendChild(item);
+    });
+  }
+
+  async function refreshProviderUsage({ quiet = true } = {}) {
+    if (state.refreshing.providerUsage) return;
+    state.refreshing.providerUsage = true;
+    try {
+      state.providerUsage = await invoke("check_provider_usage_background");
+      renderAiAgents();
+    } catch (error) {
+      if (!quiet) showToast(errorText(error), "error");
+    } finally {
+      state.refreshing.providerUsage = false;
+    }
+  }
 
   async function refreshStatus({ quiet = false } = {}) {
     if (state.refreshing.status) return;
@@ -2629,6 +2746,7 @@
     if (stayAtTop) full.scrollTop = 0;
     renderActivity();
     renderNowWorking();
+    renderAiAgents();
     byId("log-count").textContent = String(Math.min(entries.length, 999));
   }
 
@@ -3392,7 +3510,15 @@
       void refreshBotReadiness({ quiet: true });
       void refreshBranchPushAccess({ quiet: true });
       void refreshPromotions({ quiet: true });
+      void refreshProviderUsage({ quiet: true });
       window.setInterval(() => void refreshStatus({ quiet: true }), 2000);
+      // Quota probes shell out to each enabled provider's own CLI, so poll
+      // them far less often than status, and only while Overview is visible.
+      window.setInterval(() => {
+        if (state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+          void refreshProviderUsage({ quiet: true });
+        }
+      }, 60000);
       window.setInterval(() => {
         if (state.busy.size === 0 && document.querySelector("#view-repository.active")) {
           void refreshPromotions({ quiet: true });

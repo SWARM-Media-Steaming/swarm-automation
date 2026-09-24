@@ -48,6 +48,7 @@ from swarm_issue_worker import (
     Worker,
     WorkerError,
     build_parser,
+    check_usage,
     extract_completion_metadata,
     extract_followup_metadata,
     extract_needs_input_metadata,
@@ -1826,6 +1827,165 @@ class WorkerTestCase(unittest.TestCase):
         low, _, low_output = self.codex_usage_with([self.codex_limits(95, 20)])
         self.assertEqual(low.status, 1)
         self.assertIn("quota below configured minimum", low_output)
+
+    def test_check_usage_prints_only_json_and_only_enabled_providers(self) -> None:
+        # claude/codex/grok-bin are unset in _worker_argv, so each probe hits
+        # its own real `log(...)` call ("was not found in PATH") on the way to
+        # an unavailable status. check_usage must swallow that narration —
+        # its stdout contract with the desktop app is exactly one JSON line.
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--enabled-provider", "claude", "--enabled-provider", "codex"]
+        )
+        config = Config.from_args(args)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = check_usage(config)
+        self.assertEqual(exit_code, 0)
+        output = buffer.getvalue().strip()
+        self.assertEqual(output.count("\n"), 0)
+        payload = json.loads(output)
+        self.assertEqual([p["provider"] for p in payload["providers"]], ["claude", "codex"])
+        self.assertTrue(all(p["status"] == 2 for p in payload["providers"]))
+        self.assertTrue(all(p["remaining_percent"] is None for p in payload["providers"]))
+
+    def test_explicit_enabled_providers_replace_environment_fallback(self) -> None:
+        with mock.patch.dict(os.environ, {"SWARM_ENABLED_PROVIDERS": "claude"}):
+            args = build_parser().parse_args(
+                self._worker_argv(auto=False)
+                + ["--enabled-provider", "codex", "--enabled-provider", "grok"]
+            )
+
+        self.assertEqual(args.enabled_provider, ["codex", "grok"])
+
+    def test_enabled_providers_use_environment_without_explicit_flags(self) -> None:
+        with mock.patch.dict(os.environ, {"SWARM_ENABLED_PROVIDERS": "claude,codex"}):
+            args = build_parser().parse_args(self._worker_argv(auto=False))
+
+        self.assertEqual(args.enabled_provider, ["claude", "codex"])
+
+    def test_check_usage_isolates_provider_probe_exceptions(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--enabled-provider", "claude", "--enabled-provider", "codex"]
+        )
+        config = Config.from_args(args)
+
+        def usage_for(provider: str) -> ProviderUsage:
+            if provider == "claude":
+                raise RuntimeError("claude probe failed")
+            return ProviderUsage(0, 82.0, "session 82% remaining")
+
+        buffer = io.StringIO()
+        with (
+            mock.patch.object(Worker, "provider_usage", side_effect=usage_for),
+            contextlib.redirect_stdout(buffer),
+        ):
+            exit_code = check_usage(config)
+
+        self.assertEqual(exit_code, 0)
+        reported = {
+            entry["provider"]: entry
+            for entry in json.loads(buffer.getvalue().strip())["providers"]
+        }
+        self.assertEqual(reported["claude"]["status"], 2)
+        self.assertIsNone(reported["claude"]["remaining_percent"])
+        self.assertEqual(reported["codex"]["status"], 0)
+        self.assertEqual(reported["codex"]["remaining_percent"], 82.0)
+
+    def test_check_usage_degrades_invalid_percentages_without_hiding_healthy_providers(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--enabled-provider", "claude", "--enabled-provider", "codex"]
+        )
+        config = Config.from_args(args)
+
+        for invalid in (None, float("nan"), float("inf"), -0.1, 100.1):
+            with self.subTest(invalid=invalid):
+                def usage_for(provider: str) -> ProviderUsage:
+                    if provider == "claude":
+                        return ProviderUsage(0, invalid, "malformed")
+                    return ProviderUsage(0, 82.0, "session 82% remaining")
+
+                buffer = io.StringIO()
+                with (
+                    mock.patch.object(Worker, "provider_usage", side_effect=usage_for),
+                    contextlib.redirect_stdout(buffer),
+                ):
+                    exit_code = check_usage(config)
+
+                self.assertEqual(exit_code, 0)
+                reported = {
+                    entry["provider"]: entry
+                    for entry in json.loads(buffer.getvalue().strip())[
+                        "providers"
+                    ]
+                }
+                self.assertEqual(reported["claude"]["status"], 2)
+                self.assertIsNone(reported["claude"]["remaining_percent"])
+                self.assertIsNone(reported["claude"]["detail"])
+                self.assertEqual(reported["codex"]["remaining_percent"], 82.0)
+
+    def test_check_usage_degrades_fields_that_do_not_match_the_rust_schema(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--enabled-provider", "claude", "--enabled-provider", "codex"]
+        )
+        config = Config.from_args(args)
+
+        for malformed in (
+            ProviderUsage(True, 50.0, "session 50% remaining"),
+            ProviderUsage(0.0, 50.0, "session 50% remaining"),
+            ProviderUsage(0, 50.0, {"session": 50}),
+        ):
+            with self.subTest(malformed=malformed):
+                def usage_for(provider: str) -> ProviderUsage:
+                    if provider == "claude":
+                        return malformed
+                    return ProviderUsage(0, 82.0, "session 82% remaining")
+
+                buffer = io.StringIO()
+                with (
+                    mock.patch.object(Worker, "provider_usage", side_effect=usage_for),
+                    contextlib.redirect_stdout(buffer),
+                ):
+                    exit_code = check_usage(config)
+
+                self.assertEqual(exit_code, 0)
+                reported = {
+                    entry["provider"]: entry
+                    for entry in json.loads(buffer.getvalue().strip())["providers"]
+                }
+                self.assertEqual(reported["claude"], {
+                    "provider": "claude",
+                    "name": "Claude",
+                    "status": 2,
+                    "remaining_percent": None,
+                    "detail": None,
+                })
+                self.assertEqual(reported["codex"]["status"], 0)
+                self.assertEqual(reported["codex"]["remaining_percent"], 82.0)
+
+    def test_check_usage_cli_entrypoint_skips_the_preferred_provider_notice_on_stdout(self) -> None:
+        # Regression test: main() used to resolve --preferred-provider (default
+        # "claude") and log() the tie-break notice to stdout *before* checking
+        # args.check_usage, so disabling the default preferred provider (as
+        # here, only codex is enabled) corrupted check_usage's one-JSON-line
+        # stdout contract with a leading log line.
+        from swarm_issue_worker import main as worker_main
+
+        argv = self._worker_argv(auto=False) + [
+            "--check-usage",
+            "--enabled-provider", "codex",
+        ]
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = worker_main(argv)
+        self.assertEqual(exit_code, 0)
+        output = buffer.getvalue().strip()
+        self.assertEqual(output.count("\n"), 0, f"stdout was: {output!r}")
+        payload = json.loads(output)
+        self.assertEqual([p["provider"] for p in payload["providers"]], ["codex"])
 
     def test_queued_issue_without_provider_capacity_has_distinct_status(self) -> None:
         self.worker.issue = IssueContext(137, "Queued work", "", [], "https://example.invalid/137")
