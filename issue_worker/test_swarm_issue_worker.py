@@ -2973,6 +2973,7 @@ class WorkerTestCase(unittest.TestCase):
         worker.choice = ProviderChoice("Claude", "test", "high", "session")
         with (
             mock.patch.object(worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(worker.github, "gh", side_effect=["[]", "{}"]),
             mock.patch.object(worker, "create_linked_issue_branch") as create_linked,
         ):
             run_start, recovery, _, _ = worker.prepare_repository()
@@ -2996,6 +2997,7 @@ class WorkerTestCase(unittest.TestCase):
         worker.choice = ProviderChoice("Codex", "test", "high", "session")
         with (
             mock.patch.object(worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(worker.github, "gh", side_effect=["[]", "{}"]),
             mock.patch.object(worker, "create_linked_issue_branch") as create_linked,
         ):
             run_start, _, _, _ = worker.prepare_repository()
