@@ -144,7 +144,7 @@
     },
     "parallel-repo-workers": {
       title: "One worker per repository",
-      html: "<p>This chooses how the issue worker handles more than one repository.</p><ul><li><strong>Off (default)</strong> — a single worker visits each repository in turn and picks up one issue at a time.</li><li><strong>On</strong> — every repository with a ready issue gets its own worker, all running at the same time. With repositories A, B, C and D, if B, C and D have ready issues, three workers run together.</li></ul><p>Turning this on works through a backlog faster, <strong>but it uses AI credits faster</strong> because several providers run at once. Each repository still keeps its own branch, state, and one-issue-at-a-time limit.</p>",
+      html: "<p>This chooses how the issue worker handles more than one repository.</p><ul><li><strong>Off (default)</strong> — a single worker visits each repository in turn and picks up one issue at a time.</li><li><strong>On</strong> — every repository with a ready issue gets its own independent worker. When one repository finishes an issue, it can pick up its next issue immediately without waiting for workers in other repositories.</li></ul><p>Turning this on works through a backlog faster, <strong>but it uses AI credits faster</strong> because several providers run at once. Each repository still keeps its own branch, state, and one-issue-at-a-time limit.</p>",
       links: [],
     },
     "schedule-modes": {

@@ -54,6 +54,12 @@ close. Adding a fourth provider = one entry in `KNOWN_PROVIDERS`, a
 should be reachable by dynamic model routing, see "Dynamic model routing"
 below for the further entries it needs.
 
+Fresh-work usage probes are deliberately isolated per provider through
+`Worker.enabled_provider_usages`: an unexpected usage exception marks only
+that provider unavailable for the current scheduling pass, so a healthy
+enabled provider can still receive the issue. Keep that isolation when
+adding provider-selection callers or changing quota probes.
+
 Related, still-accurate mechanics:
 
 - `tauri.conf.json`'s `bundle.resources` entry (`"issue_worker/*.py":
@@ -193,6 +199,19 @@ idempotent HTML markers. Selection and follow-up parsing must support them
 without requiring a previous commit SHA. See
 `.claude/rules/issue-lifecycle-comments.md` before changing their comment,
 label, cursor, or resumption behavior.
+
+## Multi-repository scheduling
+
+`install_swarm_issue_cron.py` has two deliberately different scheduling
+models. With the default sequential setting, the outer cycle visits each
+repository once. With `--parallel-repos`, a long-running scheduler gives each
+repository a persistent thread supervised by `run_parallel_repos`: after a
+worker reports progress in continuous mode, that repository checks for its
+next issue immediately and never waits for another repository's worker.
+Polling intervals, scheduled wakeups, Run now requests, transcode deferrals,
+and live `repos.json` reloads are supervisor concerns and must not reintroduce
+a shared completion barrier. `--once` remains finite and uses `run_cycle` so
+the caller can receive one aggregate exit status.
 
 ## Test suite
 

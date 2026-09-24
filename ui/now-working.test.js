@@ -26,6 +26,19 @@ test("shows the issue being worked with its provider, model, effort, and phase",
   assert.equal(rows[0].provider, "Claude");
 });
 
+test("shows pinned continuation model and effort after the original selection rotates out", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo],
+    logs: [
+      line("Preparing to resume saved session abc for issue #84."),
+      line("Pinned Claude model claude-sonnet-5 session abc with effort high for this continuation."),
+    ],
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].detail, "Claude · claude-sonnet-5 · high effort · Resuming saved session");
+});
+
 test("drops an issue once it finishes instead of leaving a queue-check row", () => {
   const rows = deriveNowWorking({
     workerState: "running",
@@ -62,6 +75,24 @@ test("keeps issues of different repositories apart", () => {
     ],
   });
   assert.deepEqual(rows.map((row) => `${row.repository}${row.title}`), ["acme/app#1 One", "acme/site#1 Other"]);
+});
+
+test("finishing an issue preserves same-number work in another repository", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo, { ...repo, id: "r2", name: "acme/site" }],
+    logs: [
+      labeled("acme/app", "Selected oldest unprocessed assigned issue: #4 App work"),
+      labeled("acme/app", "Adversarial UAT for issue #4: starting independent test run (round 0 of 6)."),
+      labeled("acme/site", "Selected oldest unprocessed assigned issue: #4 Site work"),
+      labeled("acme/site", "Adversarial UAT for issue #4: starting re-test for round 2 of 6."),
+      labeled("acme/app", "Finished issue #4 with Codex: done"),
+    ],
+  });
+  assert.deepEqual(rows.map((row) => `${row.kind}:${row.repository}${row.title}`), [
+    "issue:acme/site#4 Site work",
+    "adversarial:acme/siteFix/re-test round 2 of 6",
+  ]);
 });
 
 test("shows a CI failure only while the worker is fixing it", () => {
@@ -184,4 +215,25 @@ test("keeps adversarial UAT progress synchronized with an issue quota pause and 
   const adversarial = rows.find((row) => row.kind === "adversarial");
   assert.equal(adversarial.state, "running");
   assert.equal(adversarial.title, "Fix/re-test round 3 of 6");
+});
+
+test("clears a quota pause after a cold-restart session restore", () => {
+  const baseLogs = [
+    line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+    line("Adversarial UAT for issue #84: starting re-test for round 3 of 6."),
+    line("Paused issue #84 because Codex usage is unavailable; session abc was preserved."),
+  ];
+
+  for (const restored of [
+    "Codex restored session abc for issue #84.",
+    "Codex restored quota-paused issue #84 on the existing branch.",
+  ]) {
+    const rows = deriveNowWorking({
+      workerState: "running",
+      repositories: [repo],
+      logs: [...baseLogs, line(restored)],
+    });
+    assert.equal(rows.find((row) => row.kind === "issue").state, "running");
+    assert.equal(rows.find((row) => row.kind === "adversarial").state, "running");
+  }
 });

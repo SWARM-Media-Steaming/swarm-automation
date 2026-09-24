@@ -24,6 +24,123 @@ RESULT_MARKER = "SWARM_ADVERSARIAL_RESULT:"
 CAP_HIT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-cap-hit -->"
 CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing after six fix/re-test rounds. "
                      "Automation is held; review the failing tests and adjudicate on the linked issue.\n\n")
+# A later round's fresh-context tester rediscovering an earlier round's
+# out-of-scope bug almost never reproduces the same title/body wording, so an
+# exact-digest marker match cannot dedup it. Title token overlap is a coarse
+# but wording-independent stand-in: it survives rewording ("crashes on empty
+# YAML" vs "crashes on empty YAML file") without a semantic model. The
+# threshold trades a few merged near-duplicates for not spamming GitHub with
+# repeat issues for the same bug.
+#
+# Jaccard similarity alone is not enough: two *distinct* bugs that share a
+# phrasing template ("<subject> crashes on empty <field>") can clear a high
+# similarity bar purely from the shared scaffolding words even though the one
+# differing word is the entire distinguishing content (Login vs. Signup form,
+# JSON vs. XML parser). A pure rewording only ever adds or drops filler words
+# (the symmetric difference between the two token sets is small), whereas a
+# substituted content word removes one token and adds a different one (the
+# symmetric difference is at least 2). Require both: high overlap and a small
+# symmetric difference, so a substitution can't hide behind a high ratio.
+#
+# Symmetric difference alone still misses *insertion*: a second, genuinely
+# distinct bug whose title is the first bug's title plus one qualifying word
+# ("Export fails silently" -> "CSV export fails silently") only adds one
+# token, so it clears the symmetric-difference bar too even though the
+# inserted word is exactly what makes it a different bug. But an appended
+# elaboration of the same subject ("... empty YAML" -> "... empty YAML
+# file") also only adds one token, and that *is* the same bug reworded --
+# so symmetric difference can't be resolved by "is it inserted" alone; where
+# the extra word lands matters. A word prepended ahead of everything else
+# narrows the sentence's own subject/verb ("CSV export...", "Settings
+# sidebar..."), which is how a genuinely distinct, more specific bug reads.
+# A word appended at the end, or folded into a reordered clause a fresh-
+# context tester wrote from scratch ("Config parser crashes on empty YAML"
+# -> "Empty YAML file crashes config parser"), is an elaboration or a
+# paraphrase of the same bug -- but that is only true when the extra word is
+# itself a plain, lowercase filler noun. A specific format/platform qualifier
+# ("XML", "Safari") reads as a proper noun or acronym in the original title
+# even when it lands mid-sentence or at the end ("Export crashes on large
+# XML files", "Video playback stutters on Safari"), and *that* capitalization
+# is what marks it as the distinguishing content of a genuinely separate bug
+# rather than incidental elaboration -- ordinary English filler words like
+# "file" stay lowercase wherever they land. So: once similarity and symmetric
+# difference both clear their bars, reject the match (treat as distinct) when
+# the single differing token is either the very first token of the title
+# that contains it, or is capitalized/acronym-cased in that title's original
+# wording.
+FINDING_TITLE_SIMILARITY_THRESHOLD = 0.6
+FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE = 1
+FINDING_TITLE_STOPWORDS = {
+    "a", "an", "and", "are", "at", "by", "for", "in", "is", "of", "on", "or", "the", "to", "with",
+}
+
+
+_FINDING_TITLE_ES_SUFFIX_STEMS = ("s", "x", "z", "ch", "sh")
+
+
+def _finding_title_stem(token: str) -> str:
+    # Plain suffix stripping so morphological variants of the same word
+    # ("upload"/"uploads", "time"/"times") land on the same token instead of
+    # being counted as unrelated content words when a reworded rediscovery
+    # changes verb tense or number.
+    #
+    # A base ending in a sibilant (s/x/z/ch/sh) takes "-es", not "-s"
+    # ("crash"/"crashes", "fix"/"fixes", "catch"/"catches") -- stripping only
+    # the trailing "s" leaves a dangling "e" ("crashe") that never matches
+    # the base form, so an ordinary verb-form rewording between rounds would
+    # wrongly look like a distinct content word. Strip the full "-es" first
+    # when the remaining stem itself ends in one of those sibilants.
+    if len(token) > 4 and token.endswith("es") and token[:-2].endswith(_FINDING_TITLE_ES_SUFFIX_STEMS):
+        return token[:-2]
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _finding_title_token_sequence(title: str) -> list[tuple[str, str]]:
+    # Each entry pairs the stemmed/lowered token used for set comparison
+    # with its original-cased spelling, so a caller can tell a plain filler
+    # word from a proper noun or acronym occupying the same slot.
+    tokens = []
+    for raw in re.findall(r"[A-Za-z0-9]+", title):
+        lowered = raw.lower()
+        if lowered in FINDING_TITLE_STOPWORDS:
+            continue
+        tokens.append((_finding_title_stem(lowered), raw))
+    return tokens
+
+
+def _finding_title_tokens(title: str) -> set[str]:
+    return {stem for stem, _raw in _finding_title_token_sequence(title)}
+
+
+def _finding_title_similarity(a: str, b: str) -> float:
+    tokens_a, tokens_b = _finding_title_tokens(a), _finding_title_tokens(b)
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+
+def _finding_title_is_reworded_duplicate(a: str, b: str) -> bool:
+    sequence_a, sequence_b = _finding_title_token_sequence(a), _finding_title_token_sequence(b)
+    set_a = {stem for stem, _raw in sequence_a}
+    set_b = {stem for stem, _raw in sequence_b}
+    if not set_a or not set_b:
+        return False
+    symmetric_difference = set_a ^ set_b
+    similarity = len(set_a & set_b) / len(set_a | set_b)
+    if not (similarity >= FINDING_TITLE_SIMILARITY_THRESHOLD
+            and len(symmetric_difference) <= FINDING_TITLE_MAX_SYMMETRIC_DIFFERENCE):
+        return False
+    if not symmetric_difference:
+        return True
+    extra_token = next(iter(symmetric_difference))
+    extra_sequence = sequence_a if extra_token in set_a else sequence_b
+    extra_index = next(i for i, (stem, _raw) in enumerate(extra_sequence) if stem == extra_token)
+    if extra_index == 0:
+        return False
+    extra_raw = extra_sequence[extra_index][1]
+    return extra_raw == extra_raw.lower()
 # Framework wiring is the only non-test code a tester may scaffold. This list
 # is deliberately explicit: adding a test framework must not grant product edits.
 FRAMEWORK_FILES = {
@@ -402,6 +519,25 @@ class AdversarialUatMixin:
         # whole adversarial round from inside run_adversarial_delivery,
         # stalling the original issue over a problem that isn't its own.
         from swarm_issue_worker import WorkerError, github_issue_url_from_output, iso_timestamp, log
+
+        def find_existing_finding(digest: str, marker: str) -> dict[str, Any] | None:
+            """Return a prior filing, treating bad GitHub output as a retryable failure."""
+            output = self.github.gh([
+                "issue", "list", "--repo", self.config.github_repository, "--state", "all",
+                "--search", f'"{digest}" in:body', "--json", "body,url", "--limit", "100",
+            ], self.choice.key)
+            try:
+                issues = json.loads(output)
+            except json.JSONDecodeError as error:
+                raise WorkerError(
+                    "GitHub returned malformed JSON while searching for an existing finding"
+                ) from error
+            if not isinstance(issues, list) or not all(isinstance(issue, dict) for issue in issues):
+                raise WorkerError(
+                    "GitHub returned an invalid issue list while searching for an existing finding"
+                )
+            return next((issue for issue in issues if marker in str(issue.get("body") or "")), None)
+
         for finding in findings:
             digest = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()[:20]
             marker = f"<!-- swarm-issue-worker:adversarial-finding:issue:{self.issue.number};id:{digest} -->"
@@ -412,6 +548,20 @@ class AdversarialUatMixin:
             if marker in loop["filed_findings"] and existing_detail and existing_detail.get("url"):
                 log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {title}")
                 continue
+            # A fresh-context tester in a later round rediscovering the same
+            # underlying bug almost never reproduces round 0's exact wording,
+            # so the digest above will differ. Check title similarity against
+            # everything already filed for this issue (accumulated across
+            # rounds and resumes in `details`) before trusting the digest.
+            reworded_duplicate = next(
+                (item for item in details
+                 if item.get("url") and _finding_title_is_reworded_duplicate(title, item.get("title", ""))),
+                None,
+            )
+            if reworded_duplicate:
+                log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number} "
+                    f"(reworded rediscovery of \"{reworded_duplicate.get('title')}\"): {reworded_duplicate.get('url')}")
+                continue
             try:
                 if marker in loop["filed_findings"]:
                     # A prior filing's `gh issue create` succeeded but its stdout
@@ -419,11 +569,7 @@ class AdversarialUatMixin:
                     # is stuck at "". Re-check search: the issue is genuinely on
                     # GitHub and may now be discoverable, so recover its URL
                     # instead of leaving it permanently blank.
-                    recheck = json.loads(self.github.gh([
-                        "issue", "list", "--repo", self.config.github_repository, "--state", "all",
-                        "--search", f'"{digest}" in:body', "--json", "body,url", "--limit", "100",
-                    ], self.choice.key))
-                    recovered = next((item for item in recheck if marker in item.get("body", "")), None)
+                    recovered = find_existing_finding(digest, marker)
                     url = github_issue_url_from_output(str(recovered.get("url", ""))) if recovered else ""
                     if existing_detail is not None:
                         existing_detail["url"] = url
@@ -439,11 +585,7 @@ class AdversarialUatMixin:
                         ],
                     )
                     continue
-                existing = json.loads(self.github.gh([
-                    "issue", "list", "--repo", self.config.github_repository, "--state", "all",
-                    "--search", f'"{digest}" in:body', "--json", "body,url", "--limit", "100",
-                ], self.choice.key))
-                already_filed = next((item for item in existing if marker in item.get("body", "")), None)
+                already_filed = find_existing_finding(digest, marker)
                 if already_filed:
                     url = github_issue_url_from_output(str(already_filed.get("url", "")))
                     log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {url or title}")

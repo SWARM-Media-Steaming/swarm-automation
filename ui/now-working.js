@@ -122,6 +122,12 @@
           item.model = match[2] || "";
           item.effort = match[3] || "";
         }
+      } else if ((match = message.match(/^Pinned (Claude|Codex|Grok) model\s+(.+?)\s+session\s+\S+\s+with effort\s+(.+?)\s+for this continuation\.$/i))) {
+        if (lastStarted) {
+          lastStarted.provider = match[1];
+          lastStarted.model = match[2];
+          lastStarted.effort = match[3];
+        }
       } else if ((match = message.match(/^(Claude|Codex|Grok) is working/i))) {
         const item = current(repository);
         if (item) {
@@ -161,7 +167,7 @@
         related(repository, match[1]).forEach((relatedItem) => {
           if (relatedItem.kind === "adversarial") relatedItem.state = "paused";
         });
-      } else if ((match = message.match(/preparing to resume.*?issue #(\d+)/i))) {
+      } else if ((match = message.match(/(?:preparing to resume.*?issue|restored session \S+ for issue|restored quota-paused issue) #(\d+)/i))) {
         const item = find(repository, match[1])
           || start(entry, repository, match[1], "", "Resuming saved session");
         item.state = "running";

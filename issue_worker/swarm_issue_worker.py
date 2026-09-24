@@ -1239,6 +1239,22 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
     def provider_capacity(self, provider: str) -> int:
         return self.provider_usage(provider).status
 
+    def enabled_provider_usages(self) -> dict[str, ProviderUsage]:
+        """Probe every enabled provider without letting one failure block the rest.
+
+        A quota probe is an advisory input to provider selection. An unexpected
+        failure therefore makes only that provider unavailable for this pass;
+        the scheduler can still assign work to another provider with capacity.
+        """
+        usages: dict[str, ProviderUsage] = {}
+        for spec in self.config.enabled_specs:
+            try:
+                usages[spec.name] = self.provider_usage(spec.key)
+            except Exception as error:
+                log(f"{spec.name} quota unavailable: usage probe failed: {error}")
+                usages[spec.name] = ProviderUsage(2)
+        return usages
+
     def usage_snapshot(self, provider: str) -> dict[str, Any] | None:
         """Probe a provider's remaining usage and return a JSON-safe snapshot.
 
@@ -5164,10 +5180,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                         self.suspend_paused()
                         return QUOTA_PAUSED_EXIT_CODE
         else:
-            usages = {
-                spec.name: self.provider_usage(spec.key)
-                for spec in self.config.enabled_specs
-            }
+            usages = self.enabled_provider_usages()
             remaining = {
                 name: usage.remaining_percent
                 for name, usage in usages.items()

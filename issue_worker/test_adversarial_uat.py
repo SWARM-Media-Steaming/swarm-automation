@@ -230,6 +230,41 @@ class AdversarialUatTests(unittest.TestCase):
             "title": "Separate parser bug", "url": "https://example.invalid/issues/182",
         }])
 
+    def test_reworded_rediscovery_of_a_prior_finding_is_not_refiled(self):
+        # Issue #222: each tester round runs with fresh context and never sees
+        # a prior round's exact finding wording, so a later round rediscovering
+        # the same real bug produces a different title/body and thus a
+        # different exact-digest marker. Dedup must not depend solely on that
+        # digest matching byte-for-byte.
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        first = {"title": "Config parser crashes on empty YAML",
+                 "body": "Repro: run parse_config() with an empty file. Traceback at line 42."}
+        second = {"title": "Config parser crashes on empty YAML file",
+                  "body": 'Steps to reproduce: call parse_config("") -- raises KeyError at config.py:42.'}
+        with mock.patch.object(self.worker.github, "gh", side_effect=self.gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [first])
+            self.worker.file_adversarial_findings(loop, [second])
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        self.assertEqual(len(creates), 1)
+        self.assertIn("reworded rediscovery", output.getvalue())
+        details = self.worker.read_state()["adversarial"]["filed_finding_details"]
+        self.assertEqual(len(details), 1)
+
+    def test_unrelated_findings_are_both_filed(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        first = {"title": "Config parser crashes on empty YAML", "body": "Repro details."}
+        second = {"title": "Sidebar icon misaligned on hover", "body": "Unrelated UI glitch."}
+        with mock.patch.object(self.worker.github, "gh", side_effect=self.gh):
+            self.worker.file_adversarial_findings(loop, [first])
+            self.worker.file_adversarial_findings(loop, [second])
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        self.assertEqual(len(creates), 2)
+        details = self.worker.read_state()["adversarial"]["filed_finding_details"]
+        self.assertEqual(len(details), 2)
+
     def test_malformed_gh_create_output_is_not_logged_as_a_successful_filing(self):
         self.prepare()
         finding = {"title": "Separate parser bug", "body": "Reproduction details."}
@@ -279,6 +314,28 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(self.worker.read_state()["adversarial"]["filed_findings"], [])
         self.assertEqual(self.worker.read_state()["adversarial"]["filed_finding_details"], [])
 
+    def test_malformed_github_issue_list_output_is_non_blocking(self):
+        # Issue #239: a successful gh invocation can still produce a
+        # truncated or non-JSON response. Filing an unrelated finding must
+        # treat that exactly like another retryable GitHub failure.
+        self.prepare()
+        finding = {"title": "Separate parser bug", "body": "Reproduction details."}
+        loop = self.worker.read_state()["adversarial"]
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"]:
+                return "not json at all"
+            return ""
+
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [finding])
+
+        self.assertIn("Could not file out-of-scope adversarial UAT finding for #180", output.getvalue())
+        self.assertIn("malformed JSON", output.getvalue())
+        self.assertEqual(self.worker.read_state()["adversarial"]["filed_findings"], [])
+        self.assertEqual(self.worker.read_state()["adversarial"]["filed_finding_details"], [])
+
     def test_github_failure_while_filing_a_finding_lets_the_round_complete(self):
         self.prepare(fixed=True)
         finding = {"title": "Separate parser bug", "body": "Reproduction details, unrelated to tracked.txt."}
@@ -292,6 +349,40 @@ class AdversarialUatTests(unittest.TestCase):
             if args[:2] == ["issue", "list"]:
                 raise WorkerError("gh: HTTP 403: API rate limit exceeded")
             if args[:2] in (["pr", "list"],):
+                return "[]"
+            if args[:2] == ["pr", "create"]:
+                return "https://example.invalid/pull/181"
+            if args[:2] == ["issue", "comment"]:
+                self.comments_posted.append(body)
+            return ""
+
+        with mock.patch.object(self.worker, "run_ai", side_effect=external), \
+                mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                mock.patch.object(self.worker, "ensure_bot_auth"), \
+                mock.patch.object(self.worker, "comments", return_value=[]), \
+                mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 80)), \
+                mock.patch.object(self.worker, "minor_bump_requested_by_trusted_user", return_value=False), \
+                mock.patch.object(self.worker, "finalize_issue"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            exit_code = self.worker.run_adversarial_delivery()
+
+        self.assertEqual(exit_code, 10)
+        self.assertIn("Could not file out-of-scope adversarial UAT finding for #180", output.getvalue())
+        self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
+
+    def test_malformed_github_issue_list_output_lets_the_round_complete(self):
+        self.prepare(fixed=True)
+        finding = {"title": "Separate parser bug", "body": "Reproduction details, unrelated to tracked.txt."}
+
+        def external(prompt, activity=""):
+            self.role(prompt)
+            self.worker.ai_output_file.write_text(uat.RESULT_MARKER + json.dumps({"out_of_scope": [finding]}))
+            return 0
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"]:
+                return "not json at all"
+            if args[:2] == ["pr", "list"]:
                 return "[]"
             if args[:2] == ["pr", "create"]:
                 return "https://example.invalid/pull/181"
