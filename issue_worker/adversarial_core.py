@@ -406,6 +406,18 @@ class AdversarialStage:
         """
         return []
 
+    def excludable_findings(self, report: dict[str, Any]) -> list[dict[str, Any]]:
+        """Out-of-scope findings whose cited suite_ids may exclude a suite
+        from this round's blocking set.
+
+        UAT's out-of-scope findings carry no confidence signal, so every one
+        of them is eligible. A stage whose findings do carry confidence (see
+        `SecurityStage`) must restrict this to findings it would actually act
+        on — a merely speculative claim must never be able to silently retire
+        a suite this round would otherwise have to pass.
+        """
+        return report.get("out_of_scope", [])
+
     def prompt(self, worker, loop: dict[str, Any], common: str) -> str:
         raise NotImplementedError
 
@@ -891,7 +903,14 @@ class AdversarialStageMixin:
                 # Every tester phase starts with a new CLI session. Only an
                 # interrupted *same phase* resumes its existing session.
                 self.issue_images = []
-                status = self.run_ai(self.adversarial_prompt(stage, loop), activity=stage.activity(loop))
+                try:
+                    status = self.run_ai(self.adversarial_prompt(stage, loop), activity=stage.activity(loop))
+                except WorkerError as error:
+                    # An unavailable executable or other setup failure raises
+                    # directly rather than returning a nonzero status, so it
+                    # would otherwise bypass the failure recording below entirely.
+                    self.record_stage_failure(stage, loop, str(error))
+                    raise
                 if status != 0 or not self.ai_output_file.exists() or not self.ai_output_file.stat().st_size:
                     if self.ai_failure_is_quota():
                         return self.pause_adversarial()
@@ -912,6 +931,52 @@ class AdversarialStageMixin:
                     report = stage.parse_report(output)
                     added, modified = self.validate_stage_edits(stage, loop, report)
                     definition = read_definition(self.config.repo_dir)
+                    # The tester prompt explicitly permits citing a pre-existing,
+                    # non-adversarial suite's ID in an out-of-scope finding ("If
+                    # an existing suite fails for an unrelated reason ... report
+                    # its ID in that finding's suite_ids array"), so the set of
+                    # names this validates against must include every suite in
+                    # the definition, not just this stage's own —
+                    # otherwise a tester following that instruction to the
+                    # letter gets rejected for naming a real, known suite. This
+                    # reference check, and the exclusion it feeds, must live
+                    # inside this same try/except: an invalid reference is
+                    # exactly as unrecoverable a tester result as a malformed
+                    # report, and needs the same rejection/retry and failure
+                    # recording, not a silent escape from both.
+                    known_suites = {s["id"] for s in definition["suites"]}
+                    cited_suite_ids = {sid for finding in report.get("out_of_scope", [])
+                                       for sid in finding.get("suite_ids", [])}
+                    if cited_suite_ids - known_suites:
+                        raise WorkerError("Out-of-scope findings named unknown suites")
+                    # Only findings this stage would actually act on may retire
+                    # a suite from blocking. A merely speculative (low
+                    # confidence) claim must never be able to silently exclude
+                    # a suite the round would otherwise have to satisfy.
+                    excluded = {sid for finding in stage.excludable_findings(report)
+                               for sid in finding.get("suite_ids", [])}
+                    candidate_excluded = set(loop.get("excluded_suites", [])) | excluded
+                    runnable = [s for s in definition["suites"]
+                                if s.get("origin") == stage.origin and s["id"] not in candidate_excluded]
+                    if stage.require_suites and not runnable:
+                        # A tester may legitimately register a *new* suite purely
+                        # to formally record a pre-existing, unrelated regression
+                        # for future scheduled runs (test_unrelated_failing_suite_
+                        # remains_scheduled_but_does_not_block) — new suite IDs
+                        # are not disqualified on their own. What must never
+                        # happen is excluding every adversarial suite this round
+                        # would otherwise run: that includes this issue's own
+                        # just-registered acceptance suite, which run_suites then
+                        # fails closed on ("no enabled adversarial suite was
+                        # registered") with nothing able to fix it, burning every
+                        # round until the cap hits and delivery stalls needing
+                        # input — the 2026-09-23 production incident on issue
+                        # #360, where Claude cited its own new suite alongside a
+                        # real pre-existing one in the same out_of_scope finding.
+                        raise WorkerError(
+                            "Out-of-scope findings would exclude every adversarial suite this round; "
+                            "this issue's own acceptance suite may not be marked out of scope"
+                        )
                 except (ValueError, TypeError, KeyError, WorkerError) as error:
                     # A rejected report must not be replayed forever from the
                     # checkpoint, and its invalid edits must not poison every
@@ -936,40 +1001,6 @@ class AdversarialStageMixin:
                 # on masquerading as the stage's current verdict once a fresh
                 # attempt actually completes, whatever that attempt concludes.
                 loop.pop("review_error", None)
-                # The tester prompt explicitly permits citing a pre-existing,
-                # non-adversarial suite's ID in an out-of-scope finding ("If
-                # an existing suite fails for an unrelated reason ... report
-                # its ID in that finding's suite_ids array"), so the set of
-                # names this validates against must include every suite in
-                # the definition, not just this stage's own —
-                # otherwise a tester following that instruction to the
-                # letter gets rejected for naming a real, known suite.
-                known_suites = {s["id"] for s in definition["suites"]}
-                excluded = {sid for finding in report.get("out_of_scope", []) for sid in finding.get("suite_ids", [])}
-                if excluded - known_suites:
-                    raise WorkerError("Out-of-scope findings named unknown suites")
-                candidate_excluded = set(loop.get("excluded_suites", [])) | excluded
-                runnable = [s for s in definition["suites"]
-                            if s.get("origin") == stage.origin and s["id"] not in candidate_excluded]
-                if stage.require_suites and not runnable:
-                    # A tester may legitimately register a *new* suite purely
-                    # to formally record a pre-existing, unrelated regression
-                    # for future scheduled runs (test_unrelated_failing_suite_
-                    # remains_scheduled_but_does_not_block) — new suite IDs
-                    # are not disqualified on their own. What must never
-                    # happen is excluding every adversarial suite this round
-                    # would otherwise run: that includes this issue's own
-                    # just-registered acceptance suite, which run_suites then
-                    # fails closed on ("no enabled adversarial suite was
-                    # registered") with nothing able to fix it, burning every
-                    # round until the cap hits and delivery stalls needing
-                    # input — the 2026-09-23 production incident on issue
-                    # #360, where Claude cited its own new suite alongside a
-                    # real pre-existing one in the same out_of_scope finding.
-                    raise WorkerError(
-                        "Out-of-scope findings would exclude every adversarial suite this round; "
-                        "this issue's own acceptance suite may not be marked out of scope"
-                    )
                 self.file_stage_findings(stage, loop, stage.findings_to_file(report))
                 loop.pop("retry_rejection", None)
                 loop["excluded_suites"] = sorted(candidate_excluded)
@@ -1045,6 +1076,7 @@ class AdversarialStageMixin:
 
     def record_stage_failure(self, stage: AdversarialStage, loop: dict[str, Any], reason: str) -> None:
         """A review that could not execute must never read as a clean pass."""
+        from ai_execution_history import sanitize_text
         from swarm_issue_worker import iso_timestamp, log
         if not stage.reports_failures:
             return
@@ -1052,7 +1084,10 @@ class AdversarialStageMixin:
         loop["review_error"] = reason
         self.save_stage(stage, loop)
         self.history.update(iso_timestamp(), **stage.failure_history_fields(reason))
-        log(f"{stage.label} for issue #{self.issue.number}: review failed — {reason}")
+        # The persisted history column is sanitized by history.update itself;
+        # the operator log is a separate surface and must not repeat a
+        # credential a setup/auth error's exception message happened to quote.
+        log(f"{stage.label} for issue #{self.issue.number}: review failed — {sanitize_text(reason)}")
 
     def run_adversarial_pipeline(self) -> int:
         """Run every enabled adversarial stage in order, then deliver once."""

@@ -111,22 +111,27 @@ def severity_counts(findings: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def finding_identity(finding: dict[str, Any]) -> tuple[str, ...] | str:
+def finding_identity(finding: dict[str, Any]) -> str:
     """How a rediscovery of the same vulnerability is recognised across rounds.
 
-    Keyed on the affected files, not the title: a fresh reviewer's wording for
-    the same vulnerability varies round to round, but which files it lives in
-    does not. Keying on title alone lets a reviewer's mere rewording of an
-    unresolved finding read as two different findings, one of which then
-    appears to "disappear" and get credited as fixed. A finding with no
-    identified files falls back to its normalized title, its only remaining
-    stable signal.
+    Keyed on the finding's own description, not its title or affected files.
+    Neither of those two other fields is stable enough alone: a fresh
+    reviewer may reword the same finding's *title* between rounds while the
+    vulnerability itself is unchanged (a title-only identity then reads the
+    reworded finding as a new one, letting the original "disappear" and get
+    wrongly credited as fixed), and the very same unresolved vulnerability
+    can gain a longer, more precise *files* list as a reviewer traces
+    additional callers without the underlying code ever changing (a
+    files-only identity then treats that expanded evidence as a new finding,
+    which can equally manufacture a false "fixed" verdict for the original).
+    Two independently exploitable checks that merely happen to live in the
+    same file are still two distinct findings, so identity cannot be just the
+    affected filename either — the description is the field a reviewer keeps
+    materially stable for as long as the underlying vulnerability itself is
+    unchanged, while still differing between genuinely distinct
+    vulnerabilities.
     """
-    files = tuple(sorted({" ".join(str(path).split()).strip().lower()
-                          for path in finding.get("files", []) if str(path).strip()}))
-    if files:
-        return files
-    return " ".join(str(finding.get("title") or "").split()).strip().lower()
+    return " ".join(str(finding.get("description") or "").split()).strip().lower()
 
 
 def render_finding(finding: dict[str, Any], *, issue_number: int) -> str:
@@ -223,6 +228,13 @@ class SecurityStage(AdversarialStage):
         return [finding for finding in report.get("out_of_scope", [])
                 if finding["confidence"] in ACTIONABLE_CONFIDENCES]
 
+    def excludable_findings(self, report: dict[str, Any]) -> list[dict[str, Any]]:
+        # A speculative (low-confidence) claim must not be able to retire a
+        # suite from this round's blocking set — only findings this stage
+        # would actually act on may exclude one.
+        return [finding for finding in report.get("out_of_scope", [])
+                if finding["confidence"] in ACTIONABLE_CONFIDENCES]
+
     def record_round(self, worker, loop: dict[str, Any], report: dict[str, Any],
                      round_value: dict[str, Any], blocking: list[dict[str, Any]],
                      results: list[dict[str, Any]] | None = None) -> None:
@@ -248,17 +260,22 @@ class SecurityStage(AdversarialStage):
         # of an unresolved vulnerability than a fresh reviewer not mentioning it.
         still_open = {finding_identity(finding) for finding in blocking}
         exit_codes = {str(result.get("id")): result.get("exit_code") for result in (results or [])}
+        # "Fixed" is this round's evidence, not a one-way ratchet: a later
+        # round can reintroduce a vulnerability an earlier round already
+        # verified fixed (a subsequent fix regresses it), so anything blocking
+        # again this round must lose its earlier fixed credit.
+        fixed[:] = [item for item in fixed if finding_identity(item) not in still_open]
+        already_fixed = {finding_identity(item) for item in fixed}
         newly_fixed = []
         for item in discovered:
             identity = finding_identity(item)
-            if identity in still_open:
-                continue
-            if any(finding_identity(f) == identity for f in fixed):
+            if identity in still_open or identity in already_fixed:
                 continue
             suite_ids = item.get("suite_ids") or []
             if suite_ids and any(exit_codes.get(sid, 1) != 0 for sid in suite_ids):
                 continue
             newly_fixed.append(item)
+            already_fixed.add(identity)
         fixed.extend(newly_fixed)
         loop["open_findings"] = blocking
         loop["summary"] = str(report.get("summary") or "").strip()
