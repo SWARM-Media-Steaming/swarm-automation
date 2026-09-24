@@ -1315,6 +1315,35 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_integration_branch_ruleset_pagination.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-integration-branch-ruleset-pagination",
+      "name": "Integration-branch ruleset lookup paginates GitHub rulesets correctly, finding safeguards on any page",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_integration_branch_ruleset_pagination.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

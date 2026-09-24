@@ -3948,12 +3948,18 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         """
         name = f"{INTEGRATION_BRANCH_RULESET_PREFIX}{branch}"
         endpoint = f"repos/{self.config.github_repository}/rulesets"
-        arguments = [
-            "api", "--method", "GET", "--hostname", self.config.github_host, endpoint,
-        ]
         try:
-            rulesets = json.loads(self.github.gh(arguments))
-        except (json.JSONDecodeError, WorkerError) as error:
+            rulesets = self.github.api_list(endpoint)
+        except json.JSONDecodeError as error:
+            raise WorkerError(
+                f"Could not verify the deletion safeguard for new integration branch {branch}: {error}"
+            ) from error
+        except WorkerError as error:
+            if str(error) == "GitHub returned a non-list response":
+                raise WorkerError(
+                    f"Could not verify the deletion safeguard for new integration branch {branch}: "
+                    "GitHub returned an unexpected ruleset list"
+                ) from error
             raise WorkerError(
                 f"Could not verify the deletion safeguard for new integration branch {branch}: {error}"
             ) from error
