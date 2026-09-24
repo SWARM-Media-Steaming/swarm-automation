@@ -2318,9 +2318,9 @@
       const ready = Boolean(tool?.installed && tool?.authenticated);
 
       let pillState = "idle";
-      if (!ready) pillState = "stopped";
+      if (working.length) pillState = "running";
+      else if (!ready) pillState = "stopped";
       else if (usage && usage.status === 2) pillState = "error";
-      else if (working.length) pillState = "running";
       else if (usage && usage.status === 1) pillState = "paused";
 
       let headline;

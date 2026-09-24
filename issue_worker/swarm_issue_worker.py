@@ -5842,7 +5842,14 @@ def check_usage(config: Config) -> int:
         for spec in config.providers:
             if not spec.enabled:
                 continue
-            usage = worker.provider_usage(spec.key)
+            try:
+                usage = worker.provider_usage(spec.key)
+            except Exception:
+                # Each provider uses an independent CLI/helper. A broken or
+                # transiently unavailable probe must degrade only that row,
+                # not discard the already-collected results for every other
+                # enabled provider.
+                usage = ProviderUsage(2)
             providers.append(
                 {
                     "provider": spec.key,
