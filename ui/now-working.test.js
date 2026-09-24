@@ -23,6 +23,7 @@ test("shows the issue being worked with its provider, model, effort, and phase",
   assert.equal(rows[0].detail, "Claude · claude-sonnet-5 · high effort · Claude is writing the change");
   assert.equal(rows[0].repository, "acme/app");
   assert.equal(rows[0].state, "running");
+  assert.equal(rows[0].provider, "Claude");
 });
 
 test("drops an issue once it finishes instead of leaving a queue-check row", () => {

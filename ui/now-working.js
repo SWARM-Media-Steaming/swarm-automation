@@ -165,6 +165,7 @@
           state: item.state,
           since: item.since,
           issueNumber: item.number,
+          provider: item.provider || "",
         });
       });
     }

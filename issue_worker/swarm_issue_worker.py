@@ -28,6 +28,7 @@ import argparse
 import contextlib
 import dataclasses
 import datetime as dt
+import io
 import json
 import os
 import re
@@ -5721,6 +5722,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=env_bool("SWARM_ALLOW_USAGE_CREDIT_MODELS", False),
         help="Offer models that bill against a separate usage-credit balance to the router.",
     )
+    parser.add_argument(
+        "--check-usage",
+        action="store_true",
+        default=False,
+        help="Probe remaining quota for each enabled provider, print it as JSON, and exit "
+        "without running a work cycle.",
+    )
     parser.add_argument("--dry-run", action="store_true", default=env_bool("SWARM_ISSUE_WORKER_DRY_RUN"))
     parser.add_argument("--gh-bin", default=env_value("GH_BIN", executable_default("gh")))
     parser.add_argument("--git-bin", default=env_value("GIT_BIN", executable_default("git")))
@@ -5815,6 +5823,39 @@ def resolve_preferred_provider(preferred: str, enabled: Iterable[str]) -> str:
     return next(key for key in KNOWN_PROVIDER_KEYS if key in enabled_set)
 
 
+def check_usage(config: Config) -> int:
+    """Probe remaining quota for each enabled provider and print it as one JSON
+    line on stdout, for the desktop app's Overview panel (see #218). Runs no
+    work cycle and touches no GitHub or git state; ``Worker`` is only
+    constructed for its usage-probing methods, which are per-CLI-account and
+    machine-wide rather than per-repository.
+
+    ``claude_usage``/``codex_usage``/``grok_usage`` narrate their own progress
+    through ``log()``, which prints to stdout — fine for the scheduler's log
+    stream, fatal here since a caller parsing this process's stdout as JSON
+    would choke on interleaved log lines. Redirect stdout for the duration of
+    the probe and print the JSON payload afterwards, once, as the only line.
+    """
+    worker = Worker(config)
+    providers: list[dict[str, Any]] = []
+    with contextlib.redirect_stdout(io.StringIO()):
+        for spec in config.providers:
+            if not spec.enabled:
+                continue
+            usage = worker.provider_usage(spec.key)
+            providers.append(
+                {
+                    "provider": spec.key,
+                    "name": spec.name,
+                    "status": usage.status,
+                    "remaining_percent": usage.remaining_percent,
+                    "detail": usage.detail,
+                }
+            )
+    print(json.dumps({"providers": providers}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not 0 <= args.minimum_remaining_percent <= 100:
@@ -5824,6 +5865,12 @@ def main(argv: list[str] | None = None) -> int:
     enabled = set(args.enabled_provider or KNOWN_PROVIDER_KEYS)
     if not enabled:
         raise WorkerError("At least one --enabled-provider is required")
+    if args.check_usage:
+        # check_usage's stdout contract is one JSON line, nothing else. It
+        # never picks a provider, so it must not reach the preferred-provider
+        # log() below — that call is real stdout narration a JSON-only caller
+        # cannot tell apart from the payload.
+        return check_usage(Config.from_args(args))
     resolved_preferred = resolve_preferred_provider(args.preferred_provider, enabled)
     if resolved_preferred != args.preferred_provider:
         log(
