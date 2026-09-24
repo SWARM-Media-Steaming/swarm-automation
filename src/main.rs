@@ -773,6 +773,100 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
     arguments
 }
 
+/// Remaining quota for one enabled AI provider, probed live by
+/// `swarm_issue_worker.py --check-usage`. Quota is per-CLI-account on this
+/// machine, not per-repository, so this is a single machine-wide probe rather
+/// than something scoped to the active repository.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderUsageInfo {
+    provider: String,
+    /// 0 = usable, 1 = below the configured minimum, 2 = unavailable (not
+    /// installed, not signed in, or the probe itself failed).
+    status: i32,
+    usable: bool,
+    remaining_percent: Option<f64>,
+    /// Short breakdown of each usage window, e.g. "session 82% / week 95%
+    /// remaining". `None` when the probe could not determine it.
+    detail: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProviderUsageProbe {
+    provider: String,
+    status: i32,
+    remaining_percent: Option<f64>,
+    detail: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProviderUsageProbeResponse {
+    providers: Vec<ProviderUsageProbe>,
+}
+
+/// Live remaining-quota probe for every *enabled* provider, for the Overview
+/// page's AI agents panel (#218). Shells out to the same
+/// `swarm_issue_worker.py` the scheduler runs, with `--check-usage` so it
+/// probes each provider's CLI once and exits instead of running a work cycle.
+/// Each provider CLI call can take real time (Codex/Grok retry with multi-
+/// second timeouts), so the caller should poll this sparingly, not on every
+/// render.
+#[tauri::command]
+fn check_provider_usage<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ProviderUsageInfo>, String> {
+    let config = current_config(&state)?;
+    let providers = resolve_providers(&config);
+    if providers.iter().all(|provider| !provider.enabled) {
+        return Ok(Vec::new());
+    }
+    let script = worker_script_dir(&app)?.join("swarm_issue_worker.py");
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let mut arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--check-usage".into(),
+    ];
+    arguments.extend(provider_scheduler_arguments(&config, &providers));
+    arguments.extend([
+        "--minimum-remaining-percent".into(),
+        config.minimum_remaining_percent.to_string(),
+        "--state-dir".into(),
+        config.worker_state_dir.clone(),
+        "--python-bin".into(),
+        python.to_string_lossy().into_owned(),
+    ]);
+    let (ok, raw) = run_capture_owned(&python, &arguments);
+    if !ok {
+        return Err(format!("Provider usage check failed: {raw}"));
+    }
+    let parsed: ProviderUsageProbeResponse = serde_json::from_str(raw.trim())
+        .map_err(|error| format!("Provider usage response could not be parsed: {error}"))?;
+    Ok(parsed
+        .providers
+        .into_iter()
+        .map(|probe| ProviderUsageInfo {
+            provider: probe.provider,
+            status: probe.status,
+            usable: probe.status == 0,
+            remaining_percent: probe.remaining_percent,
+            detail: probe.detail,
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn check_provider_usage_background(
+    app: tauri::AppHandle,
+) -> Result<Vec<ProviderUsageInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        check_provider_usage(app.clone(), state)
+    })
+    .await
+    .map_err(|error| format!("Provider usage check background task failed: {error}"))?
+}
+
 /// Global scheduler flags for `install_swarm_issue_cron.py`. Per-repo detail
 /// lives in the `--repos-file`; unknown provider flags added by the
 /// caller are forwarded to every repo's worker invocation.
@@ -4227,6 +4321,8 @@ fn main() {
             launch_bot_setup,
             verify_github_bots,
             check_repo_bot_readiness,
+            check_provider_usage,
+            check_provider_usage_background,
             git_overview,
             git_overview_background,
             refresh_repo,

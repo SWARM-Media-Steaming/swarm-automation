@@ -1051,6 +1051,193 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_ai_agents_usage_probe_isolation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-usage-probe-isolation",
+      "name": "AI agents panel: one enabled provider's usage-probe exception must not blank the others",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_usage_probe_isolation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_ai_agents_panel_pill_consistency.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-panel-pill-consistency",
+      "name": "AI agents panel: the status pill must agree with the headline about currently-working state",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "tests/adversarial/test_ai_agents_panel_pill_consistency.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_ai_agents_parallel_repositories.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-parallel-repositories",
+      "name": "AI agents panel: interleaved parallel-repository work remains attributed and scoped to the correct provider",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/logging.js",
+          "ui/now-working.js",
+          "issue_worker/install_swarm_issue_cron.py",
+          "tests/adversarial/test_ai_agents_parallel_repositories.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ai_agents_enabled_provider_authority.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-enabled-provider-authority",
+      "name": "AI agents panel: saved enabled providers override inherited worker environment",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_enabled_provider_authority.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_ai_agents_parallel_activity_completeness.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-parallel-activity-completeness",
+      "name": "AI agents panel: parallel repository exits are isolated and every concurrent work location is identified",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "ui/logging.js",
+          "ui/now-working.js",
+          "issue_worker/install_swarm_issue_cron.py",
+          "tests/adversarial/test_ai_agents_parallel_activity_completeness.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ai_agents_usage_value_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-usage-value-validation",
+      "name": "AI agents panel: malformed quota percentages degrade only their provider and preserve strict JSON",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_usage_value_validation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ai_agents_usage_schema_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-usage-schema-validation",
+      "name": "AI agents panel: malformed status/detail fields degrade only their provider at the Rust JSON boundary",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_usage_schema_validation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_ai_agents_usage_result_shape.py"
       ],
       "disruptive": false,
