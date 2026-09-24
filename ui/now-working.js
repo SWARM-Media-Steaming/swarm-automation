@@ -14,6 +14,72 @@
   // Issues and CI come from replaying the worker's log lines in order — the
   // worker has no structured "current work" channel.
 
+  // Rows derived from an adversarial stage's boundary logs rather than from
+  // the issue queue. They hang off the same issue but are their own rows, so
+  // "find the issue row" lookups must skip all of them, not just UAT's.
+  const ADVERSARIAL_KINDS = new Set(["adversarial", "security"]);
+  // Each adversarial agent emits the same four boundary logs under its own
+  // label, so one parser serves every stage; adding a third agent is a row
+  // here, not another branch in the replay chain below.
+  const ADVERSARIAL_STAGES = [
+    {
+      label: "Adversarial UAT",
+      kind: "adversarial",
+      zero: "independent test run",
+      zeroTitle: "Independent test run",
+    },
+    {
+      label: "Adversarial Cybersecurity",
+      kind: "security",
+      zero: "independent security review",
+      zeroTitle: "Independent security review",
+    },
+  ];
+
+  function adversarialRound(message) {
+    for (const stage of ADVERSARIAL_STAGES) {
+      const head = message.match(new RegExp(`^${stage.label} for issue #(\\d+): (.+)\\.$`, "i"));
+      if (!head) continue;
+      const [, number, detail] = head;
+      const rounds = [
+        [/^starting fix\/re-test round (\d+) of (\d+)$/i, "Fix in progress"],
+        [/^starting re-test for round (\d+) of (\d+)$/i, "Re-test in progress"],
+        [/^fix applied in round (\d+) of (\d+)$/i, "Fix applied; re-test pending"],
+      ];
+      const assessment = detail.match(
+        new RegExp(`^starting ${stage.zero} \\(round (\\d+) of (\\d+)\\)$`, "i"),
+      );
+      if (assessment) {
+        return { stage, number, round: assessment[1], maximum: assessment[2],
+          title: stage.zeroTitle, phase: `Round ${assessment[1]} of ${assessment[2]}` };
+      }
+      for (const [pattern, phase] of rounds) {
+        const found = detail.match(pattern);
+        if (found) {
+          return { stage, number, round: found[1], maximum: found[2],
+            title: `Fix/re-test round ${found[1]} of ${found[2]}`, phase };
+        }
+      }
+      return null;
+    }
+    return null;
+  }
+
+  // The two terminal boundary logs every adversarial stage emits once its
+  // review either fails outright or reaches a verdict. Neither is a round
+  // update, so `adversarialRound` never matches them (it returns null once a
+  // stage's label matches but no round phrasing does) — they need their own
+  // parse so a failed or finished review does not keep showing as running.
+  function adversarialTerminal(message) {
+    for (const stage of ADVERSARIAL_STAGES) {
+      const failed = message.match(new RegExp(`^${stage.label} for issue #(\\d+): review failed — (.+)$`, "i"));
+      if (failed) return { stage, number: failed[1], type: "failed", reason: failed[2] };
+      const completed = message.match(new RegExp(`^${stage.label} for issue #(\\d+): review completed with status (\\S+)\\.$`, "i"));
+      if (completed) return { stage, number: completed[1], type: "completed", status: completed[2] };
+    }
+    return null;
+  }
+
   function normalizeRepo(value) {
     return String(value || "").trim().replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
   }
@@ -53,10 +119,10 @@
     const find = (repository, number) => {
       if (repository) {
         return items.get(`issue:${repository}#${number}`)
-          || [...items.values()].find((item) => item.kind !== "adversarial"
+          || [...items.values()].find((item) => !ADVERSARIAL_KINDS.has(item.kind)
             && item.repository === repository && String(item.number) === String(number));
       }
-      return [...items.values()].find((item) => item.kind !== "adversarial" && String(item.number) === String(number));
+      return [...items.values()].find((item) => !ADVERSARIAL_KINDS.has(item.kind) && String(item.number) === String(number));
     };
     const current = (repository) => {
       const item = repository ? lastStartedByRepository.get(repository) : lastStarted;
@@ -64,10 +130,10 @@
     };
     const related = (repository, number) => [...items.values()].filter((item) =>
       String(item.number) === String(number) && (!repository || item.repository === repository));
-    const updateAdversarial = (entry, repository, number, round, maximum, title, phase) => {
-      const key = `adversarial:${repository}#${number}`;
+    const updateAdversarial = (entry, repository, number, round, maximum, title, phase, kind = "adversarial") => {
+      const key = `${kind}:${repository}#${number}`;
       const item = {
-        kind: "adversarial",
+        kind,
         key,
         number,
         repository,
@@ -94,6 +160,7 @@
       }
       const repository = resolveRepo(source, message, label);
       let match;
+      let adversarial;
 
       if (/exited with status|process stopped|Ctrl\+C received/i.test(message)) {
         if (repository) {
@@ -134,14 +201,25 @@
           item.provider = match[1];
           item.phase = `${match[1]} is writing the change`;
         }
-      } else if ((match = message.match(/^Adversarial UAT for issue #(\d+): starting fix\/re-test round (\d+) of (\d+)\.$/i))) {
-        updateAdversarial(entry, repository, match[1], match[2], match[3], `Fix/re-test round ${match[2]} of ${match[3]}`, "Fix in progress");
-      } else if ((match = message.match(/^Adversarial UAT for issue #(\d+): starting independent test run \(round (\d+) of (\d+)\)\.$/i))) {
-        updateAdversarial(entry, repository, match[1], match[2], match[3], "Independent test run", `Round ${match[2]} of ${match[3]}`);
-      } else if ((match = message.match(/^Adversarial UAT for issue #(\d+): starting re-test for round (\d+) of (\d+)\.$/i))) {
-        updateAdversarial(entry, repository, match[1], match[2], match[3], `Fix/re-test round ${match[2]} of ${match[3]}`, "Re-test in progress");
-      } else if ((match = message.match(/^Adversarial UAT for issue #(\d+): fix applied in round (\d+) of (\d+)\.$/i))) {
-        updateAdversarial(entry, repository, match[1], match[2], match[3], `Fix/re-test round ${match[2]} of ${match[3]}`, "Fix applied; re-test pending");
+      } else if ((adversarial = adversarialRound(message))) {
+        updateAdversarial(entry, repository, adversarial.number, adversarial.round,
+          adversarial.maximum, adversarial.title, adversarial.phase, adversarial.stage.kind);
+      } else if ((adversarial = adversarialTerminal(message))) {
+        const key = `${adversarial.stage.kind}:${repository}#${adversarial.number}`;
+        if (adversarial.type === "failed") {
+          const item = items.get(key) || [...items.values()].find((candidate) =>
+            candidate.kind === adversarial.stage.kind && String(candidate.number) === adversarial.number
+            && (!repository || candidate.repository === repository));
+          if (item) {
+            item.state = "error";
+            item.phase = adversarial.reason;
+          }
+        } else {
+          // A finished review (any verdict) is no longer active work; drop
+          // its row rather than leave it looking like it is still running.
+          clear((item) => item.kind === adversarial.stage.kind && String(item.number) === adversarial.number
+            && (!repository || item.repository === repository));
+        }
       } else if ((match = message.match(/(?:Created issue branch|Continuing issue|Recreated interrupted issue branch).*?(?:#|issue-)(\d+)/i))) {
         const item = find(repository, match[1]);
         if (item) item.phase = "Issue branch ready";
@@ -159,13 +237,13 @@
           item.phase = `Waiting for ${providerName} usage`;
         }
         related(repository, number).forEach((relatedItem) => {
-          if (relatedItem.kind === "adversarial") relatedItem.state = "paused";
+          if (ADVERSARIAL_KINDS.has(relatedItem.kind)) relatedItem.state = "paused";
         });
       } else if ((match = message.match(/Shelved quota-paused issue #(\d+)/i))) {
         const item = find(repository, match[1]);
         if (item) item.state = "paused";
         related(repository, match[1]).forEach((relatedItem) => {
-          if (relatedItem.kind === "adversarial") relatedItem.state = "paused";
+          if (ADVERSARIAL_KINDS.has(relatedItem.kind)) relatedItem.state = "paused";
         });
       } else if ((match = message.match(/(?:preparing to resume.*?issue|restored session \S+ for issue|restored quota-paused issue) #(\d+)/i))) {
         const item = find(repository, match[1])
@@ -173,7 +251,7 @@
         item.state = "running";
         item.phase = "Resuming saved session";
         related(repository, match[1]).forEach((relatedItem) => {
-          if (relatedItem.kind === "adversarial") relatedItem.state = "running";
+          if (ADVERSARIAL_KINDS.has(relatedItem.kind)) relatedItem.state = "running";
         });
       } else if ((match = message.match(/Finished issue #(\d+)/i))) {
         // Issue numbers are repository-local.  A terminal line without a

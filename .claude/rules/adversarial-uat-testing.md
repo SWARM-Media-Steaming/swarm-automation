@@ -5,6 +5,12 @@
 never enter the loop. This behavior-changing setting requires the `minor`
 label from a trusted author; the worker owns VERSION.
 
+- The loop itself is shared with the adversarial cybersecurity agent and lives
+  in `adversarial_core.py`; `adversarial_uat.py` is only the UAT stage
+  definition plus its named entry points. Change the loop there, for both
+  agents, rather than adding a UAT-only branch. See
+  `adversarial-security-testing.md`. When both settings are on, UAT runs first
+  and cybersecurity reviews the result.
 - Round zero is the independent assessment of the normal implementation.
   One counted round is one implementer fix plus one adversarial re-test.
   At most six counted rounds follow the assessment; clean-first-pass is zero.
@@ -16,6 +22,8 @@ label from a trusted author; the worker owns VERSION.
   still starts a fresh session. Dispute adjudication is always a new tester.
 - Tests live under `tests/adversarial/`, registered with `adversarial-` IDs and
   `origin: "adversarial"` in `.swarm/tests.json`. Preserve non-adversarial suites.
+  `tests/adversarial/security/` and `origin: "adversarial-security"` belong to
+  the cybersecurity agent; UAT neither owns nor may edit them.
   This app has no test scheduler: these suites run only during this issue's own
   fix/re-test rounds. Nothing here re-runs them after delivery — ongoing
   regression coverage belongs to the repository's own CI/CD.

@@ -135,26 +135,26 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual([r["tests_failing_after"] for r in rounds], [1, 0])
         self.assertEqual(self.git("rev-parse", "refs/remotes/origin/ai/claude/issue-180"), self.git("rev-parse", "HEAD"))
 
-    def test_cap_delivers_best_effort_and_auto_merges_like_a_clean_pass(self):
+    def test_cap_holds_automation_and_asks_a_trusted_author_to_adjudicate(self):
         self.prepare(auto=True)
         def never_fix(prompt, activity=""):
             status = self.role(prompt)
             (self.repo / "tracked.txt").write_text("broken\n")
             return status
-        head = self.git("rev-parse", "HEAD")
-        with self.patches(never_fix), mock.patch.object(self.worker, "approve_pull_request") as approve, mock.patch.object(self.worker, "merge_pull_request", return_value=head) as merge, mock.patch.object(self.worker, "auto_promote_integration_branch") as promote, mock.patch.object(self.worker, "push_ref", wraps=self.worker.push_ref) as push, mock.patch.object(self.worker, "cleanup_no_code_branch") as cleanup:
+        with self.patches(never_fix), mock.patch.object(self.worker, "approve_pull_request") as approve, mock.patch.object(self.worker, "merge_pull_request") as merge, mock.patch.object(self.worker, "auto_promote_integration_branch") as promote, mock.patch.object(self.worker, "push_ref", wraps=self.worker.push_ref) as push, mock.patch.object(self.worker, "cleanup_no_code_branch") as cleanup:
             self.assertEqual(self.worker.run_adversarial_delivery(), 10)
         self.assertEqual([c[0] for c in self.calls].count("fix"), 6)
         self.assertEqual([c[0] for c in self.calls].count("test"), 7)
-        # One push delivers the branch; the second deletes it post-merge.
-        self.assertEqual(push.call_count, 2)
-        approve.assert_called_once(); merge.assert_called_once(); promote.assert_called_once(); cleanup.assert_not_called()
+        # A cap hit is not a verified-clean pass: the branch is pushed and the
+        # PR opened, but automation never approves, merges, or promotes it.
+        push.assert_called_once()
+        approve.assert_not_called(); merge.assert_not_called(); promote.assert_not_called(); cleanup.assert_not_called()
         self.assertEqual(len(self.comments_posted), 1)
         self.assertIn("did not pass after six fix/re-test rounds", self.comments_posted[0])
-        self.assertIn("Delivered as best effort", self.comments_posted[0])
-        self.assertFalse(any("AI Needs Input" in args for args in self.api))
+        self.assertIn("AI needs your input", self.comments_posted[0])
+        self.assertTrue(any("AI Needs Input" in args for args in self.api))
         row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
-        self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (6, "cap_hit", "completed"))
+        self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (6, "cap_hit", "awaiting_input"))
         self.assertEqual(row["pull_request_url"], "https://example.invalid/pull/181")
 
     def test_first_pass_same_provider_is_a_fresh_context_and_history_can_be_off(self):
@@ -558,7 +558,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertNotIn("independent adversarial tester", prompt)
         self.assertIn("read-only", prompt)
 
-    def test_history_migration_four_is_additive_idempotent_and_rounds_cascade(self):
+    def test_history_migration_five_is_additive_idempotent_and_rounds_cascade(self):
         self.prepare()
         repository = self.worker.history.repository
         execution = self.worker.history.execution_id
@@ -572,7 +572,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(rows[0]["tester_provider"], "Grok")
         self.assertEqual(repository.adversarial_summary(self.worker.config.github_repository)["averageRounds"], 3)
         with repository.connect() as database:
-            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3, 4})
+            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3, 4, 5})
             database.execute("DELETE FROM ai_executions WHERE execution_id = ?", (execution,))
             self.assertEqual(database.execute("SELECT COUNT(*) FROM adversarial_rounds").fetchone()[0], 0)
 
