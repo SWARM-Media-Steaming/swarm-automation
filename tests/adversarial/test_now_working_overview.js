@@ -23,7 +23,7 @@ const line = (message, source = "Issue worker scheduler") =>
 const labeled = (label, message) =>
   `[12:34:56] [Issue worker scheduler/stdout] [${label}] [2026-09-15 12:34:56-0500] ${message}`;
 
-const repo = { id: "r1", name: "acme/app", uatState: "stopped", monitorActions: false };
+const repo = { id: "r1", name: "acme/app", monitorActions: false };
 const site = { ...repo, id: "r2", name: "acme/site" };
 
 function derive(logs, extra = {}) {
@@ -306,7 +306,7 @@ test("CI failure rows still appear, and still receive model/effort from the sele
   assert.match(rows[0].detail, /\bhigh effort\b/);
 });
 
-test("an in-flight test-scheduler run is unchanged when the worker is stopped", () => {
+test("legacy test-scheduler state is inert when the worker is stopped", () => {
   const rows = deriveNowWorking({
     workerState: "stopped",
     repositories: [{ ...repo, uatState: "running" }],
@@ -328,11 +328,11 @@ test("an in-flight test-scheduler run is unchanged when the worker is stopped", 
       line("Adversarial UAT for issue #84: starting fix/re-test round 3 of 6."),
     ],
   });
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].kind, "tests");
-  assert.equal(rows[0].title, "Running UI");
-  assert.equal(rows[0].detail, "Manual run · 1 of 3 suites finished");
-  assert.equal(rows[0].state, "running");
+  assert.deepEqual(
+    rows,
+    [],
+    "removed scheduler snapshots must not recreate a tests row, and a stopped issue worker has no live adversarial row",
+  );
 });
 
 test("parallel-repo adversarial logs stay attached to their own repository", () => {
@@ -389,7 +389,11 @@ test("Overview renders an adversarial row with the Adversarial UAT kind label", 
     "the Overview kind pill must say Adversarial UAT, not the raw kind id",
   );
   assert.match(kindsLiteral, /issue:\s*"Issue"/);
-  assert.match(kindsLiteral, /tests:\s*"Tests"/);
+  assert.doesNotMatch(
+    kindsLiteral,
+    /tests:\s*"Tests"/,
+    "Issue #215 removes the tests row kind in favor of Adversarial UAT",
+  );
   assert.match(kindsLiteral, /ci:\s*"CI\/CD"/);
 
   const classAssign = appJs.indexOf("item.className = `now-working-row ${row.kind}`");

@@ -4,7 +4,7 @@ const { deriveNowWorking } = require("./now-working.js");
 
 const line = (message, source = "Issue worker scheduler") =>
   `[12:34:56] [${source}/stdout] [2026-09-15 12:34:56-0500] ${message}`;
-const repo = { id: "r1", name: "acme/app", uatState: "stopped", monitorActions: false };
+const repo = { id: "r1", name: "acme/app", monitorActions: false };
 
 test("shows the issue being worked with its provider, model, effort, and phase", () => {
   const rows = deriveNowWorking({
@@ -61,24 +61,6 @@ test("keeps issues of different repositories apart", () => {
     ],
   });
   assert.deepEqual(rows.map((row) => `${row.repository}${row.title}`), ["acme/app#1 One", "acme/site#1 Other"]);
-});
-
-test("reports an in-flight test run and hides a scheduler that is only waiting", () => {
-  const rows = deriveNowWorking({
-    workerState: "stopped",
-    repositories: [{ ...repo, uatState: "running" }, { ...repo, id: "r2", name: "acme/site", uatState: "running" }],
-    testRuns: {
-      r1: [
-        { startedAt: 1, finishedAt: 5, suites: [] },
-        { startedAt: 10, finishedAt: null, trigger: "manual", suites: [{ name: "API", state: "Passed" }, { name: "UI", state: "Running" }, { name: "E2E", state: "Not executed" }] },
-      ],
-      r2: [{ startedAt: 1, finishedAt: 5, suites: [] }],
-    },
-  });
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].title, "Running UI");
-  assert.equal(rows[0].detail, "Manual run · 1 of 3 suites finished");
-  assert.equal(rows[0].state, "running");
 });
 
 test("shows a CI failure only while the worker is fixing it", () => {

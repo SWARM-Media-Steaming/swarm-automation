@@ -16,8 +16,7 @@
   //                of at the next poll or scheduled window.
   //   "disabled" — nothing useful can happen (paused, busy, or unavailable).
   //
-  // Only the issue worker can be interrupted this way: the test scheduler runs
-  // one repository's suites per cycle and has no equivalent queue to re-scan.
+  // Only the issue worker can be interrupted this way.
   function runNowMode({ kind = "issue", processState = "stopped", available = true, busy = false } = {}) {
     if (busy || !available) return "disabled";
     if (processState === "stopped") return "start";
