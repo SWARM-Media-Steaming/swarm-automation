@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main, ai-main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# PR test runs are keyed per ref so a new push supersedes the previous one.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Issue-worker Python tests
+        working-directory: issue_worker
+        run: python3 -m unittest discover -p 'test_*.py'
+      - name: Frontend tests
+        run: npm test
+      - name: Version-computation script tests
+        working-directory: scripts
+        run: python3 -m unittest test_compute_version
+
+  # File a tracked issue when CI breaks on main or ai-main, so SWARM
+  # Automation picks it up (assigned to the worker's configured assignee,
+  # labelled ci-failure). PR failures are the author's to fix and are
+  # skipped.
+  report-failure:
+    needs: [test]
+    if: failure() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: File or update the CI-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ASSIGNEE: ${{ vars.SWARM_ISSUE_ASSIGNEE || 'DotNetRockStar' }}
+        run: |
+          set -euo pipefail
+          short_sha="$(git rev-parse --short HEAD)"
+          subject="$(git log -1 --pretty=%s)"
+          failed_jobs="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")')"
+          [ -n "$failed_jobs" ] || failed_jobs="unknown"
+
+          gh label create ci-failure --repo "$REPO" --color B60205 \
+            --description "CI failure filed automatically" --force >/dev/null 2>&1 || true
+
+          body_file="$RUNNER_TEMP/ci-failure.md"
+          branch="${GITHUB_REF#refs/heads/}"
+          {
+            printf 'CI failed on `%s`.\n\n' "$branch"
+            printf '| | |\n|---|---|\n'
+            printf '| Run | %s |\n' "$RUN_URL"
+            printf '| Commit | `%s` — %s |\n' "$short_sha" "$subject"
+            printf '| Failed jobs | **%s** |\n\n' "$failed_jobs"
+            printf '## Task\n\n'
+            printf 'Open the run above, read the failed job log, and fix the root cause on a branch.\n\n'
+            printf 'Close this issue once CI is green again.\n'
+          } > "$body_file"
+
+          existing="$(gh issue list --repo "$REPO" --state open --label ci-failure \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file "$body_file"
+            echo "Updated existing issue #$existing"
+          else
+            gh issue create --repo "$REPO" \
+              --title "CI: $failed_jobs failed at $short_sha" \
+              --body-file "$body_file" \
+              --label ci-failure \
+              --assignee "$ASSIGNEE"
+          fi

@@ -231,19 +231,20 @@ automation scripts of its own.
 
 ## Releases and self-update
 
-Every push to `main` runs `.github/workflows/release.yml`: it runs the Rust and
-Python test suites and, when they pass, builds a signed `.app` and publishes it
-to GitHub Releases as `v<version>`. Pushes to `ai-main` publish
-`v<version>-beta.<run>` pre-releases.
+Every push to `main` and `ai-main` runs `.github/workflows/ci.yml`'s `test`
+job (Rust, Python, and frontend suites). GitHub Actions no longer builds or
+publishes releases — that publishing step moves to the web long term, and the
+signed-build/GitHub-Releases stage that used to follow a green `test` run has
+been removed rather than left failing.
 
-The version is computed, not hand-edited. `VERSION` holds the version as of the
-commit that last changed it, and every later commit on the branch adds one to
-the patch (`0.1.1` → `0.1.2` → …; a promotion merge counts once). A minor bump
-happens when a trusted author labels an issue `minor`; a major is a deliberate
-human commit. See `.claude/rules/versioning.md`.
+The version is still computed, not hand-edited. `VERSION` holds the version as
+of the commit that last changed it, and every later commit on the branch adds
+one to the patch (`0.1.1` → `0.1.2` → …; a promotion merge counts once). A
+minor bump happens when a trusted author labels an issue `minor`; a major is a
+deliberate human commit. See `.claude/rules/versioning.md`.
 
-The app reads that feed and can update itself in place — the control is under
-**AI Configuration → Software update** with three modes:
+The app can still update itself in place from a previously published feed —
+the control is under **AI Configuration → Software update** with three modes:
 
 - **Don't check** — stay put until you update by hand.
 - **Notify me** (default) — a banner appears; you choose when to install.
