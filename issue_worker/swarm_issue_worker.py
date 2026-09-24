@@ -300,6 +300,25 @@ def csv_values(value: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
+class ReplaceDefaultAppendAction(argparse.Action):
+    """Append explicit values, replacing rather than extending the default."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        value: Any,
+        option_string: str | None = None,
+    ) -> None:
+        del parser, option_string
+        seen_attribute = f"_{self.dest}_explicit"
+        values = getattr(namespace, self.dest, None)
+        if not getattr(namespace, seen_attribute, False):
+            values = []
+            setattr(namespace, seen_attribute, True)
+        setattr(namespace, self.dest, [*(values or []), value])
+
+
 def command_available(command: str | None) -> bool:
     return bool(command and (shutil.which(command) or Path(command).exists()))
 
@@ -5685,10 +5704,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
     parser.add_argument(
         "--enabled-provider",
-        action="append",
+        action=ReplaceDefaultAppendAction,
         choices=KNOWN_PROVIDER_KEYS,
         default=list(csv_values(env_value("SWARM_ENABLED_PROVIDERS", ""))) or None,
-        help="Provider id to include in the rotation (repeatable). Defaults to all known providers.",
+        help=(
+            "Provider id to include in the rotation (repeatable). Explicit flags replace "
+            "SWARM_ENABLED_PROVIDERS; defaults to all known providers when neither is set."
+        ),
     )
     parser.add_argument(
         "--preferred-provider",

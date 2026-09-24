@@ -1826,6 +1826,21 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(all(p["status"] == 2 for p in payload["providers"]))
         self.assertTrue(all(p["remaining_percent"] is None for p in payload["providers"]))
 
+    def test_explicit_enabled_providers_replace_environment_fallback(self) -> None:
+        with mock.patch.dict(os.environ, {"SWARM_ENABLED_PROVIDERS": "claude"}):
+            args = build_parser().parse_args(
+                self._worker_argv(auto=False)
+                + ["--enabled-provider", "codex", "--enabled-provider", "grok"]
+            )
+
+        self.assertEqual(args.enabled_provider, ["codex", "grok"])
+
+    def test_enabled_providers_use_environment_without_explicit_flags(self) -> None:
+        with mock.patch.dict(os.environ, {"SWARM_ENABLED_PROVIDERS": "claude,codex"}):
+            args = build_parser().parse_args(self._worker_argv(auto=False))
+
+        self.assertEqual(args.enabled_provider, ["claude", "codex"])
+
     def test_check_usage_isolates_provider_probe_exceptions(self) -> None:
         args = build_parser().parse_args(
             self._worker_argv(auto=False)
