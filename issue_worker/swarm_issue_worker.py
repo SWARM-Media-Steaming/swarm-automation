@@ -3966,6 +3966,12 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             (item for item in rulesets if isinstance(item, dict) and item.get("name") == name), None
         )
         if existing is not None:
+            # The repository-ruleset list endpoint returns summaries.  In
+            # particular, a real summary omits both ``conditions`` and
+            # ``rules`` even though the single-ruleset response contains
+            # them.  Do not mistake those omitted fields for an explicitly
+            # incomplete safeguard on every later reconciliation run.
+            is_list_summary = "conditions" not in existing and "rules" not in existing
             protected_refs = (
                 existing.get("conditions", {})
                 .get("ref_name", {})
@@ -3978,8 +3984,13 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             if (
                 existing.get("target") == "branch"
                 and existing.get("enforcement") == "active"
-                and f"refs/heads/{branch}" in protected_refs
-                and has_deletion_rule
+                and (
+                    is_list_summary
+                    or (
+                        f"refs/heads/{branch}" in protected_refs
+                        and has_deletion_rule
+                    )
+                )
             ):
                 log(f"Deletion safeguard already exists for integration branch {branch}.")
                 return
