@@ -31,12 +31,15 @@ label from a trusted author; the worker owns VERSION.
   as `adversarialBootstrap` metadata and reuse it on subsequent issues.
 - Out-of-scope findings include reproduction evidence and go through the same
   labelled, assigned issue-creation helper as the CI monitor. They do not enter
-  the blocking suites. A finding may name out-of-scope `suite_ids`; these stay
-  registered in `.swarm/tests.json` but are excluded from this issue's blocking
-  verdict after the separate issue is filed. A stable finding marker prevents
-  duplicate auto-filing. Log both newly filed and deduplicated findings; keep
-  each filed issue's title and URL in execution history so the app can surface
-  the non-blocking follow-up to the user.
+  the blocking suites. GitHub failures while deduplicating or filing them,
+  including an exit-zero malformed `gh issue list --json` response, are
+  retryable and must not abort the original issue's round. A finding may name
+  out-of-scope `suite_ids`; these stay registered in `.swarm/tests.json` but
+  are excluded from this issue's blocking verdict after the separate issue is
+  filed. A stable finding marker prevents duplicate auto-filing. Log both newly
+  filed and deduplicated findings; keep each filed issue's title and URL in
+  execution history so the app can surface the non-blocking follow-up to the
+  user.
 - All exchanges finish before delivery. Clean passes use normal delivery;
   cap-hit delivery explicitly disables automation and retains the PR and branch
   while the issue waits for trusted-author adjudication in AI Needs Input.

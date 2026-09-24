@@ -519,6 +519,25 @@ class AdversarialUatMixin:
         # whole adversarial round from inside run_adversarial_delivery,
         # stalling the original issue over a problem that isn't its own.
         from swarm_issue_worker import WorkerError, github_issue_url_from_output, iso_timestamp, log
+
+        def find_existing_finding(digest: str, marker: str) -> dict[str, Any] | None:
+            """Return a prior filing, treating bad GitHub output as a retryable failure."""
+            output = self.github.gh([
+                "issue", "list", "--repo", self.config.github_repository, "--state", "all",
+                "--search", f'"{digest}" in:body', "--json", "body,url", "--limit", "100",
+            ], self.choice.key)
+            try:
+                issues = json.loads(output)
+            except json.JSONDecodeError as error:
+                raise WorkerError(
+                    "GitHub returned malformed JSON while searching for an existing finding"
+                ) from error
+            if not isinstance(issues, list) or not all(isinstance(issue, dict) for issue in issues):
+                raise WorkerError(
+                    "GitHub returned an invalid issue list while searching for an existing finding"
+                )
+            return next((issue for issue in issues if marker in str(issue.get("body") or "")), None)
+
         for finding in findings:
             digest = hashlib.sha256(json.dumps(finding, sort_keys=True).encode()).hexdigest()[:20]
             marker = f"<!-- swarm-issue-worker:adversarial-finding:issue:{self.issue.number};id:{digest} -->"
@@ -550,11 +569,7 @@ class AdversarialUatMixin:
                     # is stuck at "". Re-check search: the issue is genuinely on
                     # GitHub and may now be discoverable, so recover its URL
                     # instead of leaving it permanently blank.
-                    recheck = json.loads(self.github.gh([
-                        "issue", "list", "--repo", self.config.github_repository, "--state", "all",
-                        "--search", f'"{digest}" in:body', "--json", "body,url", "--limit", "100",
-                    ], self.choice.key))
-                    recovered = next((item for item in recheck if marker in item.get("body", "")), None)
+                    recovered = find_existing_finding(digest, marker)
                     url = github_issue_url_from_output(str(recovered.get("url", ""))) if recovered else ""
                     if existing_detail is not None:
                         existing_detail["url"] = url
@@ -570,11 +585,7 @@ class AdversarialUatMixin:
                         ],
                     )
                     continue
-                existing = json.loads(self.github.gh([
-                    "issue", "list", "--repo", self.config.github_repository, "--state", "all",
-                    "--search", f'"{digest}" in:body', "--json", "body,url", "--limit", "100",
-                ], self.choice.key))
-                already_filed = next((item for item in existing if marker in item.get("body", "")), None)
+                already_filed = find_existing_finding(digest, marker)
                 if already_filed:
                     url = github_issue_url_from_output(str(already_filed.get("url", "")))
                     log(f"Out-of-scope adversarial UAT finding already filed for #{self.issue.number}: {url or title}")
