@@ -714,6 +714,64 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_parallel_quota_pause_continues_draining.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-parallel-quota-pause-continues-draining",
+      "name": "A quota-paused repository is rechecked immediately in continuous mode without stalling a healthy sibling",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/install_swarm_issue_cron.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_parallel_quota_pause_continues_draining.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_parallel_repo_retirement_stops_promptly.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-parallel-repo-retirement-stops-promptly",
+      "name": "Removing a repository from a running parallel scheduler stops its worker thread promptly without disturbing a sibling",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/install_swarm_issue_cron.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_parallel_repo_retirement_stops_promptly.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
