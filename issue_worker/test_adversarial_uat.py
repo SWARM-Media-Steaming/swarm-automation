@@ -572,7 +572,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(rows[0]["tester_provider"], "Grok")
         self.assertEqual(repository.adversarial_summary(self.worker.config.github_repository)["averageRounds"], 3)
         with repository.connect() as database:
-            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3, 4, 5})
+            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3, 4, 5, 6})
             database.execute("DELETE FROM ai_executions WHERE execution_id = ?", (execution,))
             self.assertEqual(database.execute("SELECT COUNT(*) FROM adversarial_rounds").fetchone()[0], 0)
 

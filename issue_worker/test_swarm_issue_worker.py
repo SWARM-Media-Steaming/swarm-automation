@@ -36,6 +36,9 @@ from dynamic_router import (
     PROMPT_GRADES,
     RouterError,
 )
+from adversarial_uat import UAT_STAGE
+from adversarial_security import SECURITY_STAGE
+from token_usage import AgentType, PromptType
 from swarm_issue_worker import (
     CODEX_QUOTA_CACHE_FILE,
     CODEX_QUOTA_CACHE_MAX_AGE_SECONDS,
@@ -5578,6 +5581,201 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(worker.git("branch", "--show-current"), "ai/claude/issue-183")
         self.assertFalse(recovery_mode)
         self.assertEqual(run_start, worker.git("rev-parse", "ai-main"))
+
+    # -- Per-prompt AI token usage (issue #280) --------------------------
+
+    def _claude_result_json(self, *, input_tokens: int, output_tokens: int) -> str:
+        return json.dumps(
+            {
+                "type": "result",
+                "result": "done",
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            }
+        )
+
+    def test_run_ai_records_primary_usage_for_the_initial_call(self) -> None:
+        self.worker.issue = IssueContext(360, "Title", "body", [], "https://example.invalid/360")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-1")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(input_tokens=100, output_tokens=20)
+            self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            status = self.worker.run_ai("do the work")
+        self.assertEqual(status, 0)
+        events = self.worker.read_state()["token_usage_events"]
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["agent_type"], AgentType.PRIMARY.value)
+        self.assertEqual(event["prompt_type"], PromptType.INITIAL.value)
+        self.assertEqual(event["attempt_number"], 1)
+        self.assertEqual(event["input_tokens"], 100)
+        self.assertEqual(event["output_tokens"], 20)
+        self.assertEqual(event["total_tokens"], 120)
+        self.assertTrue(event["success"])
+        self.assertEqual(event["provider"], "Claude")
+        self.assertEqual(event["model"], "test-model")
+
+    def test_run_ai_gives_a_rejected_model_retry_its_own_independent_usage_record(self) -> None:
+        worker = self.model_run_worker()
+        outcomes = [(1, self.GROK_UNKNOWN_MODEL), (0, "")]
+        calls: list[int] = []
+
+        def fake_grok(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            status, diagnostic = outcomes[len(calls)]
+            calls.append(status)
+            worker.ai_diagnostic_file.write_text(diagnostic, encoding="utf-8")
+            if status == 0:
+                worker.ai_output_file.write_text("done\n", encoding="utf-8")
+                worker._last_ai_raw_output = json.dumps({"text": "done", "usage": {"prompt_tokens": 9, "completion_tokens": 4}})
+            else:
+                worker._last_ai_raw_output = diagnostic
+            return status
+
+        with mock.patch.object(worker, "_run_grok", side_effect=fake_grok):
+            status = worker.run_ai("prompt")
+        self.assertEqual(status, 0)
+        events = worker.read_state()["token_usage_events"]
+        self.assertEqual(len(events), 2)
+        first, second = events
+        self.assertEqual(first["attempt_number"], 1)
+        self.assertFalse(first["success"])
+        self.assertIsNone(first["total_tokens"])
+        self.assertEqual(second["attempt_number"], 2)
+        self.assertTrue(second["success"])
+        self.assertEqual(second["input_tokens"], 9)
+        self.assertEqual(second["output_tokens"], 4)
+        # The retry ran against the fallback model, not the rejected one.
+        self.assertNotEqual(second["model"], "grok-4.3")
+
+    def test_run_ai_attributes_usage_to_the_active_adversarial_stage(self) -> None:
+        self.worker.issue = IssueContext(361, "Title", "body", [], "https://example.invalid/361")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-2")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.update_state(
+            **{UAT_STAGE.key: {"phase": "test", "round": 0, "active": True}}
+        )
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(input_tokens=5, output_tokens=5)
+            self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("adversarial prompt", activity="testing")
+        events = self.worker.read_state()["token_usage_events"]
+        self.assertEqual(events[-1]["agent_type"], AgentType.ADVERSARIAL_UAT.value)
+        self.assertEqual(events[-1]["prompt_type"], PromptType.ADVERSARIAL_SCAN.value)
+
+        self.worker.update_state(**{UAT_STAGE.key: {"phase": "fix", "round": 1, "active": True}})
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("fix prompt", activity="fixing")
+        events = self.worker.read_state()["token_usage_events"]
+        self.assertEqual(events[-1]["agent_type"], AgentType.ADVERSARIAL_UAT.value)
+        self.assertEqual(events[-1]["prompt_type"], PromptType.REMEDIATION.value)
+
+        self.worker.update_state(
+            **{
+                UAT_STAGE.key: {"phase": "test", "round": 0, "active": False},
+                SECURITY_STAGE.key: {"phase": "test", "round": 1, "active": True},
+            }
+        )
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("re-test prompt", activity="re-testing")
+        events = self.worker.read_state()["token_usage_events"]
+        self.assertEqual(events[-1]["agent_type"], AgentType.ADVERSARIAL_CYBERSECURITY.value)
+        self.assertEqual(events[-1]["prompt_type"], PromptType.RETRY.value)
+
+    def test_router_call_records_its_own_usage_event(self) -> None:
+        self.worker.issue = IssueContext(362, "Title", "body", [], "https://example.invalid/362")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "session-3")
+        spec = self.worker.config.spec("grok")
+
+        def fake_router(*, usage_sink=None, **_kwargs) -> str:
+            if usage_sink is not None:
+                from token_usage import NormalizedUsage
+
+                usage_sink.append(NormalizedUsage(input_tokens=42, output_tokens=8, total_tokens=50))
+            return json.dumps({"prompt_grade": "B", "selected_provider": "grok"})
+
+        with mock.patch("swarm_issue_worker.run_provider_router", side_effect=fake_router):
+            self.worker.run_router(spec, "grade this issue", [])
+        events = self.worker.token_usage_events
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["agent_type"], AgentType.ROUTER.value)
+        self.assertEqual(events[0]["input_tokens"], 42)
+        self.assertEqual(events[0]["total_tokens"], 50)
+
+    def test_ai_usage_report_appears_in_the_completion_comment_and_is_idempotent(self) -> None:
+        self.worker.issue = IssueContext(363, "Title", "body", [], "https://example.invalid/363")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-4")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(input_tokens=1000, output_tokens=200)
+            self.worker.ai_output_file.write_text("## Summary\nDone.\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("implement")
+        pending = {
+            "commit_sha": "a" * 40,
+            "commit_message": "did the thing",
+            "ai_tool": "Claude",
+            "model": "test-model",
+            "effort": "high",
+            "ai_usage_report": self.worker.render_ai_usage_report(),
+        }
+        body = self.worker.render_pending_comment(pending)
+        self.assertIn("### AI Usage", body)
+        self.assertIn("Primary", body)
+        self.assertIn("AI Invocations: 1", body)
+        # Re-rendering from the same persisted `pending` dict must not
+        # duplicate or otherwise change the usage section.
+        body_again = self.worker.render_pending_comment(pending)
+        self.assertEqual(body, body_again)
+
+    def test_token_usage_batch_persists_and_is_idempotent(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, ai_execution_history_enabled=True,
+            execution_history_db=self.state / "token-usage-history.sqlite3",
+        )
+        self.worker.history = ExecutionHistoryService(True, self.state / "token-usage-history.sqlite3")
+        self.worker.issue = IssueContext(364, "Title", "body", [], "https://example.invalid/364")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-5")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.start_execution_history()
+        execution_id = self.worker.history.execution_id
+        self.assertTrue(execution_id)
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(input_tokens=10, output_tokens=5)
+            self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("implement")
+
+        self.worker.flush_token_usage_to_history()
+        self.worker.flush_token_usage_to_history()  # must not duplicate
+
+        repository = ExecutionHistoryRepository(self.state / "token-usage-history.sqlite3")
+        rows = repository.token_usage_for_execution(execution_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["agent_type"], AgentType.PRIMARY.value)
+        self.assertEqual(rows[0]["input_tokens"], 10)
+        self.assertEqual(rows[0]["output_tokens"], 5)
+
+        totals = repository.token_usage_totals([self.worker.config.github_repository])
+        self.assertEqual(totals["invocations"], 1)
+        self.assertEqual(totals["inputTokens"], 10)
+        self.assertEqual(totals["outputTokens"], 5)
+
+        issue_rows = repository.token_usage_for_issue(self.worker.config.github_repository, 364)
+        self.assertEqual(len(issue_rows), 1)
 
 
 class RunnerTestCase(unittest.TestCase):

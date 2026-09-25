@@ -53,6 +53,16 @@ if __name__ == "__main__":
 
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
 from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
+from token_usage import (
+    DEFAULT_CURRENCY,
+    AgentType,
+    PromptType,
+    UsageRecord,
+    estimate_cost,
+    format_usage_log_line,
+    normalize_usage,
+    render_ai_usage_markdown,
+)
 from adversarial_core import AdversarialStage
 from adversarial_security import AdversarialSecurityMixin, SECURITY_STAGE
 from adversarial_uat import UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE
@@ -952,6 +962,15 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         # provider that has no capacity this pass.
         self.provider_usages: dict[str, ProviderUsage] = {}
         self.provider_priority: tuple[str, ...] = ()
+        # Raw provider CLI output (JSON/JSONL) of the most recent AI
+        # invocation, set by each `_run_<provider>` method regardless of exit
+        # status so a failed call's usage can still be recorded (issue #280).
+        self._last_ai_raw_output: str = ""
+        # Every per-prompt usage event recorded so far for the issue attempt
+        # currently in flight, mirrored into the on-disk state once it exists
+        # (see `record_ai_usage`/`save_new_state`) so it survives a
+        # quota-pause resume and is available for the GitHub usage report.
+        self.token_usage_events: list[dict[str, Any]] = []
         self.history = ExecutionHistoryService(
             config.ai_execution_history_enabled,
             config.execution_history_db,
@@ -2167,6 +2186,12 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         }
         if self.routing:
             state["routing_decision"] = self.routing
+        if self.token_usage_events:
+            # A pre-flight routing call can happen before this state file
+            # exists (see `flush_token_usage_to_history`'s docstring); carry
+            # forward whatever was already recorded in memory so it is not
+            # lost the moment the file is created.
+            state["token_usage_events"] = list(self.token_usage_events)
         self.write_state(state)
 
     def maybe_apply_dynamic_routing(self) -> None:
@@ -2404,16 +2429,41 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 routing_decision=self.routing,
             )
 
-    def run_router(self, host: "ProviderSpec", prompt: str, images: Sequence[Any]) -> str:
-        return run_provider_router(
-            provider=host.key,
-            bin_path=host.bin or "",
-            model=host.router_model,
-            effort=host.router_effort,
-            prompt=prompt,
-            cwd=self.config.repo_dir,
-            images=tuple(image.path for image in images),
-        )
+    def run_router(
+        self,
+        host: "ProviderSpec",
+        prompt: str,
+        images: Sequence[Any],
+        *,
+        prompt_type: str = PromptType.INITIAL.value,
+        attempt_number: int = 1,
+    ) -> str:
+        usage_sink: list[Any] = []
+        started_at = iso_timestamp()
+        succeeded = False
+        try:
+            result = run_provider_router(
+                provider=host.key,
+                bin_path=host.bin or "",
+                model=host.router_model,
+                effort=host.router_effort,
+                prompt=prompt,
+                cwd=self.config.repo_dir,
+                images=tuple(image.path for image in images),
+                usage_sink=usage_sink,
+            )
+            succeeded = True
+            return result
+        finally:
+            self.record_router_usage(
+                host=host,
+                prompt_type=prompt_type,
+                attempt_number=attempt_number,
+                usage=usage_sink[0] if usage_sink else None,
+                started_at=started_at,
+                success=succeeded,
+                error_type="" if succeeded else "router_call_failed",
+            )
 
     def resolve_router_response(
         self,
@@ -2466,7 +2516,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 allow_usage_credit_models=self.config.allow_usage_credit_models,
             )
             try:
-                retry = self.run_router(host, correction, images)
+                retry = self.run_router(
+                    host, correction, images, prompt_type=PromptType.RETRY.value, attempt_number=2
+                )
                 return resolve(retry, allow_tier_fallback=True)
             except RouterError as error:
                 log(
@@ -2596,6 +2648,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 changes_summary=self.summary_section(output, "Changes"),
             )
         self.history.update(completed, **fields)
+        self.flush_token_usage_to_history()
 
     def issue_from_state(self, state: dict[str, Any], remote_issue: dict[str, Any]) -> IssueContext:
         return IssueContext(
@@ -2924,6 +2977,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         usage_lines = self.render_usage_report(
             provider, pending.get("usage_at_start"), pending.get("usage_at_completion")
         )
+        ai_usage_report = pending.get("ai_usage_report") or self.render_ai_usage_report()
         return (
             f"{marker}\n{verb} by **{pending.get('ai_tool') or pending.get('ai')}**.\n\n"
             f"- Model: `{pending.get('model', 'unknown')}`\n"
@@ -2932,6 +2986,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             f"- Commit: `{commit_sha}` — {pending['commit_message']}\n"
             f"{usage_lines}\n"
             f"{pending.get('adversarial_summary', '')}"
+            f"{ai_usage_report}\n"
             "<details><summary>AI completion summary</summary>\n\n"
             f"{pending.get('ai_output') or '(No captured AI output was available.)'}\n"
             "</details>\n"
@@ -3499,7 +3554,15 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         """``activity`` names what this invocation is doing (e.g. "implementing",
         "fixing round 2", "testing round 1"), so the log can tell same-issue
         invocations apart once adversarial UAT lets one issue pass through
-        several roles, sometimes on different providers."""
+        several roles, sometimes on different providers.
+
+        This is the single centralized entry point every agent (primary
+        implementation, and — via ``adversarial_core.run_adversarial_stage``
+        — both adversarial UAT and cybersecurity) calls through to run a
+        provider CLI, so token usage is captured here once rather than by
+        each caller (issue #280): every call is recorded as its own
+        independent attempt, including a retry after a rejected model.
+        """
         assert self.choice
         self.ai_output_file.write_text("", encoding="utf-8")
         self.ai_diagnostic_file.write_text("", encoding="utf-8")
@@ -3515,7 +3578,15 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         self.record_handoff_event(
             "ai_invocation_started", provider=self.choice.name, model=self.choice.model, resume=self.choice.resume
         )
+        self._last_ai_raw_output = ""
+        started_at = iso_timestamp()
         status = runner(prompt, env, activity)
+        self.record_ai_usage(
+            attempt_number=1,
+            started_at=started_at,
+            success=status == 0,
+            error_type="" if status == 0 else "provider_exit_nonzero",
+        )
         self.record_handoff_event("ai_invocation_finished", provider=self.choice.name, status=status)
         if status != 0 and self.recover_from_rejected_model():
             runner = {
@@ -3527,8 +3598,228 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 raise WorkerError(f"No runner for provider {self.choice.name}")
             env = os.environ.copy()
             env.update(self.provider_environment())
+            self._last_ai_raw_output = ""
+            started_at = iso_timestamp()
             status = runner(prompt, env, activity)
+            self.record_ai_usage(
+                attempt_number=2,
+                started_at=started_at,
+                success=status == 0,
+                error_type="" if status == 0 else "provider_exit_nonzero",
+            )
         return status
+
+    def infer_ai_agent_context(self, attempt_number: int) -> tuple[str, str]:
+        """Which agent/prompt-type bucket the in-flight ``run_ai`` call
+        belongs to, read from worker state rather than threaded through every
+        call site. This is what lets a new caller of ``run_ai`` get correct
+        token-usage attribution automatically instead of having to remember
+        to pass it (issue #280 item 4)."""
+        if self.in_progress_file.exists():
+            state = self.read_state()
+            for stage in ADVERSARIAL_STAGES:
+                loop = state.get(stage.key)
+                if isinstance(loop, dict) and loop.get("active"):
+                    agent_type = (
+                        AgentType.ADVERSARIAL_CYBERSECURITY
+                        if stage.key == SECURITY_STAGE.key
+                        else AgentType.ADVERSARIAL_UAT
+                    )
+                    if loop.get("phase") == "fix":
+                        return agent_type.value, PromptType.REMEDIATION.value
+                    if int(loop.get("round") or 0) == 0:
+                        return agent_type.value, PromptType.ADVERSARIAL_SCAN.value
+                    return agent_type.value, PromptType.RETRY.value
+        if attempt_number > 1:
+            return AgentType.PRIMARY.value, PromptType.RETRY.value
+        prompt_type = PromptType.CONTINUATION if self.choice and self.choice.resume else PromptType.INITIAL
+        return AgentType.PRIMARY.value, prompt_type.value
+
+    def record_ai_usage(
+        self,
+        *,
+        attempt_number: int,
+        started_at: str,
+        success: bool,
+        agent_type: str | None = None,
+        prompt_type: str | None = None,
+        error_type: str = "",
+    ) -> None:
+        """Normalize, cost, log, and stash one ``run_ai`` invocation's usage.
+
+        Called once per actual provider call (primary implementation and,
+        via ``adversarial_core``, both adversarial stages), so every retry
+        gets its own independent record rather than overwriting an earlier
+        attempt's usage.
+        """
+        assert self.choice
+        inferred_agent, inferred_prompt = self.infer_ai_agent_context(attempt_number)
+        self._record_usage_event(
+            agent_type=agent_type or inferred_agent,
+            prompt_type=prompt_type or inferred_prompt,
+            provider_key=self.choice.key,
+            provider_name=self.choice.name,
+            model=self.choice.model,
+            effort=self.choice.effort,
+            attempt_number=attempt_number,
+            usage=normalize_usage(self.choice.key, self._last_ai_raw_output),
+            started_at=started_at,
+            success=success,
+            error_type=error_type,
+        )
+
+    def record_router_usage(
+        self,
+        *,
+        host: "ProviderSpec",
+        prompt_type: str,
+        attempt_number: int,
+        usage: Any,
+        started_at: str,
+        success: bool,
+        error_type: str = "",
+    ) -> None:
+        """Record one dynamic-routing/pre-flight-grading call's usage.
+
+        A separate entry point from ``record_ai_usage`` because a router call
+        runs against ``host`` (the candidate being graded/asked), not
+        ``self.choice`` — routing may not have picked a final provider yet,
+        or may already hold a fallback unrelated to who is actually doing the
+        grading. ``usage`` is already-normalized (from ``run_provider_
+        router``'s ``usage_sink``) rather than raw text, since the router
+        helper already parsed the provider's transcript once.
+        """
+        self._record_usage_event(
+            agent_type=AgentType.ROUTER.value,
+            prompt_type=prompt_type,
+            provider_key=host.key,
+            provider_name=host.name,
+            model=host.router_model,
+            effort=host.router_effort,
+            attempt_number=attempt_number,
+            usage=usage,
+            started_at=started_at,
+            success=success,
+            error_type=error_type,
+        )
+
+    def _record_usage_event(
+        self,
+        *,
+        agent_type: str,
+        prompt_type: str,
+        provider_key: str,
+        provider_name: str,
+        model: str,
+        effort: str,
+        attempt_number: int,
+        usage: Any,
+        started_at: str,
+        success: bool,
+        error_type: str,
+    ) -> None:
+        """Normalize, cost, log, and stash one AI invocation's usage — the
+        single choke point every agent type's telemetry passes through
+        (issue #280 item 4). This never raises: a telemetry failure must not
+        affect whether the underlying AI work is considered to have
+        succeeded (item 15/17)."""
+        try:
+            cost = estimate_cost(model, usage) if usage is not None else None
+            completed_at = iso_timestamp()
+            duration_ms: int | None
+            try:
+                duration_ms = max(
+                    0,
+                    int(
+                        (
+                            dt.datetime.fromisoformat(completed_at)
+                            - dt.datetime.fromisoformat(started_at)
+                        ).total_seconds()
+                        * 1000
+                    ),
+                )
+            except ValueError:
+                duration_ms = None
+            record = UsageRecord(
+                id=str(uuid.uuid4()),
+                sequence=len(self.current_token_usage_events()) + 1,
+                agent_type=agent_type,
+                prompt_type=prompt_type,
+                provider=provider_name,
+                model=model,
+                reasoning_effort=effort,
+                attempt_number=attempt_number,
+                input_tokens=usage.input_tokens if usage else None,
+                output_tokens=usage.output_tokens if usage else None,
+                reasoning_tokens=usage.reasoning_tokens if usage else None,
+                cached_input_tokens=usage.cached_input_tokens if usage else None,
+                total_tokens=usage.total_tokens if usage else None,
+                estimated_cost=cost,
+                currency=DEFAULT_CURRENCY,
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
+                success=success,
+                error_type=error_type,
+                workflow_run_id=self.history.execution_id,
+                agent_run_id=self.choice.session_id if self.choice else "",
+                prompt_id=str(uuid.uuid4()),
+            )
+            self._append_token_usage_event(record.to_dict())
+            log(
+                format_usage_log_line(
+                    issue_number=self.issue.number if self.issue else None,
+                    agent_type=agent_type,
+                    provider=provider_key,
+                    model=model,
+                    usage=usage,
+                    cost=cost,
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - telemetry must never break AI work
+            log(f"WARNING: recording AI token usage failed: {error}")
+
+    def _append_token_usage_event(self, event: dict[str, Any]) -> None:
+        if self.in_progress_file.exists():
+            state = self.read_state()
+            events = list(state.get("token_usage_events", []))
+        else:
+            events = list(self.token_usage_events)
+        events.append(event)
+        self.token_usage_events = events
+        if self.in_progress_file.exists():
+            self.update_state(token_usage_events=events)
+
+    def current_token_usage_events(self) -> list[dict[str, Any]]:
+        if self.in_progress_file.exists():
+            return list(self.read_state().get("token_usage_events", self.token_usage_events))
+        return list(self.token_usage_events)
+
+    def flush_token_usage_to_history(self) -> None:
+        """Persist this work-round's accumulated usage events once its
+        ``ai_executions`` row is known to exist. Deferred to here (rather
+        than persisted per-call) because some calls — dynamic routing — can
+        happen before that row does; see ``ai_execution_history.
+        record_token_usage_batch`` for why that makes batching at the end
+        safe rather than lossy. Never raises: a work-round that otherwise
+        finished successfully must not fail because its telemetry could not
+        be written (issue #280 item 15/17)."""
+        try:
+            if not self.history.execution_id:
+                return
+            events = self.current_token_usage_events()
+            if not events:
+                return
+            self.history.token_usage_batch(
+                self.config.github_repository, self.issue.number if self.issue else 0, events
+            )
+        except Exception as error:  # noqa: BLE001 - telemetry must never break AI work
+            log(f"WARNING: persisting AI token usage failed: {error}")
+
+    def render_ai_usage_report(self) -> str:
+        """The ``### AI Usage`` Markdown section for the GitHub completion
+        comment, covering every AI invocation of this work-round."""
+        return render_ai_usage_markdown(self.current_token_usage_events())
 
     def recover_from_rejected_model(self) -> bool:
         """When the AI CLI rejects a model, re-evaluate the live routing choice.
@@ -3679,13 +3970,17 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 "WARNING: Issue images could not be inlined into the Claude prompt; "
                 "the prompt lists their local files instead."
             )
+        # Always request stream-json output (not just when images are
+        # inlined): the final `type: "result"` event is the only place Claude
+        # reports actual token usage, and per-prompt usage tracking needs
+        # that for every call, not only the ones with images (issue #280).
         if inlined:
             command.extend(
                 ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
             )
             stdin_text: str | None = claude_stream_message(prompt, inlined)
         else:
-            command.extend(["-p", "-"])
+            command.extend(["-p", "-", "--output-format", "stream-json", "--verbose"])
             stdin_text = None
         process = subprocess.Popen(
             command,
@@ -3703,16 +3998,13 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         assert process.stdin and process.stdout
         process.stdin.write(stdin_text if stdin_text is not None else prompt)
         process.stdin.close()
-        if inlined:
-            raw = "".join(process.stdout)
-            text = assistant_result_text(raw)
-            if text and not text.endswith("\n"):
-                text += "\n"
-            self.ai_output_file.write_text(text, encoding="utf-8")
-        else:
-            with self.ai_output_file.open("w", encoding="utf-8") as output:
-                for line in process.stdout:
-                    output.write(line)
+        raw = "".join(process.stdout)
+        self._last_ai_raw_output = raw
+        self.ai_diagnostic_file.write_text(raw, encoding="utf-8")
+        text = assistant_result_text(raw)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        self.ai_output_file.write_text(text, encoding="utf-8")
         return process.wait()
 
     def _run_grok(self, prompt: str, env: dict[str, str], activity: str = "working") -> int:
@@ -3776,6 +4068,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 check=False,
             )
         raw = result.stdout or ""
+        self._last_ai_raw_output = raw
         with self.ai_diagnostic_file.open("a", encoding="utf-8") as diagnostic:
             diagnostic.write(raw)
         try:
@@ -3832,7 +4125,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 stderr=subprocess.STDOUT,
                 check=False,
             )
-        for line in self.ai_diagnostic_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        diagnostic_text = self.ai_diagnostic_file.read_text(encoding="utf-8", errors="replace")
+        self._last_ai_raw_output = diagnostic_text
+        for line in diagnostic_text.splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -5133,6 +5428,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             "adversarial_summary": self.adversarial_summary_line(),
             "usage_at_start": usage_at_start,
             "usage_at_completion": self.usage_snapshot(self.choice.key),
+            "ai_usage_report": self.render_ai_usage_report(),
             "execution_id": self.history.execution_id,
             "commit_shas": commits,
             "files_changed": files,
