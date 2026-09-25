@@ -17,16 +17,12 @@
     activitySnapshot: null,
     dirty: false,
     busy: new Set(),
-    refreshing: { status: false, tools: false, branches: false, tests: false, botReadiness: false, promotions: false, branchPushAccess: false, liveTestRuns: false },
+    refreshing: { status: false, tools: false, botReadiness: false, promotions: false, branchPushAccess: false, providerUsage: false },
     activeRepoId: "",
-    branchOverview: null,
     promotions: [],
-    testPlan: null,
-    testRuns: null,
-    // repoId -> test runs, for repos whose scheduler is up (Now working panel).
-    liveTestRuns: {},
-    testDefinitionDraftOpen: false,
-    coverageAudit: null,
+    // AI agents panel (Overview): ProviderUsageInfo[] from check_provider_usage_background,
+    // one entry per enabled provider. Scoped to all configured repositories, not activeRepoId.
+    providerUsage: [],
     executionHistory: null,
     executionHistorySearch: "",
     executionHistorySort: "recent",
@@ -46,6 +42,10 @@
     promptGradesRequest: 0,
     promptGradesSearchTimer: null,
     feedbackTab: "grades",
+    repositoryTab: "source",
+    // Feedback owns this filter. It never follows or changes activeRepoId.
+    feedbackRepoFilter: [],
+    feedbackRepoSavePromise: Promise.resolve(),
     // repoId -> array of BotReadiness from check_repo_bot_readiness.
     botReadiness: {},
     // repoId -> last BranchPushAccess from branch_push_access.
@@ -58,9 +58,7 @@
     overview: "Automation overview",
     repository: "Repository",
     ai: "AI Configuration",
-    scheduler: "Test Scheduler",
     feedback: "Feedback",
-    advanced: "Advanced",
     debug: "Info & Debug",
     help: "Help",
   };
@@ -116,7 +114,7 @@
     },
     "software-update": {
       title: "Software updates",
-      html: "<p>New versions are published automatically after each change passes tests. Updates install in place and restart the app — your configuration is untouched.</p><ul><li><strong>Notify me</strong> — a banner appears when a new version is available; you choose when to install.</li><li><strong>Automatically</strong> — a detected update waits until the issue worker and every test scheduler are idle on their own (never stopped just to make room), then downloads, installs, and restarts.</li></ul><p><strong>Check now</strong> works in either mode and also lists the 3 most recent release builds and 3 most recent beta builds so you can pick a specific version — anything older than what's installed is shown for context but can't be selected.</p>",
+      html: "<p>New versions are published automatically after each change passes tests. Updates install in place and restart the app — your configuration is untouched.</p><ul><li><strong>Notify me</strong> — a banner appears when a new version is available; you choose when to install.</li><li><strong>Automatically</strong> — a detected update waits until the issue worker is idle on its own (never stopped just to make room), then downloads, installs, and restarts.</li></ul><p><strong>Check now</strong> works in either mode and also lists the 3 most recent release builds and 3 most recent beta builds so you can pick a specific version — anything older than what's installed is shown for context but can't be selected.</p>",
       links: [],
     },
     "bot-identities": {
@@ -146,42 +144,12 @@
     },
     "parallel-repo-workers": {
       title: "One worker per repository",
-      html: "<p>This chooses how the issue worker handles more than one repository.</p><ul><li><strong>Off (default)</strong> — a single worker visits each repository in turn and picks up one issue at a time.</li><li><strong>On</strong> — every repository with a ready issue gets its own worker, all running at the same time. With repositories A, B, C and D, if B, C and D have ready issues, three workers run together.</li></ul><p>Turning this on works through a backlog faster, <strong>but it uses AI credits faster</strong> because several providers run at once. Each repository still keeps its own branch, state, and one-issue-at-a-time limit.</p>",
+      html: "<p>This chooses how the issue worker handles more than one repository.</p><ul><li><strong>Off (default)</strong> — a single worker visits each repository in turn and picks up one issue at a time.</li><li><strong>On</strong> — every repository with a ready issue gets its own independent worker. When one repository finishes an issue, it can pick up its next issue immediately without waiting for workers in other repositories.</li></ul><p>Turning this on works through a backlog faster, <strong>but it uses AI credits faster</strong> because several providers run at once. Each repository still keeps its own branch, state, and one-issue-at-a-time limit.</p>",
       links: [],
     },
     "schedule-modes": {
       title: "Pickup schedule",
       html: "<ul><li><strong>Continuous</strong> — checks repeatedly and handles ready issues one after another.</li><li><strong>Daily</strong> — checks once each day.</li><li><strong>Weekdays</strong> — checks Monday through Friday.</li><li><strong>Custom</strong> — checks on the days you choose.</li><li><strong>Manual</strong> — checks only when you select <em>Run now</em>.</li></ul><p><strong>Run now</strong> stays available whatever the schedule says, including while the worker is already running: it checks every enabled repository straight away, then the timer for the next check restarts from the end of that check.</p>",
-      links: [],
-    },
-    "uat-suite": {
-      title: "Test scheduler",
-      html: "<p>Runs whatever tests this repository declares in <code>.swarm/tests.json</code>, on a schedule, without any AI involved. AI only gets involved for a gap plain scanning can't fill on its own:</p><ul><li><strong>Finding tests</strong> — if <strong>Find tests &amp; create draft</strong> can't spot any conventional test command, it asks AI to look at the repository layout for one. Anything AI suggests starts turned off until you review and enable it.</li><li><strong>Filling in test data</strong> — a test can ask for sample data that isn't fixed ahead of time (see <strong>How tests run</strong>). AI makes a best-effort version right before that test runs.</li></ul><p>Both only happen when there's enough AI usage available (the same shared limit set in AI Configuration) — otherwise the app does the deterministic part only and says so.</p><p><strong>Start</strong> keeps a daily cycle running at the chosen hour; <strong>Run now</strong> executes one cycle immediately.</p>",
-      links: [],
-    },
-    "scheduler-run-settings": {
-      title: "How tests run",
-      html: "<ul><li><strong>Allow disruptive tests</strong> — some tests change real state (data, devices, external services). They stay off until you turn this on.</li><li><strong>Let AI fill in test data</strong> — a test's own definition can ask for data that isn't fixed ahead of time (for example, realistic-looking sample records). When this is on and AI has usage available, AI makes a best-effort version and the test run records exactly what it made. When it's off, or usage runs out, that test is marked <strong>Not executed</strong> instead of guessing on its own.</li><li><strong>Explain failures with AI</strong> — separate from the setting above. After a real failure, asks AI to read the results and add a plain-language explanation, at the cost of AI usage.</li></ul>",
-      links: [],
-    },
-    "scheduler-suites": {
-      title: "Every test and its status",
-      html: "<ul><li><strong>Ready</strong> / <strong>Passed</strong> / <strong>Failed</strong> — the normal lifecycle of a test that ran.</li><li><strong>Skipped</strong> — something the test needs (hardware, a file, a setting) is missing; this is not a failure.</li><li><strong>Not executed</strong> — the test asked AI for sample data, but AI was turned off or had no usage left when the run started. Not a failure either — it just didn't get a chance to run this cycle.</li><li><strong>Waiting for input</strong> — more than one eligible device was found; choose one below to continue.</li></ul><p>A test with AI-generated data shows what AI made, and which provider made it, right on that test's entry.</p>",
-      links: [],
-    },
-    "coverage-audit": {
-      title: "Coverage audit",
-      html: "<p>Recursively scans the repository for every plausible test entry point — nested manifests, CI workflow steps, task-runner targets, and conventional test scripts — and compares each one against the committed <code>.swarm/tests.json</code>. It never executes anything it finds and never changes the committed file.</p><ul><li><strong>Mapped &amp; scheduled</strong> — matches an enabled suite in the committed definition.</li><li><strong>Covered by another suite</strong> — an aggregate, alias, or workspace member whose assertions another scheduled or covered command already exercises, so it is intentionally not scheduled again.</li><li><strong>Disabled, pending review</strong> — matches a suite the committed definition has turned off.</li><li><strong>Unmapped</strong> — found by discovery but not accounted for anywhere in the committed definition; coverage cannot be called complete while this list is non-empty.</li></ul>",
-      links: [],
-    },
-    "test-runs": {
-      title: "Past runs",
-      html: "<p>Each completed cycle is listed newest first with when it ran, how it was triggered, its duration, and a pass / fail / skipped tally. Open a run to see every test it ran, that test's outcome, and any AI-generated data used along the way.</p>",
-      links: [],
-    },
-    "test-requirements": {
-      title: "What's ready to run",
-      html: "<p>A repository's tests can each declare things they need: programs, files, healthy servers, mounts, credentials, devices, or AI-generated data.</p><ul><li><strong>Ready</strong> — the requirement was found.</li><li><strong>Waiting for input</strong> — choose between multiple detected devices.</li><li><strong>Blocked</strong> — equipment or configuration is absent; this is not a test failure.</li></ul><p>Selections are saved only for this repository. Test commands receive no interactive input.</p>",
       links: [],
     },
     "repo-profile": {
@@ -194,11 +162,6 @@
       html: "<p>These settings decide which comments and labels the worker trusts.</p><ul><li><strong>Trusted follow-up authors</strong> — GitHub users allowed to ask the AI for another pass. Separate names with commas.</li><li><strong>Completion authors</strong> — accounts whose completion messages the app accepts as proof that a pass finished. Separate names with commas.</li><li><strong>Ready label</strong> — the label added when AI work is ready for testing.</li></ul><p>Blank author lists use the repository assignee.</p>",
       links: [],
     },
-    "repo-branches": {
-      title: "Branches and promotion",
-      html: "<p>The tree shows the protected human branch, the shared AI branch, and each active issue branch.</p><ul><li><strong>Refresh</strong> — reloads branch and pull-request information from GitHub.</li><li><strong>Squash into AI integration</strong> — combines a closed issue’s work into one commit and removes its issue branch.</li><li><strong>Create or open promotion PR</strong> — prepares the final move from the AI branch to the human branch.</li><li><strong>Raw Git graph</strong> — shows the same history in Git’s compact text format.</li></ul>",
-      links: [],
-    },
     "promotion-queue": {
       title: "Repositories ready to promote",
       html: "<p>This list appears on the Overview page whenever one or more repositories have finished AI work waiting to reach the human-owned branch. It refreshes automatically while the Overview is visible.</p><ul><li>A repository shows up when its AI integration branch (usually <code>ai-main</code>) is <strong>ahead</strong> of the human-owned branch.</li><li><strong>Create PR</strong> creates or opens the promotion pull request in your browser.</li><li><strong>Merge to Main</strong> first merges the latest human-owned branch into the AI branch, favoring human-owned changes if the same lines conflict. It then creates the PR, approves it with a configured bot, and merges it.</li></ul><p>Promotion reconciles and merges in its own isolated clone, so it is safe to run while the issue worker keeps working — it never touches the worker's checkout.</p>",
@@ -209,19 +172,24 @@
       html: "<p>Settings are stored in a private local file. GitHub and AI sign-in details stay with their own tools and are not copied into logs.</p>",
       links: [],
     },
+    "async-refresh": {
+      title: "Independent refresh",
+      html: "<p>Tool detection and logs refresh independently so slow checks do not block the rest of the interface.</p>",
+      links: [],
+    },
     "work-policy": {
       title: "Issue instructions",
-      html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Update Claude assets</strong> — asks the AI to update any Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository that the issue makes relevant.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
+      html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Adversarial cybersecurity</strong> — after the implementation (and after Adversarial UAT when that is on too), a fresh security engineer attacks the change. Vulnerabilities it introduced are fixed and re-verified inside the issue; legitimate findings elsewhere become their own <code>adversarial-security</code> issues instead of widening this one. A review that could not run is reported as failed, never as a pass.</li><li><strong>Update Claude assets</strong> — asks the AI to update any Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository that the issue makes relevant.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
       links: [],
     },
     "execution-history": {
       title: "Execution history",
-      html: "<p>Every AI issue execution for the selected repository, newest first. The list loads ten at a time from the local database. Each row shows the AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates; expand an execution for provider pairings, disputes and approximate remaining-quota consumption (not token/dollar cost). Search matches issue number, title, provider, branch, or status, and Previous and Next fetch another page. Expand one to see the original GitHub issue, the exact prompt submitted, the AI's summary of the requested and completed work, files/branch/commits/pull request, lifecycle notes and warnings, and any reviewer feedback once a review platform has provided it.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see Advanced). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans this repository's full issue backlog (open and closed) and adds a placeholder \"Imported\" entry for any issue with no execution history yet — for issues the AI worker never picked up, or that were completed before this history existed. It never overwrites or duplicates a real execution.</p>",
+      html: "<p>Every AI issue execution across all repositories by default, newest first. The repository chips above the tabs independently filter all three reports; the repository dropdown in the header does not affect Feedback. The list loads ten at a time from the local database. Each row shows its repository, AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates over the filtered repositories.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see AI Configuration). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans every repository checked in the Feedback filter and adds a placeholder \"Imported\" entry for any issue with no execution history yet. It reports success or failure for each repository and never overwrites or duplicates a real execution.</p>",
       links: [],
     },
     "prompt-grades": {
       title: "Prompt grades",
-      html: "<p>When <strong>Dynamic Model Routing</strong> is on, the router grades the original issue before any AI works on it — from <strong>A+</strong> down to <strong>F</strong> — and explains what the issue does well, what is missing, and what would raise the grade. This panel lists those grades for the selected repository, newest first. The list loads ten at a time from the local database, the same way execution history does.</p><p>Search matches issue number, title, provider, model, branch, or status, and Previous and Next fetch another page. Click a bar in the chart, such as <strong>B-</strong>, to show only prompts with that grade. Click the same bar again to clear it. The chart keeps counting every grade in the current search, so another bar can be chosen without clearing the search.</p><p>The <strong>average grade</strong> uses a 4.0 scale (A = 4.0, B = 3.0, C = 2.0, D = 1.0, F = 0) across the graded runs in the current search. Each row also shows <strong>Graded by</strong> — the AI platform and model that ran the pre-flight grading and routing pass, which is usually not the platform that then worked the issue. Expand a row to read why it earned its grade, plus the complexity, tool, model, and confidence the router chose, and the grading model's own reasoning effort.</p><p>The <strong>Router activity</strong> tab breaks the same grades down by which platform graded them, and selecting a router there filters this list to that platform's grades.</p><p>Runs without routing, and runs where the router was unavailable, are not graded and do not appear here. An issue that is reworked is graded again, so it can appear more than once. This view only reads the local execution history and never changes issue processing.</p>",
+      html: "<p>When <strong>Dynamic Model Routing</strong> is on, the router grades the original issue before any AI works on it — from <strong>A+</strong> down to <strong>F</strong> — and explains what the issue does well, what is missing, and what would raise the grade. This panel lists grades across all repositories by default, newest first; the repository chips above the tabs filter the list and its server-computed summary.</p><p>Search matches issue number, title, provider, model, branch, or status, and Previous and Next fetch another page. Click a bar in the chart, such as <strong>B-</strong>, to show only prompts with that grade. Click the same bar again to clear it. The chart keeps counting every grade in the current search, so another bar can be chosen without clearing the search.</p><p>The <strong>average grade</strong> uses a 4.0 scale across the filtered runs. Each row identifies its repository and shows <strong>Graded by</strong> — the AI platform and model that ran the pre-flight grading and routing pass.</p><p>The <strong>Router activity</strong> tab breaks the same filtered grades down by which platform graded them. Runs without routing, and runs where the router was unavailable, are not graded and do not appear here.</p>",
       links: [],
     },
     "router-activity": {
@@ -234,8 +202,14 @@
       html: "<p>The app normally finds Claude, Codex, and Grok automatically. Enter a full program path only when an installed provider is not detected or when you want to use a specific copy.</p>",
       links: [],
     },
+    "ai-agents-panel": {
+      title: "AI agents",
+      html: "<p>One row per <strong>enabled</strong> AI provider, combining what is otherwise scattered across the app: install/sign-in status from AI Configuration, live remaining quota, and whether the provider is currently working an issue (and where).</p><p>This covers every configured repository, not only the one selected above — quota is per account on this machine, and a provider can only be working one issue at a time across all of them. Quota is probed periodically rather than on every refresh, since each check runs the provider's own CLI.</p>",
+      links: [],
+    },
   };
   const HELP_CONCEPTS = [
+    ["AI agents (Overview)", "ai-agents-panel"],
     ["Including / excluding a provider", "provider-include-exclude"],
     ["GitHub App bot identities", "bot-identities"],
     ["Protected branch flow", "delivery-mode"],
@@ -244,12 +218,11 @@
     ["Monitor GitHub Actions", "ci-monitoring"],
     ["One worker per repository", "parallel-repo-workers"],
     ["Minimum quota remaining", "quota-threshold"],
-    ["Test scheduler", "uat-suite"],
-    ["Test run history", "test-runs"],
     ["Prompt grades", "prompt-grades"],
     ["Router activity", "router-activity"],
     ["Execution history", "execution-history"],
     ["Where your data lives", "data-location"],
+    ["Independent refresh", "async-refresh"],
   ];
 
   function byId(id) {
@@ -296,29 +269,16 @@
       section.classList.toggle("active", section.id === `view-${view}`);
     });
     byId("page-title").textContent = pageTitles[view] || pageTitles.overview;
-    if (view === "overview") {
+    if (view === "debug") void refreshTools({ quiet: true });
+    if (view === "overview") void refreshProviderUsage({ quiet: true });
+    if (view === "repository") {
       void refreshPromotions({ quiet: true });
+      void refreshBotReadiness({ quiet: true });
       void refreshBranchPushAccess({ quiet: true });
     }
-    if (view === "repository") void refreshBranches({ quiet: true });
-    if (view === "debug") void refreshTools({ quiet: true });
-    if (view === "scheduler") void refreshTestPlan({ quiet: true });
-    if (view === "repository") void refreshBotReadiness({ quiet: true });
-    if (view === "repository") void refreshBranchPushAccess({ quiet: true });
     if (view === "feedback") {
       void refreshPromptGrades({ quiet: true });
       void refreshExecutionHistory({ quiet: true });
-    }
-  }
-
-  function populateHours() {
-    const select = byId("uat-hour");
-    select.replaceChildren();
-    for (let hour = 0; hour < 24; hour += 1) {
-      const option = document.createElement("option");
-      option.value = String(hour);
-      option.textContent = `${String(hour).padStart(2, "0")}:00`;
-      select.appendChild(option);
     }
   }
 
@@ -343,7 +303,9 @@
       if (input) input.value = provider.bin;
     });
     ensureRepository(config);
+    restoreFeedbackRepoFilter(config);
     renderRepositorySelector();
+    renderFeedbackRepoFilter();
     document.querySelectorAll("[data-config]").forEach((input) => {
       const key = input.dataset.config;
       const value = config[key];
@@ -399,15 +361,10 @@
       monitor_actions: false,
       require_issue_tests: false,
       adversarial_uat_enabled: false,
+      adversarial_security_enabled: false,
       update_claude_assets_enabled: false,
       allow_environment_only_summary: false,
       repo_dir: "",
-      uat_hour: 3,
-      uat_triage_enabled: true,
-      uat_ai_test_data_enabled: true,
-      test_inputs: {},
-      allow_disruptive_tests: false,
-      run_dir: "",
     };
   }
 
@@ -423,6 +380,80 @@
     if (!state.config) return null;
     ensureRepository(state.config);
     return state.config.repositories.find((repo) => repo.id === state.activeRepoId) || state.config.repositories[0];
+  }
+
+  function feedbackRepositories() {
+    return (state.config?.repositories || []).filter((repo) => repo.id && repo.github_repository);
+  }
+
+  function restoreFeedbackRepoFilter(config = state.config) {
+    const repositories = (config?.repositories || []).filter((repo) => repo.id && repo.github_repository);
+    const available = new Set(repositories.map((repo) => repo.id));
+    const saved = Array.isArray(config?.feedback_repo_filter)
+      ? [...new Set(config.feedback_repo_filter.filter((id) => available.has(id)))]
+      : [];
+    state.feedbackRepoFilter = saved.length ? saved : repositories.map((repo) => repo.id);
+  }
+
+  function feedbackRepoIdsForQuery() {
+    const allIds = feedbackRepositories().map((repo) => repo.id);
+    const selected = state.feedbackRepoFilter.filter((id) => allIds.includes(id));
+    return selected.length === allIds.length ? [] : selected;
+  }
+
+  function feedbackRepoFilterSignature() {
+    return [...state.feedbackRepoFilter].sort().join("\n");
+  }
+
+  function renderFeedbackRepoFilter() {
+    const box = byId("feedback-repo-chips");
+    if (!box) return;
+    box.replaceChildren();
+    const repositories = feedbackRepositories();
+    const selected = new Set(state.feedbackRepoFilter);
+    const allSelected = repositories.length > 0 && repositories.every((repo) => selected.has(repo.id));
+    const chip = (label, checked, value, disabled = false) => {
+      const wrapper = document.createElement("label");
+      wrapper.className = "feedback-repo-chip";
+      wrapper.title = value ? label : "Include every configured repository";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = checked;
+      input.disabled = disabled;
+      input.dataset.feedbackRepo = value;
+      const text = document.createElement("span");
+      text.textContent = label;
+      wrapper.append(input, text);
+      return wrapper;
+    };
+    box.appendChild(chip("All", allSelected, ""));
+    repositories.forEach((repo) => {
+      const checked = selected.has(repo.id);
+      box.appendChild(chip(repo.github_repository, checked, repo.id, checked && selected.size === 1));
+    });
+  }
+
+  function persistFeedbackRepoFilter() {
+    const persisted = feedbackRepoIdsForQuery();
+    state.feedbackRepoSavePromise = state.feedbackRepoSavePromise
+      .catch(() => {})
+      .then(async () => {
+        const saved = await invoke("save_feedback_repo_filter", { repoIds: persisted });
+        state.config.feedback_repo_filter = saved.feedback_repo_filter || [];
+      });
+    return state.feedbackRepoSavePromise;
+  }
+
+  function selectFeedbackRepositories(repoIds) {
+    const allIds = feedbackRepositories().map((repo) => repo.id);
+    const selected = [...new Set(repoIds.filter((id) => allIds.includes(id)))];
+    state.feedbackRepoFilter = selected.length ? selected : allIds;
+    state.executionHistoryOffset = 0;
+    state.promptGradesOffset = 0;
+    renderFeedbackRepoFilter();
+    void persistFeedbackRepoFilter().catch((error) => showToast(errorText(error), "error"));
+    void refreshPromptGrades({ quiet: true });
+    void refreshExecutionHistory({ quiet: true });
   }
 
   function renderRepositorySelector() {
@@ -463,7 +494,7 @@
       const key = input.dataset.repoConfig;
       if (input.type === "checkbox") repo[key] = input.checked;
       else if (input.dataset.list !== undefined) repo[key] = input.value.split(",").map((value) => value.trim()).filter(Boolean);
-      else if (input.type === "number" || key === "uat_hour") repo[key] = Number(input.value);
+      else if (input.type === "number") repo[key] = Number(input.value);
       else repo[key] = key === "github_repository" ? normalizeRepoRef(input.value) : input.value.trim();
     });
     // Approval and squash-merging are intentionally one repository setting.
@@ -798,6 +829,7 @@
   function collectConfig() {
     stashRepositoryForm();
     const next = { ...state.config };
+    next.feedback_repo_filter = feedbackRepoIdsForQuery();
     document.querySelectorAll("[data-config]").forEach((input) => {
       const key = input.dataset.config;
       if (input.type === "checkbox" && input.dataset.checkedValue !== undefined) {
@@ -809,7 +841,7 @@
       } else if (input.type === "checkbox") next[key] = input.checked;
       else if (input.dataset.list !== undefined) {
         next[key] = input.value.split(",").map((value) => value.trim()).filter(Boolean);
-      } else if (input.type === "number" || key === "uat_hour") {
+      } else if (input.type === "number") {
         next[key] = Number(input.value);
       } else next[key] = input.value.trim();
     });
@@ -844,7 +876,6 @@
       manual: "Manual only",
     };
     byId("worker-schedule-summary").textContent = labels[config.schedule_mode] || "Not configured";
-    byId("uat-schedule-summary").textContent = `${String(currentRepo()?.uat_hour ?? 3).padStart(2, "0")}:00 local`;
   }
 
   async function saveConfig({ quiet = false } = {}) {
@@ -859,7 +890,6 @@
     if (!quiet) showToast("Configuration saved.", "success");
     void refreshStatus({ quiet: true });
     void refreshPromotions({ quiet: true });
-    if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
     return saved;
   }
 
@@ -891,11 +921,10 @@
 
   // What "Run now" should do for a [data-action] in the current status.
   function runNowModeFor(action) {
-    const isIssue = action.endsWith("issue");
     return window.SwarmRunNow.runNowMode({
-      kind: isIssue ? "issue" : "uat",
-      processState: isIssue ? (state.status?.issue?.state || "stopped") : (currentRepoStatus()?.uat?.state || "stopped"),
-      available: isIssue || Boolean(currentRepoStatus()?.uatAvailable),
+      kind: "issue",
+      processState: state.status?.issue?.state || "stopped",
+      available: true,
       busy: state.busy.has(action),
     });
   }
@@ -903,32 +932,25 @@
   async function runAction(action) {
     const verb = action.startsWith("start-") ? "Starting" : action.startsWith("run-") ? "Running"
       : action.startsWith("pause-") ? "Updating" : "Stopping";
-    const subject = action.endsWith("issue") ? "issue worker" : "test scheduler";
     // Resolved before withBusy marks the action busy, which would read as
     // "disabled" and lose the distinction between starting and interrupting.
     const runMode = action.startsWith("run-") ? runNowModeFor(action) : "";
     const progress = runMode === "request"
       ? "Asking the issue worker to scan now…"
-      : `${verb} the ${subject}…`;
+      : `${verb} the issue worker…`;
     await withBusy(action, async () => {
-      const isIssue = action.endsWith("issue");
-      const repo = currentRepo();
-      if (!isIssue && !repo) throw new Error("Choose a repository first.");
-      const process = isIssue ? "issue" : `uat:${repo.id}`;
+      const process = "issue";
       if (runMode === "request") {
-        // Already running: don't start a second scheduler, ask this one to
+        // Already running: don't start a second worker, ask this one to
         // scan now and restart its timer.
         await saveBeforeAction();
         showToast(await invoke("request_issue_scan"), "success");
       } else if (action.startsWith("start-") || action.startsWith("run-")) {
         await saveBeforeAction();
-        const command = isIssue ? "start_issue_worker" : "start_uat_scheduler";
-        const args = { runOnce: action.startsWith("run-") };
-        if (!isIssue) args.repoId = currentRepo().id;
-        await invoke(command, args);
-        showToast(`${isIssue ? "Issue worker" : "Test scheduler"} started.`, "success");
+        await invoke("start_issue_worker", { runOnce: action.startsWith("run-") });
+        showToast("Issue worker started.", "success");
       } else if (action.startsWith("pause-")) {
-        const current = isIssue ? state.status?.issue?.state : currentRepoStatus()?.uat?.state;
+        const current = state.status?.issue?.state;
         const command = current === "paused" ? "resume_process" : "pause_process";
         await invoke(command, { process });
         showToast(current === "paused" ? "Process resumed." : "Process paused.", "success");
@@ -937,7 +959,6 @@
         showToast("Process stopped.", "success");
       }
       await refreshStatus();
-      if (!isIssue) await refreshTestPlan({ quiet: true });
     }, { progress });
   }
 
@@ -975,20 +996,19 @@
     else if (kind === "issue" && status?.exitCode === 11) copy.textContent = "Work was safely saved until the selected AI provider has capacity again.";
     else if (kind === "issue" && status?.exitCode === 12) copy.textContent = "An issue is queued, but the enabled AI providers cannot start it yet. The worker will retry on schedule.";
     else if (status?.exitCode !== null && status?.exitCode !== undefined) copy.textContent = `Last run exited with status ${status.exitCode}. Review Info & Debug for details.`;
-    else copy.textContent = kind === "issue" ? "Ready when your repository and AI providers are configured." : "Discovers repository-defined suites and runs every suite whose requirements are ready.";
+    else copy.textContent = "Ready when your repository and AI providers are configured.";
   }
 
   function renderControls() {
     document.querySelectorAll("[data-action]").forEach((button) => {
       const action = button.dataset.action;
-      const isIssue = action.endsWith("issue");
-      const processState = isIssue ? (state.status?.issue?.state || "stopped") : (currentRepoStatus()?.uat?.state || "stopped");
+      const processState = state.status?.issue?.state || "stopped";
       const busy = state.busy.has(action);
       if (action.startsWith("run-")) {
         // Stays available while the issue worker runs — see runNowMode.
         button.disabled = runNowModeFor(action) === "disabled";
       } else if (action.startsWith("start-")) {
-        button.disabled = busy || processState !== "stopped" || (!isIssue && !currentRepoStatus()?.uatAvailable);
+        button.disabled = busy || processState !== "stopped";
       } else {
         button.disabled = busy || processState === "stopped";
       }
@@ -998,12 +1018,6 @@
         button.title = processState === "paused" ? "Resume" : "Pause";
       }
     });
-    const detectDefinition = byId("detect-test-definition");
-    const saveDefinition = byId("save-test-definition");
-    const runAudit = byId("run-coverage-audit");
-    if (detectDefinition) detectDefinition.disabled = state.busy.has("detect-test-definition");
-    if (saveDefinition) saveDefinition.disabled = state.busy.has("save-test-definition");
-    if (runAudit) runAudit.disabled = state.busy.has("run-coverage-audit");
   }
 
   function addFact(container, label, value) {
@@ -1037,427 +1051,6 @@
     addFact(container, "Working tree", repo?.valid ? (repo.dirty ? "Uncommitted changes" : "Clean") : "Unknown");
     addFact(container, "GitHub remote", repo?.githubRepository || "Not inferred");
     if (repo?.error) addFact(container, "Problem", repo.error);
-    const availability = byId("uat-availability");
-    availability.textContent = repo?.uatAvailable ? "Test definition found" : "Test definition not present";
-    availability.classList.toggle("ready", Boolean(repo?.uatAvailable));
-  }
-
-  function renderTestPlan() {
-    const plan = state.testPlan;
-    const summary = byId("test-definition-summary");
-    const requirementsBox = byId("test-requirements");
-    const suitesBox = byId("test-suite-list");
-    if (!summary || !requirementsBox || !suitesBox) return;
-    requirementsBox.replaceChildren();
-    suitesBox.replaceChildren();
-    const inputsBox = byId("test-inputs");
-    inputsBox?.replaceChildren();
-    if (!plan) {
-      summary.textContent = "Requirements have not been checked yet.";
-      suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No test plan loaded." }));
-      return;
-    }
-    const availability = byId("uat-availability");
-    availability.textContent = plan.available ? "Definition loaded" : "Definition needed";
-    availability.classList.toggle("ready", Boolean(plan.available));
-    summary.textContent = plan.error || `.swarm/tests.json · structured results: ${plan.resultsPath}`;
-    const onboarding = byId("test-definition-onboarding");
-    const definitionMissing = !plan.available && !plan.definitionPath;
-    onboarding.classList.remove("hidden");
-    byId("test-definition-onboarding-title").textContent = definitionMissing
-      ? "Set up tests for this repository"
-      : "Regenerate the draft for review";
-    byId("test-definition-onboarding-copy").textContent = definitionMissing
-      ? "Finds test commands this project already uses (and asks AI to look harder only if nothing turns up) and lets you review the result before anything is written."
-      : "Re-runs discovery for comparison. This never overwrites the committed .swarm/tests.json — copy anything you want into it by hand.";
-    byId("detect-test-definition").textContent = definitionMissing ? "Find tests & create draft" : "Regenerate draft";
-    if (state.testDefinitionDraftOpen !== true) byId("test-definition-draft").classList.add("hidden");
-
-    (plan.inputs || []).forEach((input) => renderTestInput(inputsBox, input));
-
-    const allRequirements = [];
-    const seen = new Set();
-    (plan.suites || []).forEach((suite) => (suite.requirements || []).forEach((requirement) => {
-      const key = `${requirement.kind}:${requirement.label}:${requirement.detail}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        allRequirements.push(requirement);
-      }
-    }));
-    if (!allRequirements.length) {
-      requirementsBox.appendChild(Object.assign(document.createElement("span"), { className: "fine-print", textContent: "No external requirements declared." }));
-    } else {
-      allRequirements.forEach((requirement) => {
-        const row = document.createElement("div");
-        row.className = `requirement-item ${requirement.state}`;
-        const mark = document.createElement("span");
-        mark.className = "requirement-mark";
-        mark.textContent = requirement.state === "ready" ? "✓" : requirement.state === "waiting" ? "…" : "!";
-        const copy = document.createElement("div");
-        const title = document.createElement("strong");
-        title.textContent = `${requirement.label} · ${requirement.state === "ready" ? "Ready" : requirement.state === "waiting" ? "Waiting for input" : "Blocked"}`;
-        const detail = document.createElement("small");
-        detail.textContent = requirement.action || requirement.detail;
-        copy.append(title, detail);
-        row.append(mark, copy);
-        requirementsBox.appendChild(row);
-      });
-    }
-
-    byId("test-suite-count").textContent = `${(plan.suites || []).length} suite${plan.suites?.length === 1 ? "" : "s"}`;
-    if (!(plan.suites || []).length) {
-      suitesBox.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No suites discovered." }));
-      return;
-    }
-    plan.suites.forEach((suite) => {
-      const card = document.createElement("article");
-      const stateClass = suite.state.toLowerCase().replaceAll(" ", "-");
-      card.className = `test-suite ${stateClass}${suite.blocked ? " blocked" : ""}`;
-      const heading = document.createElement("div");
-      heading.className = "test-suite-heading";
-      const words = document.createElement("div");
-      const name = document.createElement("strong");
-      name.textContent = suite.name;
-      if (suite.origin === "adversarial") {
-        words.appendChild(Object.assign(document.createElement("span"), {className: "status-pill paused", textContent: "Adversarial"}));
-      }
-      const meta = document.createElement("small");
-      meta.textContent = `${suite.id} · ${suite.timeoutSeconds}s${suite.disruptive ? " · disruptive" : ""}`;
-      words.append(name, meta);
-      const badge = document.createElement("span");
-      badge.className = `suite-state ${stateClass}`;
-      badge.textContent = suite.state;
-      heading.append(words, badge);
-      card.appendChild(heading);
-      if (suite.detail) {
-        const detail = document.createElement("p");
-        detail.textContent = suite.detail;
-        card.appendChild(detail);
-      }
-      const command = document.createElement("code");
-      command.textContent = suite.command;
-      card.appendChild(command);
-      appendAiGeneratedDataNote(card, suite.aiGeneratedData);
-      suitesBox.appendChild(card);
-    });
-  }
-
-  function renderTestInput(container, input) {
-    if (!container) return;
-    const model = window.SwarmTestInputs.controlModel(input);
-    const row = document.createElement("div");
-    row.className = `test-input-item ${input.state || "ready"}`;
-    const head = document.createElement("div");
-    head.className = "test-input-head";
-    const label = document.createElement("strong");
-    label.textContent = `${input.label}${input.required ? " · Required" : ""}`;
-    const stateLabel = document.createElement("span");
-    stateLabel.className = "test-input-state";
-    stateLabel.textContent = model.stateLabel;
-    head.append(label, stateLabel);
-    row.appendChild(head);
-
-    let control;
-    if (model.element === "select") {
-      control = document.createElement("select");
-      control.appendChild(Object.assign(document.createElement("option"), { value: "", textContent: input.required ? "Choose a value…" : "None" }));
-      (input.options || []).forEach((item) => control.appendChild(Object.assign(document.createElement("option"), {
-        value: item.value,
-        textContent: `${item.label}${item.detected ? " · Detected" : ""}`,
-      })));
-      control.value = input.value || "";
-    } else if (input.inputType === "boolean") {
-      const wrapper = document.createElement("label");
-      wrapper.className = "toggle";
-      control = document.createElement("input");
-      control.type = "checkbox";
-      control.checked = input.value === "true";
-      wrapper.append(control, document.createElement("span"), document.createTextNode(" Enabled"));
-      row.appendChild(wrapper);
-    } else {
-      control = document.createElement("input");
-      control.type = model.inputType;
-      control.value = model.value;
-      control.placeholder = model.placeholder;
-    }
-    control.setAttribute("aria-label", input.label);
-    if (input.inputType !== "boolean") row.appendChild(control);
-    const help = document.createElement("small");
-    help.textContent = input.message || input.help || `${input.persistence} persistence`;
-    row.appendChild(help);
-    const actions = document.createElement("div");
-    actions.className = "test-input-actions";
-    if (model.picker) {
-      const browse = Object.assign(document.createElement("button"), { type: "button", className: "secondary-button", textContent: "Browse" });
-      browse.addEventListener("click", async () => {
-        const chosen = await invoke("choose_test_input_path", { kind: input.inputType });
-        if (chosen) control.value = chosen;
-      });
-      actions.appendChild(browse);
-    }
-    const save = Object.assign(document.createElement("button"), { type: "button", className: "primary-button", textContent: "Save" });
-    save.addEventListener("click", () => saveTestInput(input.id, input.inputType === "boolean" ? String(control.checked) : control.value));
-    const clear = Object.assign(document.createElement("button"), { type: "button", className: "secondary-button", textContent: "Clear / reset" });
-    clear.addEventListener("click", () => saveTestInput(input.id, null));
-    actions.append(save, clear);
-    row.appendChild(actions);
-    container.appendChild(row);
-  }
-
-  // Shared by the live suite list and test-run history: a short note on what
-  // AI made up for a suite that asked for best-effort test data, per
-  // "documented in the test run" — never silent about it.
-  function appendAiGeneratedDataNote(container, records) {
-    if (!Array.isArray(records) || !records.length) return;
-    const note = document.createElement("p");
-    note.className = "ai-data-note";
-    note.textContent = `AI-generated data (${records.map((r) => r.provider).join(", ")}): ${records
-      .map((r) => `${r.name} — ${r.summary}`)
-      .join("; ")}`;
-    container.appendChild(note);
-  }
-
-  async function refreshTestPlan({ quiet = false } = {}) {
-    const repo = currentRepo();
-    if (!repo || state.refreshing.tests) return;
-    state.refreshing.tests = true;
-    try {
-      state.testPlan = await invoke("get_test_plan_background", { repoId: repo.id });
-      if (repo.id === state.activeRepoId) renderTestPlan();
-      try {
-        state.testRuns = await invoke("get_test_runs_background", { repoId: repo.id });
-        if (repo.id === state.activeRepoId) renderTestRuns();
-      } catch (_) {
-        /* history is best-effort; the plan is the important part */
-      }
-    } catch (error) {
-      if (!quiet) showToast(errorText(error), "error");
-    } finally {
-      state.refreshing.tests = false;
-    }
-  }
-
-  async function detectTestDefinition() {
-    const repo = currentRepo();
-    if (!repo) return;
-    await withBusy("detect-test-definition", async () => {
-      const draft = await invoke("detect_test_definition", { repoId: repo.id });
-      byId("test-definition-editor").value = draft.definition;
-      byId("test-detection-summary").textContent = draft.detectedSuites
-        ? `Detected ${draft.detectedSuites} test suite${draft.detectedSuites === 1 ? "" : "s"}. Review the draft before saving.`
-        : "No conventional tests were detected. Edit the disabled placeholder before saving.";
-      const notes = byId("test-detection-notes");
-      notes.replaceChildren();
-      (draft.notes || []).forEach((note) => {
-        const item = document.createElement("span");
-        item.textContent = `• ${note}`;
-        notes.appendChild(item);
-      });
-      state.testDefinitionDraftOpen = true;
-      byId("test-definition-draft").classList.remove("hidden");
-      byId("test-definition-editor").focus();
-    }, { progress: "Detecting tests…" });
-  }
-
-  function cancelTestDefinition() {
-    state.testDefinitionDraftOpen = false;
-    byId("test-definition-draft").classList.add("hidden");
-    byId("test-definition-editor").value = "";
-  }
-
-  async function saveTestDefinition() {
-    const repo = currentRepo();
-    if (!repo) return;
-    const definition = byId("test-definition-editor").value;
-    await withBusy("save-test-definition", async () => {
-      const path = await invoke("create_test_definition", { repoId: repo.id, definition });
-      cancelTestDefinition();
-      const repoStatus = currentRepoStatus();
-      if (repoStatus) repoStatus.uatAvailable = true;
-      renderControls();
-      await refreshStatus();
-      await refreshTestPlan();
-      showToast(`Test definition created at ${path}. Commit it to keep it with the repository.`, "success");
-    }, { progress: "Saving the test definition…" });
-  }
-
-  async function runCoverageAudit() {
-    const repo = currentRepo();
-    if (!repo) return;
-    await withBusy("run-coverage-audit", async () => {
-      state.coverageAudit = await invoke("audit_test_coverage", { repoId: repo.id });
-      renderCoverageAudit();
-    }, { progress: "Auditing test coverage…" });
-  }
-
-  function coverageAuditRow(entry) {
-    const row = document.createElement("div");
-    row.className = "requirement-item ready";
-    const mark = document.createElement("span");
-    mark.className = "requirement-mark";
-    mark.textContent = "•";
-    const copy = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = `${entry.name} · ${entry.classification} (${entry.confidence} confidence, ${entry.source})`;
-    const detail = document.createElement("small");
-    detail.textContent = [entry.path, entry.mappedTo ? `→ ${entry.mappedTo}` : "", entry.detail]
-      .filter(Boolean)
-      .join(" — ");
-    copy.append(title, detail);
-    row.append(mark, copy);
-    return row;
-  }
-
-  function renderCoverageAudit() {
-    const audit = state.coverageAudit;
-    const groups = byId("coverage-audit-groups");
-    const count = byId("coverage-audit-count");
-    const warning = byId("coverage-audit-warning");
-    if (!groups || !count || !warning) return;
-    if (!audit) {
-      count.textContent = "Not run";
-      count.classList.remove("ready");
-      warning.classList.add("hidden");
-      return;
-    }
-    const total =
-      audit.mappedScheduled.length + audit.mappedCovered.length + audit.disabledPendingReview.length + audit.unmapped.length;
-    count.textContent = `${total} candidate${total === 1 ? "" : "s"}`;
-    count.classList.toggle("ready", audit.complete);
-    warning.classList.toggle("hidden", audit.complete);
-    if (!audit.complete) {
-      warning.textContent = `${audit.unmapped.length} candidate${audit.unmapped.length === 1 ? "" : "s"} are not accounted for in .swarm/tests.json. Coverage is not complete until every candidate is scheduled, covered, or explicitly disabled pending review.`;
-    }
-    groups.replaceChildren();
-    [
-      ["Mapped & scheduled", audit.mappedScheduled],
-      ["Covered by another suite", audit.mappedCovered],
-      ["Disabled, pending review", audit.disabledPendingReview],
-      ["Unmapped", audit.unmapped],
-    ].forEach(([label, entries]) => {
-      const section = document.createElement("div");
-      section.className = "coverage-audit-group";
-      const heading = document.createElement("p");
-      heading.className = "eyebrow";
-      heading.textContent = `${label} · ${entries.length}`;
-      section.appendChild(heading);
-      if (!entries.length) {
-        section.appendChild(Object.assign(document.createElement("span"), { className: "fine-print", textContent: "None." }));
-      } else {
-        entries.forEach((entry) => section.appendChild(coverageAuditRow(entry)));
-      }
-      groups.appendChild(section);
-    });
-  }
-
-  function formatTimestamp(seconds) {
-    if (!seconds) return "—";
-    return new Date(seconds * 1000).toLocaleString();
-  }
-
-  function formatDuration(startSeconds, endSeconds) {
-    if (!startSeconds || !endSeconds || endSeconds < startSeconds) return "—";
-    const total = endSeconds - startSeconds;
-    if (total < 60) return `${total}s`;
-    const minutes = Math.floor(total / 60);
-    const rest = total % 60;
-    return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
-  }
-
-  const RUN_OUTCOMES = [
-    ["Passed", "passed"],
-    ["Failed", "failed"],
-    ["Blocked", "blocked"],
-    ["Skipped", "skipped"],
-    ["Not executed", "not-executed"],
-  ];
-
-  function renderTestRuns() {
-    const box = byId("test-run-list");
-    if (!box) return;
-    box.replaceChildren();
-    const runs = Array.isArray(state.testRuns) ? state.testRuns : [];
-    byId("test-run-count").textContent = `${runs.length} run${runs.length === 1 ? "" : "s"}`;
-    if (!runs.length) {
-      box.appendChild(Object.assign(document.createElement("p"), {
-        className: "panel-copy",
-        textContent: "No test runs recorded yet. Press Run now, or Start for the daily cycle.",
-      }));
-      return;
-    }
-    runs.forEach((run) => {
-      const suites = run.suites || [];
-      const tally = suites.reduce((counts, suite) => {
-        const key = String(suite.state || "").toLowerCase().replaceAll(" ", "-");
-        if (key === "passed") counts.passed += 1;
-        else if (key === "failed") counts.failed += 1;
-        else if (key === "blocked" || key === "waiting-for-input") counts.blocked += 1;
-        else if (key === "not-executed") counts["not-executed"] += 1;
-        else counts.skipped += 1;
-        return counts;
-      }, { passed: 0, failed: 0, blocked: 0, skipped: 0, "not-executed": 0 });
-
-      const item = document.createElement("details");
-      item.className = "test-run";
-      const summary = document.createElement("summary");
-      const head = document.createElement("div");
-      head.className = "test-run-head";
-      const when = document.createElement("strong");
-      when.textContent = formatTimestamp(run.finishedAt || run.startedAt);
-      const meta = document.createElement("small");
-      const trigger = run.trigger === "manual" ? "Run now" : run.trigger === "scheduled" ? "Scheduled" : "—";
-      const commit = run.testedCommit ? ` · ${run.testedCommit.slice(0, 12)}` : "";
-      meta.textContent = `${trigger} · ${formatDuration(run.startedAt, run.finishedAt)}${commit} · ${suites.length} suite${suites.length === 1 ? "" : "s"}`;
-      head.append(when, meta);
-      const badges = document.createElement("div");
-      badges.className = "test-run-tally";
-      RUN_OUTCOMES.forEach(([label, cls]) => {
-        const badge = document.createElement("span");
-        badge.className = `suite-state ${cls}`;
-        badge.textContent = `${tally[cls]} ${label.toLowerCase()}`;
-        badges.appendChild(badge);
-      });
-      summary.append(head, badges);
-      item.appendChild(summary);
-
-      const list = document.createElement("div");
-      list.className = "test-run-suites";
-      if (!suites.length) {
-        list.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No suites were recorded for this run." }));
-      }
-      suites.forEach((suite) => {
-        const row = document.createElement("div");
-        const stateClass = String(suite.state || "").toLowerCase().replaceAll(" ", "-");
-        row.className = `test-run-suite ${stateClass}`;
-        const words = document.createElement("div");
-        const name = document.createElement("strong");
-        name.textContent = suite.name || suite.id;
-        if (suite.origin === "adversarial") {
-          words.appendChild(Object.assign(document.createElement("span"), {className: "status-pill paused", textContent: "Adversarial"}));
-        }
-        const detail = document.createElement("small");
-        detail.textContent = suite.detail || `${suite.id}${suite.durationMs ? ` · ${Math.round(suite.durationMs / 1000)}s` : ""}`;
-        words.append(name, detail);
-        if (Array.isArray(suite.argv) && suite.argv.length) {
-          const command = document.createElement("code");
-          command.textContent = JSON.stringify(suite.argv);
-          words.appendChild(command);
-        }
-        if (Array.isArray(suite.environment) && suite.environment.length) {
-          const environment = document.createElement("small");
-          environment.textContent = `Environment: ${suite.environment.join(", ")}`;
-          words.appendChild(environment);
-        }
-        appendAiGeneratedDataNote(words, suite.aiGeneratedData);
-        const badge = document.createElement("span");
-        badge.className = `suite-state ${stateClass}`;
-        badge.textContent = suite.state || "Unknown";
-        row.append(words, badge);
-        list.appendChild(row);
-      });
-      item.appendChild(list);
-      box.appendChild(item);
-    });
   }
 
   // ----- Feedback (AI execution history) ------------------------------
@@ -1541,6 +1134,14 @@
     return facts;
   }
 
+  function repositoryBadge(repository) {
+    const badge = document.createElement("span");
+    badge.className = "repository-badge";
+    badge.textContent = repository || "Repository not recorded";
+    badge.title = repository || "Repository not recorded";
+    return badge;
+  }
+
   function buildExecutionRecordItem(record) {
     const item = document.createElement("details");
     item.className = "execution-record";
@@ -1550,15 +1151,18 @@
     head.className = "execution-head";
     const title = document.createElement("strong");
     title.textContent = `#${record.issueNumber} ${record.issueTitle || ""}`.trim();
+    const titleRow = document.createElement("div");
+    titleRow.className = "execution-title-row";
+    titleRow.append(title, repositoryBadge(record.repository));
     const meta = document.createElement("small");
     meta.textContent = [
       record.attemptNumber ? `Attempt ${record.attemptNumber}` : "",
       record.startedAt ? `Started ${formatIsoTimestamp(record.startedAt)}` : "",
     ].filter(Boolean).join(" · ");
-    head.append(title, meta);
+    head.append(titleRow, meta);
     const tagging = document.createElement("div");
     tagging.className = "execution-tagging";
-    [["AI tool", record.aiProvider], ["Model", record.model], ["Effort", record.effort], ["UAT rounds", window.SwarmAdversarialUat.roundCount(record)]].forEach(([label, value]) => {
+    [["AI tool", record.aiProvider], ["Model", record.model], ["Effort", record.effort], ["UAT rounds", window.SwarmAdversarialUat.roundCount(record)], ["Security review", window.SwarmAdversarialSecurity.reviewStatus(record)]].forEach(([label, value]) => {
       const cell = document.createElement("div");
       cell.className = "execution-tag";
       const name = document.createElement("span");
@@ -1603,12 +1207,40 @@
     addSummaryParagraph("Requested work", record.requestedWorkSummary);
     addSummaryParagraph("Changes made", record.changesSummary);
     addSummaryParagraph("Adversarial UAT", record.adversarialOutcome?.replaceAll("_", " "));
+    addSummaryParagraph("Adversarial cybersecurity", window.SwarmAdversarialSecurity.findingsSummary(record));
+    const securityFindings = record.securityFiledFindings || [];
+    if (securityFindings.length) {
+      addSummaryParagraph("Out-of-scope security findings", `${securityFindings.length} separately filed issue${securityFindings.length === 1 ? "" : "s"}.`);
+      const securityLinks = document.createElement("div");
+      securityLinks.className = "control-row";
+      for (const finding of securityFindings) {
+        if (finding?.url) securityLinks.appendChild(externalLink(finding.title || "Open separately filed issue ↗", finding.url, "text-button"));
+      }
+      if (securityLinks.children.length) body.appendChild(securityLinks);
+    }
+    if (record.securityReviewError) {
+      addSummaryParagraph("Security review failure", record.securityReviewError);
+    }
+    const filedFindings = record.adversarialFiledFindings || [];
+    if (filedFindings.length) {
+      addSummaryParagraph("Out-of-scope UAT findings", `${filedFindings.length} separately filed issue${filedFindings.length === 1 ? "" : "s"}.`);
+      const findingLinks = document.createElement("div");
+      findingLinks.className = "control-row";
+      for (const finding of filedFindings) {
+        if (finding?.url) findingLinks.appendChild(externalLink(finding.title || "Open separately filed issue ↗", finding.url, "text-button"));
+      }
+      if (findingLinks.children.length) body.appendChild(findingLinks);
+    }
     if (record.capacityConsumedPercent != null) {
       addSummaryParagraph("Approximate quota consumed", window.SwarmAdversarialUat.capacity(record.capacityConsumedPercent));
     }
     for (const round of record.adversarialRounds || []) {
-      addSummaryParagraph(`UAT ${round.round_number === 0 ? "initial assessment" : `round ${round.round_number}`}`,
-        window.SwarmAdversarialUat.roundDetail(round));
+      const label = round.round_number === 0 ? "initial assessment" : `round ${round.round_number}`;
+      if (round.stage === "security") {
+        addSummaryParagraph(`Security ${label}`, window.SwarmAdversarialSecurity.roundDetail(round));
+      } else {
+        addSummaryParagraph(`UAT ${label}`, window.SwarmAdversarialUat.roundDetail(round));
+      }
     }
     const routing = record.routingDecision;
     if (routing && typeof routing === "object") {
@@ -1684,7 +1316,9 @@
     const page = executionHistoryView();
     const aggregate = byId("adversarial-history-summary");
     const stats = page.adversarial;
-    if (aggregate) aggregate.textContent = window.SwarmAdversarialUat.aggregate(stats);
+    if (aggregate) {
+      aggregate.textContent = `${window.SwarmAdversarialUat.aggregate(stats)} ${window.SwarmAdversarialSecurity.aggregate(page.security)}`;
+    }
     const searching = state.executionHistorySearch.trim().length > 0;
     const total = Number(page.total) || 0;
     const limit = Number(page.limit) || 10;
@@ -1717,7 +1351,7 @@
         className: "panel-copy",
         textContent: searching
           ? "No executions match this search."
-          : "No AI executions recorded yet. Turn on “Store AI execution history” in Advanced, then run an issue.",
+          : "No AI executions recorded yet. Turn on “Store AI execution history” in AI Configuration, then run an issue.",
       }));
       return;
     }
@@ -1725,10 +1359,11 @@
   }
 
   async function refreshExecutionHistory({ quiet = false } = {}) {
-    const repo = currentRepo();
+    const repoIds = feedbackRepoIdsForQuery();
+    const filterSignature = feedbackRepoFilterSignature();
     const requestId = state.executionHistoryRequest + 1;
     state.executionHistoryRequest = requestId;
-    if (!repo) {
+    if (!feedbackRepositories().length) {
       state.executionHistory = { records: [], total: 0, offset: 0, limit: 10 };
       state.executionHistoryOffset = 0;
       renderExecutionHistory();
@@ -1738,12 +1373,12 @@
     const search = state.executionHistorySearch.trim();
     try {
       const page = await invoke("get_execution_history_background", {
-        repoId: repo.id,
+        repoIds,
         offset,
         search,
         sort: state.executionHistorySort,
       });
-      if (requestId !== state.executionHistoryRequest || repo.id !== state.activeRepoId) return;
+      if (requestId !== state.executionHistoryRequest || filterSignature !== feedbackRepoFilterSignature()) return;
       state.executionHistory = page;
       state.executionHistoryOffset = Number(page.offset) || 0;
       renderExecutionHistory();
@@ -1793,12 +1428,15 @@
     head.className = "execution-head";
     const title = document.createElement("strong");
     title.textContent = `#${record.issueNumber} ${record.issueTitle || ""}`.trim();
+    const titleRow = document.createElement("div");
+    titleRow.className = "execution-title-row";
+    titleRow.append(title, repositoryBadge(record.repository));
     const meta = document.createElement("small");
     meta.textContent = [
       record.attemptNumber > 1 ? `Attempt ${record.attemptNumber}` : "",
       record.startedAt ? `Graded ${formatIsoTimestamp(record.startedAt)}` : "",
     ].filter(Boolean).join(" · ");
-    head.append(title, meta);
+    head.append(titleRow, meta);
     const tagging = document.createElement("div");
     tagging.className = "execution-tagging";
     [
@@ -2140,11 +1778,32 @@
     });
   }
 
+  // The Repository view is a tablist over repo-specific setting groups
+  // instead of one long scroll, same shape as the Feedback view above.
+  const REPOSITORY_TABS = ["source", "bots", "queue", "delivery"];
+
+  function showRepositoryTab(tab, { focus = false } = {}) {
+    state.repositoryTab = REPOSITORY_TABS.includes(String(tab || "")) ? tab : REPOSITORY_TABS[0];
+    document.querySelectorAll("[data-repository-tab]").forEach((button) => {
+      const active = button.dataset.repositoryTab === state.repositoryTab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      button.tabIndex = active ? 0 : -1;
+      if (active && focus) button.focus();
+    });
+    document.querySelectorAll("[data-repository-panel]").forEach((panel) => {
+      const active = panel.dataset.repositoryPanel === state.repositoryTab;
+      panel.classList.toggle("active", active);
+      panel.hidden = !active;
+    });
+  }
+
   async function refreshPromptGrades({ quiet = false } = {}) {
-    const repo = currentRepo();
+    const repoIds = feedbackRepoIdsForQuery();
+    const filterSignature = feedbackRepoFilterSignature();
     const requestId = state.promptGradesRequest + 1;
     state.promptGradesRequest = requestId;
-    if (!repo) {
+    if (!feedbackRepositories().length) {
       state.promptGrades = null;
       state.promptGradesOffset = 0;
       renderPromptGrades();
@@ -2157,10 +1816,10 @@
     const routerModel = state.promptGradesRouterModel;
     try {
       const page = await invoke("get_prompt_grades_background", {
-        repoId: repo.id,
+        repoIds,
         query: { offset, search, grade, router, routerModel },
       });
-      if (requestId !== state.promptGradesRequest || repo.id !== state.activeRepoId) return;
+      if (requestId !== state.promptGradesRequest || filterSignature !== feedbackRepoFilterSignature()) return;
       state.promptGrades = page;
       state.promptGradesOffset = Number(page.offset) || 0;
       renderPromptGrades();
@@ -2171,29 +1830,18 @@
   }
 
   async function importExecutionHistory() {
-    const repo = currentRepo();
-    if (!repo) return;
+    if (!feedbackRepositories().length) return;
     await withBusy("import-execution-history", async () => {
-      const summary = await invoke("import_execution_history_background", { repoId: repo.id });
+      const batch = await invoke("import_execution_history_background", { repoIds: feedbackRepoIdsForQuery() });
       await refreshExecutionHistory();
-      showToast(
-        summary.imported
-          ? `Imported ${summary.imported} issue${summary.imported === 1 ? "" : "s"} from GitHub (${summary.skipped} already tracked).`
-          : `No new issues to import — all ${summary.totalIssues} are already tracked.`,
-        "success",
-      );
+      await refreshPromptGrades({ quiet: true });
+      const results = Array.isArray(batch.results) ? batch.results : [];
+      const messages = results.map((result) => result.success
+        ? `${result.repository}: ${result.imported} imported, ${result.skipped} already tracked`
+        : `${result.repository}: failed — ${result.error || "unknown error"}`);
+      const failed = results.some((result) => !result.success);
+      showToast(messages.join(" · ") || "No repositories are configured for import.", failed ? "error" : "success");
     }, { progress: "Scanning the GitHub issue backlog…" });
-  }
-
-  async function saveTestInput(key, value) {
-    if (!currentRepo()) return;
-    await withBusy(`test-input-${key}`, async () => {
-      await saveBeforeAction();
-      state.config = await invoke("save_test_input", { repoId: currentRepo().id, key, value });
-      bindConfig(state.config);
-      await refreshTestPlan();
-      showToast(value === null ? "Test input reset." : "Test input saved. Waiting suites can now be retried.", "success");
-    }, { progress: "Saving the test input…" });
   }
 
   // Accepts "owner/name", a full github.com URL, or an SSH remote; returns
@@ -2282,6 +1930,7 @@
       if (!state.dirty) state.config = await invoke("get_config");
       renderTools();
       renderReadiness();
+      renderAiAgents();
     } catch (error) {
       if (!quiet) showToast(errorText(error), "error");
     } finally {
@@ -2573,7 +2222,6 @@
     if (!state.status) return;
     renderProcess("issue", state.status.issue);
     const repoStatus = currentRepoStatus();
-    renderProcess("uat", repoStatus?.uat);
     renderRepository(repoStatus?.repository);
     const warning = byId("config-warning");
     warning.replaceChildren();
@@ -2586,9 +2234,10 @@
     renderControls();
     renderReadiness();
     renderNowWorking();
+    renderAiAgents();
   }
 
-  const NOW_WORKING_KINDS = { issue: "Issue", tests: "Tests", ci: "CI/CD" };
+  const NOW_WORKING_KINDS = { issue: "Issue", ci: "CI/CD", adversarial: "Adversarial UAT", security: "Adversarial security" };
   const NOW_WORKING_PILLS = { running: "Running", paused: "Paused", error: "Failing", ok: "Passing", idle: "Idle" };
 
   function nowWorkingRepositories() {
@@ -2596,7 +2245,6 @@
     return (state.status?.repos || []).filter((repo) => repo.enabled).map((repo) => ({
       id: repo.id,
       name: normalizeRepoRef(repo.githubRepository),
-      uatState: repo.uat?.state || "stopped",
       monitorActions: Boolean(configured.get(repo.id)?.monitor_actions),
     }));
   }
@@ -2608,7 +2256,6 @@
       logs: state.workerLogs,
       workerState: state.status?.issue?.state || "stopped",
       repositories: nowWorkingRepositories(),
-      testRuns: state.liveTestRuns,
     });
     const active = rows.filter((row) => row.state === "running").length;
     const count = byId("now-working-count");
@@ -2647,20 +2294,109 @@
     });
   }
 
-  // Test runs are only read for repos whose scheduler is up, since a stopped
-  // scheduler has nothing in flight.
-  async function refreshLiveTestRuns() {
-    if (state.refreshing.liveTestRuns) return;
-    state.refreshing.liveTestRuns = true;
+  const AI_AGENT_PILLS = { running: "Working", paused: "Low quota", stopped: "Not ready", error: "Usage unknown", idle: "Idle" };
+
+  // Which enabled providers are currently working, across every configured
+  // repository (not just activeRepoId) — reuses the same row derivation as
+  // the Now Working panel, grouped by provider instead of by issue.
+  function aiAgentsWorkingByProvider() {
+    const rows = window.SwarmNowWorking.deriveNowWorking({
+      logs: state.workerLogs,
+      workerState: state.status?.issue?.state || "stopped",
+      repositories: nowWorkingRepositories(),
+    });
+    const byProvider = new Map();
+    rows.filter((row) => row.state === "running" && row.provider).forEach((row) => {
+      const key = row.provider.toLowerCase();
+      if (!byProvider.has(key)) byProvider.set(key, []);
+      byProvider.get(key).push(row);
+    });
+    return byProvider;
+  }
+
+  function renderAiAgents() {
+    const list = byId("ai-agents-list");
+    if (!list || !state.config) return;
+    const enabled = providerList(state.config).filter((provider) => provider.enabled);
+    const usageByProvider = new Map((state.providerUsage || []).map((entry) => [entry.provider, entry]));
+    const workingByProvider = aiAgentsWorkingByProvider();
+    list.replaceChildren();
+    if (!enabled.length) {
+      const empty = document.createElement("div");
+      empty.className = "now-working-empty";
+      empty.append(
+        Object.assign(document.createElement("strong"), { textContent: "No AI providers enabled" }),
+        Object.assign(document.createElement("span"), { textContent: "Enable a provider on AI Configuration to see it here." }),
+      );
+      list.appendChild(empty);
+      return;
+    }
+    enabled.forEach((provider) => {
+      const meta = PROVIDER_META[provider.id];
+      const tool = state.tools.find((entry) => entry.id === provider.id);
+      const usage = usageByProvider.get(provider.id);
+      const working = workingByProvider.get(provider.id) || [];
+      const ready = Boolean(tool?.installed && tool?.authenticated);
+
+      let pillState = "idle";
+      if (working.length) pillState = "running";
+      else if (!ready) pillState = "stopped";
+      else if (usage && usage.status === 2) pillState = "error";
+      else if (usage && usage.status === 1) pillState = "paused";
+
+      let headline;
+      if (working.length) {
+        const locations = working.map((row) => row.repository ? `${row.title} in ${row.repository}` : row.title);
+        headline = `Working ${locations.join("; ")}`;
+      } else if (!ready) {
+        headline = "Not ready";
+      } else if (usage && usage.status === 2) {
+        headline = "Usage unknown";
+      } else if (usage && usage.status === 1) {
+        headline = "Low quota";
+      } else {
+        headline = "Idle";
+      }
+
+      const detailParts = [tool ? tool.status : "Checking…"];
+      if (usage?.remainingPercent != null) {
+        detailParts.push(usage.detail || `${Math.round(usage.remainingPercent)}% remaining`);
+      } else if (usage && usage.status === 2) {
+        detailParts.push("Usage unavailable");
+      } else if (ready) {
+        detailParts.push("Checking quota…");
+      }
+
+      const item = document.createElement("div");
+      item.className = "now-working-row ai-agent-row";
+      const kind = document.createElement("span");
+      kind.className = "now-working-kind";
+      kind.textContent = meta.label;
+      const words = document.createElement("div");
+      words.className = "now-working-words";
+      const title = document.createElement("strong");
+      title.textContent = headline;
+      const detail = document.createElement("span");
+      detail.textContent = detailParts.filter(Boolean).join(" · ");
+      words.append(title, detail);
+      const pill = document.createElement("span");
+      pill.className = `status-pill ${pillState}`;
+      pill.textContent = AI_AGENT_PILLS[pillState] || pillState;
+      item.append(kind, words, pill);
+      list.appendChild(item);
+    });
+  }
+
+  async function refreshProviderUsage({ quiet = true } = {}) {
+    if (state.refreshing.providerUsage) return;
+    state.refreshing.providerUsage = true;
     try {
-      const live = nowWorkingRepositories().filter((repo) => repo.uatState !== "stopped" && repo.uatState !== "error");
-      const entries = await Promise.all(live.map(async (repo) => {
-        try { return [repo.id, await invoke("get_test_runs_background", { repoId: repo.id })]; } catch (_) { return [repo.id, []]; }
-      }));
-      state.liveTestRuns = Object.fromEntries(entries);
-      renderNowWorking();
+      state.providerUsage = await invoke("check_provider_usage_background");
+      renderAiAgents();
+    } catch (error) {
+      if (!quiet) showToast(errorText(error), "error");
     } finally {
-      state.refreshing.liveTestRuns = false;
+      state.refreshing.providerUsage = false;
     }
   }
 
@@ -2704,13 +2440,11 @@
 
   function activityCategory(source) {
     const value = source.toLowerCase();
-    if (value.includes("uat") || value.includes("test")) return "tests";
     if (value.includes("setup") || value.includes("install") || value.includes("github bot")) return "setup";
     return "work";
   }
 
   function activitySourceLabel(source, category) {
-    if (category === "tests") return "Tests";
     if (category === "setup") return source.toLowerCase().includes("github bot") ? "GitHub setup" : "Setup";
     return source.toLowerCase().includes("issue") ? "Issue worker" : "Automation";
   }
@@ -2817,7 +2551,7 @@
       return makeActivity(log, `${source} needs attention`, "Something prevented this step from finishing. Open Info & Debug for the exact error and command output.", "error", category);
     }
     if (/^Started .* as pid \d+/i.test(message)) {
-      return makeActivity(log, `${source} started`, category === "tests" ? "The configured test run is now active." : category === "setup" ? "The requested setup task is now running." : "The app is now watching the configured repositories for ready issues.", "info", category);
+      return makeActivity(log, `${source} started`, category === "setup" ? "The requested setup task is now running." : "The app is now watching the configured repositories for ready issues.", "info", category);
     }
     if (/exited with status 0/i.test(message)) {
       return makeActivity(log, `${source} finished`, "The process completed normally.", "success", category);
@@ -2886,15 +2620,6 @@
     }
     if (/exists, but it cannot access|must be owned by/i.test(message)) {
       return makeActivity(log, "A GitHub bot needs setup", "The existing bot is not installed for this repository or belongs to the wrong GitHub owner.", "waiting", "setup");
-    }
-    if (category === "tests" && /skip(?:ped|ping).*unchanged/i.test(message)) {
-      return makeActivity(log, "Tests skipped because the code has not changed", "There is no new commit to verify.", "waiting", "tests");
-    }
-    if (category === "tests" && /(?:all tests|test suite|uat).*(?:passed|completed|succeeded)|(?:passed|completed|succeeded).*(?:tests|uat)/i.test(message)) {
-      return makeActivity(log, "Tests passed", "The configured repository checks completed successfully.", "success", "tests");
-    }
-    if (category === "tests" && /(?:starting|running).*(?:test|uat|backend|fire tv)/i.test(message)) {
-      return makeActivity(log, "Test run started", "The app is running the repository’s configured checks.", "info", "tests");
     }
     return null;
   }
@@ -3042,6 +2767,7 @@
     if (stayAtTop) full.scrollTop = 0;
     renderActivity();
     renderNowWorking();
+    renderAiAgents();
     byId("log-count").textContent = String(Math.min(entries.length, 999));
   }
 
@@ -3218,11 +2944,9 @@
     const repo = defaultRepository();
     state.config.repositories.push(repo);
     state.activeRepoId = repo.id;
-    state.branchOverview = null;
     renderRepositorySelector();
     bindRepositoryForm();
     renderStatus();
-    renderBranchOverview(null);
     setDirty();
     navigate("repository");
     byId("github-repository-input").focus();
@@ -3236,244 +2960,24 @@
     state.config.repositories = state.config.repositories.filter((entry) => entry.id !== repo.id);
     if (!state.config.repositories.length) state.config.repositories.push(defaultRepository());
     state.activeRepoId = state.config.repositories[0].id;
-    state.branchOverview = null;
     renderRepositorySelector();
     bindRepositoryForm();
     renderStatus();
-    renderBranchOverview(null);
     setDirty();
   }
 
   function selectRepository(repoId) {
     stashRepositoryForm();
     state.activeRepoId = repoId;
-    state.branchOverview = null;
-    state.testPlan = null;
-    state.testRuns = null;
-    state.coverageAudit = null;
-    state.testDefinitionDraftOpen = false;
-    state.executionHistory = null;
-    state.promptGrades = null;
-    state.promptGradesOffset = 0;
-    state.promptGradesSearch = "";
-    state.promptGradesGrade = "";
-    state.promptGradesRouter = "";
-    state.promptGradesRouterModel = "";
-    clearTimeout(state.promptGradesSearchTimer);
-    state.executionHistoryOffset = 0;
-    state.executionHistorySearch = "";
-    clearTimeout(state.executionHistorySearchTimer);
-    const executionSearch = byId("execution-history-search");
-    if (executionSearch) executionSearch.value = "";
-    const gradeSearch = byId("prompt-grades-search");
-    if (gradeSearch) gradeSearch.value = "";
     bindRepositoryForm();
     renderRepositorySelector();
     renderSummaries();
     renderStatus();
-    renderCoverageAudit();
-    if (document.querySelector("#view-repository.active")) void refreshBranches({ quiet: true });
-    if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBranchPushAccess({ quiet: true });
-    if (document.querySelector("#view-feedback.active")) {
-      void refreshPromptGrades({ quiet: true });
-      void refreshExecutionHistory({ quiet: true });
-    }
   }
 
-  function branchNode(label, name, tip, meta = "", links = {}) {
-    const row = document.createElement("div");
-    row.className = "branch-node";
-    const rail = document.createElement("span");
-    rail.className = "branch-rail";
-    const body = document.createElement("div");
-    body.className = "branch-node-body";
-    const kicker = links.labelUrl
-      ? externalLink(label, links.labelUrl, "branch-kind branch-kind-link")
-      : document.createElement("span");
-    if (!links.labelUrl) kicker.className = "branch-kind";
-    kicker.textContent = label;
-    const title = links.nameUrl
-      ? externalLink(name, links.nameUrl, "branch-name branch-name-link")
-      : document.createElement("strong");
-    if (!links.nameUrl) title.className = "branch-name";
-    title.textContent = name;
-    const detail = document.createElement("span");
-    detail.className = "branch-detail";
-    detail.textContent = tip?.sha ? `${tip.sha.slice(0, 8)} · ${tip.subject || "No subject"}${meta ? ` · ${meta}` : ""}` : (meta || "No commit available");
-    body.append(kicker, title, detail);
-    row.append(rail, body);
-    return { row, body };
-  }
-
-  function renderBranchOverview(overview) {
-    const tree = byId("branch-tree");
-    const graph = byId("raw-git-graph");
-    const warning = byId("branch-warning");
-    tree.replaceChildren();
-    graph.textContent = overview?.graph || "No branch data loaded.";
-    warning.classList.add("hidden");
-    if (!overview) {
-      const empty = document.createElement("article");
-      empty.className = "panel";
-      empty.textContent = "Save and clone this repository to inspect its branches.";
-      tree.appendChild(empty);
-      return;
-    }
-    if (overview.error) {
-      warning.textContent = overview.error;
-      warning.classList.remove("hidden");
-    }
-
-    const panel = document.createElement("article");
-    panel.className = "panel branch-map";
-    const base = branchNode("HUMAN-OWNED", overview.baseBranch, overview.baseTip, "", {
-      nameUrl: githubUrl(overview.githubRepository, "tree", overview.baseBranch),
-    });
-    panel.appendChild(base.row);
-
-    const relation = overview.integrationExists
-      ? `${overview.integrationVsBase.ahead} ahead · ${overview.integrationVsBase.behind} behind ${overview.baseBranch}`
-      : "Created automatically before the next issue";
-    const integration = branchNode("AI INTEGRATION", overview.integrationBranch, overview.integrationTip, relation, {
-      nameUrl: githubUrl(overview.githubRepository, "tree", overview.integrationBranch),
-    });
-    integration.row.classList.add("integration-node");
-    const integrationActions = document.createElement("div");
-    integrationActions.className = "branch-actions";
-    if (overview.integrationVsBase.behind > 0) {
-      const badge = document.createElement("span");
-      badge.className = "branch-alert";
-      badge.textContent = `Behind ${overview.baseBranch} — next issue run will attempt parity merge`;
-      integrationActions.appendChild(badge);
-    }
-    if (overview.integrationVsBase.ahead > 0) {
-      integrationActions.appendChild(button(
-        overview.integrationPrUrl ? "Open promotion PR" : "Create promotion PR",
-        "secondary-button compact",
-        () => openIntegrationPullRequest(),
-      ));
-      if (overview.integrationPrNumber) {
-        integrationActions.appendChild(button(
-          `Merge into ${overview.baseBranch}`,
-          "primary-button compact",
-          () => mergeIntegrationPullRequest(overview.integrationPrNumber),
-        ));
-      }
-    }
-    integration.body.appendChild(integrationActions);
-    panel.appendChild(integration.row);
-
-    const issueList = document.createElement("div");
-    issueList.className = "issue-branch-list";
-    if (!overview.issueBranches.length) {
-      const empty = document.createElement("p");
-      empty.className = "panel-copy branch-empty";
-      empty.textContent = "No active issue branches. Squash-merged branches disappear from this tree.";
-      issueList.appendChild(empty);
-    }
-    overview.issueBranches.forEach((branch) => {
-      const issueClosed = branch.issueState === "CLOSED";
-      const issueStatus = issueClosed ? "issue closed" : branch.issueState === "OPEN" ? "issue open" : "issue state unknown";
-      const meta = `${providerLabel(branch.aiTool)} · ${issueStatus} · ${branch.aheadOfIntegration} ahead · ${branch.behindIntegration} behind`;
-      const branchName = branch.name.replace(/^origin\//, "");
-      const node = branchNode(`ISSUE #${branch.issueNumber}`, branchName, branch.lastCommit, meta, {
-        labelUrl: githubUrl(overview.githubRepository, "issues", branch.issueNumber),
-        nameUrl: githubUrl(overview.githubRepository, "tree", branchName),
-      });
-      node.row.classList.add("issue-node");
-      const actions = document.createElement("div");
-      actions.className = "branch-actions";
-      if (branch.prUrl) {
-        actions.appendChild(button(`Open PR #${branch.prNumber}`, "secondary-button compact", () => openUrl(branch.prUrl)));
-        const canMerge = issueClosed && branch.mergeable !== "CONFLICTING";
-        const merge = button("Squash into AI integration", "primary-button compact", () => mergeIssuePullRequest(branch));
-        merge.disabled = !canMerge;
-        merge.title = canMerge
-          ? "Squash-merge this closed issue branch"
-          : !issueClosed
-            ? `Close issue #${branch.issueNumber} before merging`
-            : "GitHub reports merge conflicts";
-        actions.appendChild(merge);
-        if (!issueClosed) {
-          const status = document.createElement("span");
-          status.className = "branch-alert";
-          status.textContent = `Close issue #${branch.issueNumber} to unlock merge`;
-          actions.appendChild(status);
-        }
-      } else {
-        const status = document.createElement("span");
-        status.className = "branch-alert";
-        status.textContent = "Waiting for pull request";
-        actions.appendChild(status);
-      }
-      node.body.appendChild(actions);
-      issueList.appendChild(node.row);
-    });
-    panel.appendChild(issueList);
-    tree.appendChild(panel);
-  }
-
-  async function refreshBranches({ quiet = false } = {}) {
-    const repo = currentRepo();
-    if (!repo || repo.id.startsWith("draft-")) {
-      renderBranchOverview(null);
-      return;
-    }
-    if (state.refreshing.branches) return;
-    state.refreshing.branches = true;
-    const requestedRepoId = repo.id;
-    try {
-      const overview = await invoke("git_overview_background", { repoId: requestedRepoId });
-      if (currentRepo()?.id !== requestedRepoId) return;
-      state.branchOverview = overview;
-      renderBranchOverview(state.branchOverview);
-    } catch (error) {
-      if (currentRepo()?.id === requestedRepoId && !state.branchOverview) renderBranchOverview(null);
-      if (!quiet) showToast(errorText(error), "error");
-    } finally {
-      state.refreshing.branches = false;
-      if (currentRepo()?.id !== requestedRepoId && document.querySelector("#view-repository.active")) {
-        void refreshBranches({ quiet: true });
-      }
-    }
-  }
-
-  async function mergeIssuePullRequest(branch) {
-    if (!window.confirm(`Issue #${branch.issueNumber} is closed. Squash PR #${branch.prNumber} into ${currentRepo().integration_branch} and delete ${branch.name.replace(/^origin\//, "")}?`)) return;
-    await withBusy(`merge-${branch.prNumber}`, async () => {
-      state.branchOverview = await invoke("merge_issue_branch", {
-        repoId: currentRepo().id,
-        prNumber: branch.prNumber,
-        issueNumber: branch.issueNumber,
-      });
-      renderBranchOverview(state.branchOverview);
-      showToast(`Closed issue #${branch.issueNumber}'s PR was squash-merged.`, "success");
-    }, { progress: `Squash-merging PR #${branch.prNumber}…` });
-  }
-
-  async function openIntegrationPullRequest() {
-    await withBusy("integration-pr", async () => {
-      const url = await invoke("open_integration_pr", { repoId: currentRepo().id });
-      showToast(`Promotion pull request ready: ${url}`, "success");
-      await refreshBranches({ quiet: true });
-      void refreshPromotions({ quiet: true });
-    }, { progress: "Preparing the promotion pull request…" });
-  }
-
-  async function mergeIntegrationPullRequest(prNumber) {
-    const repo = currentRepo();
-    if (!window.confirm(`Merge ${repo.integration_branch} into ${repo.base_branch} via PR #${prNumber}? This is the explicit human promotion gate.`)) return;
-    await withBusy("merge-integration", async () => {
-      state.branchOverview = await invoke("merge_integration_branch", { repoId: repo.id, prNumber });
-      renderBranchOverview(state.branchOverview);
-      showToast(`${repo.integration_branch} was merged into ${repo.base_branch}.`, "success");
-      void refreshPromotions({ quiet: true });
-    }, { progress: `Merging promotion PR #${prNumber}…` });
-  }
-
-  // ----- Overview promotion queue --------------------------------------------
+  // ----- Repository promotion queue -------------------------------------------
 
   function renderPromotions() {
     const panel = byId("promotion-panel");
@@ -3535,9 +3039,6 @@
       const url = await invoke("open_integration_pr", { repoId: promotion.repoId });
       showToast(`Promotion pull request ready: ${url}`, "success");
       void refreshPromotions({ quiet: true });
-      if (currentRepo()?.id === promotion.repoId && document.querySelector("#view-repository.active")) {
-        void refreshBranches({ quiet: true });
-      }
     }, { progress: "Preparing the promotion pull request…" });
   }
 
@@ -3548,9 +3049,6 @@
       await invoke("promote_integration_branch_background", { repoId: promotion.repoId });
       showToast(`${name} was promoted to ${promotion.baseBranch}.`, "success");
       await refreshPromotions({ quiet: true });
-      if (currentRepo()?.id === promotion.repoId && document.querySelector("#view-repository.active")) {
-        void refreshBranches({ quiet: true });
-      }
     }, { progress: `Promoting ${name} to ${promotion.baseBranch}…` });
   }
 
@@ -3800,11 +3298,22 @@
     byId("diagnose-modal").addEventListener("click", (event) => {
       if (event.target === byId("diagnose-modal")) closeDiagnoseModal();
     });
-    byId("refresh-branches").addEventListener("click", () => refreshBranches());
-    byId("refresh-test-plan").addEventListener("click", () => refreshTestPlan());
     byId("refresh-execution-history").addEventListener("click", () => {
       void refreshPromptGrades();
       void refreshExecutionHistory();
+    });
+    byId("feedback-repo-chips").addEventListener("change", (event) => {
+      const input = event.target.closest("[data-feedback-repo]");
+      if (!input) return;
+      const allIds = feedbackRepositories().map((repo) => repo.id);
+      if (!input.dataset.feedbackRepo) {
+        selectFeedbackRepositories(allIds);
+        return;
+      }
+      const selected = new Set(state.feedbackRepoFilter);
+      if (input.checked) selected.add(input.dataset.feedbackRepo);
+      else selected.delete(input.dataset.feedbackRepo);
+      selectFeedbackRepositories([...selected]);
     });
     const feedbackTabs = Array.from(document.querySelectorAll("[data-feedback-tab]"));
     feedbackTabs.forEach((button) => {
@@ -3822,6 +3331,22 @@
       });
     });
     showFeedbackTab(state.feedbackTab);
+    const repositoryTabs = Array.from(document.querySelectorAll("[data-repository-tab]"));
+    repositoryTabs.forEach((button) => {
+      button.addEventListener("click", () => showRepositoryTab(button.dataset.repositoryTab));
+      button.addEventListener("keydown", (event) => {
+        const steps = { ArrowRight: 1, ArrowLeft: -1, Home: "first", End: "last" };
+        const step = steps[event.key];
+        if (step === undefined) return;
+        event.preventDefault();
+        const current = repositoryTabs.indexOf(button);
+        const index = step === "first" ? 0
+          : step === "last" ? repositoryTabs.length - 1
+          : (current + step + repositoryTabs.length) % repositoryTabs.length;
+        showRepositoryTab(repositoryTabs[index].dataset.repositoryTab, { focus: true });
+      });
+    });
+    showRepositoryTab(state.repositoryTab);
     byId("prompt-grades-router-matrix").addEventListener("click", (event) => {
       const model = event.target.closest("[data-router-model]");
       if (model) {
@@ -3938,10 +3463,6 @@
       state.executionHistoryOffset = offset + limit;
       void refreshExecutionHistory();
     });
-    byId("detect-test-definition").addEventListener("click", detectTestDefinition);
-    byId("save-test-definition").addEventListener("click", saveTestDefinition);
-    byId("cancel-test-definition").addEventListener("click", cancelTestDefinition);
-    byId("run-coverage-audit").addEventListener("click", runCoverageAudit);
     byId("active-repo-select").addEventListener("change", (event) => selectRepository(event.target.value));
     byId("add-repo").addEventListener("click", addRepository);
     byId("remove-repo").addEventListener("click", removeRepository);
@@ -3976,7 +3497,6 @@
   }
 
   async function initialize() {
-    populateHours();
     renderHelpConcepts();
     bindEvents();
     try {
@@ -4006,34 +3526,35 @@
       // Tool detection and repository inspection run independently. Keeping
       // them out of the startup await path prevents slow CLIs or network-backed
       // Git checks from freezing navigation and configuration editing.
-      void refreshStatus().then(() => refreshLiveTestRuns());
+      void refreshStatus();
       void refreshTools();
-      void refreshTestPlan({ quiet: true });
       void refreshBotReadiness({ quiet: true });
       void refreshBranchPushAccess({ quiet: true });
       void refreshPromotions({ quiet: true });
+      void refreshProviderUsage({ quiet: true });
       window.setInterval(() => void refreshStatus({ quiet: true }), 2000);
+      // Quota probes shell out to each enabled provider's own CLI, so poll
+      // them far less often than status, and only while Overview is visible.
       window.setInterval(() => {
         if (state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+          void refreshProviderUsage({ quiet: true });
+        }
+      }, 60000);
+      window.setInterval(() => {
+        if (state.busy.size === 0 && document.querySelector("#view-repository.active")) {
           void refreshPromotions({ quiet: true });
         }
       }, 15000);
       window.addEventListener("focus", () => {
-        if (state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+        if (state.busy.size === 0 && document.querySelector("#view-repository.active")) {
           void refreshPromotions({ quiet: true });
         }
       });
       document.addEventListener("visibilitychange", () => {
-        if (!document.hidden && state.busy.size === 0 && document.querySelector("#view-overview.active")) {
+        if (!document.hidden && state.busy.size === 0 && document.querySelector("#view-repository.active")) {
           void refreshPromotions({ quiet: true });
         }
       });
-      window.setInterval(() => {
-        if (document.querySelector("#view-overview.active")) void refreshLiveTestRuns();
-      }, 5000);
-      window.setInterval(() => {
-        if (document.querySelector("#view-scheduler.active")) void refreshTestPlan({ quiet: true });
-      }, 4000);
       window.setInterval(() => {
         if (state.busy.size === 0 && !state.botReadinessPoll && document.querySelector("#view-repository.active")) {
           void refreshBotReadiness({ quiet: true });

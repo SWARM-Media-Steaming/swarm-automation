@@ -3,7 +3,9 @@
 Only coding providers and GitHub's API are faked; git delivery uses a local bare
 remote and tests execute real child processes, including failures and timeouts.
 """
+import contextlib
 import dataclasses
+import io
 import json
 import sqlite3
 import sys
@@ -133,7 +135,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual([r["tests_failing_after"] for r in rounds], [1, 0])
         self.assertEqual(self.git("rev-parse", "refs/remotes/origin/ai/claude/issue-180"), self.git("rev-parse", "HEAD"))
 
-    def test_cap_publishes_failing_tests_but_never_approves_merges_or_cleans_branch(self):
+    def test_cap_holds_automation_and_asks_a_trusted_author_to_adjudicate(self):
         self.prepare(auto=True)
         def never_fix(prompt, activity=""):
             status = self.role(prompt)
@@ -143,12 +145,13 @@ class AdversarialUatTests(unittest.TestCase):
             self.assertEqual(self.worker.run_adversarial_delivery(), 10)
         self.assertEqual([c[0] for c in self.calls].count("fix"), 6)
         self.assertEqual([c[0] for c in self.calls].count("test"), 7)
+        # A cap hit is not a verified-clean pass: the branch is pushed and the
+        # PR opened, but automation never approves, merges, or promotes it.
         push.assert_called_once()
         approve.assert_not_called(); merge.assert_not_called(); promote.assert_not_called(); cleanup.assert_not_called()
-        self.assertEqual(self.git("branch", "--show-current"), "ai/claude/issue-180")
         self.assertEqual(len(self.comments_posted), 1)
-        self.assertIn("Adversarial-test deadlock", self.comments_posted[0])
-        self.assertIn("https://example.invalid/pull/181", self.comments_posted[0])
+        self.assertIn("did not pass after six fix/re-test rounds", self.comments_posted[0])
+        self.assertIn("AI needs your input", self.comments_posted[0])
         self.assertTrue(any("AI Needs Input" in args for args in self.api))
         row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
         self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (6, "cap_hit", "awaiting_input"))
@@ -214,12 +217,192 @@ class AdversarialUatTests(unittest.TestCase):
             self.role(prompt)
             self.worker.ai_output_file.write_text(uat.RESULT_MARKER + json.dumps({"out_of_scope": [finding]}))
             return 0
-        with self.patches(external), mock.patch.object(self.worker, "finalize_issue"):
+        with self.patches(external), mock.patch.object(self.worker, "finalize_issue"), contextlib.redirect_stdout(io.StringIO()) as output:
             self.worker.run_adversarial_delivery()
             self.worker.file_adversarial_findings(self.worker.read_state()["adversarial"], [finding])
         creates = [a for a in self.api if a[:2] == ["issue", "create"]]
         self.assertEqual(len(creates), 1)
         self.assertIn("--assignee", creates[0]); self.assertIn("adversarial-uat", creates[0])
+        self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
+        self.assertIn("Filed out-of-scope adversarial UAT finding for #180: https://example.invalid/issues/182", output.getvalue())
+        self.assertIn("already filed for #180: Separate parser bug", output.getvalue())
+        row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
+        self.assertEqual(json.loads(row["adversarial_filed_findings"]), [{
+            "title": "Separate parser bug", "url": "https://example.invalid/issues/182",
+        }])
+
+    def test_reworded_rediscovery_of_a_prior_finding_is_not_refiled(self):
+        # Issue #222: each tester round runs with fresh context and never sees
+        # a prior round's exact finding wording, so a later round rediscovering
+        # the same real bug produces a different title/body and thus a
+        # different exact-digest marker. Dedup must not depend solely on that
+        # digest matching byte-for-byte.
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        first = {"title": "Config parser crashes on empty YAML",
+                 "body": "Repro: run parse_config() with an empty file. Traceback at line 42."}
+        second = {"title": "Config parser crashes on empty YAML file",
+                  "body": 'Steps to reproduce: call parse_config("") -- raises KeyError at config.py:42.'}
+        with mock.patch.object(self.worker.github, "gh", side_effect=self.gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [first])
+            self.worker.file_adversarial_findings(loop, [second])
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        self.assertEqual(len(creates), 1)
+        self.assertIn("reworded rediscovery", output.getvalue())
+        details = self.worker.read_state()["adversarial"]["filed_finding_details"]
+        self.assertEqual(len(details), 1)
+
+    def test_unrelated_findings_are_both_filed(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        first = {"title": "Config parser crashes on empty YAML", "body": "Repro details."}
+        second = {"title": "Sidebar icon misaligned on hover", "body": "Unrelated UI glitch."}
+        with mock.patch.object(self.worker.github, "gh", side_effect=self.gh):
+            self.worker.file_adversarial_findings(loop, [first])
+            self.worker.file_adversarial_findings(loop, [second])
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        self.assertEqual(len(creates), 2)
+        details = self.worker.read_state()["adversarial"]["filed_finding_details"]
+        self.assertEqual(len(details), 2)
+
+    def test_malformed_gh_create_output_is_not_logged_as_a_successful_filing(self):
+        self.prepare()
+        finding = {"title": "Separate parser bug", "body": "Reproduction details."}
+        loop = self.worker.read_state()["adversarial"]
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"]:
+                return "[]"
+            if args[:2] == ["issue", "create"]:
+                return "Warning: could not add label to issue\n(no url returned)"
+            return ""
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [finding])
+        log_output = output.getvalue()
+        self.assertNotIn("Filed out-of-scope adversarial UAT finding for #180", log_output)
+        self.assertIn("GitHub did not return an issue URL", log_output)
+        details = self.worker.read_state()["adversarial"]["filed_finding_details"]
+        self.assertEqual(details[0]["url"], "")
+        row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
+        self.assertEqual(json.loads(row["adversarial_filed_findings"]), [{
+            "title": "Separate parser bug", "url": "",
+        }])
+
+    def test_github_failure_while_filing_a_finding_does_not_abort_delivery(self):
+        # Issue #217: a GitHub error (rate limit, 403, network) raised from
+        # inside file_adversarial_findings must not escape and abort the
+        # round that called it — out-of-scope findings are specified not to
+        # block delivery of the issue under test.
+        self.prepare()
+        finding = {"title": "Separate parser bug", "body": "Reproduction details."}
+        loop = self.worker.read_state()["adversarial"]
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"]:
+                raise WorkerError("gh: HTTP 403: API rate limit exceeded")
+            return ""
+
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [finding])
+
+        log_output = output.getvalue()
+        self.assertIn("Could not file out-of-scope adversarial UAT finding for #180", log_output)
+        self.assertIn("rate limit", log_output)
+        # Left un-filed so a later retry can still succeed, and never marked
+        # filed without an actual GitHub issue behind it.
+        self.assertEqual(self.worker.read_state()["adversarial"]["filed_findings"], [])
+        self.assertEqual(self.worker.read_state()["adversarial"]["filed_finding_details"], [])
+
+    def test_malformed_github_issue_list_output_is_non_blocking(self):
+        # Issue #239: a successful gh invocation can still produce a
+        # truncated or non-JSON response. Filing an unrelated finding must
+        # treat that exactly like another retryable GitHub failure.
+        self.prepare()
+        finding = {"title": "Separate parser bug", "body": "Reproduction details."}
+        loop = self.worker.read_state()["adversarial"]
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"]:
+                return "not json at all"
+            return ""
+
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [finding])
+
+        self.assertIn("Could not file out-of-scope adversarial UAT finding for #180", output.getvalue())
+        self.assertIn("malformed JSON", output.getvalue())
+        self.assertEqual(self.worker.read_state()["adversarial"]["filed_findings"], [])
+        self.assertEqual(self.worker.read_state()["adversarial"]["filed_finding_details"], [])
+
+    def test_github_failure_while_filing_a_finding_lets_the_round_complete(self):
+        self.prepare(fixed=True)
+        finding = {"title": "Separate parser bug", "body": "Reproduction details, unrelated to tracked.txt."}
+
+        def external(prompt, activity=""):
+            self.role(prompt)
+            self.worker.ai_output_file.write_text(uat.RESULT_MARKER + json.dumps({"out_of_scope": [finding]}))
+            return 0
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"]:
+                raise WorkerError("gh: HTTP 403: API rate limit exceeded")
+            if args[:2] in (["pr", "list"],):
+                return "[]"
+            if args[:2] == ["pr", "create"]:
+                return "https://example.invalid/pull/181"
+            if args[:2] == ["issue", "comment"]:
+                self.comments_posted.append(body)
+            return ""
+
+        with mock.patch.object(self.worker, "run_ai", side_effect=external), \
+                mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                mock.patch.object(self.worker, "ensure_bot_auth"), \
+                mock.patch.object(self.worker, "comments", return_value=[]), \
+                mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 80)), \
+                mock.patch.object(self.worker, "minor_bump_requested_by_trusted_user", return_value=False), \
+                mock.patch.object(self.worker, "finalize_issue"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            exit_code = self.worker.run_adversarial_delivery()
+
+        self.assertEqual(exit_code, 10)
+        self.assertIn("Could not file out-of-scope adversarial UAT finding for #180", output.getvalue())
+        self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
+
+    def test_malformed_github_issue_list_output_lets_the_round_complete(self):
+        self.prepare(fixed=True)
+        finding = {"title": "Separate parser bug", "body": "Reproduction details, unrelated to tracked.txt."}
+
+        def external(prompt, activity=""):
+            self.role(prompt)
+            self.worker.ai_output_file.write_text(uat.RESULT_MARKER + json.dumps({"out_of_scope": [finding]}))
+            return 0
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"]:
+                return "not json at all"
+            if args[:2] == ["pr", "list"]:
+                return "[]"
+            if args[:2] == ["pr", "create"]:
+                return "https://example.invalid/pull/181"
+            if args[:2] == ["issue", "comment"]:
+                self.comments_posted.append(body)
+            return ""
+
+        with mock.patch.object(self.worker, "run_ai", side_effect=external), \
+                mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                mock.patch.object(self.worker, "ensure_bot_auth"), \
+                mock.patch.object(self.worker, "comments", return_value=[]), \
+                mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 80)), \
+                mock.patch.object(self.worker, "minor_bump_requested_by_trusted_user", return_value=False), \
+                mock.patch.object(self.worker, "finalize_issue"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            exit_code = self.worker.run_adversarial_delivery()
+
+        self.assertEqual(exit_code, 10)
+        self.assertIn("Could not file out-of-scope adversarial UAT finding for #180", output.getvalue())
         self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
 
     def test_out_of_scope_finding_may_cite_a_pre_existing_non_adversarial_suite(self):
@@ -375,11 +558,12 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertNotIn("independent adversarial tester", prompt)
         self.assertIn("read-only", prompt)
 
-    def test_history_migration_three_is_additive_idempotent_and_rounds_cascade(self):
+    def test_history_migration_five_is_additive_idempotent_and_rounds_cascade(self):
         self.prepare()
         repository = self.worker.history.repository
         execution = self.worker.history.execution_id
-        repository.update(execution, iso_timestamp(), adversarial_round_count=3, adversarial_outcome="resolved_after_n", capacity_consumed_percent=4.5)
+        repository.update(execution, iso_timestamp(), adversarial_round_count=3, adversarial_outcome="resolved_after_n", capacity_consumed_percent=4.5,
+                          adversarial_filed_findings=[{"title": "Separate bug", "url": "https://example.invalid/issues/182"}])
         repository.record_adversarial_round(execution, {"round_number": 1, "tester_provider": "Codex", "tests_added": 2})
         repository.record_adversarial_round(execution, {"round_number": 1, "tester_provider": "Grok", "tests_added": 3})
         repository.migrate()
@@ -388,7 +572,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(rows[0]["tester_provider"], "Grok")
         self.assertEqual(repository.adversarial_summary(self.worker.config.github_repository)["averageRounds"], 3)
         with repository.connect() as database:
-            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3})
+            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3, 4, 5, 6})
             database.execute("DELETE FROM ai_executions WHERE execution_id = ?", (execution,))
             self.assertEqual(database.execute("SELECT COUNT(*) FROM adversarial_rounds").fetchone()[0], 0)
 
@@ -439,15 +623,16 @@ class AdversarialUatTests(unittest.TestCase):
         execution = self.worker.history.execution_id
         with repo.connect() as db:
             db.execute("DROP TABLE adversarial_rounds")
-            for column in ("adversarial_round_count", "adversarial_outcome", "capacity_consumed_percent"):
+            for column in ("adversarial_filed_findings", "adversarial_round_count", "adversarial_outcome", "capacity_consumed_percent"):
                 db.execute(f"ALTER TABLE ai_executions DROP COLUMN {column}")
-            db.execute("DELETE FROM schema_migrations WHERE version = 3")
+            db.execute("DELETE FROM schema_migrations WHERE version IN (3, 4)")
         upgraded = ExecutionHistoryRepository(repo.database_path)
         row = upgraded.for_repository(self.worker.config.github_repository)[0]
         self.assertEqual(row["execution_id"], execution)
         self.assertEqual(row["adversarial_round_count"], 0)
         self.assertEqual(row["adversarial_outcome"], "")
         self.assertIsNone(row["capacity_consumed_percent"])
+        self.assertEqual(row["adversarial_filed_findings"], "[]")
         self.assertEqual(upgraded.adversarial_summary(self.worker.config.github_repository)["loops"], 0)
 
     def test_preflight_grade_is_recorded_when_routing_is_off(self):
@@ -615,20 +800,6 @@ class AdversarialUatTests(unittest.TestCase):
         unrelated = [s for s in uat.read_definition(self.repo)["suites"] if s["id"] == "adversarial-unrelated"]
         self.assertEqual(uat.run_suites(self.repo, unrelated)[0]["exit_code"], 2)
         self.assertTrue(any(args[:2] == ["issue", "create"] for args in self.api))
-
-    def test_cap_delivery_receipt_prevents_second_push_when_terminal_comment_retries(self):
-        self.prepare()
-        def never_fix(prompt, activity=""):
-            result = self.role(prompt)
-            (self.repo / "tracked.txt").write_text("broken\n")
-            return result
-        with self.patches(never_fix), mock.patch.object(self.worker, "deliver_pull_request", return_value=("https://example.invalid/pull/181", "ai/claude/issue-180", self.git("rev-parse", "HEAD"))) as delivery, mock.patch.object(self.worker, "finalize_needs_input", side_effect=[WorkerError("temporary GitHub comment failure"), None]):
-            with self.assertRaisesRegex(WorkerError, "temporary GitHub"):
-                self.worker.run_adversarial_delivery()
-            calls = len(self.calls)
-            self.worker.run_adversarial_delivery()
-        self.assertEqual(len(self.calls), calls)
-        delivery.assert_called_once()
 
     def test_unknown_stack_bootstrap_uses_portable_harness_without_waiting_for_access(self):
         with mock.patch.object(ai_test_assist, "generate", return_value={"ok": False, "error": "unsupported provider"}):

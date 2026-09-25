@@ -28,7 +28,9 @@ import argparse
 import contextlib
 import dataclasses
 import datetime as dt
+import io
 import json
+import math
 import os
 import re
 import shutil
@@ -51,7 +53,19 @@ if __name__ == "__main__":
 
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
 from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
-from adversarial_uat import AdversarialUatMixin, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE
+from token_usage import (
+    DEFAULT_CURRENCY,
+    AgentType,
+    PromptType,
+    UsageRecord,
+    estimate_cost,
+    format_usage_log_line,
+    normalize_usage,
+    render_ai_usage_markdown,
+)
+from adversarial_core import AdversarialStage
+from adversarial_security import AdversarialSecurityMixin, SECURITY_STAGE
+from adversarial_uat import UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE
 from handoff_context import HandoffContextMixin
 from handoff_context import render_prompt_section as render_handoff_prompt_section
 from issue_images import (
@@ -97,6 +111,7 @@ CODEX_QUOTA_TIMEOUTS_SECONDS = (30, 60)
 CODEX_QUOTA_CACHE_MAX_AGE_SECONDS = 15 * 60
 CODEX_QUOTA_CACHE_FILE = "codex-rate-limits-cache.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+INTEGRATION_BRANCH_RULESET_PREFIX = "SWARM safeguard: prevent deletion of "
 QUOTA_RE = re.compile(
     r"usage limit|rate[ _-]?limit|quota|credits? (?:are )?(?:exhausted|unavailable)|"
     r"limit (?:has been )?reached|hit your .*limit|resets? at|insufficient_quota",
@@ -278,6 +293,12 @@ def log(message: str) -> None:
     print(f"[{timestamp()}] {message}", file=stream, flush=True)
 
 
+def github_issue_url_from_output(output: str) -> str:
+    """Last stdout line of ``gh issue create`` when it is an ``/issues/<n>`` URL."""
+    url = output.strip().splitlines()[-1] if output.strip() else ""
+    return url if re.search(r"/issues/[0-9]+$", url) else ""
+
+
 def env_value(name: str, fallback: str) -> str:
     return os.environ.get(name, fallback)
 
@@ -291,6 +312,25 @@ def env_bool(name: str, fallback: bool = False) -> bool:
 
 def csv_values(value: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+class ReplaceDefaultAppendAction(argparse.Action):
+    """Append explicit values, replacing rather than extending the default."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        value: Any,
+        option_string: str | None = None,
+    ) -> None:
+        del parser, option_string
+        seen_attribute = f"_{self.dest}_explicit"
+        values = getattr(namespace, self.dest, None)
+        if not getattr(namespace, seen_attribute, False):
+            values = []
+            setattr(namespace, seen_attribute, True)
+        setattr(namespace, self.dest, [*(values or []), value])
 
 
 def command_available(command: str | None) -> bool:
@@ -428,6 +468,7 @@ class Config:
     monitor_actions: bool
     require_issue_tests: bool
     adversarial_uat_enabled: bool
+    adversarial_security_enabled: bool
     update_claude_assets_enabled: bool
     allow_environment_only_summary: bool
     branch_prefix: str
@@ -480,6 +521,7 @@ class Config:
             monitor_actions=args.monitor_actions,
             require_issue_tests=args.require_issue_tests,
             adversarial_uat_enabled=args.adversarial_uat_enabled,
+            adversarial_security_enabled=args.adversarial_security_enabled,
             update_claude_assets_enabled=args.update_claude_assets_enabled,
             allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
@@ -573,6 +615,13 @@ class GitHubClient:
             flag = "-F" if isinstance(value, int) else "-f"
             arguments.extend([flag, f"{key}={value}"])
         return flatten_pages(json.loads(self.gh(arguments)))
+
+    def api_get(self, endpoint: str) -> dict[str, Any]:
+        """Return one GitHub API object, rejecting non-object responses."""
+        response = json.loads(self.gh(["api", "--method", "GET", endpoint]))
+        if not isinstance(response, dict):
+            raise WorkerError("GitHub returned a non-object response")
+        return response
 
 
 @dataclasses.dataclass
@@ -786,6 +835,12 @@ def latest_terminal_outcome(
     return outcome
 
 
+#: Every adversarial agent the worker knows about, in the order an issue
+#: passes through them: implementation -> UAT -> cybersecurity -> delivery.
+#: Each is enabled independently; see `Worker.adversarial_stages`.
+ADVERSARIAL_STAGES: tuple[AdversarialStage, ...] = (UAT_STAGE, SECURITY_STAGE)
+
+
 def extract_followup_metadata(
     comments: Iterable[dict[str, Any]],
     trusted_followup_authors: set[str],
@@ -872,7 +927,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker(AdversarialUatMixin, HandoffContextMixin):
+class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -907,12 +962,57 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         # provider that has no capacity this pass.
         self.provider_usages: dict[str, ProviderUsage] = {}
         self.provider_priority: tuple[str, ...] = ()
+        # Raw provider CLI output (JSON/JSONL) of the most recent AI
+        # invocation, set by each `_run_<provider>` method regardless of exit
+        # status so a failed call's usage can still be recorded (issue #280).
+        self._last_ai_raw_output: str = ""
+        # Every per-prompt usage event recorded so far for the issue attempt
+        # currently in flight, mirrored into the on-disk state once it exists
+        # (see `record_ai_usage`/`save_new_state`) so it survives a
+        # quota-pause resume and is available for the GitHub usage report.
+        self.token_usage_events: list[dict[str, Any]] = []
         self.history = ExecutionHistoryService(
             config.ai_execution_history_enabled,
             config.execution_history_db,
         )
         if self.history.error:
             log(f"WARNING: AI execution history is unavailable: {self.history.error}")
+
+    def adversarial_stages(self) -> list[AdversarialStage]:
+        """The adversarial agents this repository runs, in pipeline order.
+
+        Each stage is an independent repository setting, so a repository can
+        run UAT only, cybersecurity only, both, or neither. The order is fixed:
+        an implementation is verified for behaviour before it is attacked for
+        vulnerabilities, and the security agent's fixes are the last product
+        change before delivery.
+        """
+        enabled = {
+            UAT_STAGE.key: self.config.adversarial_uat_enabled,
+            SECURITY_STAGE.key: self.config.adversarial_security_enabled,
+        }
+        return [stage for stage in ADVERSARIAL_STAGES if enabled[stage.key]]
+
+    def adversarial_state_present(self) -> bool:
+        """Whether any adversarial stage already owns this work-round.
+
+        Checked against every known stage rather than the enabled ones so a
+        setting flipped off mid-issue still resumes the checkpoint it left.
+        """
+        if not self.in_progress_file.exists():
+            return False
+        state = self.read_state()
+        return any(state.get(stage.key) for stage in ADVERSARIAL_STAGES)
+
+    def record_disabled_adversarial_stages(self) -> None:
+        """Say so explicitly when a stage was switched off for this work-round."""
+        active = {stage.key for stage in self.adversarial_stages()}
+        fields: dict[str, Any] = {}
+        for stage in ADVERSARIAL_STAGES:
+            if stage.key not in active:
+                fields.update(stage.disabled_history_fields())
+        if fields:
+            self.history.update(iso_timestamp(), **fields)
 
     def git(self, *arguments: str, env: dict[str, str] | None = None, check: bool = True) -> str:
         return run_command(
@@ -1209,6 +1309,22 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             return self.grok_usage()
         raise WorkerError(f"Invalid AI provider in saved state: {provider}")
 
+    def enabled_provider_usages(self) -> dict[str, ProviderUsage]:
+        """Probe every enabled provider without letting one failure block the rest.
+
+        A quota probe is an advisory input to provider selection. An unexpected
+        failure therefore makes only that provider unavailable for this pass;
+        the scheduler can still assign work to another provider with capacity.
+        """
+        usages: dict[str, ProviderUsage] = {}
+        for spec in self.config.enabled_specs:
+            try:
+                usages[spec.name] = self.provider_usage(spec.key)
+            except Exception as error:
+                log(f"{spec.name} quota unavailable: usage probe failed: {error}")
+                usages[spec.name] = ProviderUsage(2)
+        return usages
+
     def provider_capacity(self, provider: str) -> int:
         return self.provider_usage(provider).status
 
@@ -1475,9 +1591,10 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             # would hide the test definition for every other issue that runs
             # while this one is paused.
             exclusions = [":(exclude).swarm"]
-            if state.get("adversarial"):
-                # UAT owns the tracked suite definition. Shelve that along with
-                # the tests, while keeping unrelated untracked app drafts local.
+            if any(state.get(stage.key) for stage in ADVERSARIAL_STAGES):
+                # The adversarial stages own the tracked suite definition.
+                # Shelve that along with the tests, while keeping unrelated
+                # untracked app drafts local.
                 exclusions = [f":(exclude){path}" for path in self.git(
                     "ls-files", "--others", "--exclude-standard", "-z", "--", ".swarm"
                 ).split("\0") if path and path != ".swarm/tests.json"]
@@ -2069,6 +2186,12 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         }
         if self.routing:
             state["routing_decision"] = self.routing
+        if self.token_usage_events:
+            # A pre-flight routing call can happen before this state file
+            # exists (see `flush_token_usage_to_history`'s docstring); carry
+            # forward whatever was already recorded in memory so it is not
+            # lost the moment the file is created.
+            state["token_usage_events"] = list(self.token_usage_events)
         self.write_state(state)
 
     def maybe_apply_dynamic_routing(self) -> None:
@@ -2306,16 +2429,41 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 routing_decision=self.routing,
             )
 
-    def run_router(self, host: "ProviderSpec", prompt: str, images: Sequence[Any]) -> str:
-        return run_provider_router(
-            provider=host.key,
-            bin_path=host.bin or "",
-            model=host.router_model,
-            effort=host.router_effort,
-            prompt=prompt,
-            cwd=self.config.repo_dir,
-            images=tuple(image.path for image in images),
-        )
+    def run_router(
+        self,
+        host: "ProviderSpec",
+        prompt: str,
+        images: Sequence[Any],
+        *,
+        prompt_type: str = PromptType.INITIAL.value,
+        attempt_number: int = 1,
+    ) -> str:
+        usage_sink: list[Any] = []
+        started_at = iso_timestamp()
+        succeeded = False
+        try:
+            result = run_provider_router(
+                provider=host.key,
+                bin_path=host.bin or "",
+                model=host.router_model,
+                effort=host.router_effort,
+                prompt=prompt,
+                cwd=self.config.repo_dir,
+                images=tuple(image.path for image in images),
+                usage_sink=usage_sink,
+            )
+            succeeded = True
+            return result
+        finally:
+            self.record_router_usage(
+                host=host,
+                prompt_type=prompt_type,
+                attempt_number=attempt_number,
+                usage=usage_sink[0] if usage_sink else None,
+                started_at=started_at,
+                success=succeeded,
+                error_type="" if succeeded else "router_call_failed",
+            )
 
     def resolve_router_response(
         self,
@@ -2368,7 +2516,9 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 allow_usage_credit_models=self.config.allow_usage_credit_models,
             )
             try:
-                retry = self.run_router(host, correction, images)
+                retry = self.run_router(
+                    host, correction, images, prompt_type=PromptType.RETRY.value, attempt_number=2
+                )
                 return resolve(retry, allow_tier_fallback=True)
             except RouterError as error:
                 log(
@@ -2447,7 +2597,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             ),
             iso_timestamp(),
             existing_id=(str(self.read_state().get("execution_id") or "")
-                         if self.in_progress_file.exists() and self.read_state().get("adversarial") else ""),
+                         if self.in_progress_file.exists() and self.adversarial_state_present() else ""),
         )
         if execution_id and self.in_progress_file.exists():
             self.update_state(execution_id=execution_id)
@@ -2498,6 +2648,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 changes_summary=self.summary_section(output, "Changes"),
             )
         self.history.update(completed, **fields)
+        self.flush_token_usage_to_history()
 
     def issue_from_state(self, state: dict[str, Any], remote_issue: dict[str, Any]) -> IssueContext:
         return IssueContext(
@@ -2826,6 +2977,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         usage_lines = self.render_usage_report(
             provider, pending.get("usage_at_start"), pending.get("usage_at_completion")
         )
+        ai_usage_report = pending.get("ai_usage_report") or self.render_ai_usage_report()
         return (
             f"{marker}\n{verb} by **{pending.get('ai_tool') or pending.get('ai')}**.\n\n"
             f"- Model: `{pending.get('model', 'unknown')}`\n"
@@ -2834,6 +2986,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             f"- Commit: `{commit_sha}` — {pending['commit_message']}\n"
             f"{usage_lines}\n"
             f"{pending.get('adversarial_summary', '')}"
+            f"{ai_usage_report}\n"
             "<details><summary>AI completion summary</summary>\n\n"
             f"{pending.get('ai_output') or '(No captured AI output was available.)'}\n"
             "</details>\n"
@@ -3062,6 +3215,16 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 "Do not edit, disable, or retire tests under tests/adversarial/ or suites with "
                 "origin=adversarial in .swarm/tests.json. Dispute incorrect expectations with "
                 "issue/spec evidence; only a fresh tester may adjudicate them."
+            )
+        if self.config.adversarial_security_enabled and not question_issue:
+            lines.append(
+                "An independent adversarial security engineer will attack this patch before delivery "
+                "and any vulnerability it introduces will be fixed in this issue. Write it securely: "
+                "validate and encode untrusted input, keep secrets out of the repository and out of "
+                "logs, and do not widen permissions, network exposure, or trust boundaries beyond what "
+                "the issue needs. Do not edit, disable, or retire tests under tests/adversarial/ "
+                "(including its security/ subtree) or suites with origin=adversarial-security in "
+                ".swarm/tests.json."
             )
         if self.config.update_claude_assets_enabled and not question_issue:
             lines.append(
@@ -3391,7 +3554,15 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         """``activity`` names what this invocation is doing (e.g. "implementing",
         "fixing round 2", "testing round 1"), so the log can tell same-issue
         invocations apart once adversarial UAT lets one issue pass through
-        several roles, sometimes on different providers."""
+        several roles, sometimes on different providers.
+
+        This is the single centralized entry point every agent (primary
+        implementation, and — via ``adversarial_core.run_adversarial_stage``
+        — both adversarial UAT and cybersecurity) calls through to run a
+        provider CLI, so token usage is captured here once rather than by
+        each caller (issue #280): every call is recorded as its own
+        independent attempt, including a retry after a rejected model.
+        """
         assert self.choice
         self.ai_output_file.write_text("", encoding="utf-8")
         self.ai_diagnostic_file.write_text("", encoding="utf-8")
@@ -3407,7 +3578,15 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         self.record_handoff_event(
             "ai_invocation_started", provider=self.choice.name, model=self.choice.model, resume=self.choice.resume
         )
+        self._last_ai_raw_output = ""
+        started_at = iso_timestamp()
         status = runner(prompt, env, activity)
+        self.record_ai_usage(
+            attempt_number=1,
+            started_at=started_at,
+            success=status == 0,
+            error_type="" if status == 0 else "provider_exit_nonzero",
+        )
         self.record_handoff_event("ai_invocation_finished", provider=self.choice.name, status=status)
         if status != 0 and self.recover_from_rejected_model():
             runner = {
@@ -3419,8 +3598,228 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 raise WorkerError(f"No runner for provider {self.choice.name}")
             env = os.environ.copy()
             env.update(self.provider_environment())
+            self._last_ai_raw_output = ""
+            started_at = iso_timestamp()
             status = runner(prompt, env, activity)
+            self.record_ai_usage(
+                attempt_number=2,
+                started_at=started_at,
+                success=status == 0,
+                error_type="" if status == 0 else "provider_exit_nonzero",
+            )
         return status
+
+    def infer_ai_agent_context(self, attempt_number: int) -> tuple[str, str]:
+        """Which agent/prompt-type bucket the in-flight ``run_ai`` call
+        belongs to, read from worker state rather than threaded through every
+        call site. This is what lets a new caller of ``run_ai`` get correct
+        token-usage attribution automatically instead of having to remember
+        to pass it (issue #280 item 4)."""
+        if self.in_progress_file.exists():
+            state = self.read_state()
+            for stage in ADVERSARIAL_STAGES:
+                loop = state.get(stage.key)
+                if isinstance(loop, dict) and loop.get("active"):
+                    agent_type = (
+                        AgentType.ADVERSARIAL_CYBERSECURITY
+                        if stage.key == SECURITY_STAGE.key
+                        else AgentType.ADVERSARIAL_UAT
+                    )
+                    if loop.get("phase") == "fix":
+                        return agent_type.value, PromptType.REMEDIATION.value
+                    if int(loop.get("round") or 0) == 0:
+                        return agent_type.value, PromptType.ADVERSARIAL_SCAN.value
+                    return agent_type.value, PromptType.RETRY.value
+        if attempt_number > 1:
+            return AgentType.PRIMARY.value, PromptType.RETRY.value
+        prompt_type = PromptType.CONTINUATION if self.choice and self.choice.resume else PromptType.INITIAL
+        return AgentType.PRIMARY.value, prompt_type.value
+
+    def record_ai_usage(
+        self,
+        *,
+        attempt_number: int,
+        started_at: str,
+        success: bool,
+        agent_type: str | None = None,
+        prompt_type: str | None = None,
+        error_type: str = "",
+    ) -> None:
+        """Normalize, cost, log, and stash one ``run_ai`` invocation's usage.
+
+        Called once per actual provider call (primary implementation and,
+        via ``adversarial_core``, both adversarial stages), so every retry
+        gets its own independent record rather than overwriting an earlier
+        attempt's usage.
+        """
+        assert self.choice
+        inferred_agent, inferred_prompt = self.infer_ai_agent_context(attempt_number)
+        self._record_usage_event(
+            agent_type=agent_type or inferred_agent,
+            prompt_type=prompt_type or inferred_prompt,
+            provider_key=self.choice.key,
+            provider_name=self.choice.name,
+            model=self.choice.model,
+            effort=self.choice.effort,
+            attempt_number=attempt_number,
+            usage=normalize_usage(self.choice.key, self._last_ai_raw_output),
+            started_at=started_at,
+            success=success,
+            error_type=error_type,
+        )
+
+    def record_router_usage(
+        self,
+        *,
+        host: "ProviderSpec",
+        prompt_type: str,
+        attempt_number: int,
+        usage: Any,
+        started_at: str,
+        success: bool,
+        error_type: str = "",
+    ) -> None:
+        """Record one dynamic-routing/pre-flight-grading call's usage.
+
+        A separate entry point from ``record_ai_usage`` because a router call
+        runs against ``host`` (the candidate being graded/asked), not
+        ``self.choice`` — routing may not have picked a final provider yet,
+        or may already hold a fallback unrelated to who is actually doing the
+        grading. ``usage`` is already-normalized (from ``run_provider_
+        router``'s ``usage_sink``) rather than raw text, since the router
+        helper already parsed the provider's transcript once.
+        """
+        self._record_usage_event(
+            agent_type=AgentType.ROUTER.value,
+            prompt_type=prompt_type,
+            provider_key=host.key,
+            provider_name=host.name,
+            model=host.router_model,
+            effort=host.router_effort,
+            attempt_number=attempt_number,
+            usage=usage,
+            started_at=started_at,
+            success=success,
+            error_type=error_type,
+        )
+
+    def _record_usage_event(
+        self,
+        *,
+        agent_type: str,
+        prompt_type: str,
+        provider_key: str,
+        provider_name: str,
+        model: str,
+        effort: str,
+        attempt_number: int,
+        usage: Any,
+        started_at: str,
+        success: bool,
+        error_type: str,
+    ) -> None:
+        """Normalize, cost, log, and stash one AI invocation's usage — the
+        single choke point every agent type's telemetry passes through
+        (issue #280 item 4). This never raises: a telemetry failure must not
+        affect whether the underlying AI work is considered to have
+        succeeded (item 15/17)."""
+        try:
+            cost = estimate_cost(model, usage) if usage is not None else None
+            completed_at = iso_timestamp()
+            duration_ms: int | None
+            try:
+                duration_ms = max(
+                    0,
+                    int(
+                        (
+                            dt.datetime.fromisoformat(completed_at)
+                            - dt.datetime.fromisoformat(started_at)
+                        ).total_seconds()
+                        * 1000
+                    ),
+                )
+            except ValueError:
+                duration_ms = None
+            record = UsageRecord(
+                id=str(uuid.uuid4()),
+                sequence=len(self.current_token_usage_events()) + 1,
+                agent_type=agent_type,
+                prompt_type=prompt_type,
+                provider=provider_name,
+                model=model,
+                reasoning_effort=effort,
+                attempt_number=attempt_number,
+                input_tokens=usage.input_tokens if usage else None,
+                output_tokens=usage.output_tokens if usage else None,
+                reasoning_tokens=usage.reasoning_tokens if usage else None,
+                cached_input_tokens=usage.cached_input_tokens if usage else None,
+                total_tokens=usage.total_tokens if usage else None,
+                estimated_cost=cost,
+                currency=DEFAULT_CURRENCY,
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
+                success=success,
+                error_type=error_type,
+                workflow_run_id=self.history.execution_id,
+                agent_run_id=self.choice.session_id if self.choice else "",
+                prompt_id=str(uuid.uuid4()),
+            )
+            self._append_token_usage_event(record.to_dict())
+            log(
+                format_usage_log_line(
+                    issue_number=self.issue.number if self.issue else None,
+                    agent_type=agent_type,
+                    provider=provider_key,
+                    model=model,
+                    usage=usage,
+                    cost=cost,
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - telemetry must never break AI work
+            log(f"WARNING: recording AI token usage failed: {error}")
+
+    def _append_token_usage_event(self, event: dict[str, Any]) -> None:
+        if self.in_progress_file.exists():
+            state = self.read_state()
+            events = list(state.get("token_usage_events", []))
+        else:
+            events = list(self.token_usage_events)
+        events.append(event)
+        self.token_usage_events = events
+        if self.in_progress_file.exists():
+            self.update_state(token_usage_events=events)
+
+    def current_token_usage_events(self) -> list[dict[str, Any]]:
+        if self.in_progress_file.exists():
+            return list(self.read_state().get("token_usage_events", self.token_usage_events))
+        return list(self.token_usage_events)
+
+    def flush_token_usage_to_history(self) -> None:
+        """Persist this work-round's accumulated usage events once its
+        ``ai_executions`` row is known to exist. Deferred to here (rather
+        than persisted per-call) because some calls — dynamic routing — can
+        happen before that row does; see ``ai_execution_history.
+        record_token_usage_batch`` for why that makes batching at the end
+        safe rather than lossy. Never raises: a work-round that otherwise
+        finished successfully must not fail because its telemetry could not
+        be written (issue #280 item 15/17)."""
+        try:
+            if not self.history.execution_id:
+                return
+            events = self.current_token_usage_events()
+            if not events:
+                return
+            self.history.token_usage_batch(
+                self.config.github_repository, self.issue.number if self.issue else 0, events
+            )
+        except Exception as error:  # noqa: BLE001 - telemetry must never break AI work
+            log(f"WARNING: persisting AI token usage failed: {error}")
+
+    def render_ai_usage_report(self) -> str:
+        """The ``### AI Usage`` Markdown section for the GitHub completion
+        comment, covering every AI invocation of this work-round."""
+        return render_ai_usage_markdown(self.current_token_usage_events())
 
     def recover_from_rejected_model(self) -> bool:
         """When the AI CLI rejects a model, re-evaluate the live routing choice.
@@ -3571,13 +3970,17 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 "WARNING: Issue images could not be inlined into the Claude prompt; "
                 "the prompt lists their local files instead."
             )
+        # Always request stream-json output (not just when images are
+        # inlined): the final `type: "result"` event is the only place Claude
+        # reports actual token usage, and per-prompt usage tracking needs
+        # that for every call, not only the ones with images (issue #280).
         if inlined:
             command.extend(
                 ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
             )
             stdin_text: str | None = claude_stream_message(prompt, inlined)
         else:
-            command.extend(["-p", "-"])
+            command.extend(["-p", "-", "--output-format", "stream-json", "--verbose"])
             stdin_text = None
         process = subprocess.Popen(
             command,
@@ -3595,16 +3998,13 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         assert process.stdin and process.stdout
         process.stdin.write(stdin_text if stdin_text is not None else prompt)
         process.stdin.close()
-        if inlined:
-            raw = "".join(process.stdout)
-            text = assistant_result_text(raw)
-            if text and not text.endswith("\n"):
-                text += "\n"
-            self.ai_output_file.write_text(text, encoding="utf-8")
-        else:
-            with self.ai_output_file.open("w", encoding="utf-8") as output:
-                for line in process.stdout:
-                    output.write(line)
+        raw = "".join(process.stdout)
+        self._last_ai_raw_output = raw
+        self.ai_diagnostic_file.write_text(raw, encoding="utf-8")
+        text = assistant_result_text(raw)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        self.ai_output_file.write_text(text, encoding="utf-8")
         return process.wait()
 
     def _run_grok(self, prompt: str, env: dict[str, str], activity: str = "working") -> int:
@@ -3668,6 +4068,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 check=False,
             )
         raw = result.stdout or ""
+        self._last_ai_raw_output = raw
         with self.ai_diagnostic_file.open("a", encoding="utf-8") as diagnostic:
             diagnostic.write(raw)
         try:
@@ -3724,7 +4125,9 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                 stderr=subprocess.STDOUT,
                 check=False,
             )
-        for line in self.ai_diagnostic_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        diagnostic_text = self.ai_diagnostic_file.read_text(encoding="utf-8", errors="replace")
+        self._last_ai_raw_output = diagnostic_text
+        for line in diagnostic_text.splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -3838,13 +4241,16 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         integ = self.config.integration_branch
         self.git("fetch", remote, check=False)
         base_head = self.synchronize_base_branch()
-
         if not self.git_ok("show-ref", "--verify", f"refs/heads/{integ}"):
             if self.git_ok("show-ref", "--verify", f"refs/remotes/{remote}/{integ}"):
                 self.git("branch", integ, f"{remote}/{integ}")
             else:
                 self.git("branch", integ, base)
                 log(f"Created integration branch {integ} from {base}.")
+        # Reconcile the safeguard on every GitHub run, including existing
+        # integration branches that predate the safeguard.
+        if self.remote_is_github_host():
+            self.protect_new_integration_branch(integ)
         if self.git("branch", "--show-current") != integ:
             if self.worktree_status():
                 raise WorkerError(f"Cannot switch to {integ}: the checkout is dirty")
@@ -3881,6 +4287,114 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         self.push_integration_branch()
         head = self.git("rev-parse", "HEAD")
         return head
+
+    def protect_new_integration_branch(self, branch: str) -> None:
+        """Ensure SWARM's narrow, managed deletion safeguard is installed for
+        the integration branch.
+
+        A repository ruleset leaves normal pushes, pull requests, and existing
+        branch policy untouched. An administrator can still deliberately
+        disable or remove this named ruleset before deleting the branch.
+        This uses the operator's ``gh`` identity rather than a worker bot:
+        ruleset administration is intentionally an administrator action and
+        is not among the GitHub App permissions SWARM needs for issue work.
+        """
+        name = f"{INTEGRATION_BRANCH_RULESET_PREFIX}{branch}"
+        endpoint = f"repos/{self.config.github_repository}/rulesets"
+        try:
+            rulesets = self.github.api_list(endpoint)
+        except json.JSONDecodeError as error:
+            raise WorkerError(
+                f"Could not verify the deletion safeguard for integration branch {branch}: {error}"
+            ) from error
+        except WorkerError as error:
+            if str(error) == "GitHub returned a non-list response":
+                raise WorkerError(
+                    f"Could not verify the deletion safeguard for integration branch {branch}: "
+                    "GitHub returned an unexpected ruleset list"
+                ) from error
+            raise WorkerError(
+                f"Could not verify the deletion safeguard for integration branch {branch}: {error}"
+            ) from error
+        if not isinstance(rulesets, list):
+            raise WorkerError(
+                f"Could not verify the deletion safeguard for integration branch {branch}: "
+                "GitHub returned an unexpected ruleset list"
+            )
+        existing = next(
+            (item for item in rulesets if isinstance(item, dict) and item.get("name") == name), None
+        )
+        if existing is not None:
+            # GitHub's list-rulesets endpoint returns summaries, which omit
+            # the conditions and rules that prove this safeguard is real.
+            # Fetch the named ruleset's detail record before trusting it.
+            if "conditions" not in existing and "rules" not in existing:
+                ruleset_id = existing.get("id")
+                if not isinstance(ruleset_id, int):
+                    raise WorkerError(
+                        f"Could not verify the deletion safeguard for integration branch {branch}: "
+                        f"the existing ruleset {name!r} has no numeric id"
+                    )
+                try:
+                    existing = self.github.api_get(f"{endpoint}/{ruleset_id}")
+                except json.JSONDecodeError as error:
+                    raise WorkerError(
+                        f"Could not verify the deletion safeguard for integration branch {branch}: {error}"
+                    ) from error
+                except WorkerError as error:
+                    raise WorkerError(
+                        f"Could not verify the deletion safeguard for integration branch {branch}: {error}"
+                    ) from error
+            protected_refs = (
+                existing.get("conditions", {})
+                .get("ref_name", {})
+                .get("include", [])
+            )
+            has_deletion_rule = any(
+                isinstance(rule, dict) and rule.get("type") == "deletion"
+                for rule in existing.get("rules", [])
+            )
+            if (
+                existing.get("name") == name
+                and existing.get("target") == "branch"
+                and existing.get("enforcement") == "active"
+                and f"refs/heads/{branch}" in protected_refs
+                and has_deletion_rule
+            ):
+                log(f"Deletion safeguard already exists for integration branch {branch}.")
+                return
+            raise WorkerError(
+                f"The existing ruleset {name!r} does not protect {branch} from deletion; "
+                "correct or remove it before retrying."
+            )
+
+        payload = {
+            "name": name,
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+                "ref_name": {"include": [f"refs/heads/{branch}"], "exclude": []},
+            },
+            "rules": [{"type": "deletion"}],
+        }
+        try:
+            self.github.gh(
+                [
+                    "api", "--method", "POST", "--hostname", self.config.github_host,
+                    endpoint, "--input", "-",
+                ],
+                input_text=json.dumps(payload),
+            )
+        except WorkerError as error:
+            raise WorkerError(
+                f"Could not install the deletion safeguard for integration branch {branch}. "
+                "Authorize the configured GitHub CLI identity as a repository administrator, then retry: "
+                f"{error}"
+            ) from error
+        log(
+            f"Installed GitHub deletion safeguard for integration branch {branch}; "
+            "an administrator must deliberately change the named ruleset before deleting it."
+        )
 
     def push_integration_branch(self) -> None:
         integ = self.config.integration_branch
@@ -4551,9 +5065,14 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             log(f"Reusing existing pull request {pr_url} for issue #{self.issue.number}.")
             existing_body = str(existing[0].get("body") or "")
             if allow_automation and CAP_HIT_PR_MARKER in existing_body:
-                # Only a successful UAT follow-up may release a failed head.
-                loop = self.read_state().get("adversarial", {})
-                if loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"}:
+                # Only a successful adversarial follow-up may release a failed
+                # head, and every stage that ran has to be clean — a green UAT
+                # re-run must not release a PR its security review capped out on.
+                state = self.read_state()
+                loops = [state[stage.key] for stage in ADVERSARIAL_STAGES if state.get(stage.key)]
+                if not loops or any(
+                    loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"} for loop in loops
+                ):
                     raise WorkerError("An adversarial cap-hit PR requires a passing UAT follow-up before automatic delivery")
                 self.github.gh(
                     ["pr", "edit", pr_url, "--repo", self.config.github_repository, "--body-file", "-"],
@@ -4873,15 +5392,21 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         )
         return merge_sha
 
-    def finalize_issue(self, commit_sha: str, ai_output: str) -> None:
+    def finalize_issue(self, commit_sha: str, ai_output: str, *, allow_automation: bool = True) -> None:
         assert self.issue and self.choice
         base_sha = str(self.read_state().get("base_sha") or "")
         commits = list(reversed(self.git("rev-list", f"{base_sha}..{commit_sha}").splitlines()))
         files = self.git("diff", "--name-only", base_sha, commit_sha).splitlines()
-        pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha)
+        pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha, allow_automation=allow_automation)
         if commit_sha not in commits:
             commits.append(commit_sha)
         self.history.note("Commit and pull request delivery completed", iso_timestamp())
+        if not allow_automation:
+            # A cap-hit delivery is not a verified-clean pass: the PR and
+            # branch are retained for a trusted author to adjudicate rather
+            # than reported as a normal "Completed" (see issue-branch-delivery.md).
+            self.finalize_needs_input(ai_output, delivery=(pr_url, branch, commit_sha))
+            return
         usage_at_start = self.read_state().get("usage_at_start")
         pending = {
             "issue_number": self.issue.number,
@@ -4903,6 +5428,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             "adversarial_summary": self.adversarial_summary_line(),
             "usage_at_start": usage_at_start,
             "usage_at_completion": self.usage_snapshot(self.choice.key),
+            "ai_usage_report": self.render_ai_usage_report(),
             "execution_id": self.history.execution_id,
             "commit_shas": commits,
             "files_changed": files,
@@ -5137,10 +5663,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                         self.suspend_paused()
                         return QUOTA_PAUSED_EXIT_CODE
         else:
-            usages = {
-                spec.name: self.provider_usage(spec.key)
-                for spec in self.config.enabled_specs
-            }
+            usages = self.enabled_provider_usages()
             remaining = {
                 name: usage.remaining_percent
                 for name, usage in usages.items()
@@ -5178,7 +5701,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             log(f"Dry run complete: would run {self.choice.name} for {self.issue.url}.")
             return 0
 
-        if not (self.in_progress_file.exists() and self.read_state().get("adversarial")):
+        if not (self.in_progress_file.exists() and self.adversarial_state_present()):
             self.maybe_apply_dynamic_routing()
         if self.issue.work_type == "followup":
             self.clear_needs_input_label()
@@ -5200,12 +5723,12 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         self.history.note("Repository prepared", iso_timestamp())
         # The loop is part of this work-round, with one Started comment even
         # when a different tester or fixer owns the active quota checkpoint.
-        if not self.read_state().get("adversarial"):
+        if not self.adversarial_state_present():
             self.post_started_comment()
         self.post_resumed_comment()
-        if self.read_state().get("adversarial"):
+        if self.adversarial_state_present():
             self.refresh_adversarial_requirements()
-            return self.run_adversarial_delivery()
+            return self.run_adversarial_pipeline()
         prompt = self.build_prompt(recovery_mode, candidate, recovery_dirty)
         self.history.update(
             iso_timestamp(), effective_prompt=prompt, final_status="prompt_generated"
@@ -5278,11 +5801,11 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
                     f"{self.choice.name} did not return {QUESTION_ANSWER_MARKER} or a genuine input request "
                     f"for this '{QUESTION_LABEL}' issue"
                 )
-        if self.config.adversarial_uat_enabled and not question_issue:
+        for stage in (self.adversarial_stages() if not question_issue else []):
             protection = {"phase": "fix", "stage_base": run_start, "dispute": ""}
-            self.validate_adversarial_edits(protection, {})
+            self.validate_stage_edits(stage, protection, {})
             if protection["dispute"]:
-                self.update_state(adversarial_initial_dispute=protection["dispute"])
+                self.update_state(**{f"{stage.key}_initial_dispute": protection["dispute"]})
         after = self.commit_completed_work(run_start)
         completion = after
         recovered = False
@@ -5334,10 +5857,11 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             raise WorkerError(
                 f"Issue #{self.issue.number} cannot be delivered with uncommitted changes"
             )
-        if self.config.adversarial_uat_enabled:
-            self.initialize_adversarial(completion, output)
-            return self.run_adversarial_delivery()
-        self.history.update(iso_timestamp(), adversarial_outcome="disabled")
+        self.record_disabled_adversarial_stages()
+        stages = self.adversarial_stages()
+        if stages:
+            self.initialize_stage(stages[0], completion, output)
+            return self.run_adversarial_pipeline()
         self.finalize_issue(completion, output)
         return ISSUE_COMPLETED_EXIT_CODE
 
@@ -5554,7 +6078,7 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         except (WorkerError, ValueError) as error:
             log(f"Could not check GitHub Actions; continuing with the issue queue: {error}")
             return None
-        url = output.strip().splitlines()[-1] if output.strip() else ""
+        url = github_issue_url_from_output(output)
         match = re.search(r"/issues/([0-9]+)$", url)
         if not match:
             log(f"GitHub did not return an issue URL for the CI failure issue: {output.strip()!r}")
@@ -5678,10 +6202,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
     parser.add_argument(
         "--enabled-provider",
-        action="append",
+        action=ReplaceDefaultAppendAction,
         choices=KNOWN_PROVIDER_KEYS,
         default=list(csv_values(env_value("SWARM_ENABLED_PROVIDERS", ""))) or None,
-        help="Provider id to include in the rotation (repeatable). Defaults to all known providers.",
+        help=(
+            "Provider id to include in the rotation (repeatable). Explicit flags replace "
+            "SWARM_ENABLED_PROVIDERS; defaults to all known providers when neither is set."
+        ),
     )
     parser.add_argument(
         "--preferred-provider",
@@ -5714,6 +6241,13 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_ALLOW_USAGE_CREDIT_MODELS", False),
         help="Offer models that bill against a separate usage-credit balance to the router.",
+    )
+    parser.add_argument(
+        "--check-usage",
+        action="store_true",
+        default=False,
+        help="Probe remaining quota for each enabled provider, print it as JSON, and exit "
+        "without running a work cycle.",
     )
     parser.add_argument("--dry-run", action="store_true", default=env_bool("SWARM_ISSUE_WORKER_DRY_RUN"))
     parser.add_argument("--gh-bin", default=env_value("GH_BIN", executable_default("gh")))
@@ -5758,6 +6292,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--adversarial-uat-enabled",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_ADVERSARIAL_UAT_ENABLED", False),
+    )
+    parser.add_argument(
+        "--adversarial-security-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_ADVERSARIAL_SECURITY_ENABLED", False),
     )
     parser.add_argument(
         "--update-claude-assets-enabled",
@@ -5809,6 +6348,79 @@ def resolve_preferred_provider(preferred: str, enabled: Iterable[str]) -> str:
     return next(key for key in KNOWN_PROVIDER_KEYS if key in enabled_set)
 
 
+def check_usage(config: Config) -> int:
+    """Probe remaining quota for each enabled provider and print it as one JSON
+    line on stdout, for the desktop app's Overview panel (see #218). Runs no
+    work cycle and touches no GitHub or git state; ``Worker`` is only
+    constructed for its usage-probing methods, which are per-CLI-account and
+    machine-wide rather than per-repository.
+
+    ``claude_usage``/``codex_usage``/``grok_usage`` narrate their own progress
+    through ``log()``, which prints to stdout — fine for the scheduler's log
+    stream, fatal here since a caller parsing this process's stdout as JSON
+    would choke on interleaved log lines. Redirect stdout for the duration of
+    the probe and print the JSON payload afterwards, once, as the only line.
+    """
+    worker = Worker(config)
+    providers: list[dict[str, Any]] = []
+    with contextlib.redirect_stdout(io.StringIO()):
+        for spec in config.providers:
+            if not spec.enabled:
+                continue
+            try:
+                usage = worker.provider_usage(spec.key)
+            except Exception:
+                # Each provider uses an independent CLI/helper. A broken or
+                # transiently unavailable probe must degrade only that row,
+                # not discard the already-collected results for every other
+                # enabled provider.
+                usage = ProviderUsage(2)
+            if not isinstance(usage, ProviderUsage):
+                # Runtime type hints do not protect this JSON boundary:
+                # a probe may return None, a dict, a tuple, or other objects
+                # that don't satisfy the ProviderUsage contract. Degrade only
+                # the malformed provider so healthy rows remain available.
+                usage = ProviderUsage(2)
+            elif (
+                type(usage.status) is not int
+                or usage.status not in (0, 1, 2)
+                or (usage.detail is not None and not isinstance(usage.detail, str))
+            ):
+                # Runtime type hints do not protect this JSON boundary:
+                # Python bools are ints, floats compare equal to ints, and
+                # json.dumps accepts non-string detail values that Rust's
+                # serde schema rejects. Canonicalize only the malformed row.
+                usage = ProviderUsage(2)
+            elif usage.status == 2:
+                # Keep unavailable rows canonical. In particular, never let
+                # stale or malformed probe data leak through this JSON
+                # boundary alongside an unavailable status.
+                usage = ProviderUsage(2)
+            elif (
+                isinstance(usage.remaining_percent, bool)
+                or not isinstance(usage.remaining_percent, (int, float))
+                or not math.isfinite(usage.remaining_percent)
+                or not 0 <= usage.remaining_percent <= 100
+            ):
+                # Python's JSON encoder accepts NaN and infinities by default,
+                # while serde_json correctly rejects them. A usable/low-quota
+                # row also requires an actual percentage in its valid domain.
+                # Degrade only the malformed provider so healthy rows remain
+                # available to the consolidated panel.
+                usage = ProviderUsage(2)
+            providers.append(
+                {
+                    "provider": spec.key,
+                    "name": spec.name,
+                    "status": usage.status,
+                    "remaining_percent": usage.remaining_percent,
+                    "detail": usage.detail,
+                }
+            )
+    print(json.dumps({"providers": providers}, allow_nan=False))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not 0 <= args.minimum_remaining_percent <= 100:
@@ -5818,6 +6430,12 @@ def main(argv: list[str] | None = None) -> int:
     enabled = set(args.enabled_provider or KNOWN_PROVIDER_KEYS)
     if not enabled:
         raise WorkerError("At least one --enabled-provider is required")
+    if args.check_usage:
+        # check_usage's stdout contract is one JSON line, nothing else. It
+        # never picks a provider, so it must not reach the preferred-provider
+        # log() below — that call is real stdout narration a JSON-only caller
+        # cannot tell apart from the payload.
+        return check_usage(Config.from_args(args))
     resolved_preferred = resolve_preferred_provider(args.preferred_provider, enabled)
     if resolved_preferred != args.preferred_provider:
         log(

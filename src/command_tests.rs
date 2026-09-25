@@ -1,14 +1,14 @@
 use super::{
-    audit_test_coverage, automation_log_path, bot_app_slugs_from_config, create_test_definition,
-    decide_bot_push_access, detect_test_definition, detect_tools, execution_history_query_args,
-    get_config, get_execution_history, get_prompt_grades, get_test_plan, get_test_runs,
-    grant_apps_request, inspect_repository, issue_branch_pr_is_visible, mark_permission_primed,
-    needs_promotion, parse_pr_ref, promotion_approval_args, prompt_grades_query_args,
-    provider_scheduler_arguments, push_access_message, reconcile_integration_for_promotion,
-    refresh_running_scheduler, repo_status_args, repo_worker_args, request_issue_scan,
-    require_closed_issue, run_now_request_path, save_config, save_test_input, scheduler_arguments,
-    validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
-    ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider,
+    automation_log_path, bot_app_slugs_from_config, decide_bot_push_access, detect_tools,
+    execution_history_query_args, feedback_repository_names, get_config, get_execution_history,
+    get_prompt_grades, grant_apps_request, inspect_repository, issue_branch_pr_is_visible,
+    mark_permission_primed, needs_promotion, parse_pr_ref, promotion_approval_args,
+    prompt_grades_query_args, provider_scheduler_arguments, push_access_message,
+    reconcile_integration_for_promotion, refresh_running_scheduler, repo_status_args,
+    repo_worker_args, request_issue_scan, require_closed_issue, run_now_request_path, save_config,
+    save_feedback_repo_filter, scheduler_arguments, validate_worker_script_dir, write_repos_file,
+    AiExecutionRecord, AppState, BranchAheadBehind, ExecutionHistoryPage, PromptGradesQuery,
+    ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -33,7 +33,6 @@ fn test_app() -> TestApp {
             config: std::sync::Mutex::new(AppConfig::default()),
             processes: Default::default(),
             test_data_dir: Some(data_dir.path().to_path_buf()),
-            test_input_sessions: Default::default(),
         })
         .build(mock_context(noop_assets()))
         .expect("build mock tauri app");
@@ -288,6 +287,32 @@ fn save_config_then_get_config_round_trips_through_a_real_file() {
 }
 
 #[test]
+fn adversarial_security_toggle_persists_through_a_real_config_file() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    assert!(
+        !config.repositories[0].adversarial_security_enabled,
+        "the review is off until an operator turns it on"
+    );
+    config.repositories[0].adversarial_security_enabled = true;
+
+    save_config(app.clone(), app.state(), config).expect("save a valid config");
+    // Read back through the file, not the in-memory state, so a missing
+    // serde field would surface as the setting silently reverting.
+    let on_disk: crate::config::AppConfig = serde_json::from_str(
+        &std::fs::read_to_string(test_app._data_dir.path().join(crate::config::CONFIG_FILE))
+            .expect("config.json is readable"),
+    )
+    .expect("config.json parses");
+    assert!(on_disk.repositories[0].adversarial_security_enabled);
+
+    let loaded = get_config(app.state()).expect("get_config should succeed");
+    assert!(loaded.repositories[0].adversarial_security_enabled);
+}
+
+#[test]
 fn mark_permission_primed_persists_the_flag_and_is_idempotent() {
     let test_app = test_app();
     let app = test_app.handle();
@@ -487,7 +512,6 @@ fn inspect_repository_on_a_real_git_checkout_reports_valid_with_no_scripts() {
         "a real `git init`-ed folder must be valid"
     );
     assert!(!inspection.worker_available);
-    assert!(!inspection.uat_available);
     assert!(inspection.error.is_empty());
 }
 
@@ -513,42 +537,10 @@ fn inspect_repository_detects_a_target_repos_own_script_bundles() {
         "#!/usr/bin/env python3\n",
     )
     .unwrap();
-    std::fs::create_dir_all(repo.path().join(".swarm")).unwrap();
-    std::fs::write(
-        repo.path().join(".swarm/tests.json"),
-        r#"{"version":1,"suites":[{"id":"unit","name":"Unit","command":["/usr/bin/true"]}]}"#,
-    )
-    .unwrap();
 
     let inspection = inspect_repository(repo.path().to_string_lossy().into_owned());
     assert!(inspection.valid);
     assert!(inspection.worker_available);
-    assert!(inspection.uat_available);
-}
-
-#[test]
-fn repository_test_definition_is_discovered_through_the_command_layer() {
-    let test_app = test_app();
-    let app = test_app.handle();
-    let repo_dir = real_git_checkout();
-    std::fs::create_dir_all(repo_dir.path().join(".swarm")).unwrap();
-    std::fs::write(
-        repo_dir.path().join(".swarm/tests.json"),
-        r#"{"version":1,"suites":[{"id":"integration","name":"Integration","command":["/usr/bin/true"],"requirements":{"files":["Cargo.toml"]}}]}"#,
-    )
-    .unwrap();
-    std::fs::write(repo_dir.path().join("Cargo.toml"), "[package]\n").unwrap();
-    let config = valid_config(repo_dir.path());
-    save_config(app.clone(), app.state(), config).unwrap();
-
-    let plan = get_test_plan(app.clone(), app.state(), "octocat__example".into()).unwrap();
-    assert!(plan.available);
-    assert_eq!(plan.suites.len(), 1);
-    assert_eq!(plan.suites[0].result.state, "Ready");
-
-    // History starts empty and `get_test_runs` is a safe read.
-    let runs = get_test_runs(app.clone(), app.state(), "octocat__example".into()).unwrap();
-    assert!(runs.is_empty());
 }
 
 #[test]
@@ -566,12 +558,16 @@ fn execution_history_lookup_is_safe_before_any_execution_exists() {
         .join("worker-state")
         .to_string_lossy()
         .into_owned();
+    config.repositories.push(RepoConfig {
+        repo_dir: repo_dir.path().to_string_lossy().into_owned(),
+        ..repo("octocat/other")
+    });
     save_config(app.clone(), app.state(), config).unwrap();
 
     let history = get_execution_history(
         app.clone(),
         app.state(),
-        "octocat__example".into(),
+        vec!["octocat__example".into()],
         None,
         None,
         None,
@@ -581,6 +577,18 @@ fn execution_history_lookup_is_safe_before_any_execution_exists() {
     assert_eq!(history.total, 0);
     assert_eq!(history.offset, 0);
     assert_eq!(history.limit, 10);
+    let global = get_execution_history(app.clone(), app.state(), vec![], None, None, None).unwrap();
+    assert!(global.records.is_empty());
+    let multiple = get_execution_history(
+        app.clone(),
+        app.state(),
+        vec!["octocat__example".into(), "octocat__other".into()],
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(multiple.records.is_empty());
 }
 
 #[test]
@@ -600,7 +608,7 @@ fn prompt_grades_lookup_is_safe_before_any_execution_exists() {
     let grades = get_prompt_grades(
         app.clone(),
         app.state(),
-        "octocat__example".into(),
+        vec!["octocat__example".into()],
         PromptGradesQuery::default(),
     )
     .unwrap();
@@ -609,6 +617,14 @@ fn prompt_grades_lookup_is_safe_before_any_execution_exists() {
     assert_eq!(grades.summary.graded, 0);
     assert_eq!(grades.summary.average_points, None);
     assert!(grades.router_matrix.is_empty());
+    let global = get_prompt_grades(
+        app.clone(),
+        app.state(),
+        vec![],
+        PromptGradesQuery::default(),
+    )
+    .unwrap();
+    assert!(global.records.is_empty());
 }
 
 #[test]
@@ -616,7 +632,7 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
     let args = prompt_grades_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
-        "octocat/example",
+        &["octocat/example".into()],
         PromptGradesQuery {
             offset: Some(-4),
             search: Some("  Widget  ".into()),
@@ -643,7 +659,7 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
     let unfiltered = prompt_grades_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
-        "octocat/example",
+        &[],
         PromptGradesQuery::default(),
     );
     assert!(unfiltered
@@ -658,6 +674,7 @@ fn prompt_grades_query_asks_the_history_cli_for_one_page_of_grades() {
     assert!(unfiltered
         .windows(2)
         .any(|pair| pair[0] == "--router-model" && pair[1].is_empty()));
+    assert!(!unfiltered.iter().any(|argument| argument == "--repository"));
 }
 
 #[test]
@@ -688,7 +705,7 @@ fn execution_history_query_always_requests_one_page() {
     let args = execution_history_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
-        "octocat/example",
+        &["octocat/example".into()],
         Some(-4),
         Some("  Widget  ".into()),
         Some("rounds_desc".into()),
@@ -707,7 +724,7 @@ fn execution_history_query_always_requests_one_page() {
     let unfiltered = execution_history_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
-        "octocat/example",
+        &[],
         None,
         None,
         None,
@@ -718,6 +735,64 @@ fn execution_history_query_always_requests_one_page() {
     assert!(unfiltered
         .windows(2)
         .any(|pair| pair[0] == "--search" && pair[1].is_empty()));
+    assert!(!unfiltered.iter().any(|argument| argument == "--repository"));
+}
+
+#[test]
+fn feedback_repository_ids_resolve_to_deduplicated_cli_filters() {
+    let config = AppConfig {
+        repositories: vec![repo("octocat/one"), repo("octocat/two")],
+        ..AppConfig::default()
+    };
+    let names = feedback_repository_names(
+        &config,
+        &[
+            "octocat__one".into(),
+            "octocat__two".into(),
+            "octocat__one".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(names, vec!["octocat/one", "octocat/two"]);
+    assert!(feedback_repository_names(&config, &[]).unwrap().is_empty());
+
+    let arguments = execution_history_query_args(
+        Path::new("ai_execution_history.py"),
+        Path::new("history.sqlite3"),
+        &names,
+        None,
+        None,
+        None,
+    );
+    let filters: Vec<_> = arguments
+        .windows(2)
+        .filter(|pair| pair[0] == "--repository")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    assert_eq!(filters, vec!["octocat/one", "octocat/two"]);
+}
+
+#[test]
+fn feedback_repository_filter_persists_without_replacing_other_config() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    config.repositories.push(RepoConfig {
+        repo_dir: repo_dir.path().to_string_lossy().into_owned(),
+        ..repo("octocat/other")
+    });
+    config.schedule_time = "08:30".into();
+    save_config(app.clone(), app.state(), config).unwrap();
+
+    let saved =
+        save_feedback_repo_filter(app.clone(), app.state(), vec!["octocat__other".into()]).unwrap();
+    assert_eq!(saved.feedback_repo_filter, vec!["octocat__other"]);
+    assert_eq!(saved.schedule_time, "08:30");
+
+    let loaded = get_config(app.state()).unwrap();
+    assert_eq!(loaded.feedback_repo_filter, vec!["octocat__other"]);
+    assert_eq!(loaded.schedule_time, "08:30");
 }
 
 #[test]
@@ -806,174 +881,6 @@ fn ai_execution_record_deserializes_the_python_export_shape_into_camel_case() {
     assert!(camel.get("executionId").is_some(), "{camel}");
     assert!(camel.get("filesChanged").is_some(), "{camel}");
     assert!(camel.get("execution_id").is_none(), "{camel}");
-}
-
-#[test]
-fn test_definition_onboarding_detects_saves_and_enables_the_plan() {
-    let test_app = test_app();
-    let app = test_app.handle();
-    let repo_dir = real_git_checkout();
-    std::fs::write(
-        repo_dir.path().join("Cargo.toml"),
-        "[workspace]\nmembers = []\n",
-    )
-    .unwrap();
-    save_config(app.clone(), app.state(), valid_config(repo_dir.path())).unwrap();
-
-    let draft =
-        detect_test_definition(app.clone(), app.state(), "octocat__example".into()).unwrap();
-    assert_eq!(draft.detected_suites, 1);
-    let path = create_test_definition(
-        app.clone(),
-        app.state(),
-        "octocat__example".into(),
-        draft.definition,
-    )
-    .unwrap();
-    assert!(path.ends_with(".swarm/tests.json"));
-
-    let plan = get_test_plan(app.clone(), app.state(), "octocat__example".into()).unwrap();
-    assert!(plan.available);
-    assert_eq!(plan.suites[0].argv, ["cargo", "test", "--workspace"]);
-}
-
-#[test]
-fn detect_test_definition_can_be_regenerated_without_overwriting_the_committed_file() {
-    let test_app = test_app();
-    let app = test_app.handle();
-    let repo_dir = real_git_checkout();
-    std::fs::write(
-        repo_dir.path().join("Cargo.toml"),
-        "[workspace]\nmembers = []\n",
-    )
-    .unwrap();
-    save_config(app.clone(), app.state(), valid_config(repo_dir.path())).unwrap();
-
-    let draft =
-        detect_test_definition(app.clone(), app.state(), "octocat__example".into()).unwrap();
-    create_test_definition(
-        app.clone(),
-        app.state(),
-        "octocat__example".into(),
-        draft.definition.clone(),
-    )
-    .unwrap();
-    let committed = std::fs::read_to_string(repo_dir.path().join(".swarm/tests.json")).unwrap();
-
-    // Detection can be re-run for review once a definition is committed; it
-    // must never overwrite the committed file, only note that one exists.
-    let second_draft =
-        detect_test_definition(app.clone(), app.state(), "octocat__example".into()).unwrap();
-    assert!(second_draft
-        .notes
-        .iter()
-        .any(|note| note.contains("already exists")));
-    assert_eq!(
-        std::fs::read_to_string(repo_dir.path().join(".swarm/tests.json")).unwrap(),
-        committed
-    );
-    let error = create_test_definition(
-        app.clone(),
-        app.state(),
-        "octocat__example".into(),
-        second_draft.definition,
-    )
-    .unwrap_err();
-    assert!(error.contains("already exists"));
-}
-
-#[test]
-fn audit_test_coverage_reports_unmapped_candidates_against_the_committed_definition() {
-    let test_app = test_app();
-    let app = test_app.handle();
-    let repo_dir = real_git_checkout();
-    std::fs::create_dir_all(repo_dir.path().join(".swarm")).unwrap();
-    std::fs::write(
-        repo_dir.path().join(".swarm/tests.json"),
-        r#"{"version":1,"suites":[{"id":"rust","name":"Rust","command":["cargo","test"],"requirements":{"files":["Cargo.toml"]}}]}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        repo_dir.path().join("Cargo.toml"),
-        "[package]\nname = \"x\"\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(repo_dir.path().join("go-tool")).unwrap();
-    std::fs::write(repo_dir.path().join("go-tool/go.mod"), "module x\n").unwrap();
-    save_config(app.clone(), app.state(), valid_config(repo_dir.path())).unwrap();
-
-    let audit = audit_test_coverage(app.clone(), app.state(), "octocat__example".into()).unwrap();
-    assert_eq!(audit.mapped_scheduled.len(), 1);
-    assert_eq!(audit.mapped_scheduled[0].id, "rust");
-    assert!(!audit.complete);
-    assert!(audit
-        .unmapped
-        .iter()
-        .any(|entry| entry.source == "go-manifest"));
-}
-
-#[test]
-fn generic_input_round_trips_per_repository_without_touching_other_profiles() {
-    let test_app = test_app();
-    let app = test_app.handle();
-    let first = real_git_checkout();
-    let second = real_git_checkout();
-    let mut config = valid_config(first.path());
-    config.repositories.push(RepoConfig {
-        repo_dir: second.path().to_string_lossy().into_owned(),
-        ..repo("octocat/second")
-    });
-    save_config(app.clone(), app.state(), config).unwrap();
-    std::fs::create_dir_all(first.path().join(".swarm")).unwrap();
-    std::fs::write(first.path().join(".swarm/tests.json"), r#"{
-      "version":2,
-      "inputs":[
-        {"id":"fireTvSerial","label":"Fire TV","type":"device","persistence":"repository","binding":{"arguments":["--device","{value}"]}},
-        {"id":"selector","label":"Selector","type":"text","persistence":"session-only","binding":{"arguments":["--test","{value}"]}}
-      ],
-      "suites":[{"id":"tv","name":"TV","command":["true"]}]
-    }"#).unwrap();
-
-    let saved = save_test_input(
-        app.clone(),
-        app.state(),
-        "octocat__example".into(),
-        "fireTvSerial".into(),
-        Some("192.0.2.8:5555".into()),
-    )
-    .unwrap();
-    assert_eq!(
-        saved.repositories[0].test_inputs.get("fireTvSerial"),
-        Some(&"192.0.2.8:5555".to_string())
-    );
-    assert!(saved.repositories[1].test_inputs.is_empty());
-
-    let saved = save_test_input(
-        app.clone(),
-        app.state(),
-        "octocat__example".into(),
-        "selector".into(),
-        Some("smoke".into()),
-    )
-    .unwrap();
-    assert!(!saved.repositories[0].test_inputs.contains_key("selector"));
-    assert_eq!(
-        app.state::<AppState>().test_input_sessions.lock().unwrap()["octocat__example"]["selector"],
-        "smoke"
-    );
-    let reset = save_test_input(
-        app.clone(),
-        app.state(),
-        "octocat__example".into(),
-        "selector".into(),
-        None,
-    )
-    .unwrap();
-    assert!(!reset.repositories[0].test_inputs.contains_key("selector"));
-    assert!(
-        !app.state::<AppState>().test_input_sessions.lock().unwrap()["octocat__example"]
-            .contains_key("selector")
-    );
 }
 
 #[test]
@@ -1249,6 +1156,30 @@ fn repo_worker_args_carries_advanced_issue_policy() {
 }
 
 #[test]
+fn repo_worker_args_carries_each_adversarial_stage_independently() {
+    let both = args_for(&RepoConfig {
+        adversarial_uat_enabled: true,
+        adversarial_security_enabled: true,
+        ..repo("octocat/example")
+    });
+    assert!(both.contains(&"--adversarial-uat-enabled".to_string()));
+    assert!(both.contains(&"--adversarial-security-enabled".to_string()));
+
+    // Security is its own switch: a repository can attack a change for
+    // vulnerabilities without also running the UAT loop, and vice versa.
+    let security_only = args_for(&RepoConfig {
+        adversarial_security_enabled: true,
+        ..repo("octocat/example")
+    });
+    assert!(security_only.contains(&"--no-adversarial-uat-enabled".to_string()));
+    assert!(security_only.contains(&"--adversarial-security-enabled".to_string()));
+
+    let neither = args_for(&repo("octocat/example"));
+    assert!(neither.contains(&"--no-adversarial-uat-enabled".to_string()));
+    assert!(neither.contains(&"--no-adversarial-security-enabled".to_string()));
+}
+
+#[test]
 fn repo_worker_args_carries_independent_history_settings() {
     let mut config = AppConfig {
         ai_execution_history_enabled: true,
@@ -1515,6 +1446,65 @@ fn repo_status_args_are_accepted_by_the_vendored_worker_script() {
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("repo-status prints JSON");
     assert_eq!(parsed["state"], "unconfigured");
+}
+
+#[test]
+fn check_usage_probe_args_are_accepted_by_the_vendored_worker_script_and_list_only_enabled_providers(
+) {
+    let python = match which_python() {
+        Some(python) => python,
+        None => return,
+    };
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("issue_worker/swarm_issue_worker.py");
+    let scratch = tempfile::tempdir().expect("temp dir");
+    let config = AppConfig::default();
+    // Claude disabled, Codex enabled: since this command never passes
+    // `--preferred-provider` itself, the script falls back to its own
+    // default ("claude") and, finding it disabled here, used to log a
+    // tie-break notice to stdout ahead of check_usage's JSON line. Exercises
+    // that regression at the same Rust/Python argv boundary
+    // `check_provider_usage` actually calls through.
+    let providers = vec![
+        ResolvedProvider {
+            enabled: false,
+            ..resolved_provider("claude", "/nonexistent/claude")
+        },
+        resolved_provider("codex", "/nonexistent/codex"),
+    ];
+    let mut arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--check-usage".into(),
+    ];
+    arguments.extend(provider_scheduler_arguments(&config, &providers));
+    arguments.extend([
+        "--minimum-remaining-percent".into(),
+        "10".into(),
+        "--state-dir".into(),
+        scratch.path().to_string_lossy().into_owned(),
+    ]);
+    let output = std::process::Command::new(&python)
+        .args(&arguments)
+        .output()
+        .expect("run swarm_issue_worker.py --check-usage");
+    assert!(
+        output.status.success(),
+        "--check-usage exited with {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The probed providers each narrate their own progress through the
+    // worker's normal log() calls, which print to stdout — this asserts
+    // check_usage's contract that its own stdout is nonetheless exactly one
+    // JSON line, never that narration interleaved with (or instead of) it.
+    assert_eq!(stdout.trim().lines().count(), 1, "stdout was: {stdout}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("--check-usage prints one JSON line");
+    let providers = parsed["providers"].as_array().expect("providers array");
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["provider"], "codex");
+    assert_eq!(providers[0]["status"], 2);
+    assert!(providers[0]["remaining_percent"].is_null());
 }
 
 fn which_python() -> Option<PathBuf> {

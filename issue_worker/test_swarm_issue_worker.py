@@ -36,6 +36,9 @@ from dynamic_router import (
     PROMPT_GRADES,
     RouterError,
 )
+from adversarial_uat import UAT_STAGE
+from adversarial_security import SECURITY_STAGE
+from token_usage import AgentType, PromptType
 from swarm_issue_worker import (
     CODEX_QUOTA_CACHE_FILE,
     CODEX_QUOTA_CACHE_MAX_AGE_SECONDS,
@@ -48,6 +51,7 @@ from swarm_issue_worker import (
     Worker,
     WorkerError,
     build_parser,
+    check_usage,
     extract_completion_metadata,
     extract_followup_metadata,
     extract_needs_input_metadata,
@@ -394,6 +398,29 @@ class WorkerTestCase(unittest.TestCase):
         only_claude = self.worker.choose_provider("Claude", {"Claude": 90.0})
         assert only_claude is not None
         self.assertEqual(only_claude.name, "Claude")
+
+    def test_run_keeps_scheduling_when_one_provider_usage_probe_raises(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dry_run=True)
+        issue = IssueContext(140, "Probe isolation", "", [], "https://example.invalid/140")
+        with (
+            mock.patch("swarm_issue_worker.command_available", return_value=True),
+            mock.patch.object(self.worker, "deliver_pending"),
+            mock.patch.object(self.worker, "reconcile_issue_pull_requests"),
+            mock.patch.object(self.worker, "reconcile_orphan_issue_branches"),
+            mock.patch.object(self.worker, "prepare_paused_resume", return_value=False),
+            mock.patch.object(self.worker, "monitor_repository_actions", return_value=None),
+            mock.patch.object(self.worker, "select_issue", return_value=issue),
+            mock.patch.object(self.worker, "claude_usage", return_value=ProviderUsage(0, 80.0)),
+            mock.patch.object(self.worker, "codex_usage", side_effect=RuntimeError("probe broke")),
+            mock.patch.object(self.worker, "grok_usage", return_value=ProviderUsage(0, 70.0)),
+            mock.patch.object(self.worker, "ensure_bot_auth"),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(self.worker.run(), 0)
+
+        self.assertEqual(self.worker.choice.name, "Claude")
+        self.assertEqual(self.worker.provider_usages["Codex"], ProviderUsage(2))
+        self.assertIn("Codex quota unavailable: usage probe failed: probe broke", output.getvalue())
 
     def test_prompt_policy_toggles_add_issue_instructions(self) -> None:
         self.worker.config = dataclasses.replace(
@@ -888,7 +915,10 @@ class WorkerTestCase(unittest.TestCase):
             json.loads(page_buffer.getvalue()),
             {"records": [], "total": 0, "offset": 0, "limit": 10,
              "adversarial": {"loops": 0, "averageRounds": None, "cleanFirstPassPercent": None,
-                             "capHitPercent": None, "averageCapacityConsumedPercent": None, "testsAdded": 0}},
+                             "capHitPercent": None, "averageCapacityConsumedPercent": None, "testsAdded": 0},
+             "security": {"reviews": 0, "averageRounds": None, "passPercent": None,
+                          "fixedPercent": None, "findingsCreatedPercent": None, "failedPercent": None,
+                          "findingsFound": 0, "findingsFixed": 0, "testsAdded": 0}},
         )
 
     def test_execution_history_page_fetches_ten_records_and_filters_in_sqlite(self) -> None:
@@ -1803,6 +1833,165 @@ class WorkerTestCase(unittest.TestCase):
         low, _, low_output = self.codex_usage_with([self.codex_limits(95, 20)])
         self.assertEqual(low.status, 1)
         self.assertIn("quota below configured minimum", low_output)
+
+    def test_check_usage_prints_only_json_and_only_enabled_providers(self) -> None:
+        # claude/codex/grok-bin are unset in _worker_argv, so each probe hits
+        # its own real `log(...)` call ("was not found in PATH") on the way to
+        # an unavailable status. check_usage must swallow that narration —
+        # its stdout contract with the desktop app is exactly one JSON line.
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--enabled-provider", "claude", "--enabled-provider", "codex"]
+        )
+        config = Config.from_args(args)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = check_usage(config)
+        self.assertEqual(exit_code, 0)
+        output = buffer.getvalue().strip()
+        self.assertEqual(output.count("\n"), 0)
+        payload = json.loads(output)
+        self.assertEqual([p["provider"] for p in payload["providers"]], ["claude", "codex"])
+        self.assertTrue(all(p["status"] == 2 for p in payload["providers"]))
+        self.assertTrue(all(p["remaining_percent"] is None for p in payload["providers"]))
+
+    def test_explicit_enabled_providers_replace_environment_fallback(self) -> None:
+        with mock.patch.dict(os.environ, {"SWARM_ENABLED_PROVIDERS": "claude"}):
+            args = build_parser().parse_args(
+                self._worker_argv(auto=False)
+                + ["--enabled-provider", "codex", "--enabled-provider", "grok"]
+            )
+
+        self.assertEqual(args.enabled_provider, ["codex", "grok"])
+
+    def test_enabled_providers_use_environment_without_explicit_flags(self) -> None:
+        with mock.patch.dict(os.environ, {"SWARM_ENABLED_PROVIDERS": "claude,codex"}):
+            args = build_parser().parse_args(self._worker_argv(auto=False))
+
+        self.assertEqual(args.enabled_provider, ["claude", "codex"])
+
+    def test_check_usage_isolates_provider_probe_exceptions(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--enabled-provider", "claude", "--enabled-provider", "codex"]
+        )
+        config = Config.from_args(args)
+
+        def usage_for(provider: str) -> ProviderUsage:
+            if provider == "claude":
+                raise RuntimeError("claude probe failed")
+            return ProviderUsage(0, 82.0, "session 82% remaining")
+
+        buffer = io.StringIO()
+        with (
+            mock.patch.object(Worker, "provider_usage", side_effect=usage_for),
+            contextlib.redirect_stdout(buffer),
+        ):
+            exit_code = check_usage(config)
+
+        self.assertEqual(exit_code, 0)
+        reported = {
+            entry["provider"]: entry
+            for entry in json.loads(buffer.getvalue().strip())["providers"]
+        }
+        self.assertEqual(reported["claude"]["status"], 2)
+        self.assertIsNone(reported["claude"]["remaining_percent"])
+        self.assertEqual(reported["codex"]["status"], 0)
+        self.assertEqual(reported["codex"]["remaining_percent"], 82.0)
+
+    def test_check_usage_degrades_invalid_percentages_without_hiding_healthy_providers(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--enabled-provider", "claude", "--enabled-provider", "codex"]
+        )
+        config = Config.from_args(args)
+
+        for invalid in (None, float("nan"), float("inf"), -0.1, 100.1):
+            with self.subTest(invalid=invalid):
+                def usage_for(provider: str) -> ProviderUsage:
+                    if provider == "claude":
+                        return ProviderUsage(0, invalid, "malformed")
+                    return ProviderUsage(0, 82.0, "session 82% remaining")
+
+                buffer = io.StringIO()
+                with (
+                    mock.patch.object(Worker, "provider_usage", side_effect=usage_for),
+                    contextlib.redirect_stdout(buffer),
+                ):
+                    exit_code = check_usage(config)
+
+                self.assertEqual(exit_code, 0)
+                reported = {
+                    entry["provider"]: entry
+                    for entry in json.loads(buffer.getvalue().strip())[
+                        "providers"
+                    ]
+                }
+                self.assertEqual(reported["claude"]["status"], 2)
+                self.assertIsNone(reported["claude"]["remaining_percent"])
+                self.assertIsNone(reported["claude"]["detail"])
+                self.assertEqual(reported["codex"]["remaining_percent"], 82.0)
+
+    def test_check_usage_degrades_fields_that_do_not_match_the_rust_schema(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--enabled-provider", "claude", "--enabled-provider", "codex"]
+        )
+        config = Config.from_args(args)
+
+        for malformed in (
+            ProviderUsage(True, 50.0, "session 50% remaining"),
+            ProviderUsage(0.0, 50.0, "session 50% remaining"),
+            ProviderUsage(0, 50.0, {"session": 50}),
+        ):
+            with self.subTest(malformed=malformed):
+                def usage_for(provider: str) -> ProviderUsage:
+                    if provider == "claude":
+                        return malformed
+                    return ProviderUsage(0, 82.0, "session 82% remaining")
+
+                buffer = io.StringIO()
+                with (
+                    mock.patch.object(Worker, "provider_usage", side_effect=usage_for),
+                    contextlib.redirect_stdout(buffer),
+                ):
+                    exit_code = check_usage(config)
+
+                self.assertEqual(exit_code, 0)
+                reported = {
+                    entry["provider"]: entry
+                    for entry in json.loads(buffer.getvalue().strip())["providers"]
+                }
+                self.assertEqual(reported["claude"], {
+                    "provider": "claude",
+                    "name": "Claude",
+                    "status": 2,
+                    "remaining_percent": None,
+                    "detail": None,
+                })
+                self.assertEqual(reported["codex"]["status"], 0)
+                self.assertEqual(reported["codex"]["remaining_percent"], 82.0)
+
+    def test_check_usage_cli_entrypoint_skips_the_preferred_provider_notice_on_stdout(self) -> None:
+        # Regression test: main() used to resolve --preferred-provider (default
+        # "claude") and log() the tie-break notice to stdout *before* checking
+        # args.check_usage, so disabling the default preferred provider (as
+        # here, only codex is enabled) corrupted check_usage's one-JSON-line
+        # stdout contract with a leading log line.
+        from swarm_issue_worker import main as worker_main
+
+        argv = self._worker_argv(auto=False) + [
+            "--check-usage",
+            "--enabled-provider", "codex",
+        ]
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = worker_main(argv)
+        self.assertEqual(exit_code, 0)
+        output = buffer.getvalue().strip()
+        self.assertEqual(output.count("\n"), 0, f"stdout was: {output!r}")
+        payload = json.loads(output)
+        self.assertEqual([p["provider"] for p in payload["providers"]], ["codex"])
 
     def test_queued_issue_without_provider_capacity_has_distinct_status(self) -> None:
         self.worker.issue = IssueContext(137, "Queued work", "", [], "https://example.invalid/137")
@@ -2787,6 +2976,7 @@ class WorkerTestCase(unittest.TestCase):
         worker.choice = ProviderChoice("Claude", "test", "high", "session")
         with (
             mock.patch.object(worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(worker.github, "gh", side_effect=["[]", "{}"]),
             mock.patch.object(worker, "create_linked_issue_branch") as create_linked,
         ):
             run_start, recovery, _, _ = worker.prepare_repository()
@@ -2810,6 +3000,7 @@ class WorkerTestCase(unittest.TestCase):
         worker.choice = ProviderChoice("Codex", "test", "high", "session")
         with (
             mock.patch.object(worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(worker.github, "gh", side_effect=["[]", "{}"]),
             mock.patch.object(worker, "create_linked_issue_branch") as create_linked,
         ):
             run_start, _, _, _ = worker.prepare_repository()
@@ -3274,6 +3465,102 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(
             worker.git_ok("merge-base", "--is-ancestor", "main", "ai/claude/issue-410")
         )
+
+    def test_new_integration_branch_gets_a_deletion_ruleset_before_first_push(self) -> None:
+        self.git("switch", "-q", "main")
+        self.git("branch", "-D", "ai-main")
+        self.git("push", "-q", "origin", ":ai-main")
+        self.git("fetch", "-q", "--prune", "origin")
+
+        with (
+            mock.patch.object(self.worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(self.worker.github, "gh", side_effect=["[]", "{}"]) as github,
+        ):
+            self.worker.synchronize_integration_branch()
+
+        list_args = github.call_args_list[0].args[0]
+        create_call = github.call_args_list[1]
+        create_args = create_call.args[0]
+        self.assertIn("repos/" + self.worker.config.github_repository + "/rulesets", list_args)
+        self.assertIn("--method", create_args)
+        self.assertIn("POST", create_args)
+        ruleset = json.loads(create_call.kwargs["input_text"])
+        self.assertEqual(ruleset["target"], "branch")
+        self.assertEqual(ruleset["enforcement"], "active")
+        self.assertEqual(ruleset["rules"], [{"type": "deletion"}])
+        self.assertEqual(
+            ruleset["conditions"]["ref_name"]["include"], ["refs/heads/ai-main"]
+        )
+        self.assertEqual(self.remote_heads(self.remote), ["ai-main", "main"])
+
+    def test_existing_deletion_safeguard_is_not_recreated(self) -> None:
+        ruleset_name = "SWARM safeguard: prevent deletion of ai-main"
+        ruleset = {
+            "name": ruleset_name,
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["refs/heads/ai-main"]}},
+            "rules": [{"type": "deletion"}],
+        }
+        with mock.patch.object(
+            self.worker.github, "gh", return_value=json.dumps([ruleset])
+        ) as github:
+            self.worker.protect_new_integration_branch("ai-main")
+        github.assert_called_once()
+
+    def test_existing_deletion_safeguard_list_summary_is_not_rejected(self) -> None:
+        # GitHub's list-rulesets endpoint omits conditions and rules; those
+        # fields are present only in a single-ruleset detail response, which
+        # must be verified before the summary can be trusted.
+        ruleset_summary = {
+            "id": 42,
+            "name": "SWARM safeguard: prevent deletion of ai-main",
+            "target": "branch",
+            "enforcement": "active",
+        }
+        with mock.patch.object(
+            self.worker.github, "api_list", return_value=[ruleset_summary]
+        ) as api_list, mock.patch.object(
+            self.worker.github,
+            "api_get",
+            return_value={
+                **ruleset_summary,
+                "conditions": {"ref_name": {"include": ["refs/heads/ai-main"]}},
+                "rules": [{"type": "deletion"}],
+            },
+        ) as api_get:
+            self.worker.protect_new_integration_branch("ai-main")
+        api_list.assert_called_once()
+        api_get.assert_called_once_with(
+            f"repos/{self.worker.config.github_repository}/rulesets/42"
+        )
+
+    def test_existing_integration_branch_gets_a_missing_deletion_ruleset(self) -> None:
+        with (
+            mock.patch.object(self.worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(self.worker.github, "gh", side_effect=["[]", "{}"]) as github,
+        ):
+            self.worker.synchronize_integration_branch()
+
+        self.assertEqual(github.call_count, 2)
+        ruleset = json.loads(github.call_args_list[1].kwargs["input_text"])
+        self.assertEqual(ruleset["conditions"]["ref_name"]["include"], ["refs/heads/ai-main"])
+        self.assertEqual(ruleset["rules"], [{"type": "deletion"}])
+
+    def test_new_integration_branch_is_not_pushed_when_safeguard_creation_fails(self) -> None:
+        self.git("switch", "-q", "main")
+        self.git("branch", "-D", "ai-main")
+        self.git("push", "-q", "origin", ":ai-main")
+        self.git("fetch", "-q", "--prune", "origin")
+
+        with (
+            mock.patch.object(self.worker, "remote_is_github_host", return_value=True),
+            mock.patch.object(self.worker.github, "gh", side_effect=WorkerError("admin required")),
+        ):
+            with self.assertRaisesRegex(WorkerError, "deletion safeguard"):
+                self.worker.synchronize_integration_branch()
+
+        self.assertEqual(self.remote_heads(self.remote), ["main"])
 
     def test_followup_reworks_after_branch_was_merged_into_integration(self) -> None:
         # First pass creates + pushes the branch, then it is merged into
@@ -4170,6 +4457,84 @@ class WorkerTestCase(unittest.TestCase):
         cli_page = json.loads(buffer.getvalue())
         self.assertEqual([row["issue_number"] for row in cli_page["records"]], [3])
         self.assertEqual(cli_page["summary"]["distribution"]["A"], 1)
+
+    def test_feedback_queries_union_multiple_repositories_and_empty_means_global(self) -> None:
+        database_path = self.state / "global-feedback.sqlite3"
+        rows = [
+            ("octocat/one", 1, "A", "claude", "clean_first_pass", 0),
+            ("octocat/two", 2, "C", "grok", "resolved_after_n", 2),
+            ("octocat/three", 3, "F", "codex", "cap_hit", 6),
+        ]
+        for index, (repository_name, number, grade, router, outcome, rounds) in enumerate(rows):
+            service = ExecutionHistoryService(True, database_path)
+            service.start(
+                ExecutionStart(
+                    repository=repository_name,
+                    issue_number=number,
+                    issue_url=f"https://github.com/{repository_name}/issues/{number}",
+                    issue_title=f"Issue {number}",
+                    issue_body="",
+                    provider="Codex",
+                    model="m",
+                    effort="high",
+                    branch_name="b",
+                    application_version="1",
+                    routing_decision={
+                        "prompt_grade": grade,
+                        "grade_reason": "Reason.",
+                        "fallback": False,
+                        "provider": "codex",
+                        "router_provider": router,
+                        "router_model": f"{router}-model",
+                    },
+                ),
+                f"2026-09-2{index + 1}T10:00:00-05:00",
+            )
+            service.update(
+                f"2026-09-2{index + 1}T10:05:00-05:00",
+                adversarial_round_count=rounds,
+                adversarial_outcome=outcome,
+            )
+
+        repository = ExecutionHistoryRepository(database_path)
+        selected = ["octocat/one", "octocat/two"]
+        page, total, _, _ = repository.page_for_repository(selected)
+        self.assertEqual(total, 2)
+        self.assertEqual([row["repository"] for row in page], ["octocat/two", "octocat/one"])
+        summary = repository.adversarial_summary(selected)
+        self.assertEqual(summary["loops"], 2)
+        self.assertEqual(summary["averageRounds"], 1.0)
+
+        grades = repository.graded_for_repository(selected)
+        self.assertEqual(grades["total"], 2)
+        self.assertEqual({row["repository"] for row in grades["records"]}, set(selected))
+        self.assertEqual(grades["summary"]["graded"], 2)
+        self.assertEqual([row["router"] for row in grades["routerMatrix"]], ["claude", "grok"])
+
+        global_page, global_total, _, _ = repository.page_for_repository([])
+        self.assertEqual(global_total, 3)
+        self.assertEqual([row["repository"] for row in global_page], [row[0] for row in reversed(rows)])
+        self.assertEqual(repository.adversarial_summary([])["loops"], 3)
+        self.assertEqual(repository.graded_for_repository([])["summary"]["graded"], 3)
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exit_code = execution_history_main(
+                [
+                    "--db", str(database_path),
+                    "--repository", "octocat/one",
+                    "--repository", "octocat/two",
+                    "--limit", "10",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(buffer.getvalue())["total"], 2)
+
+        global_buffer = io.StringIO()
+        with contextlib.redirect_stdout(global_buffer):
+            exit_code = execution_history_main(["--db", str(database_path), "--limit", "10"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(global_buffer.getvalue())["total"], 3)
 
     def test_router_matrix_counts_who_graded_and_who_they_picked(self) -> None:
         database_path = self.state / "grades-routers.sqlite3"
@@ -5217,6 +5582,201 @@ class WorkerTestCase(unittest.TestCase):
         self.assertFalse(recovery_mode)
         self.assertEqual(run_start, worker.git("rev-parse", "ai-main"))
 
+    # -- Per-prompt AI token usage (issue #280) --------------------------
+
+    def _claude_result_json(self, *, input_tokens: int, output_tokens: int) -> str:
+        return json.dumps(
+            {
+                "type": "result",
+                "result": "done",
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            }
+        )
+
+    def test_run_ai_records_primary_usage_for_the_initial_call(self) -> None:
+        self.worker.issue = IssueContext(360, "Title", "body", [], "https://example.invalid/360")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-1")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(input_tokens=100, output_tokens=20)
+            self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            status = self.worker.run_ai("do the work")
+        self.assertEqual(status, 0)
+        events = self.worker.read_state()["token_usage_events"]
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["agent_type"], AgentType.PRIMARY.value)
+        self.assertEqual(event["prompt_type"], PromptType.INITIAL.value)
+        self.assertEqual(event["attempt_number"], 1)
+        self.assertEqual(event["input_tokens"], 100)
+        self.assertEqual(event["output_tokens"], 20)
+        self.assertEqual(event["total_tokens"], 120)
+        self.assertTrue(event["success"])
+        self.assertEqual(event["provider"], "Claude")
+        self.assertEqual(event["model"], "test-model")
+
+    def test_run_ai_gives_a_rejected_model_retry_its_own_independent_usage_record(self) -> None:
+        worker = self.model_run_worker()
+        outcomes = [(1, self.GROK_UNKNOWN_MODEL), (0, "")]
+        calls: list[int] = []
+
+        def fake_grok(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            status, diagnostic = outcomes[len(calls)]
+            calls.append(status)
+            worker.ai_diagnostic_file.write_text(diagnostic, encoding="utf-8")
+            if status == 0:
+                worker.ai_output_file.write_text("done\n", encoding="utf-8")
+                worker._last_ai_raw_output = json.dumps({"text": "done", "usage": {"prompt_tokens": 9, "completion_tokens": 4}})
+            else:
+                worker._last_ai_raw_output = diagnostic
+            return status
+
+        with mock.patch.object(worker, "_run_grok", side_effect=fake_grok):
+            status = worker.run_ai("prompt")
+        self.assertEqual(status, 0)
+        events = worker.read_state()["token_usage_events"]
+        self.assertEqual(len(events), 2)
+        first, second = events
+        self.assertEqual(first["attempt_number"], 1)
+        self.assertFalse(first["success"])
+        self.assertIsNone(first["total_tokens"])
+        self.assertEqual(second["attempt_number"], 2)
+        self.assertTrue(second["success"])
+        self.assertEqual(second["input_tokens"], 9)
+        self.assertEqual(second["output_tokens"], 4)
+        # The retry ran against the fallback model, not the rejected one.
+        self.assertNotEqual(second["model"], "grok-4.3")
+
+    def test_run_ai_attributes_usage_to_the_active_adversarial_stage(self) -> None:
+        self.worker.issue = IssueContext(361, "Title", "body", [], "https://example.invalid/361")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-2")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.update_state(
+            **{UAT_STAGE.key: {"phase": "test", "round": 0, "active": True}}
+        )
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(input_tokens=5, output_tokens=5)
+            self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("adversarial prompt", activity="testing")
+        events = self.worker.read_state()["token_usage_events"]
+        self.assertEqual(events[-1]["agent_type"], AgentType.ADVERSARIAL_UAT.value)
+        self.assertEqual(events[-1]["prompt_type"], PromptType.ADVERSARIAL_SCAN.value)
+
+        self.worker.update_state(**{UAT_STAGE.key: {"phase": "fix", "round": 1, "active": True}})
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("fix prompt", activity="fixing")
+        events = self.worker.read_state()["token_usage_events"]
+        self.assertEqual(events[-1]["agent_type"], AgentType.ADVERSARIAL_UAT.value)
+        self.assertEqual(events[-1]["prompt_type"], PromptType.REMEDIATION.value)
+
+        self.worker.update_state(
+            **{
+                UAT_STAGE.key: {"phase": "test", "round": 0, "active": False},
+                SECURITY_STAGE.key: {"phase": "test", "round": 1, "active": True},
+            }
+        )
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("re-test prompt", activity="re-testing")
+        events = self.worker.read_state()["token_usage_events"]
+        self.assertEqual(events[-1]["agent_type"], AgentType.ADVERSARIAL_CYBERSECURITY.value)
+        self.assertEqual(events[-1]["prompt_type"], PromptType.RETRY.value)
+
+    def test_router_call_records_its_own_usage_event(self) -> None:
+        self.worker.issue = IssueContext(362, "Title", "body", [], "https://example.invalid/362")
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "session-3")
+        spec = self.worker.config.spec("grok")
+
+        def fake_router(*, usage_sink=None, **_kwargs) -> str:
+            if usage_sink is not None:
+                from token_usage import NormalizedUsage
+
+                usage_sink.append(NormalizedUsage(input_tokens=42, output_tokens=8, total_tokens=50))
+            return json.dumps({"prompt_grade": "B", "selected_provider": "grok"})
+
+        with mock.patch("swarm_issue_worker.run_provider_router", side_effect=fake_router):
+            self.worker.run_router(spec, "grade this issue", [])
+        events = self.worker.token_usage_events
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["agent_type"], AgentType.ROUTER.value)
+        self.assertEqual(events[0]["input_tokens"], 42)
+        self.assertEqual(events[0]["total_tokens"], 50)
+
+    def test_ai_usage_report_appears_in_the_completion_comment_and_is_idempotent(self) -> None:
+        self.worker.issue = IssueContext(363, "Title", "body", [], "https://example.invalid/363")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-4")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(input_tokens=1000, output_tokens=200)
+            self.worker.ai_output_file.write_text("## Summary\nDone.\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("implement")
+        pending = {
+            "commit_sha": "a" * 40,
+            "commit_message": "did the thing",
+            "ai_tool": "Claude",
+            "model": "test-model",
+            "effort": "high",
+            "ai_usage_report": self.worker.render_ai_usage_report(),
+        }
+        body = self.worker.render_pending_comment(pending)
+        self.assertIn("### AI Usage", body)
+        self.assertIn("Primary", body)
+        self.assertIn("AI Invocations: 1", body)
+        # Re-rendering from the same persisted `pending` dict must not
+        # duplicate or otherwise change the usage section.
+        body_again = self.worker.render_pending_comment(pending)
+        self.assertEqual(body, body_again)
+
+    def test_token_usage_batch_persists_and_is_idempotent(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, ai_execution_history_enabled=True,
+            execution_history_db=self.state / "token-usage-history.sqlite3",
+        )
+        self.worker.history = ExecutionHistoryService(True, self.state / "token-usage-history.sqlite3")
+        self.worker.issue = IssueContext(364, "Title", "body", [], "https://example.invalid/364")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-5")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.start_execution_history()
+        execution_id = self.worker.history.execution_id
+        self.assertTrue(execution_id)
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(input_tokens=10, output_tokens=5)
+            self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.worker.run_ai("implement")
+
+        self.worker.flush_token_usage_to_history()
+        self.worker.flush_token_usage_to_history()  # must not duplicate
+
+        repository = ExecutionHistoryRepository(self.state / "token-usage-history.sqlite3")
+        rows = repository.token_usage_for_execution(execution_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["agent_type"], AgentType.PRIMARY.value)
+        self.assertEqual(rows[0]["input_tokens"], 10)
+        self.assertEqual(rows[0]["output_tokens"], 5)
+
+        totals = repository.token_usage_totals([self.worker.config.github_repository])
+        self.assertEqual(totals["invocations"], 1)
+        self.assertEqual(totals["inputTokens"], 10)
+        self.assertEqual(totals["outputTokens"], 5)
+
+        issue_rows = repository.token_usage_for_issue(self.worker.config.github_repository, 364)
+        self.assertEqual(len(issue_rows), 1)
+
 
 class RunnerTestCase(unittest.TestCase):
     def test_saved_routing_flags_win_over_scheduler_startup_flags(self) -> None:
@@ -5591,29 +6151,6 @@ class RunnerTestCase(unittest.TestCase):
             ).stdout.strip()
             self.assertEqual(branch, "ai/codex/issue-114")
             self.assertTrue((repo / "dirty.txt").is_file())
-
-    def test_scheduler_defers_checkout_owned_by_test_run(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="swarm-runner-test-lock.") as temporary:
-            root = Path(temporary)
-            repo = root / "repo"
-            state = root / "state"
-            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.name", "runner test"], check=True)
-            subprocess.run(
-                ["git", "-C", str(repo), "config", "user.email", "runner@example.invalid"], check=True
-            )
-            subprocess.run(
-                ["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "base"], check=True
-            )
-            (repo / ".git" / "swarm-test-run.lock").write_text(
-                f"{os.getpid()}\n", encoding="utf-8"
-            )
-            args = runner_module.build_parser().parse_args(
-                ["--repo-dir", str(repo), "--state-dir", str(state)]
-            )
-            runner = runner_module.Runner(args, [])
-
-            self.assertFalse(runner.synchronize_repository(runner.repos[0]))
 
     def test_scheduler_recovers_a_checkout_with_only_harmless_untracked_files(self) -> None:
         """A stale issue branch left over from an interrupted work-round
@@ -6010,6 +6547,61 @@ class RunnerTestCase(unittest.TestCase):
             self.assertEqual(sorted(worked), ["beta", "delta", "gamma"])
             self.assertEqual(status, runner_module.ISSUE_COMPLETED_EXIT_CODE)
             self.assertIn("repositories in parallel", output.getvalue())
+
+    def test_parallel_repositories_continue_without_waiting_for_a_slow_sibling(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-independent-test.") as temporary:
+            root = Path(temporary)
+            repos_file = self._repos_file(root, ("fast", "slow"))
+            args = runner_module.build_parser().parse_args(
+                [
+                    "--repos-file", str(repos_file), "--state-dir", str(root / "state"),
+                    "--parallel-repos", "--interval-seconds", "600", "--pgrep-bin", "",
+                ]
+            )
+            runner = runner_module.Runner(args, [])
+            slow_started = threading.Event()
+            release_slow = threading.Event()
+            fast_drained = threading.Event()
+            calls: dict[str, int] = {"fast": 0, "slow": 0}
+            calls_lock = threading.Lock()
+
+            def work_repo(repo: dict[str, object]) -> int:
+                label = str(repo["label"])
+                with calls_lock:
+                    calls[label] += 1
+                    call = calls[label]
+                if label == "slow":
+                    slow_started.set()
+                    release_slow.wait(5)
+                    return 0
+                if call <= 2:
+                    return runner_module.ISSUE_COMPLETED_EXIT_CODE
+                fast_drained.set()
+                return 0
+
+            supervisor = threading.Thread(
+                target=runner.run_parallel_repos,
+                kwargs={"start_immediately": True},
+            )
+            with (
+                mock.patch.object(runner, "work_repo", side_effect=work_repo),
+                mock.patch.object(runner, "transcode_active", return_value=False),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                supervisor.start()
+                self.assertTrue(slow_started.wait(2), "the slow repository should start")
+                self.assertTrue(
+                    fast_drained.wait(2),
+                    "the fast repository should drain while its sibling is still blocked",
+                )
+                self.assertFalse(release_slow.is_set())
+                self.assertEqual(calls["fast"], 3)
+                self.assertEqual(calls["slow"], 1)
+                runner.stop_requested = True
+                release_slow.set()
+                supervisor.join(5)
+
+            self.assertFalse(supervisor.is_alive())
 
     def test_sequential_cycle_is_the_default(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-sequential-test.") as temporary:

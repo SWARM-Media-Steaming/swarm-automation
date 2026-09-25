@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -59,6 +59,9 @@ _JSON_COLUMNS = (
     "operational_notes",
     "warnings_errors",
     "routing_decision",
+    "adversarial_filed_findings",
+    "security_findings",
+    "security_filed_findings",
 )
 
 # The AI platform that graded and routed an issue, and the one that was picked
@@ -88,6 +91,42 @@ _MIGRATION_3_COLUMNS = (
     ("capacity_consumed_percent", "REAL"),
 )
 
+# Migration 4 records the non-blocking issues independently filed by an
+# adversarial tester.  Unlike the checkpoint marker list, this is user-facing
+# execution history: each entry has the finding title and the resulting issue
+# URL so it remains useful after the worker's in-progress state is gone.
+_MIGRATION_4_COLUMNS = (
+    ("adversarial_filed_findings", "TEXT NOT NULL DEFAULT '[]'"),
+)
+
+# Migration 5 adds the adversarial cybersecurity review alongside UAT. The two
+# stages share one loop (``adversarial_core.py``) and therefore one round
+# table; ``stage`` is what tells a UAT round apart from a security round, so
+# the table's uniqueness moves from (execution, round) to
+# (execution, stage, round) and the table has to be rebuilt to widen it.
+# ``security_review_status`` is deliberately separate from
+# ``security_outcome``: a review that could not execute must never be
+# indistinguishable from one that ran and found nothing.
+_MIGRATION_5_COLUMNS = (
+    ("security_outcome", "TEXT NOT NULL DEFAULT ''"),
+    ("security_review_status", "TEXT NOT NULL DEFAULT ''"),
+    ("security_review_error", "TEXT NOT NULL DEFAULT ''"),
+    ("security_round_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("security_findings", "TEXT NOT NULL DEFAULT '{}'"),
+    ("security_filed_findings", "TEXT NOT NULL DEFAULT '[]'"),
+)
+
+# Every value ``security_review_status`` may hold. ``""`` means the stage never
+# ran for this work-round. ``FAILED`` covers both a review that could not
+# execute and one that ended with unresolved findings — the accompanying
+# ``security_outcome``/``security_review_error`` say which.
+SECURITY_REVIEW_STATUSES = (
+    "PASS",
+    "FIXED",
+    "FINDINGS_CREATED",
+    "FAILED",
+)
+
 # Every value ``adversarial_outcome`` may hold. ``""`` means the work-round
 # predates the loop or never reached it; ``disabled`` means it ran with the
 # setting off. The loop in ``adversarial_uat.py`` writes these outcomes.
@@ -98,7 +137,13 @@ ADVERSARIAL_OUTCOMES = (
     "disabled",
 )
 
+#: Which adversarial agent produced a round row. ``uat`` is the historical
+#: default so rows written before the cybersecurity stage existed keep meaning
+#: exactly what they meant.
+ADVERSARIAL_STAGE_SLUGS = ("uat", "security")
+
 _ADVERSARIAL_ROUND_COLUMNS = (
+    "stage",
     "round_number",
     "fixer_provider",
     "fixer_model",
@@ -113,6 +158,45 @@ _ADVERSARIAL_ROUND_COLUMNS = (
     "started_at",
     "completed_at",
     "duration_seconds",
+    "findings_found",
+    "findings_fixed",
+    "findings_filed",
+    "severity_counts",
+)
+
+# Migration 6 adds per-prompt AI token usage (issue #280). Unlike the other
+# migrations, ``ai_token_usage`` rows are not tied to ``ai_executions`` by a
+# foreign key: a dynamic-routing call can happen before ``ai_executions`` even
+# has a row for this attempt (routing runs before ``start_execution_history``),
+# so ``execution_id`` here is a plain, indexed column rather than an enforced
+# reference — a row with an execution_id that does not (yet) resolve is still
+# useful telemetry, never a constraint violation that could break an
+# otherwise-successful AI call.
+_TOKEN_USAGE_COLUMNS = (
+    "execution_id",
+    "repository",
+    "issue_number",
+    "workflow_run_id",
+    "agent_run_id",
+    "prompt_id",
+    "provider",
+    "model",
+    "reasoning_effort",
+    "agent_type",
+    "prompt_type",
+    "attempt_number",
+    "input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "cached_input_tokens",
+    "total_tokens",
+    "estimated_cost",
+    "currency",
+    "started_at",
+    "completed_at",
+    "duration_ms",
+    "success",
+    "error_type",
 )
 
 _SECRET_PATTERNS = (
@@ -186,6 +270,21 @@ def _search_filter(search: str) -> tuple[str, list[str]]:
         clauses.append(f"LOWER({column}) LIKE ? ESCAPE '\\'")
         params.append(pattern)
     return f" AND ({' OR '.join(clauses)})", params
+
+
+def _repository_filter(repositories: Sequence[str] | str | None) -> tuple[str, list[str]]:
+    """Optional SQL predicate for one or more repositories.
+
+    A string remains accepted for callers using the old single-repository API.
+    An empty sequence deliberately returns no predicate: Feedback's default is
+    the app-wide database, queried as one global aggregate.
+    """
+    values = [repositories] if isinstance(repositories, str) else list(repositories or [])
+    names = list(dict.fromkeys(sanitize_text(value) for value in values if str(value).strip()))
+    if not names:
+        return "", []
+    slots = ", ".join("?" for _ in names)
+    return f"repository IN ({slots})", names
 
 
 def clamp_page_size(limit: int) -> int:
@@ -322,10 +421,14 @@ class ExecutionHistoryRepository:
                         )
                 database.executescript(
                     """
+                    -- Created in the widened, stage-aware shape migration 5
+                    -- introduced, so a database that first appears after that
+                    -- migration never needs the rebuild below.
                     CREATE TABLE IF NOT EXISTS adversarial_rounds (
                         round_id TEXT PRIMARY KEY,
                         execution_id TEXT NOT NULL
                             REFERENCES ai_executions(execution_id) ON DELETE CASCADE,
+                        stage TEXT NOT NULL DEFAULT 'uat',
                         round_number INTEGER NOT NULL,
                         fixer_provider TEXT NOT NULL DEFAULT '',
                         fixer_model TEXT NOT NULL DEFAULT '',
@@ -340,15 +443,149 @@ class ExecutionHistoryRepository:
                         started_at TEXT NOT NULL DEFAULT '',
                         completed_at TEXT NOT NULL DEFAULT '',
                         duration_seconds REAL,
-                        UNIQUE(execution_id, round_number)
+                        findings_found INTEGER NOT NULL DEFAULT 0,
+                        findings_fixed INTEGER NOT NULL DEFAULT 0,
+                        findings_filed INTEGER NOT NULL DEFAULT 0,
+                        severity_counts TEXT NOT NULL DEFAULT '{}',
+                        UNIQUE(execution_id, stage, round_number)
                     );
                     CREATE INDEX IF NOT EXISTS adversarial_rounds_execution_idx
-                        ON adversarial_rounds(execution_id, round_number);
+                        ON adversarial_rounds(execution_id, stage, round_number);
                     """
                 )
                 database.execute(
                     "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                     (3,),
+                )
+            if 4 not in applied and 4 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(ai_executions)")
+                }
+                for name, definition in _MIGRATION_4_COLUMNS:
+                    if name not in columns:
+                        database.execute(
+                            f"ALTER TABLE ai_executions ADD COLUMN {name} {definition}"
+                        )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (4,),
+                )
+            if 5 not in applied and 5 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(ai_executions)")
+                }
+                for name, definition in _MIGRATION_5_COLUMNS:
+                    if name not in columns:
+                        database.execute(
+                            f"ALTER TABLE ai_executions ADD COLUMN {name} {definition}"
+                        )
+                round_columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(adversarial_rounds)")
+                }
+                if round_columns and "stage" not in round_columns:
+                    # SQLite cannot widen a table-level UNIQUE constraint in
+                    # place, and (execution_id, round_number) has to become
+                    # (execution_id, stage, round_number) or a security round 0
+                    # would collide with the UAT round 0 of the same execution.
+                    # Rebuild, backfilling every existing row as a UAT round.
+                    database.executescript(
+                        """
+                        CREATE TABLE adversarial_rounds_v5 (
+                            round_id TEXT PRIMARY KEY,
+                            execution_id TEXT NOT NULL
+                                REFERENCES ai_executions(execution_id) ON DELETE CASCADE,
+                            stage TEXT NOT NULL DEFAULT 'uat',
+                            round_number INTEGER NOT NULL,
+                            fixer_provider TEXT NOT NULL DEFAULT '',
+                            fixer_model TEXT NOT NULL DEFAULT '',
+                            tester_provider TEXT NOT NULL DEFAULT '',
+                            tester_model TEXT NOT NULL DEFAULT '',
+                            tests_added INTEGER NOT NULL DEFAULT 0,
+                            tests_modified INTEGER NOT NULL DEFAULT 0,
+                            tests_failing_before INTEGER NOT NULL DEFAULT 0,
+                            tests_failing_after INTEGER NOT NULL DEFAULT 0,
+                            disputed INTEGER NOT NULL DEFAULT 0,
+                            dispute_resolution TEXT NOT NULL DEFAULT '',
+                            started_at TEXT NOT NULL DEFAULT '',
+                            completed_at TEXT NOT NULL DEFAULT '',
+                            duration_seconds REAL,
+                            findings_found INTEGER NOT NULL DEFAULT 0,
+                            findings_fixed INTEGER NOT NULL DEFAULT 0,
+                            findings_filed INTEGER NOT NULL DEFAULT 0,
+                            severity_counts TEXT NOT NULL DEFAULT '{}',
+                            UNIQUE(execution_id, stage, round_number)
+                        );
+                        INSERT INTO adversarial_rounds_v5 (
+                            round_id, execution_id, stage, round_number, fixer_provider,
+                            fixer_model, tester_provider, tester_model, tests_added,
+                            tests_modified, tests_failing_before, tests_failing_after,
+                            disputed, dispute_resolution, started_at, completed_at,
+                            duration_seconds
+                        )
+                        SELECT round_id, execution_id, 'uat', round_number, fixer_provider,
+                               fixer_model, tester_provider, tester_model, tests_added,
+                               tests_modified, tests_failing_before, tests_failing_after,
+                               disputed, dispute_resolution, started_at, completed_at,
+                               duration_seconds
+                        FROM adversarial_rounds;
+                        DROP TABLE adversarial_rounds;
+                        ALTER TABLE adversarial_rounds_v5 RENAME TO adversarial_rounds;
+                        CREATE INDEX IF NOT EXISTS adversarial_rounds_execution_idx
+                            ON adversarial_rounds(execution_id, stage, round_number);
+                        """
+                    )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (5,),
+                )
+            if 6 not in applied and 6 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                database.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS ai_token_usage (
+                        id TEXT PRIMARY KEY,
+                        execution_id TEXT NOT NULL DEFAULT '',
+                        repository TEXT NOT NULL DEFAULT '',
+                        issue_number INTEGER NOT NULL DEFAULT 0,
+                        workflow_run_id TEXT NOT NULL DEFAULT '',
+                        agent_run_id TEXT NOT NULL DEFAULT '',
+                        prompt_id TEXT NOT NULL DEFAULT '',
+                        provider TEXT NOT NULL DEFAULT '',
+                        model TEXT NOT NULL DEFAULT '',
+                        reasoning_effort TEXT NOT NULL DEFAULT '',
+                        agent_type TEXT NOT NULL DEFAULT '',
+                        prompt_type TEXT NOT NULL DEFAULT '',
+                        attempt_number INTEGER NOT NULL DEFAULT 1,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        reasoning_tokens INTEGER,
+                        cached_input_tokens INTEGER,
+                        total_tokens INTEGER,
+                        estimated_cost REAL,
+                        currency TEXT NOT NULL DEFAULT 'USD',
+                        started_at TEXT NOT NULL DEFAULT '',
+                        completed_at TEXT NOT NULL DEFAULT '',
+                        duration_ms INTEGER,
+                        success INTEGER NOT NULL DEFAULT 1,
+                        error_type TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE INDEX IF NOT EXISTS ai_token_usage_execution_idx
+                        ON ai_token_usage(execution_id);
+                    CREATE INDEX IF NOT EXISTS ai_token_usage_issue_idx
+                        ON ai_token_usage(repository, issue_number);
+                    CREATE INDEX IF NOT EXISTS ai_token_usage_agent_idx
+                        ON ai_token_usage(agent_type, provider, model);
+                    """
+                )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (6,),
                 )
 
     def create(self, start: ExecutionStart, started_at: str) -> str:
@@ -476,6 +713,13 @@ class ExecutionHistoryRepository:
             "adversarial_round_count",
             "adversarial_outcome",
             "capacity_consumed_percent",
+            "adversarial_filed_findings",
+            "security_outcome",
+            "security_review_status",
+            "security_review_error",
+            "security_round_count",
+            "security_findings",
+            "security_filed_findings",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -484,6 +728,10 @@ class ExecutionHistoryRepository:
         for key, value in fields.items():
             if key in {"files_changed", "commit_shas", "operational_notes", "warnings_errors"}:
                 serialized[key] = json.dumps(sanitize_values(value))
+            elif key in {"adversarial_filed_findings", "security_filed_findings"}:
+                serialized[key] = _serialize_adversarial_filed_findings(value)
+            elif key == "security_findings":
+                serialized[key] = _serialize_security_findings(value)
             elif key == "routing_decision":
                 serialized[key] = _serialize_routing(value)
             elif isinstance(value, str):
@@ -579,14 +827,21 @@ class ExecutionHistoryRepository:
         for column in _ADVERSARIAL_ROUND_COLUMNS:
             value = round_values.get(column)
             if column in {"round_number", "tests_added", "tests_modified",
-                          "tests_failing_before", "tests_failing_after"}:
+                          "tests_failing_before", "tests_failing_after",
+                          "findings_found", "findings_fixed", "findings_filed"}:
                 values[column] = int(value or 0)
             elif column == "disputed":
                 values[column] = 1 if value else 0
             elif column == "duration_seconds":
                 values[column] = None if value is None else float(value)
+            elif column == "severity_counts":
+                values[column] = sanitize_text(value) or "{}"
+            elif column == "stage":
+                values[column] = sanitize_text(value) or "uat"
             else:
                 values[column] = sanitize_text(value)
+        if values["stage"] not in ADVERSARIAL_STAGE_SLUGS:
+            raise ValueError(f"Unknown adversarial stage: {values['stage']}")
         columns = ", ".join(("round_id", "execution_id", *_ADVERSARIAL_ROUND_COLUMNS))
         slots = ", ".join("?" for _ in range(len(_ADVERSARIAL_ROUND_COLUMNS) + 2))
         if not 0 <= values["round_number"] <= 6:
@@ -595,7 +850,7 @@ class ExecutionHistoryRepository:
         with self.connect() as database:
             database.execute(
                 f"INSERT INTO adversarial_rounds ({columns}) VALUES ({slots}) "
-                f"ON CONFLICT(execution_id, round_number) DO UPDATE SET {assignments}",
+                f"ON CONFLICT(execution_id, stage, round_number) DO UPDATE SET {assignments}",
                 (str(uuid.uuid4()), execution_id, *(values[column] for column in _ADVERSARIAL_ROUND_COLUMNS)),
             )
 
@@ -609,7 +864,7 @@ class ExecutionHistoryRepository:
         with self.connect() as database:
             for row in database.execute(
                 f"SELECT * FROM adversarial_rounds WHERE execution_id IN ({slots}) "
-                "ORDER BY execution_id, round_number",
+                "ORDER BY execution_id, stage DESC, round_number",
                 ids,
             ):
                 record = dict(row)
@@ -617,19 +872,23 @@ class ExecutionHistoryRepository:
                 rounds.setdefault(str(record["execution_id"]), []).append(record)
         return rounds
 
-    def adversarial_summary(self, repository: str, *, search: str = "") -> dict[str, Any]:
-        """How the adversarial UAT loop is performing for one repository.
+    def adversarial_summary(
+        self, repositories: Sequence[str] | str | None = None, *, search: str = ""
+    ) -> dict[str, Any]:
+        """How the adversarial UAT loop is performing for the selected repositories.
 
         Only work-rounds that actually ran the loop are counted (``disabled``
         and rows written before the loop existed are not), so the percentages
         answer "when the loop runs, how often does it settle cleanly?" rather
         than being diluted by every issue worked with it switched off.
         """
-        clause, params = _search_filter(search)
-        where = (
-            " WHERE repository = ? AND adversarial_outcome <> '' "
-            "AND adversarial_outcome <> 'disabled'" + clause
-        )
+        repository_clause, repository_params = _repository_filter(repositories)
+        clause, search_params = _search_filter(search)
+        conditions = ["adversarial_outcome <> ''", "adversarial_outcome <> 'disabled'"]
+        if repository_clause:
+            conditions.insert(0, repository_clause)
+        where = " WHERE " + " AND ".join(conditions) + clause
+        params = [*repository_params, *search_params]
         with self.connect() as database:
             row = database.execute(
                 "SELECT COUNT(*), AVG(adversarial_round_count), "
@@ -637,13 +896,13 @@ class ExecutionHistoryRepository:
                 "SUM(adversarial_outcome = 'cap_hit'), "
                 "AVG(capacity_consumed_percent) "
                 f"FROM ai_executions{where}",
-                (repository, *params),
+                params,
             ).fetchone()
             tests = database.execute(
                 "SELECT COALESCE(SUM(tests_added), 0) FROM adversarial_rounds "
-                "WHERE execution_id IN ("
+                "WHERE stage = 'uat' AND execution_id IN ("
                 f"SELECT execution_id FROM ai_executions{where})",
-                (repository, *params),
+                params,
             ).fetchone()
         loops = int(row[0] or 0)
         if not loops:
@@ -667,9 +926,189 @@ class ExecutionHistoryRepository:
             "testsAdded": int(tests[0] or 0),
         }
 
+    def security_summary(
+        self, repositories: Sequence[str] | str | None = None, *, search: str = ""
+    ) -> dict[str, Any]:
+        """How the adversarial cybersecurity review is performing.
+
+        Counted the same way as ``adversarial_summary``: only work-rounds that
+        actually ran the review. ``failedPercent`` deliberately separates a
+        review that could not execute or left findings unresolved from a clean
+        pass, so the dashboard can never present a broken reviewer as a secure
+        codebase.
+        """
+        repository_clause, repository_params = _repository_filter(repositories)
+        clause, search_params = _search_filter(search)
+        # A review attempt is counted by whether a verdict was recorded at
+        # all, not by whether a round completed: a reviewer failure writes
+        # security_review_status without ever setting security_outcome (that
+        # column only exists for rounds that actually reached an outcome), so
+        # filtering on security_outcome silently drops failed attempts from
+        # the failure rate. security_review_status stays '' for both "this
+        # stage never ran" and "disabled", so a single check on it covers both.
+        conditions = ["security_review_status <> ''"]
+        if repository_clause:
+            conditions.insert(0, repository_clause)
+        where = " WHERE " + " AND ".join(conditions) + clause
+        params = [*repository_params, *search_params]
+        with self.connect() as database:
+            row = database.execute(
+                "SELECT COUNT(*), AVG(security_round_count), "
+                "SUM(security_review_status = 'PASS'), "
+                "SUM(security_review_status = 'FIXED'), "
+                "SUM(security_review_status = 'FINDINGS_CREATED'), "
+                "SUM(security_review_status = 'FAILED') "
+                f"FROM ai_executions{where}",
+                params,
+            ).fetchone()
+            rounds = database.execute(
+                "SELECT COALESCE(SUM(findings_found), 0), COALESCE(SUM(findings_fixed), 0), "
+                "COALESCE(SUM(tests_added), 0) FROM adversarial_rounds "
+                "WHERE stage = 'security' AND execution_id IN ("
+                f"SELECT execution_id FROM ai_executions{where})",
+                params,
+            ).fetchone()
+        reviews = int(row[0] or 0)
+        if not reviews:
+            return _empty_security_summary()
+        return {
+            "reviews": reviews,
+            "averageRounds": round(float(row[1] or 0.0), 2),
+            "passPercent": round(int(row[2] or 0) * 100 / reviews, 1),
+            "fixedPercent": round(int(row[3] or 0) * 100 / reviews, 1),
+            "findingsCreatedPercent": round(int(row[4] or 0) * 100 / reviews, 1),
+            "failedPercent": round(int(row[5] or 0) * 100 / reviews, 1),
+            "findingsFound": int(rounds[0] or 0),
+            "findingsFixed": int(rounds[1] or 0),
+            "testsAdded": int(rounds[2] or 0),
+        }
+
+    def record_token_usage_batch(
+        self, execution_id: str, repository: str, issue_number: int, events: Sequence[dict[str, Any]]
+    ) -> None:
+        """Persist every accumulated per-prompt usage event of one work-round.
+
+        Called once, when the work-round reaches a terminal state (see
+        ``finish_execution_history``) rather than after each individual AI
+        call: some calls (dynamic routing) happen before this execution's own
+        ``ai_executions`` row exists, so batching at the end is what lets
+        every event still carry the now-known ``execution_id`` without
+        blocking on write ordering. ``INSERT OR IGNORE`` on the event's own
+        stable id makes a repeated flush of the same (already-persisted)
+        state safe — a retried scheduler tick can never duplicate a row.
+        """
+        if not events:
+            return
+        columns = ", ".join(("id", "created_at", *_TOKEN_USAGE_COLUMNS))
+        slots = ", ".join("?" for _ in range(len(_TOKEN_USAGE_COLUMNS) + 2))
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        rows = []
+        for event in events:
+            event_id = sanitize_text(event.get("id")) or str(uuid.uuid4())
+            values = [event_id, now]
+            for column in _TOKEN_USAGE_COLUMNS:
+                if column == "execution_id":
+                    values.append(execution_id)
+                elif column == "repository":
+                    values.append(sanitize_text(repository))
+                elif column == "issue_number":
+                    values.append(int(issue_number or 0))
+                elif column in {
+                    "attempt_number", "input_tokens", "output_tokens", "reasoning_tokens",
+                    "cached_input_tokens", "total_tokens", "duration_ms",
+                }:
+                    raw_value = event.get(column)
+                    values.append(None if raw_value is None else int(raw_value))
+                elif column == "estimated_cost":
+                    raw_value = event.get(column)
+                    values.append(None if raw_value is None else float(raw_value))
+                elif column == "success":
+                    values.append(1 if event.get(column, True) else 0)
+                elif column == "currency":
+                    values.append(sanitize_text(event.get(column)) or "USD")
+                else:
+                    values.append(sanitize_text(event.get(column)))
+            rows.append(tuple(values))
+        with self.connect() as database:
+            database.executemany(
+                f"INSERT OR IGNORE INTO ai_token_usage ({columns}) VALUES ({slots})",
+                rows,
+            )
+
+    def token_usage_for_execution(self, execution_id: str) -> list[dict[str, Any]]:
+        """Every recorded invocation of one execution, in the order they ran."""
+        with self.connect() as database:
+            rows = database.execute(
+                "SELECT * FROM ai_token_usage WHERE execution_id = ? ORDER BY created_at, rowid",
+                (execution_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def token_usage_for_issue(self, repository: str, issue_number: int) -> list[dict[str, Any]]:
+        """Every recorded invocation across every attempt of one issue."""
+        with self.connect() as database:
+            rows = database.execute(
+                "SELECT * FROM ai_token_usage WHERE repository = ? AND issue_number = ? "
+                "ORDER BY created_at, rowid",
+                (sanitize_text(repository), int(issue_number)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def token_usage_totals(
+        self,
+        repositories: Sequence[str] | str | None = None,
+        *,
+        agent_type: str = "",
+        provider: str = "",
+        model: str = "",
+        prompt_type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> dict[str, Any]:
+        """Aggregate token/cost totals, optionally filtered by any combination
+        of agent type, provider, model, prompt type, and a ``created_at``
+        date range — the shape a future usage dashboard needs without any
+        schema change (issue #280 item 10)."""
+        repository_clause, params = _repository_filter(repositories)
+        conditions = [repository_clause] if repository_clause else []
+        for column, value in (
+            ("agent_type", agent_type),
+            ("provider", provider),
+            ("model", model),
+            ("prompt_type", prompt_type),
+        ):
+            text = sanitize_text(value)
+            if text:
+                conditions.append(f"{column} = ?")
+                params.append(text)
+        if start_date:
+            conditions.append("created_at >= ?")
+            params.append(sanitize_text(start_date))
+        if end_date:
+            conditions.append("created_at <= ?")
+            params.append(sanitize_text(end_date))
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self.connect() as database:
+            row = database.execute(
+                "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
+                "COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), "
+                "COALESCE(SUM(total_tokens), 0), COALESCE(SUM(estimated_cost), 0.0) "
+                f"FROM ai_token_usage{where}",
+                params,
+            ).fetchone()
+        return {
+            "invocations": int(row[0] or 0),
+            "inputTokens": int(row[1] or 0),
+            "outputTokens": int(row[2] or 0),
+            "reasoningTokens": int(row[3] or 0),
+            "cachedInputTokens": int(row[4] or 0),
+            "totalTokens": int(row[5] or 0),
+            "estimatedCost": round(float(row[6] or 0.0), 6),
+        }
+
     def page_for_repository(
         self,
-        repository: str,
+        repositories: Sequence[str] | str | None = None,
         *,
         search: str = "",
         limit: int = PAGE_SIZE,
@@ -687,12 +1126,15 @@ class ExecutionHistoryRepository:
         order = {"rounds_asc": "adversarial_round_count ASC, started_at DESC, attempt_number DESC",
                  "rounds_desc": "adversarial_round_count DESC, started_at DESC, attempt_number DESC"}.get(
                      sort, "started_at DESC, attempt_number DESC")
-        clause, params = _search_filter(search)
+        repository_clause, repository_params = _repository_filter(repositories)
+        clause, search_params = _search_filter(search)
+        where = f" WHERE {repository_clause}" if repository_clause else " WHERE 1 = 1"
+        params = [*repository_params, *search_params]
         with self.connect() as database:
             total = int(
                 database.execute(
-                    f"SELECT COUNT(*) FROM ai_executions WHERE repository = ?{clause}",
-                    (repository, *params),
+                    f"SELECT COUNT(*) FROM ai_executions{where}{clause}",
+                    params,
                 ).fetchone()[0]
             )
             if total == 0:
@@ -701,10 +1143,10 @@ class ExecutionHistoryRepository:
                 offset = ((total - 1) // limit) * limit
             rows = list(
                 database.execute(
-                    "SELECT * FROM ai_executions WHERE repository = ?"
+                    f"SELECT * FROM ai_executions{where}"
                     f"{clause} ORDER BY {order}, execution_id "
                     "LIMIT ? OFFSET ?",
-                    (repository, *params, limit, offset),
+                    (*params, limit, offset),
                 )
             )
         return rows, total, offset, limit
@@ -712,7 +1154,7 @@ class ExecutionHistoryRepository:
 
     def graded_for_repository(
         self,
-        repository: str,
+        repositories: Sequence[str] | str | None = None,
         *,
         search: str = "",
         grade: str = "",
@@ -751,12 +1193,17 @@ class ExecutionHistoryRepository:
         search_clause, search_params = _search_filter(search)
         grade_names = list(GRADE_POINTS)
         grade_slots = ", ".join("?" for _ in grade_names)
+        repository_clause, repository_params = _repository_filter(repositories)
+        conditions = ["routing_decision <> ''"]
+        if repository_clause:
+            conditions.insert(0, repository_clause)
         where = (
-            " WHERE repository = ? AND routing_decision <> ''"
-            f" AND json_extract(routing_decision, '$.prompt_grade') IN ({grade_slots})"
-            f"{search_clause}"
+            " WHERE "
+            + " AND ".join(conditions)
+            + f" AND json_extract(routing_decision, '$.prompt_grade') IN ({grade_slots})"
+            + search_clause
         )
-        params: list[Any] = [repository, *grade_names, *search_params]
+        params: list[Any] = [*repository_params, *grade_names, *search_params]
         grade_where = where
         grade_params = list(params)
         if selected_router:
@@ -771,7 +1218,7 @@ class ExecutionHistoryRepository:
             page_where += " AND json_extract(routing_decision, '$.prompt_grade') = ?"
             page_params.append(selected)
         columns = (
-            "issue_number, issue_title, issue_url, attempt_number, started_at, "
+            "repository, issue_number, issue_title, issue_url, attempt_number, started_at, "
             "ai_provider, model, effort, final_status, routing_decision"
         )
         with self.connect() as database:
@@ -930,6 +1377,47 @@ def _serialize_routing(value: Any) -> str:
     return json.dumps(cleaned)
 
 
+def _serialize_adversarial_filed_findings(value: Any) -> str:
+    """Sanitize the small, user-facing receipt for separately filed UAT bugs."""
+    if not isinstance(value, list):
+        raise ValueError("adversarial_filed_findings must be a list")
+    cleaned = []
+    for finding in value:
+        if not isinstance(finding, dict):
+            raise ValueError("adversarial_filed_findings entries must be objects")
+        url = sanitize_text(finding.get("url", ""))
+        if not re.search(r"/issues/[0-9]+$", url):
+            url = ""
+        cleaned.append({
+            "title": sanitize_text(finding.get("title", "")),
+            "url": url,
+        })
+    return json.dumps(cleaned)
+
+
+def _serialize_security_findings(value: Any) -> str:
+    """Sanitize the structured cybersecurity review metadata.
+
+    Findings quote real code, so every string goes through the same secret
+    scrubber the rest of the history uses before it is persisted.
+    """
+    if not value:
+        return "{}"
+    if not isinstance(value, dict):
+        raise ValueError("security_findings must be an object")
+
+    def clean(item: Any) -> Any:
+        if isinstance(item, str):
+            return sanitize_text(item)
+        if isinstance(item, dict):
+            return {str(key): clean(entry) for key, entry in item.items()}
+        if isinstance(item, list):
+            return [clean(entry) for entry in item]
+        return item
+
+    return json.dumps(clean(value))
+
+
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     """A `sqlite3.Row` as a plain, JSON-ready dict with JSON text columns decoded."""
     record = dict(row)
@@ -1082,6 +1570,20 @@ class ExecutionHistoryService:
             except sqlite3.Error as error:
                 self.error = sanitize_text(error)
 
+    def token_usage_batch(
+        self, repository_name: str, issue_number: int, events: Sequence[dict[str, Any]]
+    ) -> None:
+        """Persist this work-round's accumulated per-prompt usage events; a
+        no-op when history is off. Telemetry failure here must never surface
+        as an error to the caller — see issue #280 item 15."""
+        if self.repository and self.execution_id and events:
+            try:
+                self.repository.record_token_usage_batch(
+                    self.execution_id, repository_name, issue_number, events
+                )
+            except sqlite3.Error as error:
+                self.error = sanitize_text(error)
+
 
 def _page_requested(limit: int | None, offset: int, search: str) -> bool:
     return limit is not None or offset != 0 or bool(normalize_search(search))
@@ -1098,6 +1600,20 @@ def _empty_adversarial_summary() -> dict[str, Any]:
     }
 
 
+def _empty_security_summary() -> dict[str, Any]:
+    return {
+        "reviews": 0,
+        "averageRounds": None,
+        "passPercent": None,
+        "fixedPercent": None,
+        "findingsCreatedPercent": None,
+        "failedPercent": None,
+        "findingsFound": 0,
+        "findingsFixed": 0,
+        "testsAdded": 0,
+    }
+
+
 def _empty_page() -> dict[str, Any]:
     return {
         "records": [],
@@ -1105,15 +1621,16 @@ def _empty_page() -> dict[str, Any]:
         "offset": 0,
         "limit": PAGE_SIZE,
         "adversarial": _empty_adversarial_summary(),
+        "security": _empty_security_summary(),
     }
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`python3 ai_execution_history.py --db PATH --repository OWNER/NAME`.
+    """`python3 ai_execution_history.py --db PATH [--repository OWNER/NAME ...]`.
 
     Without paging flags, prints the repository's executions as a JSON array
     on stdout. `--limit`, `--offset`, or `--search` instead print one page
-    object (`records`/`total`/`offset`/`limit`/`adversarial`) of at most 10
+    object (`records`/`total`/`offset`/`limit`/`adversarial`/`security`) of at most 10
     rows — the desktop Feedback view always uses that form so it never
     receives the full history. Every record carries its `adversarial_rounds`,
     and `adversarial` summarizes the adversarial UAT loop across the whole
@@ -1137,7 +1654,12 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True, help="Path to the SQLite database file.")
-    parser.add_argument("--repository", required=True, help="owner/name to filter by.")
+    parser.add_argument(
+        "--repository",
+        action="append",
+        default=[],
+        help="owner/name to filter by; repeat for multiple repositories, or omit for all.",
+    )
     parser.add_argument("--sort", choices=("recent", "rounds_asc", "rounds_desc"), default="recent")
     parser.add_argument(
         "--import-from-github",
@@ -1193,10 +1715,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     database_path = Path(args.db).expanduser()
-    repository_name = sanitize_text(args.repository)
+    repository_names = [sanitize_text(value) for value in args.repository if value.strip()]
     paging = _page_requested(args.limit, args.offset, args.search) or args.sort != "recent"
 
     if args.import_from_github:
+        if len(repository_names) != 1:
+            print(json.dumps({"error": "Import requires exactly one --repository."}))
+            return 1
+        repository_name = repository_names[0]
         repository = ExecutionHistoryRepository(database_path)
         try:
             issues = fetch_github_issues(args.gh_bin, repository_name)
@@ -1215,7 +1741,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         json.dump(
             ExecutionHistoryRepository(database_path).graded_for_repository(
-                repository_name,
+                repository_names,
                 search=args.search,
                 grade=args.grade,
                 router=args.router,
@@ -1236,7 +1762,9 @@ def main(argv: list[str] | None = None) -> int:
 
     repository = ExecutionHistoryRepository(database_path)
     if not paging:
-        rows = repository.for_repository(repository_name)
+        if len(repository_names) != 1:
+            parser.error("unpaged export requires exactly one --repository")
+        rows = repository.for_repository(repository_names[0])
         json.dump(
             attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
             sys.stdout,
@@ -1244,7 +1772,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     rows, total, offset, limit = repository.page_for_repository(
-        repository_name,
+        repository_names,
         sort=args.sort,
         search=args.search,
         limit=PAGE_SIZE if args.limit is None else args.limit,
@@ -1259,7 +1787,10 @@ def main(argv: list[str] | None = None) -> int:
             "offset": offset,
             "limit": limit,
             "adversarial": repository.adversarial_summary(
-                repository_name, search=args.search
+                repository_names, search=args.search
+            ),
+            "security": repository.security_summary(
+                repository_names, search=args.search
             ),
         },
         sys.stdout,

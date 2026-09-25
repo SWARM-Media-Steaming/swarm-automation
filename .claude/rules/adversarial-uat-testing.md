@@ -5,6 +5,12 @@
 never enter the loop. This behavior-changing setting requires the `minor`
 label from a trusted author; the worker owns VERSION.
 
+- The loop itself is shared with the adversarial cybersecurity agent and lives
+  in `adversarial_core.py`; `adversarial_uat.py` is only the UAT stage
+  definition plus its named entry points. Change the loop there, for both
+  agents, rather than adding a UAT-only branch. See
+  `adversarial-security-testing.md`. When both settings are on, UAT runs first
+  and cybersecurity reviews the result.
 - Round zero is the independent assessment of the normal implementation.
   One counted round is one implementer fix plus one adversarial re-test.
   At most six counted rounds follow the assessment; clean-first-pass is zero.
@@ -16,7 +22,11 @@ label from a trusted author; the worker owns VERSION.
   still starts a fresh session. Dispute adjudication is always a new tester.
 - Tests live under `tests/adversarial/`, registered with `adversarial-` IDs and
   `origin: "adversarial"` in `.swarm/tests.json`. Preserve non-adversarial suites.
-  The existing scheduled runner and failure triage keep running these suites.
+  `tests/adversarial/security/` and `origin: "adversarial-security"` belong to
+  the cybersecurity agent; UAT neither owns nor may edit them.
+  This app has no test scheduler: these suites run only during this issue's own
+  fix/re-test rounds. Nothing here re-runs them after delivery — ongoing
+  regression coverage belongs to the repository's own CI/CD.
 - The fixer cannot change, disable or retire adversarial tests. The worker
   restores attempted edits. A fresh tester may revise earlier expectations
   only in response to a dispute, with a recorded resolution grounded in the
@@ -29,10 +39,15 @@ label from a trusted author; the worker owns VERSION.
   as `adversarialBootstrap` metadata and reuse it on subsequent issues.
 - Out-of-scope findings include reproduction evidence and go through the same
   labelled, assigned issue-creation helper as the CI monitor. They do not enter
-  the blocking suites. A finding may name out-of-scope `suite_ids`; these stay
-  registered for scheduled runs but are excluded from this issue's blocking
-  verdict after the separate issue is filed. A stable finding marker prevents
-  duplicate auto-filing.
+  the blocking suites. GitHub failures while deduplicating or filing them,
+  including an exit-zero malformed `gh issue list --json` response, are
+  retryable and must not abort the original issue's round. A finding may name
+  out-of-scope `suite_ids`; these stay registered in `.swarm/tests.json` but
+  are excluded from this issue's blocking verdict after the separate issue is
+  filed. A stable finding marker prevents duplicate auto-filing. Log both newly
+  filed and deduplicated findings; keep each filed issue's title and URL in
+  execution history so the app can surface the non-blocking follow-up to the
+  user.
 - All exchanges finish before delivery. Clean passes use normal delivery;
   cap-hit delivery explicitly disables automation and retains the PR and branch
   while the issue waits for trusted-author adjudication in AI Needs Input.
@@ -46,6 +61,10 @@ label from a trusted author; the worker owns VERSION.
   cross-language runners do not share a portable test-case count protocol.
   Capacity consumed is an approximate percentage-point drop across used
   providers' remaining-quota snapshots, never token/dollar cost.
+- Emit the stable `Adversarial UAT for issue #...` boundary logs when an
+  independent test, a fix/re-test round, a completed fix, or its re-test
+  begins. The Overview panel replays these logs to show live progress, so
+  preserve their issue number and round/max values when changing the loop.
 
 Pilot on one repository before enabling across the fleet. Inspect the first
 framework scaffold for each stack, particularly Rust/Tauri and Gradle/JUnit.

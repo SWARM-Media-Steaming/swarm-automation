@@ -118,6 +118,28 @@
     },
     {
       "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_now_working_finish_repository_scope.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-finish-repository-scope",
+      "name": "Finishing an issue clears only same-repository Now Working rows",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "tests/adversarial/test_now_working_finish_repository_scope.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
         "python3",
         "-m",
         "unittest",
@@ -166,6 +188,1470 @@
         "files": [
           "Cargo.toml",
           "tests/adversarial/test_ci_rustfmt.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_url_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-url-validation",
+      "name": "Out-of-scope UAT finding URLs are validated before being logged/persisted",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_url_validation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_title_truncation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-title-truncation",
+      "name": "Out-of-scope UAT finding titles match the GitHub issue they're filed as",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_title_truncation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_help_async_refresh_relocation.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-help-async-refresh-relocation",
+      "name": "Help Concepts owns the async-refresh explanation",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "ui/index.html",
+          "tests/adversarial/test_help_async_refresh_relocation.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_filed_finding_actionable_log.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-actionable-log",
+      "name": "Out-of-scope UAT finding log lines appear in the Info & Debug actionable log",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/logging.js",
+          "tests/adversarial/test_filed_finding_actionable_log.js"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_surfaces.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-surfaces",
+      "name": "Out-of-scope UAT findings are logged on every filing path and returned by the history CLI",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_surfaces.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_delivery_loop.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-delivery-loop",
+      "name": "Out-of-scope UAT findings logged during delivery remain in execution history after the round outcome is written",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_delivery_loop.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_log_integrity.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-log-integrity",
+      "name": "Out-of-scope UAT finding log lines stay single-line and duplicate findings are filed once",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_log_integrity.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_filed_finding_log_classification.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-log-classification",
+      "name": "Out-of-scope UAT finding log lines stay info milestones even when the title contains 'failed'",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/logging.js",
+          "tests/adversarial/test_filed_finding_log_classification.js"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_filed_finding_history_item_render.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-history-item-render",
+      "name": "Execution History renders separately filed UAT findings from the camelCase desktop payload",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "tests/adversarial/test_filed_finding_history_item_render.js"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_url_never_backfilled.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-url-never-backfilled",
+      "name": "A filed finding's URL is recovered on a later round once the issue becomes discoverable, instead of staying permanently blank",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_url_never_backfilled.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_whitespace_normalization.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-whitespace-normalization",
+      "name": "Out-of-scope UAT finding titles preserve raw whitespace to match the GitHub issue actually filed",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_whitespace_normalization.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_feedback_global_repository_filter.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-feedback-global-repository-filter",
+      "name": "Feedback: global default and multi-repository filter (backend)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_feedback_global_repository_filter.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_feedback_repo_filter_ui_state.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-feedback-repo-filter-ui-state",
+      "name": "Feedback: repository filter selection/restore state (UI)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "tests/adversarial/test_feedback_repo_filter_ui_state.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_now_working_overview.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-overview",
+      "name": "Now Working shows model/effort and live Adversarial UAT round progress",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "ui/app.js",
+          "tests/adversarial/test_now_working_overview.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_now_working_pinned_continuations.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-pinned-continuations",
+      "name": "Now Working restores model and effort from pinned continuation logs",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "tests/adversarial/test_now_working_pinned_continuations.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_now_working_cold_restart_resume.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-cold-restart-resume",
+      "name": "Cold-restart quota restores resume matching Now Working and UAT rows",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "tests/adversarial/test_now_working_cold_restart_resume.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_now_working_boundary_logs.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-now-working-boundary-logs",
+      "name": "Adversarial UAT emits Overview-panel round boundary logs",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_now_working_boundary_logs.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_test_scheduler_removal.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-test-scheduler-backend-removal",
+      "name": "Test Scheduler backend is removed while Adversarial UAT remains wired",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "Cargo.toml",
+          "src/main.rs",
+          "src/config.rs",
+          "issue_worker/adversarial_uat.py",
+          "tests/adversarial/test_test_scheduler_removal.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_test_scheduler_removal_ui.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-test-scheduler-ui-removal",
+      "name": "Test Scheduler UI is removed and Adversarial UAT owns Now Working progress",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/now-working.js",
+          "tests/adversarial/test_test_scheduler_removal_ui.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_repository_page_consolidation.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-repository-page-consolidation",
+      "name": "Repository page consolidates repo-specific settings into tabs; Advanced and the branch tree are fully removed",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/style.css",
+          "tests/adversarial/test_repository_page_consolidation.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_repository_tabs_wiring.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-repository-tabs-wiring",
+      "name": "Repository page tab wiring: REPOSITORY_TABS matches markup, tabs/panels linked both ways, no duplicate config bindings",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "tests/adversarial/test_repository_tabs_wiring.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_filed_finding_github_failure_resilience.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-filed-finding-github-failure-resilience",
+      "name": "A GitHub error while filing one out-of-scope finding is absorbed, leaving sibling findings, retries and the issue round unaffected",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_filed_finding_github_failure_resilience.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_parallel_drain_transcode_gate.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-parallel-drain-transcode-gate",
+      "name": "A continuous per-repo drain rechecks and honors the media-transcode deferral gate between issues",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/install_swarm_issue_cron.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_parallel_drain_transcode_gate.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_parallel_quota_pause_continues_draining.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-parallel-quota-pause-continues-draining",
+      "name": "A quota-paused repository is rechecked immediately in continuous mode without stalling a healthy sibling",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/install_swarm_issue_cron.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_parallel_quota_pause_continues_draining.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_parallel_repo_retirement_stops_promptly.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-parallel-repo-retirement-stops-promptly",
+      "name": "Removing a repository from a running parallel scheduler stops its worker thread promptly without disturbing a sibling",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/install_swarm_issue_cron.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_parallel_repo_retirement_stops_promptly.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_false_positive.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-false-positive",
+      "name": "Reworded-rediscovery dedup does not merge two distinct real findings that share a phrasing template",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_false_positive.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_qualifier_insertion_false_positive.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-qualifier-insertion-false-positive",
+      "name": "Reworded-rediscovery dedup does not suppress a distinct finding whose title only inserts one qualifying word",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_qualifier_insertion_false_positive.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_word_order_false_negative.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-word-order-false-negative",
+      "name": "Reworded-rediscovery dedup does not fail to merge the same bug when a later round reorders the title",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_word_order_false_negative.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_nonleading_qualifier_insertion_false_positive.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-nonleading-qualifier-insertion-false-positive",
+      "name": "Reworded-rediscovery dedup does not suppress a distinct finding whose distinguishing word is inserted mid-title or appended, not just prepended",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_nonleading_qualifier_insertion_false_positive.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_reworded_dedup_verb_stem_false_negative.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-reworded-dedup-verb-stem-false-negative",
+      "name": "Reworded-rediscovery dedup recognizes the same bug when a later round uses a different verb form (crashes/crash, fixes/fix)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_reworded_dedup_verb_stem_false_negative.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_exit_zero_malformed_issue_list_resilience.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-exit-zero-malformed-issue-list-resilience",
+      "name": "Exit-zero malformed GitHub issue-list JSON leaves UAT filing retryable",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_exit_zero_malformed_issue_list_resilience.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_provider_usage_probe_scheduling_isolation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-provider-usage-probe-scheduling-isolation",
+      "name": "A failed quota probe cannot block fresh scheduling on healthy providers",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_provider_usage_probe_scheduling_isolation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ai_agents_usage_probe_isolation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-usage-probe-isolation",
+      "name": "AI agents panel: one enabled provider's usage-probe exception must not blank the others",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_usage_probe_isolation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_ai_agents_panel_pill_consistency.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-panel-pill-consistency",
+      "name": "AI agents panel: the status pill must agree with the headline about currently-working state",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "tests/adversarial/test_ai_agents_panel_pill_consistency.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_ai_agents_parallel_repositories.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-parallel-repositories",
+      "name": "AI agents panel: interleaved parallel-repository work remains attributed and scoped to the correct provider",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/logging.js",
+          "ui/now-working.js",
+          "issue_worker/install_swarm_issue_cron.py",
+          "tests/adversarial/test_ai_agents_parallel_repositories.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ai_agents_enabled_provider_authority.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-enabled-provider-authority",
+      "name": "AI agents panel: saved enabled providers override inherited worker environment",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_enabled_provider_authority.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_ai_agents_parallel_activity_completeness.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-parallel-activity-completeness",
+      "name": "AI agents panel: parallel repository exits are isolated and every concurrent work location is identified",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "ui/logging.js",
+          "ui/now-working.js",
+          "issue_worker/install_swarm_issue_cron.py",
+          "tests/adversarial/test_ai_agents_parallel_activity_completeness.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ai_agents_usage_value_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-usage-value-validation",
+      "name": "AI agents panel: malformed quota percentages degrade only their provider and preserve strict JSON",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_usage_value_validation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ai_agents_usage_schema_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-usage-schema-validation",
+      "name": "AI agents panel: malformed status/detail fields degrade only their provider at the Rust JSON boundary",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_usage_schema_validation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ai_agents_usage_result_shape.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ai-agents-usage-result-shape",
+      "name": "Malformed provider usage results degrade gracefully without crashing the Overview panel",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_ai_agents_usage_result_shape.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_integration_branch_deletion_ruleset_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-integration-branch-deletion-ruleset-validation",
+      "name": "A same-named GitHub ruleset that does not actually block deletion must not be mistaken for an installed safeguard",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_integration_branch_deletion_ruleset_validation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_integration_branch_deletion_safeguard_failure_modes.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-integration-branch-deletion-safeguard-failure-modes",
+      "name": "A gh identity that can read but not administer rulesets, or a non-list rulesets response, must block the first push",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_integration_branch_deletion_safeguard_failure_modes.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_integration_branch_ruleset_pagination.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-integration-branch-ruleset-pagination",
+      "name": "Integration-branch ruleset lookup paginates GitHub rulesets correctly, finding safeguards on any page",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_integration_branch_ruleset_pagination.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_integration_branch_ruleset_list_response_shape.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-integration-branch-ruleset-list-response-shape",
+      "name": "Existing deletion ruleset is not misread as unprotected due to GitHub list-endpoint response shape",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_integration_branch_ruleset_list_response_shape.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_integration_branch_ruleset_summary_trust_bypass.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-integration-branch-ruleset-summary-trust-bypass",
+      "name": "Same-named summary-shaped ruleset is verified, not blindly trusted, before being treated as an installed deletion safeguard",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_integration_branch_ruleset_summary_trust_bypass.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_ci_without_releases.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-ci-without-releases",
+      "name": "CI retains all test gates while GitHub release stages are absent",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".github/workflows/ci.yml",
+          "tests/adversarial/test_ci_without_releases.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue278",
+        "-p",
+        "test_review_contract.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-review-contract",
+      "name": "Cybersecurity verdict, recovery, scope and local attack/fix integration",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_review_contract.py",
+          "tests/adversarial/issue278/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/issue278/test_review_surfaces.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-review-surfaces",
+      "name": "Cybersecurity failed and completed review visibility",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_review_surfaces.js"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue278",
+        "-p",
+        "test_security_evidence_lifecycle.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-evidence-lifecycle",
+      "name": "Cybersecurity distinct vulnerabilities and verified remediation lifecycle",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_security_evidence_lifecycle.py",
+          "tests/adversarial/issue278/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue278",
+        "-p",
+        "test_security_failure_recovery.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-failure-recovery",
+      "name": "Cybersecurity execution failures, invalid reports, retry and secret-safe logging",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_security_failure_recovery.py",
+          "tests/adversarial/issue278/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue278",
+        "-p",
+        "test_multi_stage_cap_release_gate.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-278-multi-stage-cap-gate",
+      "name": "Cybersecurity multi-stage cap-hit PR release gate",
+      "origin": "adversarial",
+      "requirements": {
+        "aiTestData": false,
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/issue278/test_multi_stage_cap_release_gate.py",
+          "tests/adversarial/issue278/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_branch_creation_ruleset_mocking.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-279-branch-creation-ruleset-mocking",
+      "name": "Branch-creation tests omit integration ruleset API fixtures (issue #279)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_branch_creation_ruleset_mocking.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_token_usage_cached_cost_double_counting.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-280-token-usage-cached-cost-double-counting",
+      "name": "Per-prompt AI token usage: cached-token cost double-counting for Codex/Grok (issue #280)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/token_usage.py",
+          "tests/adversarial/test_token_usage_cached_cost_double_counting.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_token_usage_cross_stage_attribution.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-280-token-usage-cross-stage-attribution",
+      "name": "Per-prompt AI token usage: cross-stage/router attribution integrity and aggregation (issue #280)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "issue_worker/token_usage.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_token_usage_cross_stage_attribution.py"
         ]
       },
       "timeoutSeconds": 300

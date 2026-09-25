@@ -1,6 +1,6 @@
 ---
 name: swarm-automation-dev
-description: Use when working on this repository (SWARM Automation, the Tauri desktop control center for AI issue workers and UAT schedulers) — its test conventions, its standalone (non-workspace) Cargo setup, and the history/status of the bundled issue_worker/ directory.
+description: Use when working on this repository (SWARM Automation, the Tauri desktop control center for AI issue workers) — its test conventions, its standalone (non-workspace) Cargo setup, and the history/status of the bundled issue_worker/ directory.
 ---
 
 # Working in this repository
@@ -11,7 +11,7 @@ The issue-worker automation used to live inside the
 issue automation to Python with provider bots" (#90)). It was pulled out
 into this standalone repo/app so it could be built and distributed
 independently of any one target project — it's meant to run an issue worker
-and UAT scheduler against **any** local Git checkout, not just SWARM's own.
+against **any** local Git checkout, not just SWARM's own.
 Once the standalone app existed, SWARM's own copy was deleted from the
 monorepo as dead weight (issue #169, "Clean up old issue worker scripts":
 *"The issue worker was converted into the swarm automation project so we
@@ -54,6 +54,12 @@ close. Adding a fourth provider = one entry in `KNOWN_PROVIDERS`, a
 should be reachable by dynamic model routing, see "Dynamic model routing"
 below for the further entries it needs.
 
+Fresh-work usage probes are deliberately isolated per provider through
+`Worker.enabled_provider_usages`: an unexpected usage exception marks only
+that provider unavailable for the current scheduling pass, so a healthy
+enabled provider can still receive the issue. Keep that isolation when
+adding provider-selection callers or changing quota probes.
+
 Related, still-accurate mechanics:
 
 - `tauri.conf.json`'s `bundle.resources` entry (`"issue_worker/*.py":
@@ -66,6 +72,20 @@ Related, still-accurate mechanics:
   `scripts/issue_worker/install_swarm_issue_cron.py` is a legacy detection
   heuristic for the UI, not something the worker's own execution path
   branches on.)
+
+## Feedback is app-wide, not tied to the header repository
+
+The Feedback view reads the one app-wide `swarm-automation.sqlite3` database.
+Its repository chips are intentionally independent of the header's active
+repository: `AppConfig.feedback_repo_filter` stores repo ids for that page
+only, with an empty vector meaning all repositories. The Rust history/grade
+commands resolve a non-empty id list to GitHub repository names and pass
+repeated `--repository` arguments to `ai_execution_history.py`; an empty list
+passes no repository argument so Python performs one global SQL query. Keep
+the grade summary, router matrix, adversarial aggregate, paging, and sorting
+server-side over that filtered union rather than merging per-repo responses in
+JavaScript. GitHub backlog import is the exception: it runs once per selected
+configured repository and returns a success/failure result for each one.
 
 ## Dynamic model routing
 
@@ -180,6 +200,97 @@ without requiring a previous commit SHA. See
 `.claude/rules/issue-lifecycle-comments.md` before changing their comment,
 label, cursor, or resumption behavior.
 
+## Multi-repository scheduling
+
+`install_swarm_issue_cron.py` has two deliberately different scheduling
+models. With the default sequential setting, the outer cycle visits each
+repository once. With `--parallel-repos`, a long-running scheduler gives each
+repository a persistent thread supervised by `run_parallel_repos`: after a
+worker reports progress in continuous mode, that repository checks for its
+next issue immediately and never waits for another repository's worker.
+Polling intervals, scheduled wakeups, Run now requests, transcode deferrals,
+and live `repos.json` reloads are supervisor concerns and must not reintroduce
+a shared completion barrier. `--once` remains finite and uses `run_cycle` so
+the caller can receive one aggregate exit status.
+
+## Adversarial agents share one loop
+
+Pre-delivery verification is an open set of adversarial agents, not a single
+UAT feature. The durable loop — round counting, provider choice and dynamic
+routing, quota pause/resume, framework bootstrap, edit validation, out-of-scope
+finding dedup and filing, and hand-off to delivery — lives **once** in
+`issue_worker/adversarial_core.py`. `AdversarialStage` describes one agent;
+`AdversarialStageMixin` runs any of them.
+
+Today there are two stages, each its own repository setting, run in this order
+when both are on:
+
+| | `adversarial_uat.py` | `adversarial_security.py` |
+| --- | --- | --- |
+| Setting | `adversarial_uat_enabled` | `adversarial_security_enabled` |
+| State key | `adversarial` | `adversarial_security` |
+| Test root | `tests/adversarial/` | `tests/adversarial/security/` |
+| Suite origin | `adversarial` | `adversarial-security` |
+| Result marker | `SWARM_ADVERSARIAL_RESULT:` | `SWARM_SECURITY_RESULT:` |
+| Finding label | `adversarial-uat` | `adversarial-security` |
+| Verdict | suite exit codes | suite exit codes **and** structured in-scope findings |
+
+Adding a third agent should be a new `AdversarialStage` subclass, an entry in
+`ADVERSARIAL_STAGES` and `Worker.adversarial_stages()`, a `RepoConfig` flag
+plus its `--…-enabled` argument, and a UI toggle — not a second copy of the
+loop. Anything that treats `"adversarial"` as a literal state key, suite
+origin, or log prefix is a latent bug; use the stage. The rules files
+`.claude/rules/adversarial-uat-testing.md` and
+`.claude/rules/adversarial-security-testing.md` are the behavioural contract.
+
+`adversarial_uat.py` re-exports the core's shared names (`MAX_ROUNDS`,
+`DEFINITION`, `RESULT_MARKER`, `read_definition`, `run_suites`, …) because
+registered adversarial suites under `tests/adversarial/` import them from
+there; keep those aliases when moving code around.
+
+## Per-prompt AI token usage is centralized, not per-agent
+
+Every Claude/Codex/Grok invocation's token usage (issue #280) is captured at
+the two chokepoints every agent already goes through, not inside each agent:
+`Worker.run_ai` (primary implementation, and — via
+`AdversarialStageMixin.run_adversarial_stage` — both adversarial stages) and
+`Worker.run_router` (dynamic routing / pre-flight grading, including its one
+corrective model-name retry). A new agent that calls through either of those
+gets usage tracking for free; adding tracking inside a new agent directly is
+the bug this design exists to prevent.
+
+`issue_worker/token_usage.py` owns provider-agnostic normalization
+(`normalize_claude_usage`/`normalize_codex_usage`/`normalize_grok_usage`,
+dispatched by `normalize_usage`), cost estimation (`estimate_cost`, which
+reuses `dynamic_router.model_cost`'s 1–5 relative rank — there is no other
+per-model dollar pricing table in this app, so a rank change is the only
+thing that ever needs to change a cost estimate), the `AgentType`/`PromptType`
+enums, and the GitHub `### AI Usage` table renderer (`render_ai_usage_markdown`).
+`Worker._record_usage_event` is the one place that normalizes, costs, logs
+(`AI_USAGE_RECORDED`), and stashes a usage event; `record_ai_usage` and
+`record_router_usage` are its two thin, context-specific callers.
+
+`Worker.infer_ai_agent_context` reads the *existing* adversarial loop state
+(`stage.key`/`phase`/`round` in the in-progress state file) to attribute a
+`run_ai` call to `primary`/`adversarial_uat`/`adversarial_cybersecurity`
+automatically — it does not add a parameter to `run_ai` for this, since that
+would be exactly the kind of per-call-site wiring a future agent could forget.
+
+Usage events accumulate in `Worker.token_usage_events` (mirrored into the
+in-progress state under `token_usage_events` once that file exists, since a
+pre-flight routing call can happen before it does — see
+`save_new_state`/`_append_token_usage_event`) for the whole work-round, are
+rendered into the existing single completion comment (`pending["ai_usage_
+report"]` inside `render_pending_comment`, not a second GitHub comment), and
+are persisted in one batch to the `ai_token_usage` table (migration 6 in
+`ai_execution_history.py`) by `flush_token_usage_to_history` once
+`finish_execution_history` confirms the work-round's `ai_executions` row
+exists. That table is gated by `ai_execution_history_enabled` like every
+other execution-history table (`adversarial_rounds` included); the GitHub
+report itself is not — it renders from the in-memory/state event list
+regardless of that setting, the same way `render_usage_report`'s quota lines
+already do.
+
 ## Test suite
 
 `src/command_tests.rs` (registered from `src/main.rs` via `#[path]`)
@@ -203,12 +314,12 @@ testable this way:
    defaults to empty.
 
 Deliberately **not** covered by this suite: `start_issue_worker`,
-`start_uat_scheduler`, `install_ai_cli`, and `launch_bot_setup` — these
-spawn real child processes (`python3`, `bash`, `npm`) and are better
-verified by an actual `npm run dev`/`npm run build` + launch than by tests
-that would install real software or make real GitHub calls.
+`install_ai_cli`, and `launch_bot_setup` — these spawn real child processes
+(`python3`, `bash`, `npm`) and are better verified by an actual `npm run
+dev`/`npm run build` + launch than by tests that would install real software
+or make real GitHub calls.
 
-Run with `cargo test`. The `test` job in `.github/workflows/release.yml`
+Run with `cargo test`. The `test` job in `.github/workflows/ci.yml`
 runs `cargo fmt --all -- --check` before clippy, tests, Python, and frontend
 suites; a long line that rustfmt would wrap (common in `src/main.rs` unit
 tests) fails CI even when `cargo test` is green. Format with `cargo fmt
@@ -225,3 +336,12 @@ not `pytest`** — pytest's module-level `setup_module` auto-detection
 collides with this file importing `setup_github_bots` under a name pytest
 mistakes for that hook, failing every test at collection with
 `AttributeError: module 'setup_github_bots' has no attribute '__code__'`.
+
+When testing or changing integration-branch creation, preserve its GitHub
+deletion safeguard: before the worker first pushes a new integration branch,
+it adds SWARM's named active repository ruleset with the `deletion` rule for
+that exact ref. It deliberately uses the operator's administrator-authorized
+GitHub CLI identity, not a worker GitHub App token, and must fail before the
+first push if the safeguard cannot be verified or created. Do not replace this
+with a broad branch-protection update, which could overwrite an existing
+repository policy.
