@@ -1582,6 +1582,7 @@ def run_provider_router(
     cwd: Path,
     timeout: float = 180,
     images: Sequence[Path] = (),
+    usage_sink: list[Any] | None = None,
 ) -> str:
     """One-shot router call that does not start or resume the worker session.
 
@@ -1589,10 +1590,17 @@ def run_provider_router(
     and sandboxed read-only. Grok is limited to one turn and cannot ask to
     edit the repository. A failure raises ``RouterError`` so the worker can
     keep the manually configured model.
+
+    ``usage_sink``, when given a list, gets exactly one item appended: the
+    normalized token usage for this call (``None`` if the provider reported
+    none). An out-param rather than a richer return type keeps every existing
+    caller of this function — which only wants the extracted text — unchanged
+    (see issue #280).
     """
     return run_provider_oneshot(
         provider=provider, bin_path=bin_path, model=model, effort=effort, prompt=prompt,
         cwd=cwd, schema=ROUTER_RESPONSE_SCHEMA, timeout=timeout, images=images,
+        usage_sink=usage_sink,
     )
 
 
@@ -1607,13 +1615,21 @@ def run_provider_oneshot(
     schema: dict[str, Any],
     timeout: float = 180,
     images: Sequence[Path] = (),
+    usage_sink: list[Any] | None = None,
 ) -> str:
     """Same one-shot, no-tools, no-session-persistence call ``run_provider_router``
     uses, generalized to an arbitrary JSON response schema. Any caller other
     than the model router itself (e.g. the diagnostic explainer) should use
     this directly rather than ``run_provider_router``, which is pinned to
     ``ROUTER_RESPONSE_SCHEMA``.
+
+    See ``run_provider_router`` for what ``usage_sink`` does.
     """
+    from token_usage import normalize_usage
+
+    def _record_usage(raw_text: str) -> None:
+        if usage_sink is not None:
+            usage_sink.append(normalize_usage(provider, raw_text))
     if not _command_available(bin_path):
         raise RouterError(f"{provider} executable is unavailable")
     if not model.strip():
@@ -1661,6 +1677,7 @@ def run_provider_oneshot(
                 ]
             )
             completed = _run(command, cwd=cwd, timeout=timeout, stdin=stdin)
+            _record_usage(completed)
             return extract_router_text(provider, completed)
         if provider == "codex":
             command = [
@@ -1684,6 +1701,7 @@ def run_provider_oneshot(
                 "-",
             ]
             completed = _run(command, cwd=cwd, timeout=timeout, stdin=prompt)
+            _record_usage(completed)
             message = last_message.read_text(encoding="utf-8") if last_message.exists() else ""
             return extract_router_text(provider, completed, message)
         if provider == "grok":
@@ -1720,6 +1738,7 @@ def run_provider_oneshot(
                 ]
             )
             completed = _run(command, cwd=cwd, timeout=timeout, stdin=None)
+            _record_usage(completed)
             return extract_router_text(provider, completed)
     raise RouterError(f"no router runner for provider {provider}")
 
