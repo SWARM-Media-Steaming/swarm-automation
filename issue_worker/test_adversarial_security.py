@@ -290,6 +290,36 @@ class AdversarialSecurityTests(unittest.TestCase):
         self.assertEqual(loop["outcome"], "resolved_after_n")
         self.assertEqual((self.repo / "tracked.txt").read_text().strip(), "fixed")
 
+    def test_pipeline_resumes_a_later_stage_left_dirty_behind_an_already_finished_earlier_one(self):
+        # Regression: UAT finishes cleanly, then the security stage's fix
+        # round writes its fix to disk (response cached) but crashes before
+        # committing it — the shape of a validate/commit failure like the
+        # production index.lock collision. Every retry after that used to
+        # re-check UAT's already-"done" worktree cleanliness on the way
+        # through the pipeline and abort before the security stage, the one
+        # actually stuck, ever got a turn to resume its cached response.
+        self.prepare(uat_enabled=True)
+        self.worker.initialize_stage(uat.UAT_STAGE, self.implementation, "## Summary\nImplementation")
+        real_validate = self.worker.validate_stage_edits
+        crashed = []
+
+        def flaky_validate(stage, loop, report):
+            if stage is security.SECURITY_STAGE and loop["phase"] == "fix" and not crashed:
+                crashed.append(True)
+                raise WorkerError("simulated index.lock crash mid-validation")
+            return real_validate(stage, loop, report)
+
+        with self.patches(), mock.patch.object(self.worker, "validate_stage_edits", side_effect=flaky_validate):
+            with self.assertRaisesRegex(WorkerError, "simulated index.lock crash"):
+                self.worker.run_adversarial_pipeline()
+        self.assertNotIn("ghp_", (self.repo / "service.py").read_text())
+        self.assertTrue(self.worker.worktree_status())
+        with self.patches():
+            self.assertEqual(self.worker.run_adversarial_pipeline(), 10)
+        self.assertFalse(self.worker.worktree_status() if self.worker.in_progress_file.exists() else False)
+        loop = self.loop_state()
+        self.assertEqual(loop["outcome"], "resolved_after_n")
+
     def test_cap_hit_reports_failed_and_never_pass(self):
         self.prepare()
         self.start()

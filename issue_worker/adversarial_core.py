@@ -651,13 +651,24 @@ class AdversarialStageMixin:
             if protected:
                 # Preserve product repairs, but undo attempts to grade one's own
                 # homework. A fresh tester, not the fixer, sees this as a dispute.
-                for path in sorted(protected):
-                    if self.git_ok("cat-file", "-e", f"{baseline}:{path}"):
-                        self.git("restore", f"--source={baseline}", "--staged", "--worktree", "--", path)
-                    else:
-                        self.git("rm", "-f", "--ignore-unmatch", "--", path)
+                # Batched (git ls-tree once, then one restore call and one rm
+                # call) rather than one git subprocess per path: an
+                # ungitignored Cargo/npm scaffold under tests/adversarial/ can
+                # leave thousands of untracked build artifacts here, which
+                # also fall under TEST_ROOT and made a per-file loop slow
+                # enough to collide with other git activity on .git/index.lock.
+                sorted_protected = sorted(protected)
+                existed_at_baseline = set(self.git("ls-tree", "-r", "--name-only", "-z", baseline, "--",
+                                                    *sorted_protected, check=False).split("\0")) - {""}
+                to_restore = [p for p in sorted_protected if p in existed_at_baseline]
+                to_remove = [p for p in sorted_protected if p not in existed_at_baseline]
+                if to_restore:
+                    self.git("restore", f"--source={baseline}", "--staged", "--worktree", "--", *to_restore)
+                if to_remove:
+                    self.git("rm", "-f", "--ignore-unmatch", "--", *to_remove)
+                    for path in to_remove:
                         (self.config.repo_dir / path).unlink(missing_ok=True)
-                loop["dispute"] += "\nFixer attempted to alter protected tests; worker restored them: " + ", ".join(sorted(protected))
+                loop["dispute"] += "\nFixer attempted to alter protected tests; worker restored them: " + ", ".join(sorted_protected)
             return 0, 0
         forbidden = paths - {p for p in paths if stage.owns_path(p) or p == DEFINITION or p in FRAMEWORK_FILES}
         if forbidden:
@@ -668,7 +679,11 @@ class AdversarialStageMixin:
         if others(before) != others(after):
             raise WorkerError("Tester changed existing framework choice or non-adversarial suites/metadata")
         changed_tests = {p for p in paths if stage.owns_path(p)}
-        prior = {p for p in changed_tests if self.git_ok("cat-file", "-e", f"{baseline}:{p}")}
+        # One batched git ls-tree instead of one `git cat-file -e` per path,
+        # for the same reason as the fix-phase restoration above.
+        existed_at_baseline = set(self.git("ls-tree", "-r", "--name-only", "-z", baseline, "--",
+                                           *changed_tests, check=False).split("\0")) - {""} if changed_tests else set()
+        prior = changed_tests & existed_at_baseline
         old_suites = [s for s in before["suites"] if s.get("origin") == stage.origin]
         new_suites = [s for s in after["suites"] if s.get("origin") == stage.origin]
         revised = prior or any(s not in new_suites for s in old_suites)
@@ -1075,8 +1090,6 @@ class AdversarialStageMixin:
         self.history.update(iso_timestamp(), **stage.history_fields(loop),
                             capacity_consumed_percent=self.adversarial_capacity_consumed())
         log(f"{stage.label} for issue #{self.issue.number}: review completed with status {loop['status']}.")
-        if self.worktree_status():
-            raise WorkerError("Adversarial delivery has uncommitted changes")
         return None
 
     def adversarial_capacity_consumed(self) -> float | None:
@@ -1102,7 +1115,7 @@ class AdversarialStageMixin:
 
     def run_adversarial_pipeline(self) -> int:
         """Run every enabled adversarial stage in order, then deliver once."""
-        from swarm_issue_worker import ISSUE_COMPLETED_EXIT_CODE, ProviderChoice
+        from swarm_issue_worker import ISSUE_COMPLETED_EXIT_CODE, ProviderChoice, WorkerError
         stages = self.adversarial_stages()
         previous = None
         for stage in stages:
@@ -1121,6 +1134,16 @@ class AdversarialStageMixin:
                     ((stage, self.read_stage(stage)) for stage in stages) if loop]
         if not finished:
             raise RuntimeError("No adversarial stage state to deliver")
+        # Checked once, here, after every enabled stage has reached "done" —
+        # not inside run_adversarial_stage, which runs once per stage on
+        # every pipeline invocation including ones where that stage did no
+        # new work this round. An already-finished earlier stage (e.g. UAT)
+        # was tripping this same check on every retry because a *later*
+        # stage (e.g. cybersecurity) was still mid-round with its own
+        # uncommitted fix, which aborted the whole pipeline before the later
+        # stage ever got a turn to resume and commit its own work.
+        if self.worktree_status():
+            raise WorkerError("Adversarial delivery has uncommitted changes")
         last = finished[-1][1]
         self.choice = ProviderChoice(**last["delivery_choice"])
         self.update_state_for_choice(self.choice)
