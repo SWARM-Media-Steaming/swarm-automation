@@ -1597,6 +1597,33 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_token_usage_cached_cost_double_counting.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-280-token-usage-cached-cost-double-counting",
+      "name": "Per-prompt AI token usage: cached-token cost double-counting for Codex/Grok (issue #280)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/token_usage.py",
+          "tests/adversarial/test_token_usage_cached_cost_double_counting.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
