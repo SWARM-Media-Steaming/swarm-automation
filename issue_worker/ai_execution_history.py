@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -162,6 +162,41 @@ _ADVERSARIAL_ROUND_COLUMNS = (
     "findings_fixed",
     "findings_filed",
     "severity_counts",
+)
+
+# Migration 6 adds per-prompt AI token usage (issue #280). Unlike the other
+# migrations, ``ai_token_usage`` rows are not tied to ``ai_executions`` by a
+# foreign key: a dynamic-routing call can happen before ``ai_executions`` even
+# has a row for this attempt (routing runs before ``start_execution_history``),
+# so ``execution_id`` here is a plain, indexed column rather than an enforced
+# reference — a row with an execution_id that does not (yet) resolve is still
+# useful telemetry, never a constraint violation that could break an
+# otherwise-successful AI call.
+_TOKEN_USAGE_COLUMNS = (
+    "execution_id",
+    "repository",
+    "issue_number",
+    "workflow_run_id",
+    "agent_run_id",
+    "prompt_id",
+    "provider",
+    "model",
+    "reasoning_effort",
+    "agent_type",
+    "prompt_type",
+    "attempt_number",
+    "input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "cached_input_tokens",
+    "total_tokens",
+    "estimated_cost",
+    "currency",
+    "started_at",
+    "completed_at",
+    "duration_ms",
+    "success",
+    "error_type",
 )
 
 _SECRET_PATTERNS = (
@@ -506,6 +541,51 @@ class ExecutionHistoryRepository:
                 database.execute(
                     "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                     (5,),
+                )
+            if 6 not in applied and 6 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                database.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS ai_token_usage (
+                        id TEXT PRIMARY KEY,
+                        execution_id TEXT NOT NULL DEFAULT '',
+                        repository TEXT NOT NULL DEFAULT '',
+                        issue_number INTEGER NOT NULL DEFAULT 0,
+                        workflow_run_id TEXT NOT NULL DEFAULT '',
+                        agent_run_id TEXT NOT NULL DEFAULT '',
+                        prompt_id TEXT NOT NULL DEFAULT '',
+                        provider TEXT NOT NULL DEFAULT '',
+                        model TEXT NOT NULL DEFAULT '',
+                        reasoning_effort TEXT NOT NULL DEFAULT '',
+                        agent_type TEXT NOT NULL DEFAULT '',
+                        prompt_type TEXT NOT NULL DEFAULT '',
+                        attempt_number INTEGER NOT NULL DEFAULT 1,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        reasoning_tokens INTEGER,
+                        cached_input_tokens INTEGER,
+                        total_tokens INTEGER,
+                        estimated_cost REAL,
+                        currency TEXT NOT NULL DEFAULT 'USD',
+                        started_at TEXT NOT NULL DEFAULT '',
+                        completed_at TEXT NOT NULL DEFAULT '',
+                        duration_ms INTEGER,
+                        success INTEGER NOT NULL DEFAULT 1,
+                        error_type TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE INDEX IF NOT EXISTS ai_token_usage_execution_idx
+                        ON ai_token_usage(execution_id);
+                    CREATE INDEX IF NOT EXISTS ai_token_usage_issue_idx
+                        ON ai_token_usage(repository, issue_number);
+                    CREATE INDEX IF NOT EXISTS ai_token_usage_agent_idx
+                        ON ai_token_usage(agent_type, provider, model);
+                    """
+                )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (6,),
                 )
 
     def create(self, start: ExecutionStart, started_at: str) -> str:
@@ -901,6 +981,129 @@ class ExecutionHistoryRepository:
             "findingsFound": int(rounds[0] or 0),
             "findingsFixed": int(rounds[1] or 0),
             "testsAdded": int(rounds[2] or 0),
+        }
+
+    def record_token_usage_batch(
+        self, execution_id: str, repository: str, issue_number: int, events: Sequence[dict[str, Any]]
+    ) -> None:
+        """Persist every accumulated per-prompt usage event of one work-round.
+
+        Called once, when the work-round reaches a terminal state (see
+        ``finish_execution_history``) rather than after each individual AI
+        call: some calls (dynamic routing) happen before this execution's own
+        ``ai_executions`` row exists, so batching at the end is what lets
+        every event still carry the now-known ``execution_id`` without
+        blocking on write ordering. ``INSERT OR IGNORE`` on the event's own
+        stable id makes a repeated flush of the same (already-persisted)
+        state safe — a retried scheduler tick can never duplicate a row.
+        """
+        if not events:
+            return
+        columns = ", ".join(("id", "created_at", *_TOKEN_USAGE_COLUMNS))
+        slots = ", ".join("?" for _ in range(len(_TOKEN_USAGE_COLUMNS) + 2))
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        rows = []
+        for event in events:
+            event_id = sanitize_text(event.get("id")) or str(uuid.uuid4())
+            values = [event_id, now]
+            for column in _TOKEN_USAGE_COLUMNS:
+                if column == "execution_id":
+                    values.append(execution_id)
+                elif column == "repository":
+                    values.append(sanitize_text(repository))
+                elif column == "issue_number":
+                    values.append(int(issue_number or 0))
+                elif column in {
+                    "attempt_number", "input_tokens", "output_tokens", "reasoning_tokens",
+                    "cached_input_tokens", "total_tokens", "duration_ms",
+                }:
+                    raw_value = event.get(column)
+                    values.append(None if raw_value is None else int(raw_value))
+                elif column == "estimated_cost":
+                    raw_value = event.get(column)
+                    values.append(None if raw_value is None else float(raw_value))
+                elif column == "success":
+                    values.append(1 if event.get(column, True) else 0)
+                elif column == "currency":
+                    values.append(sanitize_text(event.get(column)) or "USD")
+                else:
+                    values.append(sanitize_text(event.get(column)))
+            rows.append(tuple(values))
+        with self.connect() as database:
+            database.executemany(
+                f"INSERT OR IGNORE INTO ai_token_usage ({columns}) VALUES ({slots})",
+                rows,
+            )
+
+    def token_usage_for_execution(self, execution_id: str) -> list[dict[str, Any]]:
+        """Every recorded invocation of one execution, in the order they ran."""
+        with self.connect() as database:
+            rows = database.execute(
+                "SELECT * FROM ai_token_usage WHERE execution_id = ? ORDER BY created_at, rowid",
+                (execution_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def token_usage_for_issue(self, repository: str, issue_number: int) -> list[dict[str, Any]]:
+        """Every recorded invocation across every attempt of one issue."""
+        with self.connect() as database:
+            rows = database.execute(
+                "SELECT * FROM ai_token_usage WHERE repository = ? AND issue_number = ? "
+                "ORDER BY created_at, rowid",
+                (sanitize_text(repository), int(issue_number)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def token_usage_totals(
+        self,
+        repositories: Sequence[str] | str | None = None,
+        *,
+        agent_type: str = "",
+        provider: str = "",
+        model: str = "",
+        prompt_type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> dict[str, Any]:
+        """Aggregate token/cost totals, optionally filtered by any combination
+        of agent type, provider, model, prompt type, and a ``created_at``
+        date range — the shape a future usage dashboard needs without any
+        schema change (issue #280 item 10)."""
+        repository_clause, params = _repository_filter(repositories)
+        conditions = [repository_clause] if repository_clause else []
+        for column, value in (
+            ("agent_type", agent_type),
+            ("provider", provider),
+            ("model", model),
+            ("prompt_type", prompt_type),
+        ):
+            text = sanitize_text(value)
+            if text:
+                conditions.append(f"{column} = ?")
+                params.append(text)
+        if start_date:
+            conditions.append("created_at >= ?")
+            params.append(sanitize_text(start_date))
+        if end_date:
+            conditions.append("created_at <= ?")
+            params.append(sanitize_text(end_date))
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self.connect() as database:
+            row = database.execute(
+                "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
+                "COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), "
+                "COALESCE(SUM(total_tokens), 0), COALESCE(SUM(estimated_cost), 0.0) "
+                f"FROM ai_token_usage{where}",
+                params,
+            ).fetchone()
+        return {
+            "invocations": int(row[0] or 0),
+            "inputTokens": int(row[1] or 0),
+            "outputTokens": int(row[2] or 0),
+            "reasoningTokens": int(row[3] or 0),
+            "cachedInputTokens": int(row[4] or 0),
+            "totalTokens": int(row[5] or 0),
+            "estimatedCost": round(float(row[6] or 0.0), 6),
         }
 
     def page_for_repository(
@@ -1364,6 +1567,20 @@ class ExecutionHistoryService:
         if self.repository and self.execution_id:
             try:
                 self.repository.append(self.execution_id, "warnings_errors", message, now)
+            except sqlite3.Error as error:
+                self.error = sanitize_text(error)
+
+    def token_usage_batch(
+        self, repository_name: str, issue_number: int, events: Sequence[dict[str, Any]]
+    ) -> None:
+        """Persist this work-round's accumulated per-prompt usage events; a
+        no-op when history is off. Telemetry failure here must never surface
+        as an error to the caller — see issue #280 item 15."""
+        if self.repository and self.execution_id and events:
+            try:
+                self.repository.record_token_usage_batch(
+                    self.execution_id, repository_name, issue_number, events
+                )
             except sqlite3.Error as error:
                 self.error = sanitize_text(error)
 

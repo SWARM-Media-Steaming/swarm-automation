@@ -248,6 +248,49 @@ origin, or log prefix is a latent bug; use the stage. The rules files
 registered adversarial suites under `tests/adversarial/` import them from
 there; keep those aliases when moving code around.
 
+## Per-prompt AI token usage is centralized, not per-agent
+
+Every Claude/Codex/Grok invocation's token usage (issue #280) is captured at
+the two chokepoints every agent already goes through, not inside each agent:
+`Worker.run_ai` (primary implementation, and — via
+`AdversarialStageMixin.run_adversarial_stage` — both adversarial stages) and
+`Worker.run_router` (dynamic routing / pre-flight grading, including its one
+corrective model-name retry). A new agent that calls through either of those
+gets usage tracking for free; adding tracking inside a new agent directly is
+the bug this design exists to prevent.
+
+`issue_worker/token_usage.py` owns provider-agnostic normalization
+(`normalize_claude_usage`/`normalize_codex_usage`/`normalize_grok_usage`,
+dispatched by `normalize_usage`), cost estimation (`estimate_cost`, which
+reuses `dynamic_router.model_cost`'s 1–5 relative rank — there is no other
+per-model dollar pricing table in this app, so a rank change is the only
+thing that ever needs to change a cost estimate), the `AgentType`/`PromptType`
+enums, and the GitHub `### AI Usage` table renderer (`render_ai_usage_markdown`).
+`Worker._record_usage_event` is the one place that normalizes, costs, logs
+(`AI_USAGE_RECORDED`), and stashes a usage event; `record_ai_usage` and
+`record_router_usage` are its two thin, context-specific callers.
+
+`Worker.infer_ai_agent_context` reads the *existing* adversarial loop state
+(`stage.key`/`phase`/`round` in the in-progress state file) to attribute a
+`run_ai` call to `primary`/`adversarial_uat`/`adversarial_cybersecurity`
+automatically — it does not add a parameter to `run_ai` for this, since that
+would be exactly the kind of per-call-site wiring a future agent could forget.
+
+Usage events accumulate in `Worker.token_usage_events` (mirrored into the
+in-progress state under `token_usage_events` once that file exists, since a
+pre-flight routing call can happen before it does — see
+`save_new_state`/`_append_token_usage_event`) for the whole work-round, are
+rendered into the existing single completion comment (`pending["ai_usage_
+report"]` inside `render_pending_comment`, not a second GitHub comment), and
+are persisted in one batch to the `ai_token_usage` table (migration 6 in
+`ai_execution_history.py`) by `flush_token_usage_to_history` once
+`finish_execution_history` confirms the work-round's `ai_executions` row
+exists. That table is gated by `ai_execution_history_enabled` like every
+other execution-history table (`adversarial_rounds` included); the GitHub
+report itself is not — it renders from the in-memory/state event list
+regardless of that setting, the same way `render_usage_report`'s quota lines
+already do.
+
 ## Test suite
 
 `src/command_tests.rs` (registered from `src/main.rs` via `#[path]`)
