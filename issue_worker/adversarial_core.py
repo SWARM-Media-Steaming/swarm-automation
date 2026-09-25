@@ -606,20 +606,31 @@ class AdversarialStageMixin:
         paths = sorted(self.adversarial_changed_paths(baseline))
         patch_path = self.state / "last-rejected-adversarial.patch"
         patch = self.git("diff", "--binary", "--no-ext-diff", baseline, "--", *paths, check=False) if paths else ""
-        untracked = set(self.git("ls-files", "--others", "--exclude-standard", "-z", "--", *paths,
-                                 check=False).split("\0")) if paths else set()
-        for path in sorted(untracked - {""}):
-            result = subprocess.run(
-                [self.config.git_bin, "-C", str(self.config.repo_dir), "diff", "--binary", "--no-index", "--", "/dev/null", path],
-                text=True, capture_output=True, check=False,
-            )
-            patch += ("\n" if patch and not patch.endswith("\n") else "") + result.stdout
+        untracked = sorted(set(self.git("ls-files", "--others", "--exclude-standard", "-z", "--", *paths,
+                                        check=False).split("\0")) - {""}) if paths else []
+        if untracked:
+            # A single batched diff instead of one `git diff --no-index`
+            # subprocess per file: an ungitignored Cargo/npm scaffold under
+            # tests/adversarial/ can leave thousands of untracked build
+            # artifacts here, and spawning a subprocess per file made this
+            # pass slow enough to still be running when the next scheduled
+            # cycle started, colliding with it on .git/index.lock.
+            self.git("add", "--intent-to-add", "--", *untracked)
+            untracked_patch = self.git("diff", "--binary", "--no-ext-diff", "--", *untracked, check=False)
+            self.git("reset", "--", *untracked)
+            patch += ("\n" if patch and not patch.endswith("\n") else "") + untracked_patch
         patch_path.write_text(patch, encoding="utf-8")
-        for path in paths:
-            if self.git_ok("cat-file", "-e", f"{baseline}:{path}"):
-                self.git("restore", f"--source={baseline}", "--staged", "--worktree", "--", path)
-            else:
-                self.git("rm", "-f", "--ignore-unmatch", "--", path, check=False)
+        # One batched existence lookup instead of one `git cat-file -e` per
+        # path, for the same reason.
+        existed_at_baseline = set(self.git("ls-tree", "-r", "--name-only", "-z", baseline, "--", *paths,
+                                           check=False).split("\0")) - {""} if paths else set()
+        tracked_at_baseline = [p for p in paths if p in existed_at_baseline]
+        newly_added = [p for p in paths if p not in existed_at_baseline]
+        if tracked_at_baseline:
+            self.git("restore", f"--source={baseline}", "--staged", "--worktree", "--", *tracked_at_baseline)
+        if newly_added:
+            self.git("rm", "-f", "--ignore-unmatch", "--", *newly_added, check=False)
+            for path in newly_added:
                 (self.config.repo_dir / path).unlink(missing_ok=True)
         return paths, patch_path
 
