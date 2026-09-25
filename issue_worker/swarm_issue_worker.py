@@ -3072,9 +3072,11 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
             )
         if self.config.allow_environment_only_summary:
             lines.append(
-                "If repository evidence shows this is caused only by local environment, credentials, "
-                "external services, or infrastructure state, do not write code. Provide the requested "
-                f"summary and put {ENVIRONMENT_ONLY_MARKER} on its own final line."
+                "If repository evidence shows no code change is needed here — because the cause is "
+                "local environment, credentials, external services, or infrastructure state, or "
+                "because the reported problem no longer reproduces or was already fixed by other "
+                f"work — do not write code. Provide the requested summary and put {ENVIRONMENT_ONLY_MARKER} "
+                "on its own final line."
             )
         if question_issue:
             lines.append(QUESTION_INSTRUCTION)
@@ -4941,7 +4943,8 @@ class Worker(AdversarialUatMixin, HandoffContextMixin):
         )
         body = (
             f"{marker}\nReviewed by **{self.choice.name}** with no code changes.\n\n"
-            "- Result: this appears to be environmental rather than a code change.\n"
+            "- Result: no code change was needed here; see the AI summary below for why "
+            "(environmental cause, or the reported problem no longer reproduces).\n"
             f"{usage_lines}\n"
             "<details><summary>AI summary</summary>\n\n"
             f"{ai_output or '(No captured AI output was available.)'}\n"
