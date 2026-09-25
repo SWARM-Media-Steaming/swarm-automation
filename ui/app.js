@@ -109,7 +109,7 @@
     },
     "provider-include-exclude": {
       title: "Enabled AI tools",
-      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set the shared minimum quota reserve.</p><p><strong>Dynamic Model Routing</strong> grades the original issue, picks which enabled provider handles it, and chooses that provider’s worker model and reasoning effort from the models it offers. The card’s router model performs the grading; to tell the providers apart it uses each one’s remaining usage and a built-in summary of what it tends to be good at. Turn routing off to choose the provider order and the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
+      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set that provider’s own minimum quota reserve. Changing one card does not change the others.</p><p><strong>Dynamic Model Routing</strong> grades the original issue, picks which enabled provider handles it, and chooses that provider’s worker model and reasoning effort from the models it offers. The card’s router model performs the grading; to tell the providers apart it uses each one’s remaining usage and a built-in summary of what it tends to be good at. Turn routing off to choose the provider order and the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
       links: [],
     },
     "software-update": {
@@ -124,7 +124,7 @@
     },
     "quota-threshold": {
       title: "Minimum quota remaining",
-      html: "<p>This keeps a small part of an AI provider’s usage allowance in reserve. If the provider falls below the chosen percentage, the app waits or tries another enabled provider.</p>",
+      html: "<p>Each AI provider has its own reserve. If that provider falls below the percentage on its card, the app waits or tries another enabled provider. 0% allows the provider to be selected until its most constrained usage window is empty. A saved change applies on the next worker cycle without restarting the scheduler.</p>",
       links: [],
     },
     "delivery-mode": {
@@ -559,6 +559,9 @@
         router_model: routerModel,
         router_effort: entry.router_effort || routerDefault.effort,
         bin: entry.bin || "",
+        minimum_remaining_percent: Number.isFinite(Number(entry.minimum_remaining_percent))
+          ? Number(entry.minimum_remaining_percent)
+          : Number(config.minimum_remaining_percent ?? 10),
       };
     });
   }
@@ -699,13 +702,8 @@
       quotaInput.min = "0";
       quotaInput.max = "100";
       quotaInput.className = "provider-minimum-quota";
-      quotaInput.value = String(config.minimum_remaining_percent ?? 10);
-      quotaInput.addEventListener("input", () => {
-        document.querySelectorAll(".provider-minimum-quota").forEach((input) => {
-          if (input !== quotaInput) input.value = quotaInput.value;
-        });
-        setDirty();
-      });
+      quotaInput.value = String(provider.minimum_remaining_percent ?? 10);
+      quotaInput.addEventListener("input", setDirty);
       const suffix = document.createElement("span");
       suffix.textContent = "%";
       quotaWrap.append(quotaInput, suffix);
@@ -806,6 +804,7 @@
       router_model: card.querySelector(".provider-router-model")?.value.trim() || "",
       router_effort: card.querySelector(".provider-router-effort")?.value || "",
       bin: document.querySelector(`[data-provider-bin="${card.dataset.provider}"]`)?.value.trim() || "",
+      minimum_remaining_percent: Number(card.querySelector(".provider-minimum-quota")?.value ?? 10),
     }));
   }
 
@@ -851,8 +850,6 @@
     if (providers.length) next.providers = providers;
     const selectedPreference = document.querySelector('input[name="preferred-provider"]:checked')?.value;
     if (selectedPreference) next.preferred_provider = selectedPreference;
-    const minimumQuota = document.querySelector(".provider-minimum-quota")?.value;
-    if (minimumQuota !== undefined) next.minimum_remaining_percent = Number(minimumQuota);
     return next;
   }
 

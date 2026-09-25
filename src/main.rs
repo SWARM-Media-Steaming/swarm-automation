@@ -699,6 +699,7 @@ struct ResolvedProvider {
     strengths: String,
     bin: PathBuf,
     enabled: bool,
+    minimum_remaining_percent: u8,
 }
 
 fn resolve_providers(config: &AppConfig) -> Vec<ResolvedProvider> {
@@ -714,6 +715,7 @@ fn resolve_providers(config: &AppConfig) -> Vec<ResolvedProvider> {
             strengths: provider.strengths.clone(),
             bin: tools::find_executable(&provider.id, &provider.bin).unwrap_or_default(),
             enabled: provider.enabled,
+            minimum_remaining_percent: config.provider_minimum_remaining(&provider.id),
         })
         .collect()
 }
@@ -741,6 +743,10 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
         arguments.extend([
             format!("--{}-bin", provider.id),
             provider.bin.to_string_lossy().into_owned(),
+        ]);
+        arguments.extend([
+            format!("--{}-minimum-remaining-percent", provider.id),
+            provider.minimum_remaining_percent.to_string(),
         ]);
         if provider.enabled {
             arguments.extend(["--enabled-provider".into(), provider.id.clone()]);
@@ -920,9 +926,10 @@ fn execution_history_db_path(config: &AppConfig) -> PathBuf {
 }
 
 /// `swarm_issue_worker.py` flag list for one repo, embedded in `repos.json`.
-/// Includes the routing toggle and preference so a save while the scheduler is
-/// already running can change them on the next new attempt: the scheduler
-/// repeats those flags after its startup copies, and argparse keeps the last.
+/// Includes the routing toggle, preference, and per-provider quota floors so a
+/// save while the scheduler is already running can change them on the next
+/// new attempt: the scheduler repeats those flags after its startup copies,
+/// and argparse keeps the last.
 fn repo_worker_args(
     config: &AppConfig,
     repo: &RepoConfig,
@@ -1048,6 +1055,12 @@ fn repo_worker_args(
         "--routing-optimization".into(),
         config.routing_optimization.clone(),
     ];
+    for provider in &config.providers {
+        arguments.extend([
+            format!("--{}-minimum-remaining-percent", provider.id),
+            config.provider_minimum_remaining(&provider.id).to_string(),
+        ]);
+    }
     // A blank list is a genuine "trust no one" — fall back to the assignee so
     // a first run works without filling in two more fields.
     let trusted = if repo.trusted_followup_authors.is_empty() {
@@ -4421,6 +4434,7 @@ mod tests {
             strengths: "".into(),
             bin: PathBuf::from("/usr/local/bin/claude"),
             enabled: true,
+            minimum_remaining_percent: 10,
         }
     }
 

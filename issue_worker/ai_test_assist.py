@@ -149,12 +149,16 @@ def pick_provider(
         if not provider.get("enabled") or not provider.get("bin"):
             continue
         key = provider.get("id")
+        try:
+            floor = float(provider["minimum_remaining_percent"])
+        except (KeyError, TypeError, ValueError):
+            floor = minimum_remaining_percent
         if key == "claude":
-            usage = claude_capacity(provider["bin"], minimum_remaining_percent)
+            usage = claude_capacity(provider["bin"], floor)
         elif key == "codex":
-            usage = codex_capacity(provider["bin"], minimum_remaining_percent, python_bin, script_dir)
+            usage = codex_capacity(provider["bin"], floor, python_bin, script_dir)
         elif key == "grok":
-            usage = grok_capacity(provider["bin"], minimum_remaining_percent, python_bin, script_dir)
+            usage = grok_capacity(provider["bin"], floor, python_bin, script_dir)
         else:
             continue
         if usage["available"]:

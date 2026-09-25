@@ -422,9 +422,14 @@ class ProviderSpec:
     strengths: str
     bin: str | None
     enabled: bool       # in the rotation for new work
+    # Usage reserve for this provider. None in from_args is replaced by the
+    # shared --minimum-remaining-percent fallback.
+    minimum_remaining_percent: float = 10.0
 
     @classmethod
     def from_args(cls, args: argparse.Namespace, key: str, name: str) -> "ProviderSpec":
+        per_provider = getattr(args, f"{key}_minimum_remaining_percent", None)
+        inherited = float(args.minimum_remaining_percent)
         return cls(
             key=key,
             name=name,
@@ -435,6 +440,7 @@ class ProviderSpec:
             strengths=getattr(args, f"{key}_router_strengths", "") or default_provider_strengths(key),
             bin=getattr(args, f"{key}_bin") or None,
             enabled=key in set(args.enabled_provider or KNOWN_PROVIDER_KEYS),
+            minimum_remaining_percent=inherited if per_provider is None else float(per_provider),
         )
 
 
@@ -544,6 +550,13 @@ class Config:
         if spec is None:
             raise WorkerError(f"Unknown AI provider: {provider}")
         return spec
+
+    def minimum_remaining_percent_for(self, provider: str) -> float:
+        """Usage reserve for ``provider``, falling back to the shared floor."""
+        spec = self.spec(provider)
+        if spec is not None:
+            return spec.minimum_remaining_percent
+        return self.minimum_remaining_percent
 
     @property
     def enabled_specs(self) -> tuple[ProviderSpec, ...]:
@@ -1132,7 +1145,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         log(f"Claude remaining quota — session: {session_remaining:g}%; week: {week_remaining:g}%.")
         remaining = min(session_remaining, week_remaining)
         detail = f"session {session_remaining:g}% / week {week_remaining:g}% remaining"
-        below_minimum = remaining < self.config.minimum_remaining_percent
+        below_minimum = remaining < self.config.minimum_remaining_percent_for("claude")
         return ProviderUsage(1 if below_minimum else 0, remaining, detail)
 
     def claude_capacity(self) -> int:
@@ -1217,13 +1230,14 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         cached_prefix = f"cached {cache_age:g}s old; " if cache_age is not None else ""
         detail = f"{cached_prefix}{summary} remaining"
         exhausted = limits.get("rateLimitReachedType") is not None or bool(limits.get("spendControlReached", False))
-        below_minimum = remaining < self.config.minimum_remaining_percent
+        minimum = self.config.minimum_remaining_percent_for("codex")
+        below_minimum = remaining < minimum
         if log_result:
             if exhausted:
                 log(f"Codex quota exhausted — {summary}.")
             elif below_minimum:
                 log(
-                    f"Codex quota below configured minimum ({self.config.minimum_remaining_percent:g}%) — {summary}."
+                    f"Codex quota below configured minimum ({minimum:g}%) — {summary}."
                 )
             else:
                 log(f"Codex remaining quota — {summary}.")
@@ -1293,7 +1307,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             return ProviderUsage(2)
         remaining = max(0.0, min(100.0, 100 - used))
         log(f"Grok remaining quota — {period}: {remaining:g}%.")
-        below_minimum = remaining < self.config.minimum_remaining_percent
+        below_minimum = remaining < self.config.minimum_remaining_percent_for("grok")
         return ProviderUsage(1 if below_minimum else 0, remaining, f"{period} {remaining:g}% remaining")
 
     def grok_capacity(self) -> int:
@@ -1401,8 +1415,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         """Pick a provider for this pass.
 
         `remaining` maps each enabled provider that currently has at least
-        ``minimum_remaining_percent`` headroom to its most constrained usage
-        window's remaining percentage. Providers below the minimum or whose usage could not be read are absent.
+        its configured ``minimum_remaining_percent`` headroom to its most
+        constrained usage window's remaining percentage. Providers below
+        their own minimum or whose usage could not be read are absent.
 
         New issue: the provider with the most usage remaining is chosen, so no
         single account is drained before the others. A named preferred provider
@@ -5679,10 +5694,14 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             self.choice = self.choose_provider(self.issue.previous_ai, remaining)
             if not self.choice:
                 enabled = ", ".join(spec.name for spec in self.config.enabled_specs) or "no provider"
+                floors = ", ".join(
+                    f"{spec.name} {spec.minimum_remaining_percent:g}%"
+                    for spec in self.config.enabled_specs
+                )
+                detail = f" ({floors})" if floors else ""
                 log(
-                    f"No enabled provider ({enabled}) has at least "
-                    f"{self.config.minimum_remaining_percent:g}% remaining in every active quota "
-                    "window; stopping."
+                    f"No enabled provider ({enabled}) has at least its configured minimum remaining "
+                    f"in every active quota window{detail}; stopping."
                 )
                 return PROVIDER_UNAVAILABLE_EXIT_CODE
             self.start_usage = usages.get(self.choice.name)
@@ -6203,6 +6222,15 @@ def build_parser() -> argparse.ArgumentParser:
             f"--{_key}-bin",
             default=env_value(f"{_key.upper()}_BIN", executable_default(_key)),
         )
+        parser.add_argument(
+            f"--{_key}-minimum-remaining-percent",
+            type=float,
+            default=None,
+            help=(
+                f"Usage reserve for {_key}. Overrides --minimum-remaining-percent for this "
+                "provider. 0 allows selection until the most constrained window is empty."
+            ),
+        )
     parser.add_argument(
         "--enabled-provider",
         action=ReplaceDefaultAppendAction,
@@ -6428,6 +6456,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not 0 <= args.minimum_remaining_percent <= 100:
         raise WorkerError("--minimum-remaining-percent must be between 0 and 100")
+    for key in KNOWN_PROVIDER_KEYS:
+        per_provider = getattr(args, f"{key}_minimum_remaining_percent")
+        if per_provider is not None and not 0 <= per_provider <= 100:
+            raise WorkerError(f"--{key}-minimum-remaining-percent must be between 0 and 100")
     if args.base_branch == args.integration_branch:
         raise WorkerError("--integration-branch must differ from --base-branch")
     enabled = set(args.enabled_provider or KNOWN_PROVIDER_KEYS)

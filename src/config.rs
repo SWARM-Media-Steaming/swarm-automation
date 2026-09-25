@@ -167,6 +167,13 @@ pub struct ProviderSettings {
     pub strengths: String,
     /// Executable path override; empty means auto-detect on PATH.
     pub bin: String,
+    /// Per-provider usage reserve, as a percent of the most constrained
+    /// remaining window. `None` means inherit the legacy shared
+    /// [`AppConfig::minimum_remaining_percent`] until [`AppConfig::normalize`]
+    /// copies that value in. `0` is valid: the provider may be selected until
+    /// that window is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_remaining_percent: Option<u8>,
 }
 
 impl Default for ProviderSettings {
@@ -180,6 +187,7 @@ impl Default for ProviderSettings {
             router_effort: "low".into(),
             strengths: String::new(),
             bin: String::new(),
+            minimum_remaining_percent: None,
         }
     }
 }
@@ -202,6 +210,7 @@ impl ProviderSettings {
             router_effort: router_effort.into(),
             strengths: provider_strengths_preset(id).into(),
             bin: String::new(),
+            minimum_remaining_percent: None,
         }
     }
 }
@@ -468,6 +477,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub allow_usage_credit_models: bool,
 
+    /// Legacy shared usage reserve. Copied onto each provider that has not set
+    /// its own value. Kept in memory as a fallback; no longer written once
+    /// per-provider floors exist.
+    #[serde(skip_serializing)]
     pub minimum_remaining_percent: u8,
     /// One issue worker per repository, running at the same time, instead of a
     /// single worker that visits each repository in turn. Faster when several
@@ -677,6 +690,14 @@ impl AppConfig {
         if self.minimum_remaining_percent > 100 {
             return Err("Minimum remaining quota must be between 0 and 100 percent.".into());
         }
+        for provider in &self.providers {
+            if self.provider_minimum_remaining(&provider.id) > 100 {
+                return Err(format!(
+                    "{} minimum remaining quota must be between 0 and 100 percent.",
+                    provider_label(&provider.id)
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -785,8 +806,16 @@ impl AppConfig {
         self.providers.iter().find(|provider| provider.id == id)
     }
 
+    /// The usage reserve for `id`: the provider's own floor when set, otherwise
+    /// the legacy shared [`Self::minimum_remaining_percent`].
+    pub fn provider_minimum_remaining(&self, id: &str) -> u8 {
+        self.provider(id)
+            .and_then(|provider| provider.minimum_remaining_percent)
+            .unwrap_or(self.minimum_remaining_percent)
+    }
+
     #[cfg(test)]
-    fn provider_mut(&mut self, id: &str) -> Option<&mut ProviderSettings> {
+    pub fn provider_mut(&mut self, id: &str) -> Option<&mut ProviderSettings> {
         self.providers.iter_mut().find(|provider| provider.id == id)
     }
 
@@ -853,6 +882,7 @@ impl AppConfig {
                 self.providers.push(ProviderSettings::preset(id));
             }
         }
+        let inherited_minimum = self.minimum_remaining_percent;
         for provider in &mut self.providers {
             let (router_model, router_effort) = router_preset(&provider.id);
             if provider.router_model.trim().is_empty() {
@@ -863,6 +893,9 @@ impl AppConfig {
             }
             if provider.strengths.trim().is_empty() {
                 provider.strengths = provider_strengths_preset(&provider.id).into();
+            }
+            if provider.minimum_remaining_percent.is_none() {
+                provider.minimum_remaining_percent = Some(inherited_minimum);
             }
         }
         self.claude_model.clear();
@@ -1110,12 +1143,46 @@ mod tests {
             "base_branch",
             "claude_model",
             "profile_name",
+            "minimum_remaining_percent",
         ] {
             assert!(
                 !top.contains_key(legacy),
                 "top-level legacy key {legacy} must not serialize"
             );
         }
+    }
+
+    #[test]
+    fn normalize_copies_the_shared_quota_floor_onto_providers_that_have_none() {
+        let mut config: AppConfig = serde_json::from_str(
+            r#"{
+                "minimum_remaining_percent": 0,
+                "providers": [
+                    {"id": "claude", "enabled": true, "model": "claude-sonnet-5"},
+                    {"id": "codex", "enabled": true, "model": "gpt-5.6-luna", "minimum_remaining_percent": 25},
+                    {"id": "grok", "enabled": true, "model": "grok-4.6"}
+                ]
+            }"#,
+        )
+        .expect("config with mixed quota floors parses");
+        config.normalize();
+
+        assert_eq!(config.provider_minimum_remaining("claude"), 0);
+        assert_eq!(config.provider_minimum_remaining("codex"), 25);
+        assert_eq!(config.provider_minimum_remaining("grok"), 0);
+
+        let value: serde_json::Value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("minimum_remaining_percent").is_none());
+        let providers = value["providers"].as_array().unwrap();
+        let floor = |id: &str| {
+            providers
+                .iter()
+                .find(|provider| provider["id"] == id)
+                .and_then(|provider| provider["minimum_remaining_percent"].as_u64())
+        };
+        assert_eq!(floor("claude"), Some(0));
+        assert_eq!(floor("codex"), Some(25));
+        assert_eq!(floor("grok"), Some(0));
     }
 
     #[test]
