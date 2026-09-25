@@ -84,6 +84,13 @@ class NormalizedUsage:
     total when it gave one; otherwise it is computed by the normalizer that
     built this object, following that provider's own input/cache semantics
     (see the module docstring of each ``normalize_*_usage`` function).
+
+    ``cached_tokens_included_in_input`` records which of the two cache wire
+    semantics this usage follows, so ``estimate_cost`` can bill it correctly
+    without knowing which provider produced it: Anthropic's cache counters are
+    additional to ``input_tokens`` (``False``, the default); OpenAI-shaped
+    usage (Codex, Grok) already counts cached tokens inside ``input_tokens``
+    (``True``). See ``_openai_style_usage`` and ``normalize_claude_usage``.
     """
 
     input_tokens: int | None = None
@@ -91,6 +98,7 @@ class NormalizedUsage:
     reasoning_tokens: int | None = None
     cached_input_tokens: int | None = None
     total_tokens: int | None = None
+    cached_tokens_included_in_input: bool = False
     raw: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -221,6 +229,7 @@ def _openai_style_usage(payload: dict[str, Any]) -> NormalizedUsage:
         reasoning_tokens=_as_int(reasoning),
         cached_input_tokens=_as_int(cached),
         total_tokens=total_tokens,
+        cached_tokens_included_in_input=True,
         raw={"usage": payload},
     )
 
@@ -312,7 +321,18 @@ def estimate_cost(model: str, usage: NormalizedUsage | None) -> float | None:
     estimated (no usage, or the model has no cost rank). Reasoning tokens are
     not charged separately: every normalizer above already folds them inside
     ``output_tokens`` when the provider does, per that provider's own
-    semantics, so charging them again here would double-count."""
+    semantics, so charging them again here would double-count.
+
+    Cached input tokens are always billed at ``CACHED_INPUT_RATE_FACTOR`` of
+    the fresh-input rate, but *which* tokens are "fresh" depends on the
+    provider's own wire semantics (``usage.cached_tokens_included_in_input``):
+    OpenAI-shaped usage (Codex, Grok) already counts cached tokens inside
+    ``input_tokens``, so those must be subtracted out of the full-price
+    portion before charging them again at the discount — otherwise a cache
+    hit would be billed twice and could raise the estimate above an entirely
+    uncached call. Claude's cache counters are genuinely additional to
+    ``input_tokens``, so no subtraction happens there.
+    """
     if usage is None:
         return None
     from dynamic_router import model_cost  # local import: keeps this module import-light
@@ -324,10 +344,14 @@ def estimate_cost(model: str, usage: NormalizedUsage | None) -> float | None:
     if rates is None:
         return None
     try:
-        input_cost = (usage.input_tokens or 0) / 1_000_000 * rates["input"]
-        cached_cost = (
-            (usage.cached_input_tokens or 0) / 1_000_000 * rates["input"] * CACHED_INPUT_RATE_FACTOR
-        )
+        input_tokens = usage.input_tokens or 0
+        cached_tokens = usage.cached_input_tokens or 0
+        if usage.cached_tokens_included_in_input:
+            fresh_input_tokens = max(0, input_tokens - cached_tokens)
+        else:
+            fresh_input_tokens = input_tokens
+        input_cost = fresh_input_tokens / 1_000_000 * rates["input"]
+        cached_cost = cached_tokens / 1_000_000 * rates["input"] * CACHED_INPUT_RATE_FACTOR
         output_cost = (usage.output_tokens or 0) / 1_000_000 * rates["output"]
         return round(input_cost + cached_cost + output_cost, 6)
     except (TypeError, ValueError):
