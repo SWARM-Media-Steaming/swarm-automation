@@ -37,6 +37,7 @@ must degrade, never block, matching every other resilience rule in
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -154,6 +155,9 @@ class ModelSpec:
     benchmark_source: str | None
     benchmark_date: str | None
     notes: str
+    input_cost: float | None = None
+    output_cost: float | None = None
+    reasoning_cost: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -291,6 +295,18 @@ def _read_yaml(path: Path) -> Any:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         raise ModelRouterConfigError(f"could not read {path}: {error}") from error
+    # A ``.json`` path is a Model Routing Calibration override (issue #205,
+    # ``model_calibration.py``'s ``active_catalog.json``) rather than the
+    # bundled YAML — accepted here, not given its own loader function, so
+    # every existing caller (which always passes a ``.yaml`` path or None)
+    # is completely unaffected.
+    if path.suffix == ".json":
+        try:
+            data = json.loads(text)
+            # Calibration uses one atomic document for version + catalog.
+            return data["active"] if "active" in data else data
+        except json.JSONDecodeError as error:
+            raise ModelRouterConfigError(f"could not parse {path}: {error}") from error
     try:
         return load_yaml(text)
     except YamlError as error:
@@ -335,6 +351,9 @@ def _parse_model(entry: Any) -> ModelSpec:
             benchmark_source=entry.get("benchmark_source"),
             benchmark_date=entry.get("benchmark_date"),
             notes=str(entry.get("notes") or ""),
+            input_cost=_optional_float(entry.get("input_cost")),
+            output_cost=_optional_float(entry.get("output_cost")),
+            reasoning_cost=_optional_float(entry.get("reasoning_cost")),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ModelRouterConfigError(f"malformed models.yaml entry {entry!r}: {error}") from error
@@ -507,6 +526,10 @@ class _BenchmarkNormalizer:
                     measured_costs.append(entry.benchmark_cost_per_task)
                 if entry.benchmark_tokens_per_task is not None:
                     measured_tokens.append(entry.benchmark_tokens_per_task)
+        measured_costs.extend(
+            cost for model in catalog for effort in model.supported_efforts
+            if (cost := estimated_dollar_cost(model, effort)) is not None
+        )
         if measured_costs:
             self._ranges["benchmark_cost_per_task"] = (min(measured_costs), max(measured_costs))
         if measured_tokens:
@@ -568,12 +591,19 @@ def _measured_entry(model: ModelSpec, effort: str) -> BenchmarkEntry | None:
 
 
 def estimated_dollar_cost(model: ModelSpec, effort: str) -> float | None:
-    """Measured benchmark dollars/task at this exact effort, or None.
+    """Exact-effort measured cost, else a disclosed token-budget estimate.
 
-    Relative cost ranks are not converted into a fabricated dollar figure.
+    Public API prices are USD per million tokens. This is a comparison
+    scenario, not a prediction of CLI subscription billing or actual usage.
     """
     entry = _measured_entry(model, effort)
-    return None if entry is None else entry.benchmark_cost_per_task
+    if entry is not None and entry.benchmark_cost_per_task is not None:
+        return entry.benchmark_cost_per_task
+    if model.input_cost is None or model.output_cost is None:
+        return None
+    reasoning_tokens = {"low": 0, "medium": 1000, "high": 3000, "xhigh": 6000, "max": 10000}.get(effort, 0)
+    reasoning_price = model.reasoning_cost if model.reasoning_cost is not None else model.output_cost
+    return (4000 * model.input_cost + 1000 * model.output_cost + reasoning_tokens * reasoning_price) / 1_000_000
 
 
 def estimated_tokens_per_task(model: ModelSpec, effort: str) -> float | None:

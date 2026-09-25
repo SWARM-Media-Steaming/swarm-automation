@@ -52,6 +52,20 @@
     branchPushAccess: {},
     botReadinessPoll: null,
     pendingUpdate: null,
+    // Dynamic Routing Calibration (AI Configuration). `status` is the last
+    // get_model_calibration_status response; `lastResult` is the last manual
+    // refresh_model_data response (cleared on navigation away is unnecessary,
+    // it just stops being shown once a new status makes it stale).
+    modelCalibration: {
+      status: null,
+      lastResult: null,
+      analysis: null,
+      refreshing: false,
+      analyzing: false,
+      activating: false,
+      sort: { column: "provider", direction: "asc" },
+      progressTimer: null,
+    },
   };
 
   const pageTitles = {
@@ -202,6 +216,26 @@
       html: "<p>The app normally finds Claude, Codex, and Grok automatically. Enter a full program path only when an installed provider is not detected or when you want to use a specific copy.</p>",
       links: [],
     },
+    "model-calibration": {
+      title: "Dynamic Routing Calibration",
+      html: "<p>Dynamic Model Routing scores models using a local catalog of pricing and benchmark data. This panel refreshes and validates that data, shows whether it is current, and never silently replaces what is already active.</p><p><strong>Refresh Model Data</strong> fetches from the configured source, validates and normalizes it, compares it against the active calibration, recalculates routing metrics, and runs a routing simulation. A refresh that finds a meaningful, regression-free change is left as a <em>proposed</em> calibration awaiting review, unless <strong>Automatically activate clean refreshes</strong> is on.</p><p>The app also refreshes on startup (configurable below), always after the last known-good calibration is already loaded and usable — startup never waits on or depends on the external source.</p><p>Discovering a new model never makes it available for routing by itself; only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are ever chosen.</p>",
+      links: [],
+    },
+    "routing-algorithm": {
+      title: "How Dynamic Routing works",
+      html: "<p>The router removes models that do not meet the task's minimum capability requirement, then chooses among what remains using capability, task fit, expected cost, reasoning level, and performance.</p><p><strong>Cost Aware</strong> means finding the least expensive model that is still sufficiently capable for the task — not always picking the cheapest model outright. <strong>Balanced</strong> (this app's default, \"Optimize routing for cost\" off) weighs capability and task fit without letting cost narrow the field.</p><p>The routing examples and current strategy shown here are generated from the active calibration, not hard-coded, and update the next time a refresh changes them.</p>",
+      links: [],
+    },
+    "model-routing-table": {
+      title: "Model routing table",
+      html: "<p>One row per model the active calibration knows about. <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routable; <strong>DISCOVERED</strong> models were just found by a refresh and are not yet available for routing; <strong>DEPRECATED</strong> and <strong>DISABLED</strong> models are excluded. Benchmark scores are comparative data points, not a guarantee of real-world quality. Select a row to expand its full detail: pricing, benchmarks, supported reasoning levels, and recent history.</p>",
+      links: [],
+    },
+    "model-data-refresh-settings": {
+      title: "Model data source & schedule",
+      html: "<p><strong>Local</strong> only re-reads the bundled catalog — no network access, always available offline. <strong>models.dev</strong> and <strong>Artificial Analysis</strong> are public pricing/benchmark sources; Artificial Analysis needs <code>ARTIFICIAL_ANALYSIS_API_KEY</code> set in the app's environment. <strong>Custom JSON URL</strong> reads a configured HTTPS endpoint.</p><p>The minimum refresh interval protects the configured source from being queried on every restart during development; the manual <strong>Refresh Model Data</strong> button always bypasses it.</p><p><strong>Apply calibrated model data to live routing</strong> is off by default: turning it on feeds the active calibration's catalog into the issue worker's own routing decisions instead of only the bundled catalog.</p>",
+      links: [],
+    },
     "ai-agents-panel": {
       title: "AI agents",
       html: "<p>One row per <strong>enabled</strong> AI provider, combining what is otherwise scattered across the app: install/sign-in status from AI Configuration, live remaining quota, and whether the provider is currently working an issue (and where).</p><p>This covers every configured repository, not only the one selected above — quota is per account on this machine, and a provider can only be working one issue at a time across all of them. Quota is probed periodically rather than on every refresh, since each check runs the provider's own CLI.</p>",
@@ -280,6 +314,7 @@
       void refreshPromptGrades({ quiet: true });
       void refreshExecutionHistory({ quiet: true });
     }
+    if (view === "ai") void refreshModelCalibration({ quiet: true });
   }
 
   // A checkbox carrying data-checked-value/data-unchecked-value stores a
@@ -3302,6 +3337,18 @@
       void refreshPromptGrades();
       void refreshExecutionHistory();
     });
+    byId("refresh-model-data").addEventListener("click", () => void refreshModelData());
+    byId("model-calibration-activate").addEventListener("click", () => void activateProposedCalibration());
+    byId("model-calibration-analyze").addEventListener("click", () => void analyzeModelCalibrationUpdate());
+    byId("model-routing-table-head").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-sort-column]");
+      if (!button) return;
+      state.modelCalibration.sort = window.SwarmModelCalibration.toggleSort(
+        state.modelCalibration.sort,
+        button.dataset.sortColumn,
+      );
+      renderModelRoutingTable();
+    });
     byId("feedback-repo-chips").addEventListener("change", (event) => {
       const input = event.target.closest("[data-feedback-repo]");
       if (!input) return;
@@ -3496,6 +3543,397 @@
     });
   }
 
+  // ----- Dynamic Routing Calibration (AI Configuration, issue #205) ------
+
+  function modelCalibrationStatus() {
+    return state.modelCalibration.status || {};
+  }
+
+  function labeledCell(label, value, { tone } = {}) {
+    const cell = document.createElement("div");
+    cell.className = tone ? `verification-result ${tone}` : "verification-result";
+    const strong = document.createElement("strong");
+    strong.textContent = `${label}: `;
+    cell.append(strong, document.createTextNode(String(value)));
+    return cell;
+  }
+
+  function renderModelCalibrationHealth() {
+    const pill = window.SwarmModelCalibration.healthPill(modelCalibrationStatus());
+    const label = byId("model-calibration-health-pill");
+    if (!label) return;
+    label.textContent = pill.text;
+    label.className = `status-pill ${pill.tone}`;
+  }
+
+  function renderModelCalibrationFields() {
+    const box = byId("model-calibration-fields");
+    if (!box) return;
+    box.replaceChildren();
+    const fields = window.SwarmModelCalibration.statusFields(state.config || {}, modelCalibrationStatus());
+    fields.forEach(({ label, value }) => {
+      const display = /refresh$/i.test(label) && value !== "Never" ? formatIsoTimestamp(value) : value;
+      const cell = document.createElement("div");
+      cell.className = "execution-tag";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = display;
+      cell.append(name, strong);
+      box.appendChild(cell);
+    });
+  }
+
+  function renderModelCalibrationProgress() {
+    const banner = byId("model-calibration-progress");
+    if (!banner) return;
+    const status = modelCalibrationStatus();
+    const running = Boolean(status.refresh_running) && status.progress;
+    banner.classList.toggle("hidden", !running);
+    banner.replaceChildren();
+    if (!running) return;
+    const strong = document.createElement("strong");
+    strong.textContent = "Refreshing:";
+    banner.append(strong, document.createTextNode(` ${status.progress.label || ""}`));
+  }
+
+  function renderModelCalibrationResult() {
+    const box = byId("model-calibration-result");
+    const changesBox = byId("model-calibration-changes");
+    const changesBody = byId("model-calibration-changes-body");
+    if (!box || !changesBox || !changesBody) return;
+    const api = window.SwarmModelCalibration;
+    const result = state.modelCalibration.lastResult;
+    box.replaceChildren();
+    if (!result) {
+      box.classList.add("hidden");
+      changesBox.classList.add("hidden");
+      return;
+    }
+    box.classList.remove("hidden");
+    const headline = document.createElement("p");
+    headline.className = "panel-copy";
+    headline.textContent = api.resultHeadline(result);
+    box.appendChild(headline);
+    const detail = api.failureDetail(result);
+    if (detail) box.appendChild(labeledCell("Detail", detail, { tone: "invalid" }));
+    api.resultSummaryLines(result).forEach(({ label, value }) => box.appendChild(labeledCell(label, value)));
+
+    const diff = result.diff || {};
+    const changeLines = api.changeDetailLines(diff);
+    const impactLines = api.routingImpactLines(diff);
+    if (result.status === "changed") {
+      changesBox.classList.remove("hidden");
+      changesBody.replaceChildren();
+      changesBody.appendChild(Object.assign(document.createElement("strong"), { textContent: "What changed" }));
+      changeLines.forEach(({ heading, detail: text }) => changesBody.appendChild(labeledCell(heading, text)));
+      changesBody.appendChild(Object.assign(document.createElement("strong"), { textContent: "Routing impact" }));
+      impactLines.forEach(({ heading, detail: text }) => changesBody.appendChild(labeledCell(heading, text)));
+    } else {
+      changesBox.classList.add("hidden");
+    }
+  }
+
+  function renderModelCalibrationHowItWorks() {
+    const api = window.SwarmModelCalibration;
+    const flow = byId("model-calibration-flow");
+    if (flow) {
+      flow.replaceChildren();
+      const line = document.createElement("p");
+      line.className = "panel-copy";
+      line.textContent = api.ALGORITHM_FLOW_STEPS.join(" → ");
+      flow.appendChild(line);
+    }
+    const modes = byId("model-calibration-modes");
+    if (modes) {
+      modes.replaceChildren();
+      api.ROUTING_MODE_EXPLANATIONS.forEach(({ name, detail }) => {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = name;
+        const body = document.createElement("p");
+        body.textContent = detail;
+        details.append(summary, body);
+        modes.appendChild(details);
+      });
+    }
+  }
+
+  function renderModelCalibrationStrategy() {
+    const api = window.SwarmModelCalibration;
+    const strategy = api.currentStrategy(modelCalibrationStatus());
+    const box = byId("model-calibration-strategy");
+    if (box) {
+      box.replaceChildren();
+      box.appendChild(labeledCell("Mode", strategy.mode));
+      box.appendChild(labeledCell("Cost optimization", strategy.costOptimizationEnabled ? "Enabled" : "Disabled"));
+      strategy.factors.forEach((factor) => box.appendChild(labeledCell(factor.name, factor.level)));
+    }
+    const technical = byId("model-calibration-technical-body");
+    if (!technical) return;
+    technical.replaceChildren();
+    const active = modelCalibrationStatus().active_calibration;
+    if (!active) {
+      technical.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No calibration data yet." }));
+      return;
+    }
+    [
+      ["Calibration version", active.version],
+      ["Algorithm version", active.algorithm_version],
+      ["Data source", (active.source || {}).kind],
+      ["Last updated", formatIsoTimestamp(active.created_at) || active.created_at],
+      ["Workload categories", Object.keys(active.routing || {}).length],
+      ["Token cost assumptions", `${(active.token_cost_assumptions || {}).unit || ""}`],
+    ].forEach(([label, value]) => technical.appendChild(labeledCell(label, value ?? "—")));
+  }
+
+  function modelDetailRow(label, value) {
+    const row = document.createElement("div");
+    row.className = "execution-tag";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const strong = document.createElement("strong");
+    strong.textContent = value === null || value === undefined || value === "" ? "—" : String(value);
+    row.append(name, strong);
+    return row;
+  }
+
+  function buildModelRow(model) {
+    const item = document.createElement("details");
+    item.className = "execution-record";
+    const summary = document.createElement("summary");
+    const head = document.createElement("div");
+    head.className = "execution-head";
+    const title = document.createElement("strong");
+    title.textContent = `${model.provider}/${model.model}`;
+    head.appendChild(title);
+    const meta = document.createElement("small");
+    meta.textContent = `Status ${model.status} · Updated ${model.last_updated || "—"}`;
+    head.appendChild(meta);
+    const tagging = document.createElement("div");
+    tagging.className = "execution-tagging";
+    [
+      ["Coding", model.coding_score],
+      ["Agentic", model.agentic_score],
+      ["Reasoning", model.reasoning_score],
+      ["Input $/M", model.input_cost],
+      ["Output $/M", model.output_cost],
+      ["Cost efficiency", model.cost_efficiency],
+    ].forEach(([label, value]) => {
+      const cell = document.createElement("div");
+      cell.className = "execution-tag";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = value === null || value === undefined ? "—" : String(value);
+      cell.append(name, strong);
+      tagging.appendChild(cell);
+    });
+    summary.append(head, tagging);
+    item.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "execution-body";
+    const detail = document.createElement("div");
+    detail.className = "execution-tagging";
+    [
+      ["Release date", model.release_date],
+      ["Speed", model.speed],
+      ["Supported reasoning levels", (model.supported_efforts || []).join(", ")],
+      ["Strengths", (model.strengths || []).join(", ")],
+      ["Deprecated", model.deprecated ? "Yes" : "No"],
+      ["Superseded by", model.superseded_by],
+      ["Benchmark source", model.benchmark_source],
+      ["Benchmark date", model.benchmark_date],
+      ["Notes", model.notes],
+    ].forEach(([label, value]) => detail.appendChild(modelDetailRow(label, value)));
+    body.appendChild(detail);
+    item.appendChild(body);
+    return item;
+  }
+
+  function renderModelRoutingTable() {
+    const api = window.SwarmModelCalibration;
+    const status = modelCalibrationStatus();
+    const models = (status.active_calibration || {}).models || [];
+    const count = byId("model-calibration-model-count");
+    if (count) count.textContent = `${models.length} model${models.length === 1 ? "" : "s"}`;
+
+    const head = byId("model-routing-table-head");
+    if (head) {
+      head.replaceChildren();
+      api.SORTABLE_COLUMNS.forEach((column) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "text-button";
+        button.dataset.sortColumn = column;
+        const active = state.modelCalibration.sort.column === column;
+        button.textContent = column.replace(/_/g, " ") + (active ? (state.modelCalibration.sort.direction === "asc" ? " ▲" : " ▼") : "");
+        head.appendChild(button);
+      });
+    }
+
+    const box = byId("model-routing-table");
+    if (!box) return;
+    box.replaceChildren();
+    if (!models.length) {
+      box.appendChild(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: "No calibrated model data yet. Select Refresh Model Data above.",
+      }));
+      return;
+    }
+    const sorted = api.sortModels(models, state.modelCalibration.sort.column, state.modelCalibration.sort.direction);
+    sorted.forEach((model) => box.appendChild(buildModelRow(model)));
+  }
+
+  function renderModelCalibrationExamples() {
+    const box = byId("model-calibration-examples");
+    if (!box) return;
+    box.replaceChildren();
+    const examples = window.SwarmModelCalibration.exampleRoutingDecisions(modelCalibrationStatus());
+    if (!examples.length) {
+      box.appendChild(Object.assign(document.createElement("p"), { className: "panel-copy", textContent: "No calibrated routing decisions yet." }));
+      return;
+    }
+    examples.forEach(({ label, text }) => {
+      const row = document.createElement("p");
+      row.className = "panel-copy";
+      const strong = document.createElement("strong");
+      strong.textContent = `${label}: `;
+      row.append(strong, document.createTextNode(text));
+      box.appendChild(row);
+    });
+  }
+
+  function renderModelCalibrationButtons() {
+    const status = modelCalibrationStatus();
+    const refreshButton = byId("refresh-model-data");
+    if (refreshButton) {
+      const busy = state.modelCalibration.refreshing || Boolean(status.refresh_running);
+      refreshButton.disabled = busy;
+      refreshButton.textContent = busy ? "Refreshing…" : "Refresh Model Data";
+    }
+    const activateButton = byId("model-calibration-activate");
+    if (activateButton) {
+      activateButton.classList.toggle("hidden", !status.has_newer_proposed);
+      activateButton.disabled = state.modelCalibration.activating;
+      activateButton.textContent = state.modelCalibration.activating
+        ? "Activating…"
+        : `Activate proposed calibration (${status.proposed_version || ""})`;
+    }
+    const analyzeButton = byId("model-calibration-analyze");
+    if (analyzeButton) analyzeButton.disabled = state.modelCalibration.analyzing;
+  }
+
+  function renderModelCalibrationAnalysis() {
+    const box = byId("model-calibration-analysis");
+    if (!box) return;
+    const analysis = state.modelCalibration.analysis;
+    box.replaceChildren();
+    if (!analysis) {
+      box.classList.add("hidden");
+      return;
+    }
+    box.classList.remove("hidden");
+    const summary = document.createElement("p");
+    summary.className = "panel-copy";
+    summary.textContent = analysis.summary || "";
+    box.appendChild(summary);
+    (analysis.answers || []).forEach(({ question, answer }) => {
+      const details = document.createElement("details");
+      const summaryEl = document.createElement("summary");
+      summaryEl.textContent = question;
+      const body = document.createElement("p");
+      body.textContent = answer;
+      details.append(summaryEl, body);
+      box.appendChild(details);
+    });
+  }
+
+  function renderModelCalibrationFull() {
+    renderModelCalibrationHealth();
+    renderModelCalibrationFields();
+    renderModelCalibrationProgress();
+    renderModelCalibrationResult();
+    renderModelCalibrationHowItWorks();
+    renderModelCalibrationStrategy();
+    renderModelRoutingTable();
+    renderModelCalibrationExamples();
+    renderModelCalibrationButtons();
+    renderModelCalibrationAnalysis();
+  }
+
+  async function refreshModelCalibration({ quiet = true } = {}) {
+    try {
+      state.modelCalibration.status = await invoke("get_model_calibration_status_background");
+      renderModelCalibrationFull();
+    } catch (error) {
+      if (!quiet) showToast(errorText(error), "error");
+    }
+  }
+
+  async function refreshModelData() {
+    if (state.modelCalibration.refreshing) return;
+    state.modelCalibration.refreshing = true;
+    renderModelCalibrationButtons();
+    if (state.modelCalibration.progressTimer) window.clearInterval(state.modelCalibration.progressTimer);
+    state.modelCalibration.progressTimer = window.setInterval(() => {
+      void refreshModelCalibration({ quiet: true });
+    }, 700);
+    try {
+      state.modelCalibration.lastResult = await invoke("refresh_model_data_background", { force: true });
+    } catch (error) {
+      state.modelCalibration.lastResult = { status: "failed", error: errorText(error) };
+      showToast(`Model data refresh failed: ${errorText(error)}`, "error");
+    } finally {
+      window.clearInterval(state.modelCalibration.progressTimer);
+      state.modelCalibration.progressTimer = null;
+      state.modelCalibration.refreshing = false;
+      await refreshModelCalibration({ quiet: true });
+    }
+  }
+
+  async function activateProposedCalibration() {
+    const version = modelCalibrationStatus().proposed_version;
+    if (!version || state.modelCalibration.activating) return;
+    state.modelCalibration.activating = true;
+    renderModelCalibrationButtons();
+    try {
+      await invoke("activate_model_calibration_background", { version });
+      showToast(`Activated calibration ${version}.`);
+    } catch (error) {
+      showToast(errorText(error), "error");
+    } finally {
+      state.modelCalibration.activating = false;
+      await refreshModelCalibration({ quiet: true });
+    }
+  }
+
+  async function analyzeModelCalibrationUpdate() {
+    if (state.modelCalibration.analyzing) return;
+    state.modelCalibration.analyzing = true;
+    renderModelCalibrationButtons();
+    try {
+      state.modelCalibration.analysis = await invoke("analyze_model_calibration_update_background");
+      renderModelCalibrationAnalysis();
+    } catch (error) {
+      showToast(errorText(error), "error");
+    } finally {
+      state.modelCalibration.analyzing = false;
+      renderModelCalibrationButtons();
+    }
+  }
+
+  function onModelCalibrationRefreshed(payload) {
+    state.modelCalibration.status = null;
+    void refreshModelCalibration({ quiet: true });
+    const notification = (payload || {}).notification;
+    if (notification && notification.should_notify) {
+      showToast(notification.message, notification.kind === "error" ? "error" : "");
+    }
+  }
+
   async function initialize() {
     renderHelpConcepts();
     bindEvents();
@@ -3522,6 +3960,7 @@
       });
       await listen("update-available", (event) => showUpdateBanner(event.payload));
       await listen("system-permission-primed", (event) => showToast(event.payload));
+      await listen("model-calibration-refreshed", (event) => onModelCalibrationRefreshed(event.payload));
       void refreshAppVersion();
       // Tool detection and repository inspection run independently. Keeping
       // them out of the startup await path prevents slow CLIs or network-backed
@@ -3563,6 +4002,15 @@
       window.setInterval(() => {
         if (state.busy.size === 0) void refreshTools({ quiet: true });
       }, 30000);
+      window.setInterval(() => {
+        if (
+          state.busy.size === 0 &&
+          !state.modelCalibration.refreshing &&
+          document.querySelector("#view-ai.active")
+        ) {
+          void refreshModelCalibration({ quiet: true });
+        }
+      }, 20000);
     } catch (error) {
       showToast(`Could not initialize the application: ${errorText(error)}`, "error");
     }

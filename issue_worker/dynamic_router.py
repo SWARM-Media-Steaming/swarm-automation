@@ -621,6 +621,24 @@ def describe_scored_tier(
     return text
 
 
+def active_calibration_catalog_path() -> Path | None:
+    """Optional override catalog from an activated Model Routing Calibration.
+
+    ``SWARM_MODEL_CALIBRATION_CATALOG`` is set by the desktop app (only when
+    the operator has turned on "Apply calibrated model data to live routing")
+    to the ``active_catalog.json`` a calibration was promoted to (see
+    ``model_calibration.py``'s ``ModelCalibrationService.activate``). Unset,
+    missing, or unreadable, this returns ``None`` and every caller falls back
+    to the bundled ``models.yaml`` exactly as before this existed — activating
+    a calibration is the only thing that can ever change what gets loaded.
+    """
+    raw = os.environ.get("SWARM_MODEL_CALIBRATION_CATALOG", "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_file() else None
+
+
 def _scored_tier_decision(
     candidate: RouterCandidate,
     complexity: int,
@@ -643,9 +661,10 @@ def _scored_tier_decision(
         tier = tier_for_complexity(candidate.tiers, complexity)
         return tier.model, tier.effort, describe_tier(candidate, tier, complexity)
     try:
+        catalog = _model_router.load_model_catalog(active_calibration_catalog_path())
         disabled = {
             model.model
-            for model in _model_router.load_model_catalog()
+            for model in catalog
             if not allow_usage_credit_models and requires_usage_credits(model.model)
         }
         disabled |= {str(model).strip() for model in candidate.excluded_models}
@@ -658,6 +677,7 @@ def _scored_tier_decision(
                 cost_sensitive=cost_on,
                 quality_requirement="high" if risk == "high" else "normal",
             ),
+            catalog=catalog,
             availability=_model_router.RoutingAvailability(
                 enabled_agents=frozenset({candidate.key}),
                 disabled_models=frozenset(disabled),

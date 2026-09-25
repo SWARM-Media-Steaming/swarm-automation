@@ -168,6 +168,46 @@ side (Python vs. `config.rs`) is a real way to introduce drift — the router
 prompt and the saved config would disagree about that provider's defaults. The
 model catalog is the one exception: Python-only by design, see above.
 
+## Model Routing Calibration
+
+Optional, app-wide companion to Dynamic Model Routing (issue #205) that keeps
+the model/pricing/benchmark data the router scores against fresh, without ever
+making startup or routing depend on an external source being reachable.
+`issue_worker/model_calibration.py`'s `ModelCalibrationService` is the single
+implementation manual refresh (AI Configuration's "Refresh Model Data"
+button), startup refresh, and any future scheduled/AI-triggered refresh all
+call — distinguished only by `initiated_by` (`USER`/`STARTUP`/`SCHEDULED`/
+`AI_AGENT`). `issue_worker/model_data_sources.py` holds the bounded,
+IP-pinned HTTPS adapters for the public sources (`models.dev`, Artificial
+Analysis, or a configured JSON URL); `"local"` re-reads the bundled
+`skills/model-router/models.yaml` with no network access at all.
+
+A refresh never touches the active calibration on failure or on a
+no-meaningful-change result. The **first** calibration ever produced (no
+`active_catalog.json` yet) becomes active immediately regardless of
+`activation_policy` — there is nothing yet to protect from a silent
+replacement. After that, a meaningful, regression-free change is written as a
+*proposed* calibration awaiting `activate()` (manual, from the UI, or
+automatic when `activation_policy="auto"`). `status_report()` calls
+`ensure_bootstrap()` on every read specifically so the AI Configuration page
+always has something to show even before any refresh has ever run; refreshing
+itself never re-derives that offline bootstrap as its comparison baseline
+(that was a real bug — see the `_refresh_locked` docstring-style comment for
+why a second, independent writer of `state.json` inside the same call used to
+silently erase `active_version`).
+
+The live routing hook is `dynamic_router.active_calibration_catalog_path()`,
+gated by `SWARM_MODEL_CALIBRATION_CATALOG` — set by `start_issue_worker` in
+`src/main.rs` only when the repo-independent, app-wide
+`model_calibration_apply_to_routing` setting is on and an activated
+calibration's `active_catalog.json` exists. Unset or missing, every routing
+path falls back to the bundled `models.yaml` exactly as before this existed.
+The other new `AppConfig` fields (`model_data_refresh_on_startup`,
+`model_data_min_refresh_interval_hours`, `model_data_source`,
+`model_data_source_url`, `model_calibration_auto_activate`) are app-wide, not
+per-repository, matching `dynamic_model_routing`/`routing_optimization` above
+rather than the Feedback view's per-page filter pattern.
+
 ## Issue outcomes and no-code flows
 
 Every assigned issue, including one labelled `Question`, goes through the
