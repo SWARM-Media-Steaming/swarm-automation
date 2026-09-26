@@ -328,12 +328,30 @@ def _best_benchmark(entry: dict[str, Any], field: str) -> tuple[float | None, st
     return fallback, "HEURISTIC"
 
 
-def _status_for(entry: dict[str, Any], previous_keys: set[str], *, has_previous: bool) -> str:
+def _status_for(
+    entry: dict[str, Any],
+    prev_by_key: dict[str, dict[str, Any]],
+    approved_keys: frozenset[str],
+    *,
+    has_previous: bool,
+) -> str:
+    """DISCOVERED is a review gate, not a one-refresh delay: once assigned it
+    is carried forward on every later refresh regardless of what else in the
+    calibration changes, until ``approve_discovered_model`` explicitly
+    approves that key. Without this, "present in the immediately preceding
+    calibration" reads as approval, so any unrelated refresh ages a
+    never-reviewed model straight into the live routing catalog.
+    """
     if entry["deprecated"]:
         return STATUS_DEPRECATED
     if not entry["active"]:
         return STATUS_DISABLED
-    if has_previous and entry["key"] not in previous_keys:
+    if entry["key"] in approved_keys:
+        return STATUS_ACTIVE if entry["recommended"] else STATUS_CANDIDATE
+    prev = prev_by_key.get(entry["key"])
+    if has_previous and prev is None:
+        return STATUS_DISCOVERED
+    if prev is not None and prev.get("status") == STATUS_DISCOVERED:
         return STATUS_DISCOVERED
     return STATUS_ACTIVE if entry["recommended"] else STATUS_CANDIDATE
 
@@ -400,6 +418,15 @@ def recalculate_routing(
 def _average_routing_cost(
     routing: dict[str, Any], models_by_key: dict[str, dict[str, Any]]
 ) -> float | None:
+    """Average per-task dollar cost across the routed workloads, in dollars
+    only. A model with no published `input_cost`/`output_cost` has no dollar
+    figure to contribute and is left out of the average entirely -- it must
+    never fall back to the catalog's 1-5 `relative_cost` ordinal rank, which
+    is not a dollar amount and is not comparable to one. Averaging the two
+    together made the first refresh that ever attached real pricing to a
+    previously rank-only model report a fabricated ~99% "cost saving" that
+    was purely a unit change, not a routing change.
+    """
     costs: list[float] = []
     for decision in routing.values():
         provider, model = decision.get("provider"), decision.get("model")
@@ -408,7 +435,6 @@ def _average_routing_cost(
         spec = models_by_key.get(f"{provider}/{model}")
         if not spec:
             continue
-        dollar = None
         try:
             parsed = _model_router._parse_model(spec)
             dollar = _model_router.estimated_dollar_cost(parsed, str(decision.get("effort") or "medium"))
@@ -416,8 +442,6 @@ def _average_routing_cost(
             dollar = None
         if dollar is not None:
             costs.append(dollar)
-        elif spec.get("relative_cost") is not None:
-            costs.append(float(spec["relative_cost"]))
     if not costs:
         return None
     return round(sum(costs) / len(costs), 4)
@@ -426,15 +450,26 @@ def _average_routing_cost(
 def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
     prev_models = {m["key"]: m for m in (previous or {}).get("models", [])}
     new_models = {m["key"]: m for m in new["models"]}
-    discovered = sorted(key for key in new_models if key not in prev_models)
-    discovered.extend(
+    # Newly discovered *this round* -- drives has_meaningful_change and the
+    # notification gate, so a model that was already awaiting review before
+    # this refresh does not repeatedly count as "new" or re-trigger a notice.
+    newly_discovered = sorted(key for key in new_models if key not in prev_models)
+    newly_discovered.extend(
         sorted(
             f"{item.get('provider')}/{item.get('model')}"
             for item in new.get("discovered_models") or []
             if item.get("provider") and item.get("model")
         )
     )
-    discovered = sorted(set(discovered))
+    newly_discovered = sorted(set(newly_discovered))
+    # Every model still sitting in DISCOVERED status, whether or not it was
+    # discovered this round -- so the change summary keeps surfacing an
+    # unreviewed model instead of only mentioning it once and then going
+    # silent about it forever.
+    pending_review = sorted(
+        key for key, model in new_models.items() if model.get("status") == STATUS_DISCOVERED
+    )
+    discovered = sorted(set(newly_discovered) | set(pending_review))
 
     pricing_changes: list[dict[str, Any]] = []
     benchmark_changes: list[dict[str, Any]] = []
@@ -490,16 +525,27 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
                 }
             )
 
+    routed_model_keys = sorted(
+        {
+            f"{decision.get('provider')}/{decision.get('model')}"
+            for decision in list(prev_routing.values()) + list(new_routing.values())
+            if decision.get("provider") and decision.get("model")
+        }
+    )
+
     cost_before = _average_routing_cost(prev_routing, prev_models)
     cost_after = _average_routing_cost(new_routing, new_models)
     cost_change_percent = None
     if cost_before not in (None, 0) and cost_after is not None:
         cost_change_percent = round((cost_after - cost_before) / cost_before * 100, 1)
 
-    has_change = bool(discovered or pricing_changes or benchmark_changes or routing_changes)
+    has_change = bool(newly_discovered or pricing_changes or benchmark_changes or routing_changes)
     return {
         "has_meaningful_change": has_change,
         "discovered_models": discovered,
+        "newly_discovered_models": newly_discovered,
+        "pending_review_models": pending_review,
+        "routed_model_keys": routed_model_keys,
         "pricing_changes": pricing_changes,
         "benchmark_changes": benchmark_changes,
         "routing_changes": routing_changes,
@@ -644,10 +690,31 @@ def notification_for(result: dict[str, Any], *, consecutive_failures: int = 0) -
     if status != "changed":
         return {"should_notify": False, "kind": "info", "message": ""}
     reasons = []
-    discovered = diff.get("discovered_models") or []
+    # Only models newly discovered *this* round page the user -- one already
+    # awaiting review from an earlier refresh does not re-notify every
+    # startup just because it is still unreviewed (see discovered_models'
+    # broader, non-notifying use in the diff for the ongoing summary).
+    discovered = diff.get("newly_discovered_models") or []
     if discovered:
         reasons.append(f"{len(discovered)} new model{'s' if len(discovered) != 1 else ''} discovered")
-    pricing = diff.get("pricing_changes") or []
+    # A pricing change is only "significant" enough to notify about if it (a)
+    # touches a model some workload is actually routed to, and (b) moves a
+    # real published dollar price -- not just the catalog's 1-5 ordinal
+    # `relative_cost` rank, which by itself changes no dollar estimate and no
+    # routing decision. Both are needed: the smallest possible rank bump on a
+    # model that some workload happens to route to still changes nothing
+    # real about routing and must not page the user (issue: "Only surface a
+    # meaningful notification when ... significant pricing changes occur").
+    routed_keys = set(diff.get("routed_model_keys") or [])
+    pricing = [
+        item
+        for item in (diff.get("pricing_changes") or [])
+        if item.get("key") in routed_keys
+        and (
+            item.get("previous_input_cost") != item.get("new_input_cost")
+            or item.get("previous_output_cost") != item.get("new_output_cost")
+        )
+    ]
     if pricing:
         reasons.append(f"{len(pricing)} pricing change{'s' if len(pricing) != 1 else ''}")
     routing = diff.get("routing_changes") or []
@@ -777,16 +844,29 @@ class ModelCalibrationService:
         return self.state_dir / "refresh.lock"
 
     def load_state(self) -> dict[str, Any]:
-        return _read_json(self.state_path) or {}
+        # A torn/unparseable file here must degrade to "no recorded state"
+        # rather than take down every read (status_report) and the one
+        # in-app recovery action (a forced manual refresh) that both start
+        # by loading it. See test_model_calibration_state_resilience.py.
+        try:
+            return _read_json(self.state_path) or {}
+        except CalibrationError:
+            return {}
 
     def save_state(self, state: dict[str, Any]) -> None:
         _atomic_write_json(self.state_path, state)
 
     def load_active(self) -> dict[str, Any] | None:
-        return _read_json(self.active_path)
+        try:
+            return _read_json(self.active_path)
+        except CalibrationError:
+            return None
 
     def load_proposed(self) -> dict[str, Any] | None:
-        return _read_json(self.proposed_path)
+        try:
+            return _read_json(self.proposed_path)
+        except CalibrationError:
+            return None
 
     def load_progress(self) -> dict[str, Any] | None:
         payload = _read_json(self.progress_path)
@@ -831,7 +911,10 @@ class ModelCalibrationService:
             return []
         entries: list[dict[str, Any]] = []
         for path in sorted(self.history_dir.glob("*.json"), reverse=True):
-            payload = _read_json(path)
+            try:
+                payload = _read_json(path)
+            except CalibrationError:
+                continue
             if not payload:
                 continue
             entries.append(
@@ -912,6 +995,26 @@ class ModelCalibrationService:
         self.save_state(state)
         return calibration
 
+    def approve_discovered_model(self, key: str, *, initiated_by: str = "USER") -> dict[str, Any]:
+        """Explicitly clear a model out of DISCOVERED so the next refresh can
+        assign it a normal ACTIVE/CANDIDATE status. Discovery alone never
+        does this -- see `_status_for`'s docstring and issue #205's "does not
+        automatically make it available for routing". Takes effect on the
+        next refresh, matching how a whole calibration version's `activate`
+        already works -- there is no separate instant-apply path.
+        """
+        key = str(key or "").strip()
+        if "/" not in key or _UNSAFE_TEXT_RE.search(key):
+            raise CalibrationError(f"invalid model key {key!r}")
+        state = self.load_state()
+        approved = set(state.get("approved_models") or [])
+        approved.add(key)
+        state["approved_models"] = sorted(approved)
+        state["last_approved_at"] = iso_now()
+        state["last_approved_by"] = _normalize_initiator(initiated_by)
+        self.save_state(state)
+        return {"approved_models": state["approved_models"]}
+
     def _record_failure(
         self, state: dict[str, Any], attempted_at: str, source_status: str, error: Any, initiated_by: str
     ) -> dict[str, Any]:
@@ -946,8 +1049,8 @@ class ModelCalibrationService:
         discovered_models: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         specs, warnings = _validate_and_parse(raw_entries)
-        previous_keys = {m["key"] for m in (previous or {}).get("models", [])}
         prev_by_key = {m["key"]: m for m in (previous or {}).get("models", [])}
+        approved_keys = frozenset(self.load_state().get("approved_models") or [])
         models: list[dict[str, Any]] = []
         raw_by_key = {}
         for raw in raw_entries:
@@ -963,7 +1066,9 @@ class ModelCalibrationService:
             if extra.get("external_evaluations"):
                 entry["external_evaluations"] = extra["external_evaluations"]
             entry["key"] = f"{entry['provider']}/{entry['model']}"
-            entry["status"] = _status_for(entry, previous_keys, has_previous=previous is not None)
+            entry["status"] = _status_for(
+                entry, prev_by_key, approved_keys, has_previous=previous is not None
+            )
             entry["cost_efficiency"] = _cost_efficiency(entry)
             coding, coding_quality = _best_benchmark(entry, "coding_agent_index")
             agentic, _agentic_quality = _best_benchmark(entry, "deep_swe")
@@ -1381,6 +1486,12 @@ def build_calibration_parser() -> argparse.ArgumentParser:
     activate.add_argument("version")
     activate.add_argument("--initiated-by", default="USER")
 
+    approve = sub.add_parser(
+        "approve", help="Approve a DISCOVERED model so the next refresh can make it routable."
+    )
+    approve.add_argument("key")
+    approve.add_argument("--initiated-by", default="USER")
+
     history = sub.add_parser("history", help="List recent calibration versions.")
     history.add_argument("--limit", type=int, default=20)
 
@@ -1409,6 +1520,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.action == "activate":
             result = service.activate(args.version, initiated_by=args.initiated_by)
+        elif args.action == "approve":
+            result = service.approve_discovered_model(args.key, initiated_by=args.initiated_by)
         elif args.action == "analyze":
             result = service.analyze()
         else:
