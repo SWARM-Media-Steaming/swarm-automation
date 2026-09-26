@@ -1794,6 +1794,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_external_benchmark_changes.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-external-benchmark-changes",
+      "name": "Issue #205: external benchmark changes must produce reviewable calibration changes",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "tests/adversarial/test_model_calibration_external_benchmark_changes.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
