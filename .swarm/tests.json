@@ -1764,6 +1764,36 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_discovered_review_unreachable.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-discovered-review-unreachable",
+      "name": "Issue #205: approving a discovered model must survive its own refresh and be reachable from the app",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "src/main.rs",
+          "ui/app.js",
+          "ui/index.html",
+          "tests/adversarial/test_model_calibration_discovered_review_unreachable.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
