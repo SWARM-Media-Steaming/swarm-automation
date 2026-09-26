@@ -1822,6 +1822,183 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_external_input_integrity.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-external-input-integrity",
+      "name": "Issue #205: unusable external feeds cannot replace last-known-good prices",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_external_input_integrity.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_external_discovery_idempotence.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-external-discovery-idempotence",
+      "name": "Issue #205: unchanged external discoveries do not create repeated versions or startup notifications",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_external_discovery_idempotence.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_simulation_eligibility.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-simulation-eligibility",
+      "name": "Issue #205: simulation and safe auto-activation enforce model review gates",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_simulation_eligibility.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_effort_benchmark_retention.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-effort-benchmark-retention",
+      "name": "Issue #205: measured benchmark and task-cost changes remain reviewable",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_effort_benchmark_retention.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_lifecycle_integration.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-lifecycle-integration",
+      "name": "Issue #205: refresh intervals, outage recovery, concurrency, initiators and rollback",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_lifecycle_integration.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_model_calibration_review_ui.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-review-ui",
+      "name": "Issue #205: real calibration responses expose discoveries, history and startup errors in AI Configuration",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "node"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_review_ui.js",
+          "ui/app.js",
+          "ui/model-calibration-ui.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
