@@ -3609,7 +3609,21 @@
     const changesBody = byId("model-calibration-changes-body");
     if (!box || !changesBox || !changesBody) return;
     const api = window.SwarmModelCalibration;
-    const result = state.modelCalibration.lastResult;
+    const status = modelCalibrationStatus();
+    const manualResult = state.modelCalibration.lastResult;
+    // Status survives app restarts and also carries startup refresh failures.
+    // Prefer it when a later background check superseded a manual result.
+    const useStoredResult = status.last_attempted_status && (
+      !manualResult || (manualResult.attempted_at && status.last_attempted_refresh_at > manualResult.attempted_at)
+    );
+    const result = useStoredResult ? {
+      status: status.last_attempted_status,
+      error: status.last_error,
+      attempted_at: status.last_attempted_refresh_at,
+      diff: status.last_diff,
+      activated: !status.has_newer_proposed,
+      calibration_version: status.proposed_version || status.active_version,
+    } : manualResult;
     box.replaceChildren();
     if (!result) {
       box.classList.add("hidden");
@@ -3704,7 +3718,7 @@
     return row;
   }
 
-  function buildModelRow(model) {
+  function buildModelRow(model, calibration) {
     const item = document.createElement("details");
     item.className = "execution-record";
     const summary = document.createElement("summary");
@@ -3751,9 +3765,42 @@
       ["Superseded by", model.superseded_by],
       ["Benchmark source", model.benchmark_source],
       ["Benchmark date", model.benchmark_date],
+      ["Data source", (calibration.source || {}).kind],
       ["Notes", model.notes],
     ].forEach(([label, value]) => detail.appendChild(modelDetailRow(label, value)));
     body.appendChild(detail);
+    const benchmarks = document.createElement("details");
+    benchmarks.appendChild(Object.assign(document.createElement("summary"), { textContent: "Benchmark values and change history" }));
+    benchmarks.appendChild(Object.assign(document.createElement("p"), {
+      className: "panel-copy",
+      textContent: "Public benchmark results are comparative data, not guarantees of task quality.",
+    }));
+    Object.entries(model.benchmarks || {}).forEach(([effort, values]) => {
+      Object.entries(values).forEach(([field, value]) => {
+        if (value != null) benchmarks.appendChild(labeledCell(`${effort} · ${field}`, value));
+      });
+    });
+    Object.entries(model.external_evaluations || {}).forEach(([field, value]) => {
+      benchmarks.appendChild(labeledCell(field, value));
+    });
+    [
+      ["Pricing history", model.pricing_history],
+      ["Benchmark history", model.benchmark_history],
+    ].forEach(([label, entries]) => {
+      const history = document.createElement("details");
+      history.appendChild(Object.assign(document.createElement("summary"), { textContent: label }));
+      if (!(entries || []).length) {
+        history.appendChild(Object.assign(document.createElement("p"), { textContent: "No recorded changes." }));
+      }
+      (entries || []).forEach((change) => {
+        history.appendChild(labeledCell(
+          `${formatIsoTimestamp(change.at)} · ${change.field}`,
+          `${change.previous ?? "unavailable"} → ${change.new ?? "unavailable"}`,
+        ));
+      });
+      benchmarks.appendChild(history);
+    });
+    body.appendChild(benchmarks);
     if (model.status === "DISCOVERED") {
       const approveRow = document.createElement("div");
       approveRow.className = "control-row";
@@ -3762,11 +3809,14 @@
       approveButton.className = "secondary-button compact";
       approveButton.dataset.approveModel = model.key;
       const busy = state.modelCalibration.approvingKeys.has(model.key);
-      approveButton.disabled = busy;
+      const supported = Boolean(model.agent && (model.supported_efforts || []).length);
+      approveButton.disabled = busy || !supported;
       approveButton.textContent = busy ? "Approving…" : "Approve for routing";
       approveRow.appendChild(approveButton);
       const note = document.createElement("small");
-      note.textContent = "Discovering a model never makes it routable on its own — approve it, then the next refresh makes it ACTIVE or CANDIDATE.";
+      note.textContent = supported
+        ? "Approval allows this model into the next calibration proposal. Activate that calibration to use it for routing."
+        : "Pricing data is available for review. Routing requires a supported model definition with capability and reasoning levels before approval.";
       approveRow.appendChild(note);
       body.appendChild(approveRow);
     }
@@ -3792,9 +3842,23 @@
   function renderModelRoutingTable() {
     const api = window.SwarmModelCalibration;
     const status = modelCalibrationStatus();
-    const models = (status.active_calibration || {}).models || [];
+    const groups = [{ label: "Active calibration", calibration: status.active_calibration }];
+    if (status.has_newer_proposed) {
+      groups.push({ label: "Proposed calibration — awaiting review", calibration: status.proposed_calibration });
+    }
+    const modelGroups = groups.filter(({ calibration }) => calibration).map(({ label, calibration }) => ({
+      label,
+      calibration,
+      models: [
+        ...(calibration.models || []),
+        ...(calibration.discovered_models || []).map((model) => ({
+          ...model, key: model.key || `${model.provider}/${model.model}`, status: "DISCOVERED",
+        })),
+      ],
+    }));
+    const modelCount = new Set(modelGroups.flatMap(({ models }) => models.map((model) => model.key))).size;
     const count = byId("model-calibration-model-count");
-    if (count) count.textContent = `${models.length} model${models.length === 1 ? "" : "s"}`;
+    if (count) count.textContent = `${modelCount} model${modelCount === 1 ? "" : "s"}`;
 
     const head = byId("model-routing-table-head");
     if (head) {
@@ -3813,15 +3877,18 @@
     const box = byId("model-routing-table");
     if (!box) return;
     box.replaceChildren();
-    if (!models.length) {
+    if (!modelCount) {
       box.appendChild(Object.assign(document.createElement("p"), {
         className: "panel-copy",
         textContent: "No calibrated model data yet. Select Refresh Model Data above.",
       }));
       return;
     }
-    const sorted = api.sortModels(models, state.modelCalibration.sort.column, state.modelCalibration.sort.direction);
-    sorted.forEach((model) => box.appendChild(buildModelRow(model)));
+    modelGroups.forEach(({ label, calibration, models }) => {
+      box.appendChild(Object.assign(document.createElement("h4"), { textContent: `${label} (${calibration.version})` }));
+      const sorted = api.sortModels(models, state.modelCalibration.sort.column, state.modelCalibration.sort.direction);
+      sorted.forEach((model) => box.appendChild(buildModelRow(model, calibration)));
+    });
   }
 
   function renderModelCalibrationExamples() {
@@ -3963,7 +4030,9 @@
   }
 
   function onModelCalibrationRefreshed(payload) {
-    state.modelCalibration.status = null;
+    if (payload && payload.status !== "skipped_interval" && payload.status !== "already_running") {
+      state.modelCalibration.lastResult = payload;
+    }
     void refreshModelCalibration({ quiet: true });
     const notification = (payload || {}).notification;
     if (notification && notification.should_notify) {

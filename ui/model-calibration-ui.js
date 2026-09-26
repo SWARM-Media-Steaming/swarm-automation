@@ -20,6 +20,7 @@
     if (info.refresh_running) return { text: "Refreshing…", tone: "running" };
     if (!info.active_version) return { text: "Not yet calibrated", tone: "idle" };
     if (!info.healthy) return { text: "Needs attention", tone: "error" };
+    if (info.last_attempted_status === "failed") return { text: "Refresh failed", tone: "error" };
     if (info.has_newer_proposed) return { text: "Update available", tone: "paused" };
     return { text: "Current", tone: "ok" };
   }
@@ -90,7 +91,7 @@
     const diff = info.diff || {};
     const lines = [
       { label: "Models checked", value: String(diff.models_checked ?? info.models_checked ?? 0) },
-      { label: "New models", value: String((diff.discovered_models || []).length) },
+      { label: "New models", value: String((diff.newly_discovered_models || diff.discovered_models || []).length) },
       { label: "Pricing changes", value: String((diff.pricing_changes || []).length) },
       { label: "Benchmark changes", value: String((diff.benchmark_changes || []).length) },
       { label: "Routing changes", value: `${(diff.routing_changes || []).length} workload categor${(diff.routing_changes || []).length === 1 ? "y" : "ies"}` },

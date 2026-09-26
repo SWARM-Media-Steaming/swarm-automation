@@ -164,7 +164,8 @@ def _overlay_keys(entry: dict[str, Any]) -> set[tuple[str, str]]:
 
 
 def merge_overlay(
-    local_entries: Sequence[dict[str, Any]], overlay_rows: Sequence[dict[str, Any]]
+    local_entries: Sequence[dict[str, Any]], overlay_rows: Sequence[dict[str, Any]],
+    *, previous: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Apply remote pricing/benchmark patches onto the bundled catalog.
 
@@ -172,58 +173,72 @@ def merge_overlay(
     routable by this merge alone.
     """
     merged = [dict(entry) for entry in local_entries if isinstance(entry, dict)]
+    previous_models = _calibration_models(previous)
     lookup: dict[tuple[str, str], dict[str, Any]] = {}
     for entry in merged:
+        prior = previous_models.get(f"{entry.get('provider')}/{entry.get('model')}", {})
+        # Feeds are overlays, so an omitted or invalid observation cannot erase
+        # the last known value. Router capability/eligibility still comes from
+        # the local definition, never from a public pricing feed.
+        for field in ("input_cost", "output_cost", "reasoning_cost", "external_evaluations", "speed", "release_date"):
+            if prior.get(field) is not None:
+                entry[field] = prior[field]
         for key in _overlay_keys(entry):
             lookup[key] = entry
     discovered: list[dict[str, Any]] = []
     seen_discovered: set[tuple[str, str]] = set()
+    usable_rows = 0
     for raw in overlay_rows:
         if not isinstance(raw, dict):
             continue
+        provider = raw.get("provider")
+        model = raw.get("model") or raw.get("model_id")
+        if not isinstance(provider, str) or not isinstance(model, str):
+            continue
+        if not provider.strip() or not model.strip():
+            continue
+        observations = {}
+        for field in ("input_cost", "output_cost", "reasoning_cost", "speed"):
+            parsed = _finite_float(raw.get(field))
+            if parsed is not None:
+                observations[field] = parsed
+        evaluations = raw.get("evaluations")
+        if isinstance(evaluations, dict):
+            cleaned = {
+                sanitize_text(str(name))[:80]: parsed
+                for name, value in list(evaluations.items())[:20]
+                if (parsed := _finite_float(value)) is not None
+            }
+            if cleaned:
+                observations["external_evaluations"] = cleaned
+        release = sanitize_text(str(raw.get("release_date") or "")).strip()[:40]
+        if release:
+            observations["release_date"] = release
+        if raw.get("deprecated") is True:
+            observations["deprecated"] = True
+        if not observations:
+            continue
+        usable_rows += 1
         keys = _overlay_keys(raw)
-        target = next((lookup[key] for key in keys if key in lookup), None)
+        target = next((lookup[key] for key in sorted(keys) if key in lookup), None)
         if target is None:
-            identity = next(iter(keys), None)
+            identity = next(iter(sorted(keys)), None)
             if identity is None or identity in seen_discovered:
                 continue
             seen_discovered.add(identity)
             discovered.append(
                 {
-                    "provider": str(raw.get("provider") or "")[:80],
-                    "model": str(raw.get("model") or raw.get("model_id") or "")[:120],
+                    "provider": provider.strip()[:80],
+                    "model": model.strip()[:120],
                     "status": STATUS_DISCOVERED,
-                    "input_cost": _finite_float(raw.get("input_cost")),
-                    "output_cost": _finite_float(raw.get("output_cost")),
-                    "reasoning_cost": _finite_float(raw.get("reasoning_cost")),
-                    "release_date": sanitize_text(str(raw.get("release_date") or ""))[:40],
-                    "speed": _finite_float(raw.get("speed")),
                     "active": False,
+                    **observations,
                 }
             )
             continue
-        for field in ("input_cost", "output_cost", "reasoning_cost"):
-            parsed = _finite_float(raw.get(field))
-            if parsed is not None:
-                target[field] = parsed
-        if raw.get("deprecated") is True:
-            target["deprecated"] = True
-        release = sanitize_text(str(raw.get("release_date") or "")).strip()[:40]
-        if release:
-            target["release_date"] = release
-        evaluations = raw.get("evaluations")
-        if isinstance(evaluations, dict):
-            cleaned = {}
-            for name, value in list(evaluations.items())[:20]:
-                parsed = _finite_float(value)
-                if parsed is None:
-                    continue
-                cleaned[sanitize_text(str(name))[:80]] = parsed
-            if cleaned:
-                target["external_evaluations"] = cleaned
-        speed = _finite_float(raw.get("speed"))
-        if speed is not None:
-            target["speed"] = speed
+        target.update(observations)
+    if not usable_rows:
+        raise CalibrationValidationError("Model source contained no usable model pricing, benchmark, or performance data.")
     return merged, discovered
 
 
@@ -457,6 +472,11 @@ def _benchmark_value_changes(previous: dict[str, Any], new: dict[str, Any]) -> l
     before = {field: previous.get(field) for field in fields}
     after = {field: new.get(field) for field in fields}
     for entry, values in ((previous, before), (new, after)):
+        for effort, benchmark in (entry.get("benchmarks") or {}).items():
+            values.update(
+                (f"benchmarks.{effort}.{name}", value)
+                for name, value in benchmark.items()
+            )
         values.update(
             (f"external_evaluations.{name}", value)
             for name, value in (entry.get("external_evaluations") or {}).items()
@@ -468,21 +488,22 @@ def _benchmark_value_changes(previous: dict[str, Any], new: dict[str, Any]) -> l
     ]
 
 
+def _calibration_models(calibration: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Include external discoveries in comparison and history, not live routing."""
+    calibration = calibration or {}
+    return {
+        model.get("key") or f"{model['provider']}/{model['model']}": model
+        for model in list(calibration.get("discovered_models") or []) + list(calibration.get("models") or [])
+    }
+
+
 def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
-    prev_models = {m["key"]: m for m in (previous or {}).get("models", [])}
-    new_models = {m["key"]: m for m in new["models"]}
+    prev_models = _calibration_models(previous)
+    new_models = _calibration_models(new)
     # Newly discovered *this round* -- drives has_meaningful_change and the
     # notification gate, so a model that was already awaiting review before
     # this refresh does not repeatedly count as "new" or re-trigger a notice.
     newly_discovered = sorted(key for key in new_models if key not in prev_models)
-    newly_discovered.extend(
-        sorted(
-            f"{item.get('provider')}/{item.get('model')}"
-            for item in new.get("discovered_models") or []
-            if item.get("provider") and item.get("model")
-        )
-    )
-    newly_discovered = sorted(set(newly_discovered))
     # Every model still sitting in DISCOVERED status, whether or not it was
     # discovered this round -- so the change summary keeps surfacing an
     # unreviewed model instead of only mentioning it once and then going
@@ -1101,7 +1122,7 @@ class ModelCalibrationService:
         discovered_models: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         specs, warnings = _validate_and_parse(raw_entries)
-        prev_by_key = {m["key"]: m for m in (previous or {}).get("models", [])}
+        prev_by_key = _calibration_models(previous)
         approved_keys = frozenset(self.load_state().get("approved_models") or [])
         models: list[dict[str, Any]] = []
         raw_by_key = {}
@@ -1140,6 +1161,10 @@ class ModelCalibrationService:
         for entry in models:
             counts[entry["status"]] = counts.get(entry["status"], 0) + 1
         discovered = list(discovered_models or [])
+        for entry in discovered:
+            entry["key"] = f"{entry['provider']}/{entry['model']}"
+            entry["last_updated"] = iso_now(now_ts)
+            _append_history(prev_by_key.get(entry["key"]), entry, now_ts)
         counts[STATUS_DISCOVERED] += len(discovered)
 
         routable_specs = [
@@ -1163,7 +1188,7 @@ class ModelCalibrationService:
             "models": models,
             "discovered_models": discovered,
             "model_counts": counts,
-            "routing": recalculate_routing(routable_specs or specs, routing_optimization=routing_optimization),
+            "routing": recalculate_routing(routable_specs, routing_optimization=routing_optimization),
             "weights": _weights_summary(routing_optimization),
             "token_cost_assumptions": TOKEN_COST_ASSUMPTIONS,
             "source_warnings": [sanitize_text(warning)[:400] for warning in warnings],
@@ -1240,6 +1265,7 @@ class ModelCalibrationService:
         source: str,
         source_url: str | None,
         fetch_fn: Callable[[], Any] | None,
+        previous: dict[str, Any] | None = None,
     ) -> tuple[list[Any], list[dict[str, Any]], dict[str, Any]]:
         discovered: list[dict[str, Any]] = []
         if fetch_fn is not None:
@@ -1252,7 +1278,7 @@ class ModelCalibrationService:
             overlay, meta = _sources.fetch_source(kind, source_url or "")
         except _sources.SourceError as error:
             raise CalibrationSourceError(str(error)) from error
-        merged, discovered = merge_overlay(local_entries, overlay)
+        merged, discovered = merge_overlay(local_entries, overlay, previous=previous)
         return merged, discovered, meta
 
     def refresh(
@@ -1336,11 +1362,24 @@ class ModelCalibrationService:
         except CalibrationError as error:
             return self._record_failure(state, iso_now(now_ts), "error", error, initiated_by)
 
+        # A pending proposal is already-observed data, even though routing
+        # still uses the active version. Repeated checks must not mint the
+        # same proposal or rediscover its models. Tie it to its active base so
+        # a rollback cannot reuse an unrelated proposal as the baseline.
+        proposed = self.load_proposed()
+        comparison = previous
+        if (
+            proposed
+            and state.get("proposed_version") == proposed.get("version")
+            and proposed.get("base_version") == (previous or {}).get("version")
+        ):
+            comparison = proposed
+
         attempted_at = iso_now(now_ts)
         self._set_progress(*PROGRESS_STAGES[0])
         try:
             raw_entries, discovered, source_meta = self._fetch_entries(
-                source=source, source_url=source_url, fetch_fn=fetch_fn
+                source=source, source_url=source_url, fetch_fn=fetch_fn, previous=comparison
             )
         except CalibrationSourceError as error:
             return self._record_failure(state, attempted_at, "unavailable", error, initiated_by)
@@ -1351,7 +1390,7 @@ class ModelCalibrationService:
         try:
             new_calibration = self._build_calibration(
                 raw_entries,
-                previous=previous,
+                previous=comparison,
                 initiated_by=initiated_by,
                 now_ts=now_ts,
                 source=source_meta,
@@ -1364,6 +1403,8 @@ class ModelCalibrationService:
 
         self._set_progress(*PROGRESS_STAGES[2])
         diff = diff_calibrations(previous, new_calibration)
+        observed_diff = diff_calibrations(comparison, new_calibration)
+        diff["newly_discovered_models"] = observed_diff["newly_discovered_models"]
         simulation = None
         if run_calibration and run_simulation_flag:
             self._set_progress(*PROGRESS_STAGES[3])
@@ -1414,7 +1455,12 @@ class ModelCalibrationService:
             result["notification"] = notification_for(result)
             return result
 
-        if not run_calibration or not diff["has_meaningful_change"]:
+        if not run_calibration or not observed_diff["has_meaningful_change"] or not diff["has_meaningful_change"]:
+            if run_calibration and not diff["has_meaningful_change"]:
+                # The source returned to the active data; an older proposal
+                # is no longer an update to offer. Its history remains intact.
+                state["proposed_version"] = None
+                self.proposed_path.unlink(missing_ok=True)
             state["last_attempted_status"] = "no_change"
             self.save_state(state)
             self._set_progress(*PROGRESS_STAGES[5])
@@ -1431,13 +1477,16 @@ class ModelCalibrationService:
             return result
 
         state["last_attempted_status"] = "changed"
+        new_calibration["base_version"] = (previous or {}).get("version")
+        new_calibration["diff"] = diff
+        new_calibration["simulation"] = simulation
         self._write_history(new_calibration)
         _atomic_write_json(self.proposed_path, new_calibration)
         state["proposed_version"] = new_calibration["version"]
         self.save_state(state)
 
         activated = False
-        if activation_policy == "auto" and new_calibration["regression_ok"]:
+        if activation_policy == "auto" and simulation is not None and simulation["regression_ok"]:
             self.activate(new_calibration["version"], initiated_by=initiated_by)
             activated = True
 
@@ -1459,7 +1508,9 @@ class ModelCalibrationService:
     def analyze(self) -> dict[str, Any]:
         """Explain the latest stored diff using only stored calibration data."""
         state = self.load_state()
-        return explain_update(self.load_active(), self.load_proposed(), state.get("last_diff"))
+        proposed = self.load_proposed()
+        pending = proposed if proposed and state.get("proposed_version") == proposed.get("version") else None
+        return explain_update(self.load_active(), pending, (pending or {}).get("diff") or state.get("last_diff"))
 
     def status_report(self, *, routing_optimization: str = "best") -> dict[str, Any]:
         try:
@@ -1482,6 +1533,7 @@ class ModelCalibrationService:
             except (OSError, ValueError, json.JSONDecodeError, TypeError):
                 refresh_running = False
         counts = (active or {}).get("model_counts") or {}
+        review_counts = (proposed or {}).get("model_counts") if proposed_version else counts
         return {
             "active_version": active_version,
             "proposed_version": proposed_version,
@@ -1502,7 +1554,7 @@ class ModelCalibrationService:
             "progress": progress,
             "refresh_running": refresh_running,
             "active_model_count": int(counts.get(STATUS_ACTIVE) or 0) + int(counts.get(STATUS_CANDIDATE) or 0),
-            "discovered_model_count": int(counts.get(STATUS_DISCOVERED) or 0),
+            "discovered_model_count": int((review_counts or {}).get(STATUS_DISCOVERED) or 0),
             "routing_mode": (active or {}).get("routing_mode") or routing_mode_label(routing_optimization),
             "weights": (active or {}).get("weights") or _weights_summary(routing_optimization),
             "token_cost_assumptions": TOKEN_COST_ASSUMPTIONS,

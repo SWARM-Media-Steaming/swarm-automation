@@ -51,6 +51,12 @@ test("health pill is current when healthy with nothing pending", () => {
   });
 });
 
+test("failed refresh remains visible while the active calibration is healthy", () => {
+  assert.deepEqual(healthPill({
+    active_version: "2026-01-01-001", healthy: true, last_attempted_status: "failed",
+  }), { text: "Refresh failed", tone: "error" });
+});
+
 test("status fields cover every plain-language item the issue calls for", () => {
   const fields = statusFields(
     { dynamic_model_routing: true, routing_optimization: "cost" },
@@ -149,6 +155,13 @@ test("an auto-activated result says the calibration is already active", () => {
   });
   const calibration = lines.find((line) => line.label === "Calibration");
   assert.match(calibration.value, /Active immediately/);
+});
+
+test("already-discovered models awaiting review do not inflate the new-model count", () => {
+  const lines = resultSummaryLines({
+    status: "changed", diff: { discovered_models: ["fixture/pending"], newly_discovered_models: [] },
+  });
+  assert.equal(lines.find((line) => line.label === "New models").value, "0");
 });
 
 test("failure detail is only populated for a failed result", () => {

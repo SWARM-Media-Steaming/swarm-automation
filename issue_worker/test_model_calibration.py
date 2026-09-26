@@ -352,6 +352,82 @@ class ExternalEvaluationRefreshTests(unittest.TestCase):
         )
 
 
+class OverlayReviewLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.service = calib.ModelCalibrationService(Path(tmp.name))
+        local = mock.patch.object(calib, "fetch_local_source", return_value=[_entry("m1")])
+        local.start()
+        self.addCleanup(local.stop)
+        self.service.ensure_bootstrap(now=1.0)
+
+    def refresh_rows(self, rows: list[dict], *, now: float, **options: object) -> dict:
+        with mock.patch.object(sources, "fetch_json", return_value=({"models": rows}, "fixture")):
+            return self.service.refresh(
+                source="json", source_url="https://example.invalid/models.json",
+                force=True, now=now, **options,
+            )
+
+    def test_repeated_pending_proposal_keeps_version_history_and_review_data(self) -> None:
+        rows = [
+            {"provider": "fixture", "model": "m1", "input_cost": 2, "output_cost": 8},
+            {"provider": "fixture", "model": "new", "input_cost": 1, "output_cost": 4},
+        ]
+        active_before = self.service.active_path.read_bytes()
+        first = self.refresh_rows(rows, now=100.0)
+        proposal_before = self.service.proposed_path.read_bytes()
+        history_before = self.service.list_history()
+        result = self.refresh_rows(rows, now=200.0, initiated_by="STARTUP")
+        self.assertEqual(result["status"], "no_change")
+        self.assertFalse(result["notification"]["should_notify"])
+        self.assertEqual(result["diff"]["newly_discovered_models"], [])
+        self.assertEqual(self.service.active_path.read_bytes(), active_before)
+        self.assertEqual(self.service.proposed_path.read_bytes(), proposal_before)
+        self.assertEqual(self.service.list_history(), history_before)
+        self.assertEqual(self.service.status_report()["discovered_model_count"], 1)
+        self.assertEqual(self.service.analyze()["proposed_version"], first["calibration_version"])
+
+    def test_benchmark_only_overlay_preserves_known_prices(self) -> None:
+        self.refresh_rows([
+            {"provider": "fixture", "model": "m1", "input_cost": 2, "output_cost": 8},
+        ], now=100.0, activation_policy="auto")
+        result = self.refresh_rows([
+            {"provider": "fixture", "model": "m1", "evaluations": {"coding": 75}},
+        ], now=200.0)
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(result["diff"]["pricing_changes"], [])
+        proposed = self.service.load_proposed()["models"][0]
+        self.assertEqual((proposed["input_cost"], proposed["output_cost"]), (2, 8))
+
+    def test_discovered_model_updates_retain_values_and_history_without_approval(self) -> None:
+        def rows(price: float, benchmark: float) -> list[dict]:
+            return [
+                {"provider": "fixture", "model": "m1", "output_cost": 8},
+                {"provider": "fixture", "model": "new", "output_cost": price,
+                 "evaluations": {"coding": benchmark}},
+            ]
+        self.refresh_rows(rows(4, 50), now=100.0, activation_policy="auto")
+        result = self.refresh_rows(rows(3, 60), now=200.0)
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(result["diff"]["newly_discovered_models"], [])
+        proposed = self.service.load_proposed()
+        model = proposed["discovered_models"][0]
+        self.assertEqual(model["status"], "DISCOVERED")
+        self.assertTrue(any(item["previous"] == 4 and item["new"] == 3 for item in model["pricing_history"]))
+        self.assertTrue(any(item["previous"] == 50 and item["new"] == 60 for item in model["benchmark_history"]))
+        self.assertNotIn("new", {item["model"] for item in self.service._router_models(proposed)})
+
+    def test_auto_activation_requires_a_completed_simulation(self) -> None:
+        before = self.service.active_path.read_bytes()
+        result = self.refresh_rows([
+            {"provider": "fixture", "model": "m1", "input_cost": 2, "output_cost": 8},
+        ], now=100.0, activation_policy="auto", run_simulation_flag=False)
+        self.assertFalse(result["activated"])
+        self.assertIsNone(result["simulation"])
+        self.assertEqual(self.service.active_path.read_bytes(), before)
+
+
 class SimulationAndDiffTests(unittest.TestCase):
     def test_diff_reports_no_meaningful_change_for_identical_catalogs(self) -> None:
         service = calib.ModelCalibrationService(Path(tempfile.mkdtemp()))
