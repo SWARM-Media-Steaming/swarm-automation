@@ -447,6 +447,27 @@ def _average_routing_cost(
     return round(sum(costs) / len(costs), 4)
 
 
+def _benchmark_value_changes(previous: dict[str, Any], new: dict[str, Any]) -> list[dict[str, Any]]:
+    """Compare named benchmark values for both review summaries and history.
+
+    External evaluations remain in their source's units and namespace; they
+    need review even when the effort-specific router benchmarks are unchanged.
+    """
+    fields = ("coding_score", "agentic_score", "reasoning_score", "relative_capability")
+    before = {field: previous.get(field) for field in fields}
+    after = {field: new.get(field) for field in fields}
+    for entry, values in ((previous, before), (new, after)):
+        values.update(
+            (f"external_evaluations.{name}", value)
+            for name, value in (entry.get("external_evaluations") or {}).items()
+        )
+    return [
+        {"field": field, "previous": before.get(field), "new": after.get(field)}
+        for field in sorted(before.keys() | after.keys())
+        if before.get(field) != after.get(field)
+    ]
+
+
 def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
     prev_models = {m["key"]: m for m in (previous or {}).get("models", [])}
     new_models = {m["key"]: m for m in new["models"]}
@@ -512,19 +533,15 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
                     "new_output_cost": model.get("output_cost"),
                 }
             )
-        for field in ("coding_score", "agentic_score", "reasoning_score", "relative_capability"):
-            if prev.get(field) != model.get(field):
-                benchmark_changes.append(
-                    {
-                        "key": key,
-                        "provider": model["provider"],
-                        "model": model["model"],
-                        "field": field,
-                        "previous": prev.get(field),
-                        "new": model.get(field),
-                    }
-                )
-                break
+        for change in _benchmark_value_changes(prev, model):
+            benchmark_changes.append(
+                {
+                    "key": key,
+                    "provider": model["provider"],
+                    "model": model["model"],
+                    **change,
+                }
+            )
 
     prev_routing = (previous or {}).get("routing", {})
     new_routing = new.get("routing", {})
@@ -689,11 +706,9 @@ def _append_history(previous: dict[str, Any] | None, entry: dict[str, Any], now_
             pricing_history.append(
                 {"at": stamp, "field": field, "previous": prev.get(field), "new": entry.get(field)}
             )
-    for field in ("coding_score", "agentic_score", "reasoning_score", "relative_capability"):
-        if prev.get(field) != entry.get(field) and (prev.get(field) is not None or entry.get(field) is not None):
-            benchmark_history.append(
-                {"at": stamp, "field": field, "previous": prev.get(field), "new": entry.get(field)}
-            )
+    benchmark_history.extend(
+        {"at": stamp, **change} for change in _benchmark_value_changes(prev, entry)
+    )
     entry["pricing_history"] = pricing_history[-20:]
     entry["benchmark_history"] = benchmark_history[-20:]
 
@@ -788,6 +803,20 @@ def explain_update(active: dict[str, Any] | None, proposed: dict[str, Any] | Non
             {
                 "question": f"Is the price change for {change.get('key')} significant?",
                 "answer": detail,
+            }
+        )
+    for change in (diff.get("benchmark_changes") or [])[:8]:
+        before = change.get("previous")
+        after = change.get("new")
+        answers.append(
+            {
+                "question": f"What benchmark changed for {change.get('key')}?",
+                "answer": (
+                    f"{change.get('field')}: "
+                    f"{before if before is not None else 'unavailable'} → "
+                    f"{after if after is not None else 'unavailable'}. "
+                    "Benchmark results are comparative data, not guarantees of task quality."
+                ),
             }
         )
     discovered = diff.get("discovered_models") or []

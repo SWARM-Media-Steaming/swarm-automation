@@ -1,9 +1,9 @@
 """Tests for Model Routing Calibration (issue #205).
 
-Deterministic and offline: the "remote" source path is exercised only through
-an injected ``fetch_fn`` (never a live network call), and the "local" source
-path reads the real bundled ``skills/model-router/models.yaml`` so these tests
-also double as a smoke test that file still parses.
+Deterministic and offline: remote sources use an injected ``fetch_fn`` or a
+mocked JSON transport (never a live network call), and the local source path
+reads the real bundled ``skills/model-router/models.yaml`` so these tests also
+double as a smoke test that file still parses.
 
 Run with ``python3 -m unittest test_model_calibration`` from this directory
 (not pytest — see test_swarm_issue_worker.py's module docstring for why).
@@ -249,6 +249,107 @@ class ModelCalibrationServiceTests(unittest.TestCase):
         catalog = mr.load_model_catalog(self.service.catalog_override_path)
         self.assertEqual({model.model for model in catalog}, {"m1"})
         self.assertIsInstance(result, dict)
+
+
+class ExternalEvaluationRefreshTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.service = calib.ModelCalibrationService(Path(tmp.name))
+
+    def refresh_evaluations(self, evaluations: dict, *, now: float) -> dict:
+        payload = {
+            "data": [
+                {
+                    "model_creator": {"slug": "fixture"},
+                    "slug": "m1",
+                    "evaluations": evaluations,
+                }
+            ],
+        }
+        with mock.patch.dict("os.environ", {"ARTIFICIAL_ANALYSIS_API_KEY": "fixture-key"}):
+            with mock.patch.object(calib, "fetch_local_source", return_value=[_entry("m1")]):
+                with mock.patch.object(sources, "fetch_json", return_value=(payload, str(now))):
+                    return self.service.refresh(
+                        source="artificial_analysis", force=True, now=now
+                    )
+
+    def test_external_values_are_reviewable_with_history_activation_and_rollback(self) -> None:
+        initial = self.refresh_evaluations(
+            {"coding_agent_index": 60, "intelligence_index": 40}, now=1.0
+        )
+        active_before = self.service.active_path.read_bytes()
+        catalog_before = self.service.catalog_override_path.read_bytes()
+        updated = self.refresh_evaluations(
+            {"coding_agent_index": "80", "intelligence_index": 50}, now=100.0
+        )
+
+        self.assertEqual(updated["status"], "changed")
+        self.assertFalse(updated["activated"])
+        self.assertIsNotNone(updated["simulation"])
+        changes = updated["diff"]["benchmark_changes"]
+        self.assertEqual(
+            [(item["field"], item["previous"], item["new"]) for item in changes],
+            [
+                ("external_evaluations.coding_agent_index", 60, 80),
+                ("external_evaluations.intelligence_index", 40, 50),
+            ],
+        )
+        self.assertEqual(self.service.active_path.read_bytes(), active_before)
+        self.assertEqual(self.service.catalog_override_path.read_bytes(), catalog_before)
+        proposed = self.service.load_proposed()
+        history = proposed["models"][0]["benchmark_history"]
+        latest = [item for item in history if item["at"] == calib.iso_now(100.0)]
+        self.assertEqual(
+            latest,
+            [
+                {"at": calib.iso_now(100.0), "field": "external_evaluations.coding_agent_index",
+                 "previous": 60, "new": 80},
+                {"at": calib.iso_now(100.0), "field": "external_evaluations.intelligence_index",
+                 "previous": 40, "new": 50},
+            ],
+        )
+        explanation = self.service.analyze()
+        self.assertTrue(any("60.0 → 80.0" in item["answer"] for item in explanation["answers"]))
+        self.assertFalse(any("no meaningful" in item["answer"] for item in explanation["answers"]))
+
+        self.service.activate(updated["calibration_version"])
+        self.assertEqual(self.service.load_active(), proposed)
+        self.service.activate(initial["calibration_version"])
+        self.assertEqual(self.service.active_path.read_bytes(), active_before)
+        self.assertEqual(self.service.catalog_override_path.read_bytes(), catalog_before)
+
+    def test_equivalent_normalized_evaluations_do_not_create_an_update(self) -> None:
+        initial = self.refresh_evaluations(
+            {"coding_agent_index": "60", "intelligence_index": 0}, now=1.0
+        )
+        result = self.refresh_evaluations(
+            {"intelligence_index": 0.0, "coding_agent_index": 60.0,
+             "missing": None, "invalid": "not a number"},
+            now=100.0,
+        )
+        self.assertEqual(result["status"], "no_change")
+        self.assertEqual(result["diff"]["benchmark_changes"], [])
+        self.assertIsNone(self.service.load_proposed())
+        self.assertEqual(self.service.load_active()["version"], initial["calibration_version"])
+        self.assertEqual(len(self.service.list_history()), 1)
+
+    def test_added_and_removed_external_evaluations_are_reported(self) -> None:
+        self.refresh_evaluations({"coding_agent_index": 60}, now=1.0)
+        result = self.refresh_evaluations({"new_benchmark": 0}, now=100.0)
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(
+            [(item["field"], item["previous"], item["new"])
+             for item in result["diff"]["benchmark_changes"]],
+            [
+                ("external_evaluations.coding_agent_index", 60, None),
+                ("external_evaluations.new_benchmark", None, 0),
+            ],
+        )
+        self.assertEqual(
+            self.service.load_proposed()["models"][0]["external_evaluations"],
+            {"new_benchmark": 0},
+        )
 
 
 class SimulationAndDiffTests(unittest.TestCase):
