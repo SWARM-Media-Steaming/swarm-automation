@@ -63,6 +63,7 @@
       refreshing: false,
       analyzing: false,
       activating: false,
+      approvingKeys: new Set(),
       sort: { column: "provider", direction: "asc" },
       progressTimer: null,
     },
@@ -3349,6 +3350,11 @@
       );
       renderModelRoutingTable();
     });
+    byId("model-routing-table").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-approve-model]");
+      if (!button) return;
+      void approveDiscoveredModel(button.dataset.approveModel);
+    });
     byId("feedback-repo-chips").addEventListener("change", (event) => {
       const input = event.target.closest("[data-feedback-repo]");
       if (!input) return;
@@ -3748,8 +3754,39 @@
       ["Notes", model.notes],
     ].forEach(([label, value]) => detail.appendChild(modelDetailRow(label, value)));
     body.appendChild(detail);
+    if (model.status === "DISCOVERED") {
+      const approveRow = document.createElement("div");
+      approveRow.className = "control-row";
+      const approveButton = document.createElement("button");
+      approveButton.type = "button";
+      approveButton.className = "secondary-button compact";
+      approveButton.dataset.approveModel = model.key;
+      const busy = state.modelCalibration.approvingKeys.has(model.key);
+      approveButton.disabled = busy;
+      approveButton.textContent = busy ? "Approving…" : "Approve for routing";
+      approveRow.appendChild(approveButton);
+      const note = document.createElement("small");
+      note.textContent = "Discovering a model never makes it routable on its own — approve it, then the next refresh makes it ACTIVE or CANDIDATE.";
+      approveRow.appendChild(note);
+      body.appendChild(approveRow);
+    }
     item.appendChild(body);
     return item;
+  }
+
+  async function approveDiscoveredModel(key) {
+    if (!key || state.modelCalibration.approvingKeys.has(key)) return;
+    state.modelCalibration.approvingKeys.add(key);
+    renderModelRoutingTable();
+    try {
+      await invoke("approve_discovered_model_background", { key });
+      showToast(`Approved ${key} for routing. It becomes ACTIVE or CANDIDATE on the next refresh.`);
+    } catch (error) {
+      showToast(errorText(error), "error");
+    } finally {
+      state.modelCalibration.approvingKeys.delete(key);
+      await refreshModelCalibration({ quiet: true });
+    }
   }
 
   function renderModelRoutingTable() {

@@ -473,6 +473,26 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
 
     pricing_changes: list[dict[str, Any]] = []
     benchmark_changes: list[dict[str, Any]] = []
+    # A model already present last refresh whose `status` alone moves (most
+    # notably DISCOVERED -> ACTIVE/CANDIDATE right after approve_discovered_
+    # model) must count as meaningful on its own. Without this, the operator
+    # sequence of "review, approve, refresh" with nothing else changed
+    # computes has_meaningful_change=False, and _refresh_locked discards the
+    # correctly-recalculated new_calibration instead of ever persisting it --
+    # the approval silently never takes effect.
+    status_changes: list[dict[str, Any]] = []
+    for key, model in new_models.items():
+        prev = prev_models.get(key)
+        if prev is not None and prev.get("status") != model.get("status"):
+            status_changes.append(
+                {
+                    "key": key,
+                    "provider": model["provider"],
+                    "model": model["model"],
+                    "previous_status": prev.get("status"),
+                    "new_status": model.get("status"),
+                }
+            )
     for key, model in new_models.items():
         prev = prev_models.get(key)
         if prev is None:
@@ -539,7 +559,9 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
     if cost_before not in (None, 0) and cost_after is not None:
         cost_change_percent = round((cost_after - cost_before) / cost_before * 100, 1)
 
-    has_change = bool(newly_discovered or pricing_changes or benchmark_changes or routing_changes)
+    has_change = bool(
+        newly_discovered or pricing_changes or benchmark_changes or routing_changes or status_changes
+    )
     return {
         "has_meaningful_change": has_change,
         "discovered_models": discovered,
@@ -549,6 +571,7 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
         "pricing_changes": pricing_changes,
         "benchmark_changes": benchmark_changes,
         "routing_changes": routing_changes,
+        "status_changes": status_changes,
         "estimated_cost_before": cost_before,
         "estimated_cost_after": cost_after,
         "estimated_cost_change_percent": cost_change_percent,

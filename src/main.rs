@@ -1667,6 +1667,44 @@ async fn activate_model_calibration_background(
     .map_err(|error| format!("Could not activate that calibration: {error}"))?
 }
 
+/// Clears a DISCOVERED model's review gate (`ModelCalibrationService.
+/// approve_discovered_model`) so the *next* refresh can assign it a normal
+/// ACTIVE/CANDIDATE status. Discovering a model never makes it routable by
+/// itself -- this is the only way an operator turns that into a deliberate
+/// decision, and takes effect on the next refresh rather than instantly.
+#[tauri::command]
+fn approve_discovered_model<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    run_model_calibration(
+        &app,
+        &config,
+        vec![
+            "approve".into(),
+            key,
+            "--initiated-by".into(),
+            "USER".into(),
+        ],
+        "Could not approve that model",
+    )
+}
+
+#[tauri::command]
+async fn approve_discovered_model_background(
+    app: tauri::AppHandle,
+    key: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        approve_discovered_model(app.clone(), state, key)
+    })
+    .await
+    .map_err(|error| format!("Could not approve that model: {error}"))?
+}
+
 /// Grounded, deterministic explanation of the latest stored calibration
 /// diff ("Analyze Routing Update" / "Why did this route change?"). Reads
 /// only already-computed calibration/simulation data -- it never invents a
@@ -4593,6 +4631,8 @@ fn main() {
             refresh_model_data_background,
             activate_model_calibration,
             activate_model_calibration_background,
+            approve_discovered_model,
+            approve_discovered_model_background,
             analyze_model_calibration_update,
             analyze_model_calibration_update_background,
             get_prompt_grades,
