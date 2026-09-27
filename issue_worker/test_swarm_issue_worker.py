@@ -4515,7 +4515,7 @@ class WorkerTestCase(unittest.TestCase):
         rows = [
             ("octocat/one", 1, "A", "claude", "clean_first_pass", 0),
             ("octocat/two", 2, "C", "grok", "resolved_after_n", 2),
-            ("octocat/three", 3, "F", "codex", "cap_hit", 6),
+            ("octocat/three", 3, "F", "codex", "cap_hit", 3),
         ]
         for index, (repository_name, number, grade, router, outcome, rounds) in enumerate(rows):
             service = ExecutionHistoryService(True, database_path)
