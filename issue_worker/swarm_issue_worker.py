@@ -1145,8 +1145,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         log(f"Claude remaining quota — session: {session_remaining:g}%; week: {week_remaining:g}%.")
         remaining = min(session_remaining, week_remaining)
         detail = f"session {session_remaining:g}% / week {week_remaining:g}% remaining"
-        below_minimum = remaining < self.config.minimum_remaining_percent_for("claude")
-        return ProviderUsage(1 if below_minimum else 0, remaining, detail)
+        minimum = self.config.minimum_remaining_percent_for("claude")
+        below_minimum = remaining < minimum
+        exhausted = remaining <= 0
+        return ProviderUsage(1 if exhausted or below_minimum else 0, remaining, detail)
 
     def claude_capacity(self) -> int:
         return self.claude_usage().status
@@ -1229,7 +1231,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         remaining = min(100 - amount for amount in used)
         cached_prefix = f"cached {cache_age:g}s old; " if cache_age is not None else ""
         detail = f"{cached_prefix}{summary} remaining"
-        exhausted = limits.get("rateLimitReachedType") is not None or bool(limits.get("spendControlReached", False))
+        exhausted = (
+            remaining <= 0
+            or limits.get("rateLimitReachedType") is not None
+            or bool(limits.get("spendControlReached", False))
+        )
         minimum = self.config.minimum_remaining_percent_for("codex")
         below_minimum = remaining < minimum
         if log_result:
@@ -1307,8 +1313,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             return ProviderUsage(2)
         remaining = max(0.0, min(100.0, 100 - used))
         log(f"Grok remaining quota — {period}: {remaining:g}%.")
-        below_minimum = remaining < self.config.minimum_remaining_percent_for("grok")
-        return ProviderUsage(1 if below_minimum else 0, remaining, f"{period} {remaining:g}% remaining")
+        minimum = self.config.minimum_remaining_percent_for("grok")
+        below_minimum = remaining < minimum
+        exhausted = remaining <= 0
+        return ProviderUsage(1 if exhausted or below_minimum else 0, remaining, f"{period} {remaining:g}% remaining")
 
     def grok_capacity(self) -> int:
         return self.grok_usage().status
