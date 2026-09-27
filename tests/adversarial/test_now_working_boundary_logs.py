@@ -204,7 +204,7 @@ class NowWorkingBoundaryLogTests(unittest.TestCase):
         self.assertNotIn("fix applied in round", output)
         self.assertNotIn("starting re-test for round", output)
 
-    def test_cap_hit_logs_the_sixth_counted_round(self) -> None:
+    def test_cap_hit_logs_the_third_and_final_counted_round(self) -> None:
         self.prepare(fixed=False)
 
         def never_fix(prompt, activity=""):
@@ -230,10 +230,12 @@ class NowWorkingBoundaryLogTests(unittest.TestCase):
                 "Adversarial UAT for issue #180: starting re-test for round "
                 f"{round_number} of {uat.MAX_ROUNDS}.",
             )
-        self.assertEqual(uat.MAX_ROUNDS, 6)
+        # Issue #294 defines round zero as an uncounted assessment and caps
+        # the subsequent repair/re-test rounds at three.
+        self.assertEqual(uat.MAX_ROUNDS, 3)
         self.assertIsNone(
             re.search(
-                r"starting fix/re-test round 7 of ",
+                r"starting fix/re-test round 4 of ",
                 output,
             )
         )
