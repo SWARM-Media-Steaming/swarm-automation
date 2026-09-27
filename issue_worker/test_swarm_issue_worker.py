@@ -1656,6 +1656,26 @@ class WorkerTestCase(unittest.TestCase):
         # Empty --grok-bin in setUp -> not installed -> unavailable.
         self.assertEqual(self.worker.grok_capacity(), 2)
 
+    def test_claude_usage_with_zero_reserve_requires_positive_quota(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--minimum-remaining-percent", "0", "--claude-minimum-remaining-percent", "0"]
+        )
+        self.worker = Worker(Config.from_args(args))
+        output = json.dumps({"result": "Current session: 100% used\nCurrent week: 10% used\n"})
+        with (
+            mock.patch.object(self.worker, "provider_bin", return_value="/test/claude"),
+            mock.patch("swarm_issue_worker.command_available", return_value=True),
+            mock.patch(
+                "swarm_issue_worker.run_command",
+                return_value=subprocess.CompletedProcess(["claude"], 0, stdout=output, stderr=""),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            usage = self.worker.claude_usage()
+        self.assertEqual(usage.status, 1)
+        self.assertEqual(usage.remaining_percent, 0.0)
+
     def grok_signed_in_home(self) -> dict[str, str]:
         home = self.root / "grok-home"
         (home / ".grok").mkdir(parents=True, exist_ok=True)
@@ -1710,6 +1730,16 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(usage.remaining_percent, 5.0)
         self.assertEqual(self.worker.config.minimum_remaining_percent_for("claude"), 10)
         self.assertEqual(self.worker.config.minimum_remaining_percent_for("grok"), 0)
+
+    def test_grok_usage_with_zero_reserve_requires_positive_quota(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--minimum-remaining-percent", "0", "--grok-minimum-remaining-percent", "0"]
+        )
+        self.worker = Worker(Config.from_args(args))
+        usage, _ = self.grok_usage_with([self.grok_limits(100.0)])
+        self.assertEqual(usage.status, 1)
+        self.assertEqual(usage.remaining_percent, 0.0)
 
     def test_grok_usage_retries_one_transient_failure(self) -> None:
         failed = subprocess.CompletedProcess(["grok-rate-limits"], 1, stdout="", stderr="agent timeout")
@@ -1845,6 +1875,16 @@ class WorkerTestCase(unittest.TestCase):
         low, _, low_output = self.codex_usage_with([self.codex_limits(95, 20)])
         self.assertEqual(low.status, 1)
         self.assertIn("quota below configured minimum", low_output)
+
+    def test_codex_with_zero_reserve_requires_positive_quota(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--minimum-remaining-percent", "0", "--codex-minimum-remaining-percent", "0"]
+        )
+        self.worker = Worker(Config.from_args(args))
+        usage, _, _ = self.codex_usage_with([self.codex_limits(100, 20)])
+        self.assertEqual(usage.status, 1)
+        self.assertEqual(usage.remaining_percent, 0)
 
     def test_check_usage_prints_only_json_and_only_enabled_providers(self) -> None:
         # claude/codex/grok-bin are unset in _worker_argv, so each probe hits
