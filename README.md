@@ -64,7 +64,7 @@ gate. These suites run during the issue's own fix/re-test rounds only —
 there is no scheduler in this app to re-run them afterward, so ongoing
 regression coverage belongs in the repository's own CI/CD.
 
-After the initial assessment, up to six implementer-fix/tester-retest rounds
+After the initial assessment, up to three implementer-fix/tester-retest rounds
 run locally. Only a fresh tester can adjudicate disputed tests; the implementer
 cannot modify them. Out-of-scope findings become separate labelled, assigned
 issues. A clean pass follows normal PR delivery. A cap-hit still publishes the
@@ -107,7 +107,7 @@ Each review ends as `PASS`, `FIXED`, `FINDINGS_CREATED`, or `FAILED`, recorded
 both on the issue and in execution history. A review that could not execute is
 `FAILED` — never a pass. Like UAT, it uses the dynamic model router (as a
 security/adversarial code-analysis task), survives quota pauses, and is capped
-at six fix/re-test rounds.
+at three fix/re-test rounds.
 
 Optional AI execution history can be enabled under AI Configuration. It stores the
 original issue, sanitized effective prompt, provider settings, lifecycle,

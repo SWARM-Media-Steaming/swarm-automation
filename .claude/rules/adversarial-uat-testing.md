@@ -13,7 +13,7 @@ label from a trusted author; the worker owns VERSION.
   and cybersecurity reviews the result.
 - Round zero is the independent assessment of the normal implementation.
   One counted round is one implementer fix plus one adversarial re-test.
-  At most six counted rounds follow the assessment; clean-first-pass is zero.
+  At most three counted rounds follow the assessment; clean-first-pass is zero.
 - Each tester invocation has fresh context containing the issue/spec, current
   diff, trusted issue amendments and repository conventions, never the implementer's transcript or
   reasoning. Quota resume may continue the same unfinished phase. Provider

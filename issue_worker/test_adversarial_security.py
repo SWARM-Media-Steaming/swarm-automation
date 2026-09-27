@@ -338,7 +338,7 @@ class AdversarialSecurityTests(unittest.TestCase):
             self.worker.config.github_repository)[0]
         self.assertEqual(row["security_review_status"], "FAILED")
         self.assertNotIn("Adversarial Cybersecurity: PASS", self.comments_posted[0])
-        self.assertIn("did not reach a clean state after six", self.comments_posted[0])
+        self.assertIn("did not reach a clean state after three", self.comments_posted[0])
         self.assertIn("Service token is hardcoded", self.comments_posted[0])
 
     def test_a_review_that_cannot_execute_records_failed_rather_than_a_clean_pass(self):

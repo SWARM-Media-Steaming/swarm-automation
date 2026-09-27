@@ -18,7 +18,7 @@ For every work-round that produces a commit, in this order:
 
 0. When `adversarial_uat_enabled` is on, finish the independent assessment and
    all local fix/re-test rounds before pushing. No intermediate round pushes
-   or PRs. A clean pass follows steps 1–3 below. A six-round deadlock also
+   or PRs. A clean pass follows steps 1–3 below. A three-round deadlock also
    pushes and opens/reuses the issue PR, but calls `deliver_pull_request` with
    `allow_automation=False`, then `finalize_needs_input(delivery=...)` instead
    of `finalize_issue`. The delivery-only flag is mandatory: auto-approval,

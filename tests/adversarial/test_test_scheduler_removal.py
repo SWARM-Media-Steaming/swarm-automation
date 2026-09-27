@@ -110,7 +110,9 @@ class TestSchedulerBackendRemovalTests(unittest.TestCase):
         self.assertIn('"--no-adversarial-uat-enabled"', main)
         self.assertIn("adversarial_uat_enabled", worker)
         self.assertTrue(adversarial.is_file())
-        self.assertIn("MAX_ROUNDS = 6", adversarial.read_text(encoding="utf-8"))
+        # The UAT configuration remains wired after scheduler removal, but
+        # Issue #294 caps its counted repair/re-test rounds at three.
+        self.assertIn("MAX_ROUNDS = 3", adversarial.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
