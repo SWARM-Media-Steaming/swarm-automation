@@ -109,7 +109,7 @@
     },
     "provider-include-exclude": {
       title: "Enabled AI tools",
-      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set that provider’s own minimum quota reserve. Changing one card does not change the others.</p><p><strong>Dynamic Model Routing</strong> grades the original issue, picks which enabled provider handles it, and chooses that provider’s worker model and reasoning effort from the models it offers. The card’s router model performs the grading; to tell the providers apart it uses each one’s remaining usage and a built-in summary of what it tends to be good at. Turn routing off to choose the provider order and the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
+      html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set that provider’s own minimum quota reserve. Changing one card does not change the others. A reserve of 0% accepts any positive remaining quota, but never an exhausted account.</p><p><strong>Dynamic Model Routing</strong> grades the original issue, picks which enabled provider handles it, and chooses that provider’s worker model and reasoning effort from the models it offers. The card’s router model performs the grading; to tell the providers apart it uses each one’s remaining usage and a built-in summary of what it tends to be good at. Turn routing off to choose the provider order and the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
       links: [],
     },
     "software-update": {
@@ -695,6 +695,7 @@
       routerEffortLabel.appendChild(routerEffortInput);
       const quotaLabel = document.createElement("label");
       quotaLabel.append("Minimum quota remaining ");
+      quotaLabel.title = "0% accepts any positive remaining quota, but never an exhausted account.";
       const quotaWrap = document.createElement("div");
       quotaWrap.className = "input-with-suffix";
       const quotaInput = document.createElement("input");

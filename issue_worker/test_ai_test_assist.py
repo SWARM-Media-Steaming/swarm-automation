@@ -35,6 +35,24 @@ class CapacityTestCase(unittest.TestCase):
             result = assist.claude_capacity("claude", 10)
         self.assertFalse(result["available"])
 
+    def test_claude_capacity_with_zero_reserve_requires_positive_quota(self) -> None:
+        usage = "Current session: 100% used\nCurrent week: 10% used\n"
+        with mock.patch.object(assist, "command_available", return_value=True), mock.patch.object(
+            assist, "_run", return_value=(0, json.dumps({"result": usage}))
+        ):
+            result = assist.claude_capacity("claude", 0)
+        self.assertFalse(result["available"])
+
+    def test_codex_capacity_with_zero_reserve_requires_positive_quota(self) -> None:
+        limits = {"primary": {"usedPercent": 100.0}, "secondary": {"usedPercent": 20.0}}
+        with tempfile.TemporaryDirectory() as scripts:
+            (Path(scripts) / "codex_rate_limits.py").write_text("# helper\n", encoding="utf-8")
+            with mock.patch.object(assist, "command_available", return_value=True), mock.patch.object(
+                assist, "_run", return_value=(0, json.dumps(limits))
+            ):
+                result = assist.codex_capacity("codex", 0, "python3", scripts)
+        self.assertFalse(result["available"])
+
     def test_grok_capacity_requires_sign_in(self) -> None:
         with mock.patch.object(assist, "command_available", return_value=True), mock.patch.dict(
             "os.environ", {"HOME": "/nonexistent-home"}, clear=False
@@ -66,6 +84,10 @@ class CapacityTestCase(unittest.TestCase):
 
     def test_grok_capacity_is_unavailable_when_usage_cannot_be_read(self) -> None:
         result, _ = self.grok_capacity_with((1, ""))
+        self.assertFalse(result["available"])
+
+    def test_grok_capacity_with_zero_reserve_requires_positive_quota(self) -> None:
+        result, _ = self.grok_capacity_with((0, json.dumps({"usedPercent": 100.0})), minimum=0)
         self.assertFalse(result["available"])
         result, _ = self.grok_capacity_with((0, "not json"))
         self.assertFalse(result["available"])
