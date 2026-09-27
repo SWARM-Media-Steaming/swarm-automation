@@ -1,7 +1,7 @@
 """The adversarial UAT agent: independent acceptance tests before delivery.
 
 Round zero is the independent assessment of the normal implementation. Each
-of the six subsequent rounds is exactly one fix plus one fresh assessment.
+of the three subsequent rounds is exactly one fix plus one fresh assessment.
 Only suite exit codes decide success; an agent's self-reported pass never does.
 
 The durable loop itself lives in `adversarial_core.py` and is shared with the
@@ -36,10 +36,10 @@ from adversarial_core import (  # noqa: F401  (re-exported for callers and tests
 import adversarial_core
 
 # Declared here, not merely re-exported, so the UAT agent's own module states
-# its round cap: round zero is the independent assessment and at most six
+# its round cap: round zero is the independent assessment and at most three
 # counted fix/re-test rounds follow it. It must stay identical to the shared
 # loop's cap or the two would disagree about when a deadlock has been reached.
-MAX_ROUNDS = 6
+MAX_ROUNDS = 3
 if MAX_ROUNDS != adversarial_core.MAX_ROUNDS:
     raise RuntimeError("Adversarial UAT round cap diverged from the shared adversarial loop")
 

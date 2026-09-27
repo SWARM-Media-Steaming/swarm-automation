@@ -217,6 +217,52 @@ test("keeps adversarial UAT progress synchronized with an issue quota pause and 
   assert.equal(adversarial.title, "Fix/re-test round 3 of 6");
 });
 
+test("drops a selected issue that never started because no provider had capacity", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo],
+    logs: [
+      labeled("acme/app", "Selected oldest unprocessed assigned issue: #443 Server goes offline message when skipping ahead multiple times"),
+      labeled("acme/app", "No enabled provider (Claude, Codex, Grok) has at least 10% remaining in every active quota window; stopping."),
+      line("acme/app: an issue is queued, but no enabled AI provider has enough verified capacity; will retry on schedule."),
+    ],
+  });
+  assert.deepEqual(rows, []);
+});
+
+test("a capacity stop only drops that repository's running row", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo, { ...repo, id: "r2", name: "acme/site" }],
+    logs: [
+      labeled("acme/app", "Selected oldest unprocessed assigned issue: #443 Server goes offline"),
+      labeled("acme/site", "Selected oldest unprocessed assigned issue: #9 Two"),
+      labeled("acme/site", "Selected Codex model gpt-x with effort medium for this run."),
+      labeled("acme/app", "No enabled provider (Claude, Codex, Grok) has at least 10% remaining in every active quota window; stopping."),
+    ],
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].repository, "acme/site");
+  assert.equal(rows[0].state, "running");
+  assert.equal(rows[0].title, "#9 Two");
+});
+
+test("a capacity stop leaves a quota-paused session visible", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo],
+    logs: [
+      line("Selected oldest unprocessed assigned issue: #442 Earlier work"),
+      line("Paused issue #442 because Codex usage is unavailable; session abc was preserved."),
+      line("Selected oldest unprocessed assigned issue: #443 Next in queue"),
+      line("No enabled provider (Claude, Codex, Grok) has at least 10% remaining in every active quota window; stopping."),
+    ],
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].title, "#442 Earlier work");
+  assert.equal(rows[0].state, "paused");
+});
+
 test("clears a quota pause after a cold-restart session restore", () => {
   const baseLogs = [
     line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),

@@ -8,7 +8,7 @@ say and which suites they own; the durable loop around them is identical:
     build -> attack -> fix -> learn -> repeat
 
 Round zero is an independent assessment of the normal implementation. Each of
-the six subsequent rounds is exactly one fix plus one fresh assessment by a new
+the three subsequent rounds is exactly one fix plus one fresh assessment by a new
 context. Only executable suite exit codes and a fresh agent's structured report
 decide success; an agent's self-reported pass never does.
 
@@ -30,11 +30,11 @@ import subprocess
 import tempfile
 from typing import Any
 
-MAX_ROUNDS = 6
+MAX_ROUNDS = 3
 DEFINITION = ".swarm/tests.json"
 TEST_ROOT = "tests/adversarial/"
 CAP_HIT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-cap-hit -->"
-CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing after six fix/re-test rounds. "
+CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing after three fix/re-test rounds. "
                      "Automation is held; review the failing tests and adjudicate on the linked issue.\n\n")
 # A later round's fresh-context tester rediscovering an earlier round's
 # out-of-scope bug almost never reproduces the same title/body wording, so an
@@ -439,7 +439,7 @@ class AdversarialStage:
     def cap_hit_output(self, loop: dict[str, Any]) -> str:
         failures = "\n".join(f"- {r['id']}: {r['output'][-2000:]}" for r in loop["results"] if r["exit_code"])
         return (
-            "## Summary\nAdversarial UAT did not pass after six fix/re-test rounds. Delivered as best "
+            "## Summary\nAdversarial UAT did not pass after three fix/re-test rounds. Delivered as best "
             "effort: this is the last fix attempt, not a verified-clean pass.\n\n" +
             self.summary_line(loop) + "\n" + failures +
             "\n\n## Still failing\nThese adversarial tests were not satisfied. Automatic approval, "

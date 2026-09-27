@@ -73,7 +73,7 @@ def claude_capacity(bin_path: str, minimum_remaining_percent: float) -> dict[str
         return {"available": False, "detail": "Claude Code returned an unrecognized /usage format"}
     remaining = min(100 - float(session.group(1)), 100 - float(week.group(1)))
     detail = f"session {100 - float(session.group(1)):g}% / week {100 - float(week.group(1)):g}% remaining"
-    return {"available": remaining >= minimum_remaining_percent, "detail": detail}
+    return {"available": remaining > 0 and remaining >= minimum_remaining_percent, "detail": detail}
 
 
 def codex_capacity(bin_path: str, minimum_remaining_percent: float, python_bin: str, script_dir: str) -> dict[str, Any]:
@@ -98,7 +98,8 @@ def codex_capacity(bin_path: str, minimum_remaining_percent: float, python_bin: 
         return {"available": False, "detail": "Codex's rate-limit response had no active windows"}
     remaining = min(100 - amount for amount in used)
     available = (
-        limits.get("rateLimitReachedType") is None
+        remaining > 0
+        and limits.get("rateLimitReachedType") is None
         and not bool(limits.get("spendControlReached", False))
         and remaining >= minimum_remaining_percent
     )
@@ -132,7 +133,7 @@ def grok_capacity(
         return {"available": False, "detail": "Grok's usage response was invalid"}
     remaining = max(0.0, min(100.0, 100 - used))
     return {
-        "available": remaining >= minimum_remaining_percent,
+        "available": remaining > 0 and remaining >= minimum_remaining_percent,
         "detail": f"{period} {remaining:g}% remaining",
     }
 
@@ -149,12 +150,16 @@ def pick_provider(
         if not provider.get("enabled") or not provider.get("bin"):
             continue
         key = provider.get("id")
+        try:
+            floor = float(provider["minimum_remaining_percent"])
+        except (KeyError, TypeError, ValueError):
+            floor = minimum_remaining_percent
         if key == "claude":
-            usage = claude_capacity(provider["bin"], minimum_remaining_percent)
+            usage = claude_capacity(provider["bin"], floor)
         elif key == "codex":
-            usage = codex_capacity(provider["bin"], minimum_remaining_percent, python_bin, script_dir)
+            usage = codex_capacity(provider["bin"], floor, python_bin, script_dir)
         elif key == "grok":
-            usage = grok_capacity(provider["bin"], minimum_remaining_percent, python_bin, script_dir)
+            usage = grok_capacity(provider["bin"], floor, python_bin, script_dir)
         else:
             continue
         if usage["available"]:

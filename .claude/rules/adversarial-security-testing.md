@@ -22,7 +22,7 @@ the `minor` label from a trusted author; the worker owns VERSION.
   stay shared. Anything that reads `"adversarial"` as a literal state key,
   origin or log prefix is a bug waiting for the second agent.
 - Round zero is the independent review of the normal implementation; at most
-  six counted fix/re-test rounds follow. Each tester invocation has fresh
+  three counted fix/re-test rounds follow. Each tester invocation has fresh
   context — issue, amendments, diff, changed files, repository conventions and
   earlier recorded findings — and never the implementer's transcript.
 

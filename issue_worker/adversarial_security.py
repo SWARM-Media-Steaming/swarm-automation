@@ -401,7 +401,7 @@ class SecurityStage(AdversarialStage):
         ) or "- (no findings were reported in the final round)"
         failures = "\n".join(f"- {r['id']}: {r['output'][-2000:]}" for r in loop["results"] if r["exit_code"])
         return (
-            "## Summary\nThe adversarial cybersecurity review did not reach a clean state after six "
+            "## Summary\nThe adversarial cybersecurity review did not reach a clean state after three "
             "fix/re-test rounds. Delivered as best effort: this is the last remediation attempt, not a "
             "verified-clean security review.\n\n" + self.summary_line(loop) +
             "\n## Unresolved security findings\n" + open_findings +

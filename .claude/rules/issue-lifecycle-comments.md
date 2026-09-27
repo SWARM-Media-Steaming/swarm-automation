@@ -23,7 +23,7 @@ transitions, and the code that must keep producing them:
    sync with the same rules below).
 5. **AI needs input** — `finalize_needs_input`, only when credentials,
    authority, unavailable external information, or an external user action
-   makes autonomous progress impossible, or the adversarial UAT six-round
+   makes autonomous progress impossible, or the adversarial UAT three-round
    cap is exhausted after publishing the reviewable PR. Apply `AI Needs Input`, remove
    `Ready For Testing`, and wait for a trusted-author comment.
 6. **Question answered** — `finalize_question_answer`, for issues labelled

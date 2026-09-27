@@ -49,11 +49,12 @@ class RepoWorkerState:
 
 
 def saved_routing_overrides(worker_args: Sequence[object]) -> list[str]:
-    """Routing flags from a saved repos.json entry, in the order they appear.
+    """Live-reload flags from a saved repos.json entry, in the order they appear.
 
     Repeated at the end of the worker command so a save while the scheduler is
     already running wins over the copies captured on the scheduler command line
     at startup. argparse keeps the last BooleanOptionalAction / store value.
+    Covers routing and per-provider (or shared) minimum remaining quota.
     """
     flags: list[str] = []
     arguments = [str(arg) for arg in worker_args]
@@ -65,6 +66,13 @@ def saved_routing_overrides(worker_args: Sequence[object]) -> list[str]:
             index += 1
             continue
         if argument == "--routing-optimization" and index + 1 < len(arguments):
+            flags.extend([argument, arguments[index + 1]])
+            index += 2
+            continue
+        if (
+            argument in {"--minimum-remaining-percent"}
+            or argument.endswith("-minimum-remaining-percent")
+        ) and index + 1 < len(arguments):
             flags.extend([argument, arguments[index + 1]])
             index += 2
             continue

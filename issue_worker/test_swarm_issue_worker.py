@@ -1656,6 +1656,26 @@ class WorkerTestCase(unittest.TestCase):
         # Empty --grok-bin in setUp -> not installed -> unavailable.
         self.assertEqual(self.worker.grok_capacity(), 2)
 
+    def test_claude_usage_with_zero_reserve_requires_positive_quota(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--minimum-remaining-percent", "0", "--claude-minimum-remaining-percent", "0"]
+        )
+        self.worker = Worker(Config.from_args(args))
+        output = json.dumps({"result": "Current session: 100% used\nCurrent week: 10% used\n"})
+        with (
+            mock.patch.object(self.worker, "provider_bin", return_value="/test/claude"),
+            mock.patch("swarm_issue_worker.command_available", return_value=True),
+            mock.patch(
+                "swarm_issue_worker.run_command",
+                return_value=subprocess.CompletedProcess(["claude"], 0, stdout=output, stderr=""),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            usage = self.worker.claude_usage()
+        self.assertEqual(usage.status, 1)
+        self.assertEqual(usage.remaining_percent, 0.0)
+
     def grok_signed_in_home(self) -> dict[str, str]:
         home = self.root / "grok-home"
         (home / ".grok").mkdir(parents=True, exist_ok=True)
@@ -1698,6 +1718,28 @@ class WorkerTestCase(unittest.TestCase):
         usage, _ = self.grok_usage_with([self.grok_limits(95.0)])
         self.assertEqual(usage.status, 1)
         self.assertEqual(usage.remaining_percent, 5.0)
+
+    def test_grok_usage_uses_its_own_minimum_reserve(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--minimum-remaining-percent", "10", "--grok-minimum-remaining-percent", "0"]
+        )
+        self.worker = Worker(Config.from_args(args))
+        usage, _ = self.grok_usage_with([self.grok_limits(95.0)])
+        self.assertEqual(usage.status, 0)
+        self.assertEqual(usage.remaining_percent, 5.0)
+        self.assertEqual(self.worker.config.minimum_remaining_percent_for("claude"), 10)
+        self.assertEqual(self.worker.config.minimum_remaining_percent_for("grok"), 0)
+
+    def test_grok_usage_with_zero_reserve_requires_positive_quota(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--minimum-remaining-percent", "0", "--grok-minimum-remaining-percent", "0"]
+        )
+        self.worker = Worker(Config.from_args(args))
+        usage, _ = self.grok_usage_with([self.grok_limits(100.0)])
+        self.assertEqual(usage.status, 1)
+        self.assertEqual(usage.remaining_percent, 0.0)
 
     def test_grok_usage_retries_one_transient_failure(self) -> None:
         failed = subprocess.CompletedProcess(["grok-rate-limits"], 1, stdout="", stderr="agent timeout")
@@ -1833,6 +1875,16 @@ class WorkerTestCase(unittest.TestCase):
         low, _, low_output = self.codex_usage_with([self.codex_limits(95, 20)])
         self.assertEqual(low.status, 1)
         self.assertIn("quota below configured minimum", low_output)
+
+    def test_codex_with_zero_reserve_requires_positive_quota(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--minimum-remaining-percent", "0", "--codex-minimum-remaining-percent", "0"]
+        )
+        self.worker = Worker(Config.from_args(args))
+        usage, _, _ = self.codex_usage_with([self.codex_limits(100, 20)])
+        self.assertEqual(usage.status, 1)
+        self.assertEqual(usage.remaining_percent, 0)
 
     def test_check_usage_prints_only_json_and_only_enabled_providers(self) -> None:
         # claude/codex/grok-bin are unset in _worker_argv, so each probe hits
@@ -4463,7 +4515,7 @@ class WorkerTestCase(unittest.TestCase):
         rows = [
             ("octocat/one", 1, "A", "claude", "clean_first_pass", 0),
             ("octocat/two", 2, "C", "grok", "resolved_after_n", 2),
-            ("octocat/three", 3, "F", "codex", "cap_hit", 6),
+            ("octocat/three", 3, "F", "codex", "cap_hit", 3),
         ]
         for index, (repository_name, number, grade, router, outcome, rounds) in enumerate(rows):
             service = ExecutionHistoryService(True, database_path)
@@ -5060,6 +5112,16 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(args.github_repository, "DotNetRockStar/swarm")
         self.assertEqual(args.assignee, "DotNetRockStar")
         self.assertEqual(args.minimum_remaining_percent, 10)
+        self.assertIsNone(args.claude_minimum_remaining_percent)
+        self.assertIsNone(args.codex_minimum_remaining_percent)
+        self.assertIsNone(args.grok_minimum_remaining_percent)
+        per_provider = build_parser().parse_args(
+            ["--minimum-remaining-percent", "10", "--grok-minimum-remaining-percent", "0"]
+        )
+        config = Config.from_args(per_provider)
+        self.assertEqual(config.minimum_remaining_percent, 10)
+        self.assertEqual(config.minimum_remaining_percent_for("claude"), 10)
+        self.assertEqual(config.minimum_remaining_percent_for("grok"), 0)
         self.assertEqual(args.base_branch, "main")
         self.assertEqual(args.integration_branch, "ai-main")
         self.assertEqual(args.branch_prefix, "ai")
@@ -5801,6 +5863,37 @@ class RunnerTestCase(unittest.TestCase):
         self.assertFalse(parsed.dynamic_model_routing)
         self.assertEqual(parsed.routing_optimization, "cost")
 
+    def test_saved_quota_flags_win_over_scheduler_startup_flags(self) -> None:
+        worker_args = [
+            "--minimum-remaining-percent", "10",
+            "--claude-minimum-remaining-percent", "10",
+            "--grok-minimum-remaining-percent", "0",
+        ]
+        self.assertEqual(
+            runner_module.saved_routing_overrides(worker_args),
+            [
+                "--minimum-remaining-percent", "10",
+                "--claude-minimum-remaining-percent", "10",
+                "--grok-minimum-remaining-percent", "0",
+            ],
+        )
+        parsed = build_parser().parse_args(
+            [
+                "--repo-dir", "/tmp/repo",
+                "--state-dir", "/tmp/state",
+                "--minimum-remaining-percent", "10",
+                "--claude-minimum-remaining-percent", "10",
+                "--grok-minimum-remaining-percent", "10",
+                *runner_module.saved_routing_overrides(worker_args),
+            ]
+        )
+        self.assertEqual(parsed.minimum_remaining_percent, 10)
+        self.assertEqual(parsed.claude_minimum_remaining_percent, 10)
+        self.assertEqual(parsed.grok_minimum_remaining_percent, 0)
+        config = Config.from_args(parsed)
+        self.assertEqual(config.minimum_remaining_percent_for("claude"), 10)
+        self.assertEqual(config.minimum_remaining_percent_for("grok"), 0)
+
     def test_scheduler_repeats_saved_routing_flags_after_startup_arguments(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swarm-runner-routing-test.") as temporary:
             root = Path(temporary)
@@ -5860,6 +5953,67 @@ class RunnerTestCase(unittest.TestCase):
                     "--no-dynamic-model-routing",
                     "--routing-optimization",
                     "cost",
+                ],
+            )
+
+    def test_scheduler_repeats_saved_quota_flags_after_startup_arguments(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-quota-test.") as temporary:
+            root = Path(temporary)
+            worker = root / "worker.py"
+            worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            workspace = root / "repo"
+            workspace.mkdir()
+            args = runner_module.build_parser().parse_args(
+                [
+                    "--repo-dir", str(workspace),
+                    "--state-dir", str(root / "state"),
+                    "--worker", str(worker),
+                    "--crontab-bin", "",
+                    "--pgrep-bin", "",
+                ]
+            )
+            runner = runner_module.Runner(
+                args,
+                ["--minimum-remaining-percent", "10", "--grok-minimum-remaining-percent", "10"],
+            )
+            repo = {
+                "label": "acme/widgets",
+                "workspace_dir": str(workspace),
+                "state_dir": str(root / "state" / "widgets"),
+                "base_branch": "main",
+                "remote_name": "origin",
+                "integration_branch": "ai-main",
+                "worker_args": [
+                    "--github-repository", "acme/widgets",
+                    "--grok-minimum-remaining-percent", "0",
+                ],
+            }
+            captured: dict[str, list[str]] = {}
+
+            class FakeProcess:
+                def __init__(self) -> None:
+                    self.stdout = io.StringIO()
+                    self.stderr = io.StringIO()
+
+                def wait(self) -> int:
+                    return 0
+
+            def fake_popen(command, **_kwargs):
+                captured["command"] = list(command)
+                return FakeProcess()
+
+            with mock.patch("install_swarm_issue_cron.subprocess.Popen", side_effect=fake_popen):
+                self.assertEqual(runner.run_worker(repo), 0)
+            command = captured["command"]
+            self.assertEqual(
+                command[-6:],
+                [
+                    "--minimum-remaining-percent",
+                    "10",
+                    "--grok-minimum-remaining-percent",
+                    "10",
+                    "--grok-minimum-remaining-percent",
+                    "0",
                 ],
             )
 

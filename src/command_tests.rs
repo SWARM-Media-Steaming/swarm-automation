@@ -173,6 +173,7 @@ fn resolved_provider(id: &str, bin: &str) -> ResolvedProvider {
         strengths: format!("{id} is best at tests"),
         bin: PathBuf::from(bin),
         enabled: true,
+        minimum_remaining_percent: 10,
     }
 }
 
@@ -226,6 +227,24 @@ fn provider_scheduler_arguments_carry_dynamic_routing_settings() {
         .any(|pair| pair[0] == "--routing-optimization" && pair[1] == "cost"));
     assert!(on.iter().any(|arg| arg == "--allow-usage-credit-models"));
     assert!(!on.iter().any(|arg| arg == "--no-allow-usage-credit-models"));
+}
+
+#[test]
+fn provider_scheduler_arguments_carry_each_provider_quota_floor() {
+    let config = AppConfig::default();
+    let providers = vec![
+        ResolvedProvider {
+            minimum_remaining_percent: 0,
+            ..resolved_provider("claude", "/usr/bin/false")
+        },
+        ResolvedProvider {
+            minimum_remaining_percent: 25,
+            ..resolved_provider("grok", "/usr/bin/false")
+        },
+    ];
+    let args = provider_scheduler_arguments(&config, &providers);
+    assert_eq!(pair(&args, "--claude-minimum-remaining-percent"), Some("0"));
+    assert_eq!(pair(&args, "--grok-minimum-remaining-percent"), Some("25"));
 }
 
 #[test]
@@ -1238,6 +1257,35 @@ fn repo_worker_args_carries_the_saved_routing_toggle_and_preference() {
     assert!(on.contains(&"--dynamic-model-routing".to_string()));
     assert!(!on.contains(&"--no-dynamic-model-routing".to_string()));
     assert_eq!(pair(&on, "--routing-optimization"), Some("cost"));
+}
+
+#[test]
+fn repo_worker_args_carries_each_provider_quota_floor() {
+    let repo = repo("octocat/example");
+    let mut config = AppConfig::default();
+    config.repositories.push(repo.clone());
+    config
+        .provider_mut("claude")
+        .unwrap()
+        .minimum_remaining_percent = Some(0);
+    config
+        .provider_mut("codex")
+        .unwrap()
+        .minimum_remaining_percent = Some(10);
+    config
+        .provider_mut("grok")
+        .unwrap()
+        .minimum_remaining_percent = Some(0);
+    let args = repo_worker_args(
+        &config,
+        &repo,
+        &PathBuf::from("/tmp/ws"),
+        &PathBuf::from("/usr/bin/git"),
+        &PathBuf::from("/usr/bin/gh"),
+    );
+    assert_eq!(pair(&args, "--claude-minimum-remaining-percent"), Some("0"));
+    assert_eq!(pair(&args, "--codex-minimum-remaining-percent"), Some("10"));
+    assert_eq!(pair(&args, "--grok-minimum-remaining-percent"), Some("0"));
 }
 
 #[test]

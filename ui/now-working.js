@@ -261,7 +261,13 @@
         if (repository) {
           clear((item) => String(item.number) === match[1] && item.repository === repository);
         }
-      } else if (/Returned the clean local checkout/i.test(message)) {
+      } else if (/Returned the clean local checkout/i.test(message)
+        // Selecting an issue is logged before the capacity check. When every
+        // enabled provider is below the minimum, the worker stops without
+        // starting a session — that is a queue poll, not current work.
+        || /No enabled provider .* has at least .* remaining/i.test(message)
+        || /an issue is queued, but no enabled AI provider has enough verified capacity/i.test(message)
+        || /queued issue work is waiting for ai capacity/i.test(message)) {
         clear((item) => item.state === "running" && (!repository || item.repository === repository));
       }
     });
