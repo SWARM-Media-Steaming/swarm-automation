@@ -2460,6 +2460,37 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_identity_transactions.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-identity-transactions",
+      "name": "Issue #205: Source aliases and catalog duplicates preserve review, routing and rollback on conflict",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "issue_worker/model_router.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_identity_transactions.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
