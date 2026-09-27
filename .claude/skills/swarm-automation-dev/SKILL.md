@@ -212,14 +212,25 @@ the readable calibration's version, not the advisory state pointer. Refresh,
 activation, approval and bootstrap writes share an OS file lock; the separate
 `refresh.lock` JSON is only a status marker. History pruning protects the
 active, proposed and immediately previous active versions for rollback.
+New version IDs advance past the newest retained version, including after a
+clock rollback; pruning never makes an old review or rollback ID reusable.
 The active catalog filters both the scoring fallback and the router's
 explicit model choices (including the catalog offered in its prompt).
 Bootstrap validates the published document and its filtered model list,
 repairing missing or damaged publications from the last activated recovery
-copy under the same lock. Catalog removals are meaningful changes even when
-representative routes stay the same. The review UI keeps pending proposal
-details visible after unchanged checks and reconciles cached refresh results
-against the current active version after activation.
+copy under the same lock. Catalog removals, supported reasoning levels, task
+strengths/weaknesses, and other routing eligibility inputs are meaningful
+changes even when the five representative routes stay the same. The review
+UI keeps pending proposal details visible after unchanged checks. Refresh
+status stores the version that produced its diff separately from the
+active/proposed pointers, so both cached and reopened pages describe
+rolled-back changes as historical.
+
+Within one source refresh, provider/model aliases resolve to one observation.
+Equal normalized values and complementary fields can coalesce; conflicting
+prices, benchmarks, performance, or retirement observations fail validation
+before any proposal, history, or active calibration is published. Never let
+source row order select a value, including for newly discovered models.
 
 ## Issue outcomes and no-code flows
 

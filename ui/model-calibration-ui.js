@@ -77,9 +77,12 @@
       error: info.last_error,
       attempted_at: info.last_attempted_refresh_at,
       diff: info.last_diff,
-      calibration_version: info.proposed_version || info.active_version,
+      calibration_version: info.last_refresh_calibration_version,
     } : cachedResult;
     if (!result) return null;
+    // Older status documents did not retain the refresh's version. Avoid
+    // attributing their diff to whichever calibration happens to be active.
+    if (result.status === "changed" && !result.calibration_version) return null;
     if (result.status !== "changed" || !info.active_version) return result;
     // Activation does not change the refresh timestamp. Resolve the version
     // against current status even when the cached refresh is still newest.
@@ -138,6 +141,9 @@
     if ((diff.performance_changes || []).length) {
       lines.push({ label: "Performance changes", value: String(diff.performance_changes.length) });
     }
+    if ((diff.routing_input_changes || []).length) {
+      lines.push({ label: "Routing input changes", value: String(diff.routing_input_changes.length) });
+    }
     if ((diff.cost_comparison_categories || []).length) {
       lines.push({
         label: "Cost estimate coverage",
@@ -188,7 +194,8 @@
       });
       lines.push({ heading: `${change.provider}/${change.model}`, detail: details.join("; ") });
     });
-    [...(info.benchmark_changes || []), ...(info.performance_changes || [])].forEach((change) => {
+    [...(info.benchmark_changes || []), ...(info.performance_changes || []),
+      ...(info.routing_input_changes || [])].forEach((change) => {
       lines.push({
         heading: `${change.provider}/${change.model}`,
         detail: `${change.field}: ${change.previous ?? "—"} → ${change.new ?? "—"}`,

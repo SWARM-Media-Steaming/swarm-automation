@@ -590,6 +590,78 @@ class CalibrationPublicationTests(unittest.TestCase):
         self.assertEqual(mr.load_model_catalog(self.service.catalog_override_path)[0].relative_cost, 4)
 
 
+class SourceIdentityTests(unittest.TestCase):
+    def test_conflicts_preserve_active_and_pending_data_for_either_row_order(self) -> None:
+        for field, values in (
+            ("output_cost", (4, 40)),
+            ("speed", (20, 30)),
+            ("evaluations", ({"coding": 60}, {"coding": 80})),
+            ("deprecated", (True, False)),
+        ):
+            for reverse in (False, True):
+                with self.subTest(field=field, reverse=reverse), tempfile.TemporaryDirectory() as tmp:
+                    service = calib.ModelCalibrationService(Path(tmp))
+                    local = _entry("m1")
+                    local["model_id"] = "m1-api"
+                    with mock.patch.object(calib, "fetch_local_source", return_value=[local]):
+                        service.ensure_bootstrap(now=100)
+                        pending = service.refresh(fetch_fn=lambda: [_entry("m1", cost=4)], now=101, force=True)
+                        self.assertEqual(pending["status"], "changed")
+                        paths = [service.active_path, service.catalog_override_path, service.proposed_path]
+                        before = [p.read_bytes() for p in paths]
+                        history = service.list_history()
+                        success = service.status_report()["last_successful_refresh_at"]
+                        # Local model slug and API ID are aliases of one identity.
+                        rows = [
+                            {"provider": "fixture", "model": "m1", field: values[0]},
+                            {"provider": " FIXTURE ", "model": " M1-API ", field: values[1]},
+                        ]
+                        with mock.patch.object(sources, "fetch_json", return_value=(
+                            {"models": rows[::-1] if reverse else rows}, "fixture",
+                        )):
+                            result = service.refresh(source="json", source_url="https://example.invalid/models",
+                                                     now=102, force=True, activation_policy="auto")
+                        self.assertEqual(result["status"], "failed")
+                        self.assertEqual(result["source_status"], "error")
+                        self.assertIn("conflicting observations", result["error"])
+                        self.assertEqual([p.read_bytes() for p in paths], before)
+                        self.assertEqual(service.list_history(), history)
+                        self.assertEqual(service.status_report()["last_successful_refresh_at"], success)
+
+    def test_matching_and_complementary_rows_coalesce_after_normalization(self) -> None:
+        local = _entry("m1")
+        for model in ("m1", "new-model"):
+            with self.subTest(model=model):
+                rows = [
+                    {"provider": "fixture", "model": model, "input_cost": "2.0", "evaluations": {"coding": 70}},
+                    {"provider": "FIXTURE", "model": model.upper(), "input_cost": 2, "output_cost": 8,
+                     "evaluations": {"coding": "70.0", "reasoning": 80}},
+                ]
+                forward = calib.merge_overlay([local], rows)
+                self.assertEqual(forward, calib.merge_overlay([local], rows[::-1]))
+                merged, discovered = forward
+                entry = discovered[0] if model == "new-model" else merged[0]
+                self.assertEqual(entry["input_cost"], 2)
+                self.assertEqual(entry["output_cost"], 8)
+                self.assertEqual(entry["external_evaluations"], {"coding": 70, "reasoning": 80})
+                self.assertEqual(len(discovered), int(model == "new-model"))
+
+    def test_full_catalog_cannot_hide_contradictory_duplicates(self) -> None:
+        with self.assertRaises(calib.CalibrationValidationError):
+            calib._validate_and_parse([_entry("m1", cost=2), _entry("m1", cost=4)])
+
+
+class VersionAllocationTests(unittest.TestCase):
+    def test_clock_rollback_does_not_reuse_pruned_dates(self) -> None:
+        # The newest retained snapshot is the high-water mark even when older
+        # dates have been pruned completely and the wall clock moves backwards.
+        self.assertEqual(calib._version_for(1, {"2026-01-01-042"}), "2026-01-01-043")
+
+    def test_exhausted_day_never_fills_a_pruned_version_gap(self) -> None:
+        with self.assertRaises(calib.CalibrationError):
+            calib._version_for(1, {"1970-01-01-001", "1970-01-01-999"})
+
+
 class DynamicRouterHookTests(unittest.TestCase):
     """Zero-behavior-change-by-default guarantee for the live routing hook."""
 

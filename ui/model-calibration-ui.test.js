@@ -192,6 +192,35 @@ test("a later stored source failure supersedes the previous successful manual re
   assert.equal(failureDetail(result), "Source unavailable");
 });
 
+test("reopened summaries use the refresh version after rollback", () => {
+  const result = refreshResult({
+    active_version: "2026-01-01-001", last_attempted_status: "changed",
+    last_refresh_calibration_version: "2026-01-02-001", last_diff: {},
+  });
+  assert.equal(result.calibration_version, "2026-01-02-001");
+  assert.equal(result.calibration_state, "historical");
+  assert.match(resultSummaryLines(result).find((line) => line.label === "Calibration").value,
+    /Historical calibration.*2026-01-02-001/);
+});
+
+test("legacy status without refresh provenance does not misattribute a diff", () => {
+  assert.equal(refreshResult({
+    active_version: "2026-01-01-001", last_attempted_status: "changed", last_diff: {},
+  }), null);
+});
+
+test("task-fit changes remain visible when example routes do not change", () => {
+  const diff = { routing_input_changes: [{
+    provider: "fixture", model: "m1", field: "strengths", previous: ["coding"], new: ["documentation"],
+  }] };
+  assert.equal(resultSummaryLines({ status: "changed", diff })
+    .find((line) => line.label === "Routing input changes").value, "1");
+  assert.deepEqual(changeDetailLines(diff), [{
+    heading: "fixture/m1", detail: "strengths: coding → documentation",
+  }]);
+  assert.match(routingImpactLines(diff)[0].detail, /No change/);
+});
+
 test("removed models are counted and named even when representative routes do not change", () => {
   const diff = { removed_models: ["fixture/retired"], routing_changes: [] };
   const summary = resultSummaryLines({ status: "changed", diff });

@@ -164,6 +164,22 @@ def _overlay_keys(entry: dict[str, Any]) -> set[tuple[str, str]]:
     return keys
 
 
+def _merge_observations(previous: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Coalesce one feed's observations, rejecting order-dependent values."""
+    combined = dict(previous)
+    for field, value in incoming.items():
+        if field in combined and combined[field] != value:
+            if isinstance(combined[field], dict) and isinstance(value, dict):
+                value = _merge_observations(combined[field], value)
+            else:
+                # Do not include untrusted identities or source values in errors.
+                raise CalibrationValidationError(
+                    "Model source contains conflicting observations for the same model identity."
+                )
+        combined[field] = value
+    return combined
+
+
 def merge_overlay(
     local_entries: Sequence[dict[str, Any]], overlay_rows: Sequence[dict[str, Any]],
     *, previous: dict[str, Any] | None = None,
@@ -190,7 +206,7 @@ def merge_overlay(
         for key in _overlay_keys(entry):
             lookup[key] = entry
     discovered: list[dict[str, Any]] = []
-    seen_discovered: set[tuple[str, str]] = set()
+    observed: dict[int, dict[str, Any]] = {}
     usable_rows = 0
     for raw in overlay_rows:
         if not isinstance(raw, dict):
@@ -218,29 +234,32 @@ def merge_overlay(
         release = sanitize_text(str(raw.get("release_date") or "")).strip()[:40]
         if release:
             observations["release_date"] = release
-        if raw.get("deprecated") is True:
-            observations["deprecated"] = True
+        if isinstance(raw.get("deprecated"), bool):
+            observations["deprecated"] = raw["deprecated"]
         if not observations:
             continue
         usable_rows += 1
         keys = _overlay_keys(raw)
-        target = next((lookup[key] for key in sorted(keys) if key in lookup), None)
+        targets = {id(lookup[key]): lookup[key] for key in keys if key in lookup}
+        if len(targets) > 1:
+            raise CalibrationValidationError("Model source contains ambiguous model aliases.")
+        target = next(iter(targets.values()), None)
         if target is None:
-            identity = next(iter(sorted(keys)), None)
-            if identity is None or identity in seen_discovered:
-                continue
-            seen_discovered.add(identity)
-            discovered.append(
-                {
-                    "provider": provider.strip()[:80],
-                    "model": model.strip()[:120],
-                    "status": STATUS_DISCOVERED,
-                    "active": False,
-                    **observations,
-                }
-            )
-            continue
-        target.update(observations)
+            target = {
+                "provider": provider.strip().lower()[:80],
+                "model": model.strip().lower()[:120],
+                "status": STATUS_DISCOVERED,
+                "active": False,
+            }
+            discovered.append(target)
+        combined = _merge_observations(observed.get(id(target), {}), observations)
+        observed[id(target)] = combined
+        for key in keys:
+            lookup[key] = target
+        # A public feed cannot re-enable a retired catalog model. Still compare
+        # explicit false observations above so contradictory rows fail validation.
+        target.update({field: value for field, value in combined.items()
+                       if field != "deprecated" or value is True})
     if not usable_rows:
         raise CalibrationValidationError("Model source contained no usable model pricing, benchmark, or performance data.")
     return merged, discovered
@@ -302,7 +321,7 @@ def _validate_and_parse(raw_entries: Any) -> tuple[list["_model_router.ModelSpec
         raise CalibrationValidationError("source data did not contain any model entries")
     specs: list[_model_router.ModelSpec] = []
     warnings: list[str] = []
-    seen: set[tuple[str, str]] = set()
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
     for index, raw in enumerate(raw_entries):
         try:
             spec = _model_router._parse_model(raw)
@@ -318,9 +337,13 @@ def _validate_and_parse(raw_entries: Any) -> tuple[list["_model_router.ModelSpec
             continue
         key = (spec.provider, spec.model)
         if key in seen:
+            if seen[key] != entry_dict:
+                raise CalibrationValidationError(
+                    "Catalog contains conflicting entries for the same model identity."
+                )
             warnings.append(f"entry {index}: duplicate model {spec.provider}/{spec.model}")
             continue
-        seen.add(key)
+        seen[key] = entry_dict
         specs.append(spec)
     if not specs:
         raise CalibrationValidationError(
@@ -518,6 +541,7 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
     pricing_changes: list[dict[str, Any]] = []
     benchmark_changes: list[dict[str, Any]] = []
     performance_changes: list[dict[str, Any]] = []
+    routing_input_changes: list[dict[str, Any]] = []
     # A model already present last refresh whose `status` alone moves (most
     # notably DISCOVERED -> ACTIVE/CANDIDATE right after approve_discovered_
     # model) must count as meaningful on its own. Without this, the operator
@@ -542,6 +566,15 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
         prev = prev_models.get(key)
         if prev is None:
             continue
+        # The representative workloads cannot cover every task or constraint.
+        # Preserve eligibility and task-fit changes even for unselected models.
+        for field in ("agent", "model_id", "active", "recommended", "deprecated",
+                      "superseded_by", "supported_efforts", "strengths", "weaknesses"):
+            if prev.get(field) != model.get(field):
+                routing_input_changes.append({
+                    "key": key, "provider": model["provider"], "model": model["model"],
+                    "field": field, "previous": prev.get(field), "new": model.get(field),
+                })
         price_fields = ("relative_cost", "input_cost", "output_cost", "reasoning_cost")
         if any(prev.get(field) != model.get(field) for field in price_fields):
             pricing_changes.append(
@@ -614,7 +647,8 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
         cost_change_percent = round((cost_after - cost_before) / cost_before * 100, 1)
 
     has_change = bool(
-        newly_discovered or removed_models or pricing_changes or benchmark_changes or performance_changes or routing_changes or status_changes
+        newly_discovered or removed_models or pricing_changes or benchmark_changes
+        or performance_changes or routing_changes or status_changes or routing_input_changes
     )
     return {
         "has_meaningful_change": has_change,
@@ -626,6 +660,7 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
         "pricing_changes": pricing_changes,
         "benchmark_changes": benchmark_changes,
         "performance_changes": performance_changes,
+        "routing_input_changes": routing_input_changes,
         "routing_changes": routing_changes,
         "status_changes": status_changes,
         "estimated_cost_before": cost_before,
@@ -738,11 +773,14 @@ def _read_json(path: Path) -> Any:
 
 def _version_for(timestamp: float, existing_versions: set[str]) -> str:
     date = time.strftime("%Y-%m-%d", time.gmtime(timestamp))
-    for sequence in range(1, 1000):
-        candidate = f"{date}-{sequence:03d}"
-        if candidate not in existing_versions:
-            return candidate
-    raise CalibrationError("exhausted calibration versions for today")
+    # Pruning retains the newest version. Never fill holes left by pruning or
+    # rollback, including when the system clock moves back to an earlier date.
+    latest = max((v for v in existing_versions if _VERSION_RE.fullmatch(v)), default="")
+    date = max(date, latest[:10])
+    sequence = int(latest[-3:]) + 1 if latest.startswith(date + "-") else 1
+    if sequence > 999:
+        raise CalibrationError("exhausted calibration versions for today")
+    return f"{date}-{sequence:03d}"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -877,6 +915,12 @@ def explain_update(active: dict[str, Any] | None, proposed: dict[str, Any] | Non
         answers.append({
             "question": f"What performance data changed for {change.get('key')}?",
             "answer": f"{change.get('field')}: {change.get('previous')} → {change.get('new')}.",
+        })
+    for change in (diff.get("routing_input_changes") or [])[:8]:
+        answers.append({
+            "question": f"What routing input changed for {change.get('key')}?",
+            "answer": f"{change.get('field')}: {change.get('previous')} → {change.get('new')}. "
+                      "This can affect tasks beyond the representative routing examples.",
         })
     for change in (diff.get("benchmark_changes") or [])[:8]:
         before = change.get("previous")
@@ -1581,6 +1625,7 @@ class ModelCalibrationService:
             # metadata before activation so publication is the final write.
             self._write_history(new_calibration)
             state["last_attempted_status"] = "changed"
+            state["last_refresh_calibration_version"] = new_calibration["version"]
             self.save_state(state)
             self._activate_locked(new_calibration["version"], initiated_by=initiated_by)
             self._set_progress(*PROGRESS_STAGES[5])
@@ -1620,6 +1665,7 @@ class ModelCalibrationService:
             return result
 
         state["last_attempted_status"] = "changed"
+        state["last_refresh_calibration_version"] = new_calibration["version"]
         new_calibration["base_version"] = (previous or {}).get("version")
         new_calibration["diff"] = diff
         new_calibration["simulation"] = simulation
@@ -1700,6 +1746,7 @@ class ModelCalibrationService:
             "active_calibration": active,
             "proposed_calibration": proposed,
             "last_diff": state.get("last_diff"),
+            "last_refresh_calibration_version": state.get("last_refresh_calibration_version"),
             "last_activated_at": state.get("last_activated_at"),
             "last_activated_by": state.get("last_activated_by"),
             "history": self.list_history(10),
