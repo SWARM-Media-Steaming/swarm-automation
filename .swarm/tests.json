@@ -1683,6 +1683,37 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue294_three_round_cap.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-294-three-round-cap",
+      "name": "Adversarial UAT stops after three counted repair rounds (issue #294)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_core.py",
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_issue294_three_round_cap.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
