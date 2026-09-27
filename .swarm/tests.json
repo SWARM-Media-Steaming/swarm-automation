@@ -2154,6 +2154,128 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_cold_start_contract.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-cold-start-contract",
+      "name": "Issue #205: First external startup preserves offline baseline and manual review",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "issue_worker/model_router.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_cold_start_contract.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_live_catalog_recovery.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-live-catalog-recovery",
+      "name": "Issue #205: Recover activated eligibility when the live catalog publication is damaged",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "issue_worker/model_router.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_live_catalog_recovery.py",
+          "issue_worker/dynamic_router.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_model_calibration_review_transitions.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-review-transitions",
+      "name": "Issue #205: Review details survive unchanged checks and summaries reconcile activation",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node",
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_data_sources.py",
+          "issue_worker/model_router.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_review_transitions.js",
+          "ui/app.js",
+          "ui/model-calibration-ui.js",
+          "tests/adversarial/calibration_transition_fixture.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_catalog_removal.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-catalog-removal",
+      "name": "Issue #205: authoritative catalog removals remain reviewable and govern routing",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_router.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_catalog_removal.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
