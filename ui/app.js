@@ -3610,22 +3610,10 @@
     if (!box || !changesBox || !changesBody) return;
     const api = window.SwarmModelCalibration;
     const status = modelCalibrationStatus();
-    const manualResult = state.modelCalibration.lastResult;
-    // Status survives app restarts and also carries startup refresh failures.
-    // Prefer it when a later background check superseded a manual result.
-    const useStoredResult = status.last_attempted_status && (
-      !manualResult || (manualResult.attempted_at && status.last_attempted_refresh_at > manualResult.attempted_at)
-    );
-    const result = useStoredResult ? {
-      status: status.last_attempted_status,
-      error: status.last_error,
-      attempted_at: status.last_attempted_refresh_at,
-      diff: status.last_diff,
-      activated: !status.has_newer_proposed,
-      calibration_version: status.proposed_version || status.active_version,
-    } : manualResult;
+    const result = api.refreshResult(status, state.modelCalibration.lastResult);
+    const pending = status.has_newer_proposed && status.proposed_calibration;
     box.replaceChildren();
-    if (!result) {
+    if (!result && !pending) {
       box.classList.add("hidden");
       changesBox.classList.add("hidden");
       return;
@@ -3633,16 +3621,22 @@
     box.classList.remove("hidden");
     const headline = document.createElement("p");
     headline.className = "panel-copy";
-    headline.textContent = api.resultHeadline(result);
+    headline.textContent = pending && (!result || result.status === "no_change")
+      ? "Model data is current. A proposed calibration is still awaiting review."
+      : api.resultHeadline(result);
     box.appendChild(headline);
     const detail = api.failureDetail(result);
     if (detail) box.appendChild(labeledCell("Detail", detail, { tone: "invalid" }));
-    api.resultSummaryLines(result).forEach(({ label, value }) => box.appendChild(labeledCell(label, value)));
+    const summary = pending ? {
+      status: "changed", diff: pending.diff, calibration_version: pending.version, activated: false,
+    } : result;
+    api.resultSummaryLines(summary).forEach(({ label, value }) => box.appendChild(labeledCell(label, value)));
 
-    const diff = result.diff || {};
+    // An unchanged check or a source failure does not dismiss a proposal.
+    const diff = (pending && pending.diff) || (result && result.diff) || {};
     const changeLines = api.changeDetailLines(diff);
     const impactLines = api.routingImpactLines(diff);
-    if (result.status === "changed") {
+    if (pending || (result && result.status === "changed")) {
       changesBox.classList.remove("hidden");
       changesBody.replaceChildren();
       changesBody.appendChild(Object.assign(document.createElement("strong"), { textContent: "What changed" }));

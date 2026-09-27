@@ -4,6 +4,7 @@ const {
   healthPill,
   statusFields,
   refreshStatusLabel,
+  refreshResult,
   resultHeadline,
   costImpactText,
   resultSummaryLines,
@@ -162,6 +163,43 @@ test("already-discovered models awaiting review do not inflate the new-model cou
     status: "changed", diff: { discovered_models: ["fixture/pending"], newly_discovered_models: [] },
   });
   assert.equal(lines.find((line) => line.label === "New models").value, "0");
+});
+
+test("activation and rollback reconcile a cached manual result without another refresh", () => {
+  const cached = {
+    status: "changed", calibration_version: "2026-01-02-001", activated: false,
+    attempted_at: "2026-01-02T00:00:00Z", diff: {},
+  };
+  const status = {
+    active_version: cached.calibration_version, has_newer_proposed: false,
+    last_attempted_status: "changed", last_attempted_refresh_at: cached.attempted_at,
+  };
+  const active = refreshResult(status, cached);
+  assert.equal(active.activated, true);
+  assert.match(resultSummaryLines(active).find((line) => line.label === "Calibration").value, /Active calibration/);
+  const rolledBack = refreshResult({ ...status, active_version: "2026-01-01-001" }, cached);
+  assert.equal(rolledBack.activated, false);
+  assert.match(resultSummaryLines(rolledBack).find((line) => line.label === "Calibration").value, /Historical calibration/);
+  assert.equal(cached.activated, false);
+});
+
+test("a later stored source failure supersedes the previous successful manual result", () => {
+  const result = refreshResult({
+    active_version: "2026-01-01-001", last_attempted_status: "failed",
+    last_attempted_refresh_at: "2026-01-02T00:00:00Z", last_error: "Source unavailable",
+  }, { status: "changed", attempted_at: "2026-01-01T00:00:00Z" });
+  assert.equal(result.status, "failed");
+  assert.equal(failureDetail(result), "Source unavailable");
+});
+
+test("removed models are counted and named even when representative routes do not change", () => {
+  const diff = { removed_models: ["fixture/retired"], routing_changes: [] };
+  const summary = resultSummaryLines({ status: "changed", diff });
+  assert.equal(summary.find((line) => line.label === "Removed models").value, "1");
+  assert.deepEqual(changeDetailLines(diff), [{
+    heading: "fixture/retired", detail: "Removed from the updated model catalog",
+  }]);
+  assert.match(routingImpactLines(diff)[0].detail, /No change/);
 });
 
 test("failure detail is only populated for a failed result", () => {

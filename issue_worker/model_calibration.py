@@ -505,6 +505,7 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
     # notification gate, so a model that was already awaiting review before
     # this refresh does not repeatedly count as "new" or re-trigger a notice.
     newly_discovered = sorted(key for key in new_models if key not in prev_models)
+    removed_models = sorted(key for key in prev_models if key not in new_models)
     # Every model still sitting in DISCOVERED status, whether or not it was
     # discovered this round -- so the change summary keeps surfacing an
     # unreviewed model instead of only mentioning it once and then going
@@ -613,12 +614,13 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
         cost_change_percent = round((cost_after - cost_before) / cost_before * 100, 1)
 
     has_change = bool(
-        newly_discovered or pricing_changes or benchmark_changes or performance_changes or routing_changes or status_changes
+        newly_discovered or removed_models or pricing_changes or benchmark_changes or performance_changes or routing_changes or status_changes
     )
     return {
         "has_meaningful_change": has_change,
         "discovered_models": discovered,
         "newly_discovered_models": newly_discovered,
+        "removed_models": removed_models,
         "pending_review_models": pending_review,
         "routed_model_keys": routed_model_keys,
         "pricing_changes": pricing_changes,
@@ -831,6 +833,11 @@ def explain_update(active: dict[str, Any] | None, proposed: dict[str, Any] | Non
     """Grounded explanation of a stored calibration diff. Invents no numbers."""
     diff = diff or {}
     answers: list[dict[str, str]] = []
+    for key in diff.get("removed_models") or []:
+        answers.append({
+            "question": f"Why is {key} absent from the updated catalog?",
+            "answer": "The model is no longer present in the refreshed catalog. Activating this calibration removes it from routing eligibility.",
+        })
     routing_changes = diff.get("routing_changes") or []
     proposed_routing = (proposed or {}).get("routing") or {}
     for change in routing_changes:
@@ -923,6 +930,7 @@ def explain_update(active: dict[str, Any] | None, proposed: dict[str, Any] | Non
         "answers": answers,
         "summary": (
             f"{len(diff.get('discovered_models') or [])} new models, "
+            f"{len(diff.get('removed_models') or [])} removed models, "
             f"{len(diff.get('pricing_changes') or [])} pricing changes, "
             f"{len(diff.get('benchmark_changes') or [])} benchmark changes, "
             f"{len(routing_changes)} routing changes."
@@ -976,17 +984,26 @@ class ModelCalibrationService:
     def save_state(self, state: dict[str, Any]) -> None:
         _atomic_write_json(self.state_path, state)
 
+    def _load_published_active(self) -> dict[str, Any] | None:
+        """Read a coherent publication, including its filtered routing models."""
+        try:
+            catalog = _read_json(self.catalog_override_path)
+            active = catalog.get("calibration") if isinstance(catalog, dict) else None
+            if _is_calibration(active) and catalog.get("models") == self._router_models(active):
+                for model in catalog["models"]:
+                    _model_router._parse_model(model)
+                return active
+        except (CalibrationError, _model_router.ModelRouterConfigError):
+            pass
+        return None
+
     def load_active(self) -> dict[str, Any] | None:
         # Version and routable models share one atomic publication. The old
         # active file is retained as a compatibility/recovery copy, not an
         # independent pointer that can get ahead of the live router.
-        try:
-            catalog = _read_json(self.catalog_override_path)
-            active = catalog.get("calibration") if isinstance(catalog, dict) else None
-            if _is_calibration(active):
-                return active
-        except CalibrationError:
-            pass
+        active = self._load_published_active()
+        if active:
+            return active
         try:
             active = _read_json(self.active_path)
             return active if _is_calibration(active) else None
@@ -1150,8 +1167,7 @@ class ModelCalibrationService:
         if previous:
             self._write_history(previous)
             # Upgrade a legacy catalog before touching its compatibility copy.
-            catalog = _read_json(self.catalog_override_path)
-            if not isinstance(catalog, dict) or not _is_calibration(catalog.get("calibration")):
+            if self._load_published_active() is None:
                 self._write_catalog_override(previous)
         state = self.load_state()
         state["active_version"] = calibration["version"]
@@ -1317,8 +1333,8 @@ class ModelCalibrationService:
 
     def ensure_bootstrap(self, *, routing_optimization: str = "best", now: float | None = None) -> dict[str, Any]:
         """Load the last known-good calibration, or seed it from the bundled catalog."""
-        active = self.load_active()
-        if active and self.catalog_override_path.is_file():
+        active = self._load_published_active()
+        if active:
             return active
         self.acquire_lock()
         try:
@@ -1327,6 +1343,9 @@ class ModelCalibrationService:
             self.release_lock()
 
     def _bootstrap_locked(self, *, routing_optimization: str, now: float | None) -> dict[str, Any]:
+        published = self._load_published_active()
+        if published:
+            return published
         active = self.load_active()
         if active:
             self._write_catalog_override(active)
@@ -1472,6 +1491,13 @@ class ModelCalibrationService:
         fetch_fn: Callable[[], Any] | None,
         now_ts: float,
     ) -> dict[str, Any]:
+        # External feeds are overlays of the offline catalog. Publish that
+        # baseline before any network work, using the lock already held by
+        # refresh. Reload state afterwards so its activation metadata cannot
+        # be overwritten by a stale pre-bootstrap snapshot. Local/complete
+        # catalogs can still supply their own initial offline baseline.
+        if source in ("models_dev", "artificial_analysis", "json"):
+            self._bootstrap_locked(routing_optimization=routing_optimization, now=now_ts)
         state = self.load_state()
         skipped = self._should_skip_interval(
             state, now_ts=now_ts, min_interval_hours=min_interval_hours, force=force
@@ -1481,14 +1507,8 @@ class ModelCalibrationService:
             skipped["notification"] = notification_for(skipped)
             return skipped
 
-        # The *last activated* calibration, if any -- never a synchronous
-        # rebuild from the local bundled catalog. That offline fallback is
-        # `ensure_bootstrap`'s job alone (called from `status_report` so the
-        # UI always has something to show); doing it here as well would (a)
-        # silently diff freshly fetched data against the bundled catalog
-        # instead of whatever is actually active, and (b) create a second,
-        # independent writer of `state.json` that a later `save_state` call
-        # in this same method would clobber (dropping `active_version`).
+        # Always compare with the last activated calibration. Bootstrap only
+        # seeds an absent baseline or repairs its damaged routing publication.
         try:
             previous = self.load_active()
         except CalibrationError as error:

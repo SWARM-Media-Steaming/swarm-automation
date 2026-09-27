@@ -67,6 +67,31 @@
 
   // Exact-shape text blocks the issue mocks up under "Refresh Result
   // Summary". `result` is a `refresh_model_data` response.
+  function refreshResult(status, cachedResult) {
+    const info = status || {};
+    const useStored = info.last_attempted_status && (
+      !cachedResult || (cachedResult.attempted_at && info.last_attempted_refresh_at > cachedResult.attempted_at)
+    );
+    const result = useStored ? {
+      status: info.last_attempted_status,
+      error: info.last_error,
+      attempted_at: info.last_attempted_refresh_at,
+      diff: info.last_diff,
+      calibration_version: info.proposed_version || info.active_version,
+    } : cachedResult;
+    if (!result) return null;
+    if (result.status !== "changed" || !info.active_version) return result;
+    // Activation does not change the refresh timestamp. Resolve the version
+    // against current status even when the cached refresh is still newest.
+    const version = result.calibration_version;
+    return {
+      ...result,
+      activated: version === info.active_version,
+      calibration_state: version === info.active_version ? "active"
+        : info.has_newer_proposed && version === info.proposed_version ? "proposed" : "historical",
+    };
+  }
+
   function resultHeadline(result) {
     const status = (result || {}).status;
     if (status === "changed") return "Model data refreshed successfully";
@@ -98,11 +123,18 @@
       { label: "Estimated cost impact", value: costImpactText(diff.estimated_cost_change_percent) },
       {
         label: "Calibration",
-        value: info.activated
+        value: info.calibration_state === "active"
+          ? `Active calibration (version ${info.calibration_version})`
+          : info.calibration_state === "historical"
+          ? `Historical calibration (version ${info.calibration_version})`
+          : info.activated
           ? `Active immediately (version ${info.calibration_version})`
           : `New calibration available for review (version ${info.calibration_version})`,
       },
     ];
+    if ((diff.removed_models || []).length) {
+      lines.push({ label: "Removed models", value: String(diff.removed_models.length) });
+    }
     if ((diff.performance_changes || []).length) {
       lines.push({ label: "Performance changes", value: String(diff.performance_changes.length) });
     }
@@ -128,6 +160,12 @@
     const lines = [];
     (info.discovered_models || []).forEach((key) => {
       lines.push({ heading: key, detail: "New model discovered" });
+    });
+    (info.removed_models || []).forEach((key) => {
+      lines.push({ heading: key, detail: "Removed from the updated model catalog" });
+    });
+    (info.status_changes || []).forEach((change) => {
+      lines.push({ heading: change.key, detail: `Status ${change.previous_status} → ${change.new_status}` });
     });
     (info.pricing_changes || []).forEach((change) => {
       const details = [];
@@ -291,6 +329,7 @@
     healthPill,
     statusFields,
     refreshStatusLabel,
+    refreshResult,
     resultHeadline,
     costImpactText,
     resultSummaryLines,

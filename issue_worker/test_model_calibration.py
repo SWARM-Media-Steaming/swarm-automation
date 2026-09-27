@@ -278,6 +278,9 @@ class ExternalEvaluationRefreshTests(unittest.TestCase):
         initial = self.refresh_evaluations(
             {"coding_agent_index": 60, "intelligence_index": 40}, now=1.0
         )
+        # First external data is a proposal against the offline baseline too.
+        self.assertFalse(initial["activated"])
+        self.service.activate(initial["calibration_version"])
         active_before = self.service.active_path.read_bytes()
         catalog_before = self.service.catalog_override_path.read_bytes()
         updated = self.refresh_evaluations(
@@ -323,6 +326,8 @@ class ExternalEvaluationRefreshTests(unittest.TestCase):
         initial = self.refresh_evaluations(
             {"coding_agent_index": "60", "intelligence_index": 0}, now=1.0
         )
+        self.service.activate(initial["calibration_version"])
+        history_before = self.service.list_history()
         result = self.refresh_evaluations(
             {"intelligence_index": 0.0, "coding_agent_index": 60.0,
              "missing": None, "invalid": "not a number"},
@@ -332,10 +337,11 @@ class ExternalEvaluationRefreshTests(unittest.TestCase):
         self.assertEqual(result["diff"]["benchmark_changes"], [])
         self.assertIsNone(self.service.load_proposed())
         self.assertEqual(self.service.load_active()["version"], initial["calibration_version"])
-        self.assertEqual(len(self.service.list_history()), 1)
+        self.assertEqual(self.service.list_history(), history_before)
 
     def test_added_and_removed_external_evaluations_are_reported(self) -> None:
-        self.refresh_evaluations({"coding_agent_index": 60}, now=1.0)
+        initial = self.refresh_evaluations({"coding_agent_index": 60}, now=1.0)
+        self.service.activate(initial["calibration_version"])
         result = self.refresh_evaluations({"new_benchmark": 0}, now=100.0)
         self.assertEqual(result["status"], "changed")
         self.assertEqual(
@@ -350,6 +356,36 @@ class ExternalEvaluationRefreshTests(unittest.TestCase):
             self.service.load_proposed()["models"][0]["external_evaluations"],
             {"new_benchmark": 0},
         )
+
+
+class ExternalBootstrapTests(unittest.TestCase):
+    def test_every_external_initiator_publishes_offline_data_before_fetching(self) -> None:
+        for initiator in calib.ALLOWED_INITIATORS:
+            with self.subTest(initiator=initiator), tempfile.TemporaryDirectory() as tmp:
+                service = calib.ModelCalibrationService(Path(tmp))
+                baseline = _entry("m1") | {"input_cost": 2, "output_cost": 8}
+                active_during_fetch = []
+
+                def fetch(*_args, **_kwargs):
+                    # Read without status_report: that must not be what
+                    # bootstraps the baseline or determines activation policy.
+                    active_during_fetch.append(service.load_active())
+                    catalog = mr.load_model_catalog(service.catalog_override_path)
+                    self.assertEqual(catalog[0].output_cost, 8)
+                    self.assertIsNone(service.load_state().get("last_successful_at"))
+                    return {"models": [{"provider": "fixture", "model": "m1", "output_cost": 50}]}, "v1"
+
+                with mock.patch.object(calib, "fetch_local_source", return_value=[baseline]):
+                    with mock.patch.object(sources, "fetch_json", side_effect=fetch):
+                        result = service.refresh(
+                            source="json", source_url="https://example.invalid/models.json",
+                            initiated_by=initiator, now=1.0,
+                        )
+                self.assertEqual(result["status"], "changed")
+                self.assertFalse(result["activated"])
+                self.assertEqual(service.load_active(), active_during_fetch[0])
+                self.assertEqual(service.load_state()["active_version"], active_during_fetch[0]["version"])
+                self.assertEqual(service.load_proposed()["models"][0]["output_cost"], 50)
 
 
 class OverlayReviewLifecycleTests(unittest.TestCase):
@@ -538,6 +574,20 @@ class CalibrationPublicationTests(unittest.TestCase):
         self.assertEqual(status["last_successful_refresh_at"], successful_at)
         self.assertEqual(status["last_attempted_status"], "failed")
         self.assertEqual(self.service.load_active(), self.previous)
+
+    def test_status_repairs_a_mismatched_filtered_catalog_from_activated_data(self) -> None:
+        self.service.activate(self.version)
+        active_bytes = self.service.active_path.read_bytes()
+        publication = json.loads(self.service.catalog_override_path.read_text())
+        # Valid JSON and a valid embedded version are not enough: the router
+        # must receive the model data that belongs to that activated version.
+        publication["models"][0]["relative_cost"] = 1
+        self.service.catalog_override_path.write_text(json.dumps(publication))
+        report = calib.ModelCalibrationService(self.service.state_dir).status_report()
+        self.assertEqual(report["active_version"], self.version)
+        self.assertTrue(report["healthy"])
+        self.assertEqual(self.service.active_path.read_bytes(), active_bytes)
+        self.assertEqual(mr.load_model_catalog(self.service.catalog_override_path)[0].relative_cost, 4)
 
 
 class DynamicRouterHookTests(unittest.TestCase):

@@ -182,19 +182,16 @@ IP-pinned HTTPS adapters for the public sources (`models.dev`, Artificial
 Analysis, or a configured JSON URL); `"local"` re-reads the bundled
 `skills/model-router/models.yaml` with no network access at all.
 
-A refresh never touches the active calibration on failure or on a
-no-meaningful-change result. The **first** calibration ever produced (no
-`active_catalog.json` yet) becomes active immediately regardless of
-`activation_policy` — there is nothing yet to protect from a silent
-replacement. After that, a meaningful, regression-free change is written as a
-*proposed* calibration awaiting `activate()` (manual, from the UI, or
-automatic when `activation_policy="auto"`). `status_report()` calls
-`ensure_bootstrap()` on every read specifically so the AI Configuration page
-always has something to show even before any refresh has ever run; refreshing
-itself never re-derives that offline bootstrap as its comparison baseline
-(that was a real bug — see the `_refresh_locked` docstring-style comment for
-why a second, independent writer of `state.json` inside the same call used to
-silently erase `active_version`).
+A refresh never replaces the active calibration on failure or on a
+no-meaningful-change result. Before fetching any external source, the shared
+refresh service loads or publishes the bundled offline baseline under its
+existing writer lock, then reloads state so bootstrap activation metadata
+cannot be overwritten. The first external update therefore follows the same
+manual review or safe automatic activation policy as later updates, even if
+AI Configuration has never been opened. A local or complete catalog can
+provide the initial offline baseline directly. `status_report()` also calls
+`ensure_bootstrap()` so data is visible before any refresh. Existing active
+calibrations are never rebuilt from the bundled catalog.
 
 The live routing hook is `dynamic_router.active_calibration_catalog_path()`,
 gated by `SWARM_MODEL_CALIBRATION_CATALOG` — set by `start_issue_worker` in
@@ -217,6 +214,12 @@ activation, approval and bootstrap writes share an OS file lock; the separate
 active, proposed and immediately previous active versions for rollback.
 The active catalog filters both the scoring fallback and the router's
 explicit model choices (including the catalog offered in its prompt).
+Bootstrap validates the published document and its filtered model list,
+repairing missing or damaged publications from the last activated recovery
+copy under the same lock. Catalog removals are meaningful changes even when
+representative routes stay the same. The review UI keeps pending proposal
+details visible after unchanged checks and reconciles cached refresh results
+against the current active version after activation.
 
 ## Issue outcomes and no-code flows
 
