@@ -143,18 +143,18 @@ class AdversarialUatTests(unittest.TestCase):
             return status
         with self.patches(never_fix), mock.patch.object(self.worker, "approve_pull_request") as approve, mock.patch.object(self.worker, "merge_pull_request") as merge, mock.patch.object(self.worker, "auto_promote_integration_branch") as promote, mock.patch.object(self.worker, "push_ref", wraps=self.worker.push_ref) as push, mock.patch.object(self.worker, "cleanup_no_code_branch") as cleanup:
             self.assertEqual(self.worker.run_adversarial_delivery(), 10)
-        self.assertEqual([c[0] for c in self.calls].count("fix"), 6)
+        self.assertEqual([c[0] for c in self.calls].count("fix"), 3)
         self.assertEqual([c[0] for c in self.calls].count("test"), 7)
         # A cap hit is not a verified-clean pass: the branch is pushed and the
         # PR opened, but automation never approves, merges, or promotes it.
         push.assert_called_once()
         approve.assert_not_called(); merge.assert_not_called(); promote.assert_not_called(); cleanup.assert_not_called()
         self.assertEqual(len(self.comments_posted), 1)
-        self.assertIn("did not pass after six fix/re-test rounds", self.comments_posted[0])
+        self.assertIn("did not pass after three fix/re-test rounds", self.comments_posted[0])
         self.assertIn("AI needs your input", self.comments_posted[0])
         self.assertTrue(any("AI Needs Input" in args for args in self.api))
         row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
-        self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (6, "cap_hit", "awaiting_input"))
+        self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (3, "cap_hit", "awaiting_input"))
         self.assertEqual(row["pull_request_url"], "https://example.invalid/pull/181")
 
     def test_first_pass_same_provider_is_a_fresh_context_and_history_can_be_off(self):
@@ -443,7 +443,7 @@ class AdversarialUatTests(unittest.TestCase):
         # only suite covering this issue from every future run_suites call —
         # run_suites then fails closed with a synthetic "no enabled
         # adversarial suite was registered" result every round, burning all
-        # 6 rounds on an unfixable, manufactured failure before stalling on
+            # 3 rounds on an unfixable, manufactured failure before stalling on
         # "AI Needs Input". A citation that would leave zero adversarial
         # suites runnable must instead be rejected immediately so a fresh
         # tester gets a chance to do it correctly (see the sibling test for
