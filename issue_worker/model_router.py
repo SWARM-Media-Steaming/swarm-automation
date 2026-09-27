@@ -302,9 +302,10 @@ def _read_yaml(path: Path) -> Any:
     # is completely unaffected.
     if path.suffix == ".json":
         try:
-            data = json.loads(text)
-            # Calibration uses one atomic document for version + catalog.
-            return data["active"] if "active" in data else data
+            # Calibration publishes the already-filtered router models at the
+            # top level, alongside its full review document. Never substitute
+            # that full document, which also includes ineligible models.
+            return json.loads(text)
         except json.JSONDecodeError as error:
             raise ModelRouterConfigError(f"could not parse {path}: {error}") from error
     try:

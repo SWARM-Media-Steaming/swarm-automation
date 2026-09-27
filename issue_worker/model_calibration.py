@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import fcntl
 import json
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -38,7 +40,6 @@ DEFAULT_MIN_REFRESH_INTERVAL_HOURS = 6.0
 FAILED_RETRY_BACKOFF_HOURS = 0.25
 MAX_ERROR_LENGTH = 2000
 MAX_HISTORY_ENTRIES = 30
-MAX_LOCK_AGE_SECONDS = 30 * 60
 STALE_REFRESH_SECONDS = 30 * 60
 ALLOWED_INITIATORS = ("STARTUP", "USER", "SCHEDULED", "AI_AGENT")
 ALLOWED_SOURCES = ("local", "models_dev", "artificial_analysis", "json")
@@ -142,7 +143,7 @@ def _finite_float(value: Any) -> float | None:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if number != number or number in (float("inf"), float("-inf")):
         return None
@@ -180,9 +181,12 @@ def merge_overlay(
         # Feeds are overlays, so an omitted or invalid observation cannot erase
         # the last known value. Router capability/eligibility still comes from
         # the local definition, never from a public pricing feed.
-        for field in ("input_cost", "output_cost", "reasoning_cost", "external_evaluations", "speed", "release_date"):
+        for field in ("input_cost", "output_cost", "reasoning_cost", "external_evaluations", "speed", "latency_seconds", "release_date"):
             if prior.get(field) is not None:
                 entry[field] = prior[field]
+        # A missing retirement observation is not permission to re-enable.
+        if prior.get("deprecated"):
+            entry["deprecated"] = True
         for key in _overlay_keys(entry):
             lookup[key] = entry
     discovered: list[dict[str, Any]] = []
@@ -198,7 +202,7 @@ def merge_overlay(
         if not provider.strip() or not model.strip():
             continue
         observations = {}
-        for field in ("input_cost", "output_cost", "reasoning_cost", "speed"):
+        for field in ("input_cost", "output_cost", "reasoning_cost", "speed", "latency_seconds"):
             parsed = _finite_float(raw.get(field))
             if parsed is not None:
                 observations[field] = parsed
@@ -430,20 +434,12 @@ def recalculate_routing(
     return routing
 
 
-def _average_routing_cost(
+def _routing_costs(
     routing: dict[str, Any], models_by_key: dict[str, dict[str, Any]]
-) -> float | None:
-    """Average per-task dollar cost across the routed workloads, in dollars
-    only. A model with no published `input_cost`/`output_cost` has no dollar
-    figure to contribute and is left out of the average entirely -- it must
-    never fall back to the catalog's 1-5 `relative_cost` ordinal rank, which
-    is not a dollar amount and is not comparable to one. Averaging the two
-    together made the first refresh that ever attached real pricing to a
-    previously rank-only model report a fabricated ~99% "cost saving" that
-    was purely a unit change, not a routing change.
-    """
-    costs: list[float] = []
-    for decision in routing.values():
+) -> dict[str, float]:
+    """Per-workload dollar estimates; ordinal cost ranks are never dollars."""
+    costs: dict[str, float] = {}
+    for category, decision in routing.items():
         provider, model = decision.get("provider"), decision.get("model")
         if not provider or not model:
             continue
@@ -456,10 +452,15 @@ def _average_routing_cost(
         except _model_router.ModelRouterConfigError:
             dollar = None
         if dollar is not None:
-            costs.append(dollar)
-    if not costs:
-        return None
-    return round(sum(costs) / len(costs), 4)
+            costs[category] = dollar
+    return costs
+
+
+def _average_routing_cost(
+    routing: dict[str, Any], models_by_key: dict[str, dict[str, Any]]
+) -> float | None:
+    costs = _routing_costs(routing, models_by_key)
+    return round(sum(costs.values()) / len(costs), 4) if costs else None
 
 
 def _benchmark_value_changes(previous: dict[str, Any], new: dict[str, Any]) -> list[dict[str, Any]]:
@@ -515,6 +516,7 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
 
     pricing_changes: list[dict[str, Any]] = []
     benchmark_changes: list[dict[str, Any]] = []
+    performance_changes: list[dict[str, Any]] = []
     # A model already present last refresh whose `status` alone moves (most
     # notably DISCOVERED -> ACTIVE/CANDIDATE right after approve_discovered_
     # model) must count as meaningful on its own. Without this, the operator
@@ -552,6 +554,8 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
                     "new_input_cost": model.get("input_cost"),
                     "previous_output_cost": prev.get("output_cost"),
                     "new_output_cost": model.get("output_cost"),
+                    "previous_reasoning_cost": prev.get("reasoning_cost"),
+                    "new_reasoning_cost": model.get("reasoning_cost"),
                 }
             )
         for change in _benchmark_value_changes(prev, model):
@@ -563,6 +567,12 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
                     **change,
                 }
             )
+        for field in ("speed", "latency_seconds", "relative_latency", "relative_token_efficiency"):
+            if prev.get(field) != model.get(field):
+                performance_changes.append({
+                    "key": key, "provider": model["provider"], "model": model["model"],
+                    "field": field, "previous": prev.get(field), "new": model.get(field),
+                })
 
     prev_routing = (previous or {}).get("routing", {})
     new_routing = new.get("routing", {})
@@ -591,14 +601,19 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
         }
     )
 
-    cost_before = _average_routing_cost(prev_routing, prev_models)
-    cost_after = _average_routing_cost(new_routing, new_models)
+    before_costs = _routing_costs(prev_routing, prev_models)
+    after_costs = _routing_costs(new_routing, new_models)
+    # Both averages must describe the same workload sample. Learning a price
+    # for previously unpriced work cannot masquerade as a routing saving.
+    comparable = sorted(before_costs.keys() & after_costs.keys())
+    cost_before = round(sum(before_costs[key] for key in comparable) / len(comparable), 4) if comparable else None
+    cost_after = round(sum(after_costs[key] for key in comparable) / len(comparable), 4) if comparable else None
     cost_change_percent = None
     if cost_before not in (None, 0) and cost_after is not None:
         cost_change_percent = round((cost_after - cost_before) / cost_before * 100, 1)
 
     has_change = bool(
-        newly_discovered or pricing_changes or benchmark_changes or routing_changes or status_changes
+        newly_discovered or pricing_changes or benchmark_changes or performance_changes or routing_changes or status_changes
     )
     return {
         "has_meaningful_change": has_change,
@@ -608,15 +623,15 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
         "routed_model_keys": routed_model_keys,
         "pricing_changes": pricing_changes,
         "benchmark_changes": benchmark_changes,
+        "performance_changes": performance_changes,
         "routing_changes": routing_changes,
         "status_changes": status_changes,
         "estimated_cost_before": cost_before,
         "estimated_cost_after": cost_after,
         "estimated_cost_change_percent": cost_change_percent,
+        "cost_comparison_categories": comparable,
         "models_checked": len(new_models),
-        "capability": "No meaningful reduction detected"
-        if not any("capability dropped" in (item.get("reason") or "") for item in [])
-        else "Capability reduction detected",
+        "capability": "Not yet simulated",
     }
 
 
@@ -678,11 +693,32 @@ def _parse_iso(text: str) -> float:
     return float(calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ")))
 
 
-def _atomic_write_json(path: Path, payload: Any) -> None:
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent,
+                                     prefix=path.name + ".", suffix=".tmp", delete=False) as handle:
+        tmp = Path(handle.name)
+        try:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    _atomic_write_bytes(path, json.dumps(payload, indent=2, sort_keys=True, allow_nan=False).encode("utf-8"))
+
+
+def _is_calibration(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and bool(_VERSION_RE.fullmatch(str(payload.get("version") or "")))
+        and isinstance(payload.get("models"), list)
+        and all(isinstance(model, dict) for model in payload["models"])
+        and isinstance(payload.get("routing"), dict)
+    )
 
 
 def _read_json(path: Path) -> Any:
@@ -772,6 +808,7 @@ def notification_for(result: dict[str, Any], *, consecutive_failures: int = 0) -
         and (
             item.get("previous_input_cost") != item.get("new_input_cost")
             or item.get("previous_output_cost") != item.get("new_output_cost")
+            or item.get("previous_reasoning_cost") != item.get("new_reasoning_cost")
         )
     ]
     if pricing:
@@ -811,21 +848,29 @@ def explain_update(active: dict[str, Any] | None, proposed: dict[str, Any] | Non
             }
         )
     for change in (diff.get("pricing_changes") or [])[:8]:
-        before = change.get("previous_output_cost")
-        after = change.get("new_output_cost")
-        rank_before = change.get("previous_cost_rank")
-        rank_after = change.get("new_cost_rank")
-        if before is not None and after is not None and before:
-            delta = round((after - before) / before * 100, 1)
-            detail = f"Output price {before} → {after} ({delta:+}%)."
-        else:
-            detail = f"Cost rank {rank_before} → {rank_after}."
+        details = []
+        for field, label in (("input_cost", "Input price"), ("output_cost", "Output price"),
+                             ("reasoning_cost", "Reasoning price"), ("cost_rank", "Cost rank")):
+            before, after = change.get(f"previous_{field}"), change.get(f"new_{field}")
+            if before == after:
+                continue
+            detail = f"{label} {before if before is not None else 'unavailable'} → {after if after is not None else 'unavailable'}"
+            if field != "cost_rank":
+                if before and after is not None:
+                    detail += f" ({round((after - before) / before * 100, 1):+}%)"
+                detail += " USD per million tokens"
+            details.append(detail + ".")
         answers.append(
             {
                 "question": f"Is the price change for {change.get('key')} significant?",
-                "answer": detail,
+                "answer": " ".join(details),
             }
         )
+    for change in (diff.get("performance_changes") or [])[:8]:
+        answers.append({
+            "question": f"What performance data changed for {change.get('key')}?",
+            "answer": f"{change.get('field')}: {change.get('previous')} → {change.get('new')}.",
+        })
     for change in (diff.get("benchmark_changes") or [])[:8]:
         before = change.get("previous")
         after = change.get("new")
@@ -891,6 +936,7 @@ class ModelCalibrationService:
     def __init__(self, state_dir: Path):
         self.state_dir = Path(state_dir)
         self.history_dir = self.state_dir / "history"
+        self._lock_handle = None
 
     @property
     def state_path(self) -> Path:
@@ -922,7 +968,8 @@ class ModelCalibrationService:
         # in-app recovery action (a forced manual refresh) that both start
         # by loading it. See test_model_calibration_state_resilience.py.
         try:
-            return _read_json(self.state_path) or {}
+            payload = _read_json(self.state_path)
+            return payload if isinstance(payload, dict) else {}
         except CalibrationError:
             return {}
 
@@ -930,54 +977,81 @@ class ModelCalibrationService:
         _atomic_write_json(self.state_path, state)
 
     def load_active(self) -> dict[str, Any] | None:
+        # Version and routable models share one atomic publication. The old
+        # active file is retained as a compatibility/recovery copy, not an
+        # independent pointer that can get ahead of the live router.
         try:
-            return _read_json(self.active_path)
+            catalog = _read_json(self.catalog_override_path)
+            active = catalog.get("calibration") if isinstance(catalog, dict) else None
+            if _is_calibration(active):
+                return active
+        except CalibrationError:
+            pass
+        try:
+            active = _read_json(self.active_path)
+            return active if _is_calibration(active) else None
         except CalibrationError:
             return None
 
     def load_proposed(self) -> dict[str, Any] | None:
         try:
-            return _read_json(self.proposed_path)
+            payload = _read_json(self.proposed_path)
+            return payload if _is_calibration(payload) else None
         except CalibrationError:
             return None
 
     def load_progress(self) -> dict[str, Any] | None:
-        payload = _read_json(self.progress_path)
+        try:
+            payload = _read_json(self.progress_path)
+        except CalibrationError:
+            return None
         return payload if isinstance(payload, dict) else None
 
     def _set_progress(self, stage: str, label: str) -> None:
-        _atomic_write_json(
-            self.progress_path,
-            {"stage": stage, "label": label, "updated_at": iso_now()},
-        )
+        try:
+            _atomic_write_json(
+                self.progress_path,
+                {"stage": stage, "label": label, "updated_at": iso_now()},
+            )
+        except OSError:
+            # Progress is advisory; it must not turn a committed activation
+            # into a failed refresh or prevent recovery from a storage error.
+            pass
 
     def _clear_progress(self) -> None:
-        self.progress_path.unlink(missing_ok=True)
+        try:
+            self.progress_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def acquire_lock(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        now = time.time()
-        if self.lock_path.exists():
-            try:
-                payload = json.loads(self.lock_path.read_text(encoding="utf-8"))
-                pid = int(payload.get("pid") or 0)
-                created = float(payload.get("created_at") or 0)
-            except (OSError, ValueError, json.JSONDecodeError, TypeError):
-                pid, created = 0, 0.0
-            if _pid_alive(pid) and now - created < MAX_LOCK_AGE_SECONDS:
-                raise CalibrationBusyError("A model data refresh is already running.")
-            self.lock_path.unlink(missing_ok=True)
+        # The persistent lock inode serializes all writers. The separate JSON
+        # marker is only for status: creating/deleting it cannot race to steal
+        # the lock, and the OS releases ownership if a process crashes.
+        handle = (self.state_dir / ".calibration.lock").open("a+b")
         try:
-            fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as error:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            handle.close()
             raise CalibrationBusyError("A model data refresh is already running.") from error
+        except OSError:
+            handle.close()
+            raise
         try:
-            os.write(fd, json.dumps({"pid": os.getpid(), "created_at": now}).encode("utf-8"))
-        finally:
-            os.close(fd)
+            _atomic_write_json(self.lock_path, {"pid": os.getpid(), "created_at": time.time()})
+        except OSError:
+            handle.close()
+            raise
+        self._lock_handle = handle
 
     def release_lock(self) -> None:
-        self.lock_path.unlink(missing_ok=True)
+        handle, self._lock_handle = self._lock_handle, None
+        if handle is not None:
+            try:
+                self.lock_path.unlink(missing_ok=True)
+            finally:
+                handle.close()
 
     def list_history(self, limit: int = 20) -> list[dict[str, Any]]:
         if not self.history_dir.is_dir():
@@ -988,7 +1062,7 @@ class ModelCalibrationService:
                 payload = _read_json(path)
             except CalibrationError:
                 continue
-            if not payload:
+            if not _is_calibration(payload):
                 continue
             entries.append(
                 {
@@ -1009,14 +1083,20 @@ class ModelCalibrationService:
         if not _VERSION_RE.match(version):
             raise CalibrationError(f"invalid calibration version {version!r}")
         _atomic_write_json(self.history_dir / f"{version}.json", calibration)
-        self._prune_history()
+        self._prune_history(protected_versions={version})
 
-    def _prune_history(self) -> None:
+    def _prune_history(self, *, protected_versions: set[str] | None = None) -> None:
         if not self.history_dir.is_dir():
             return
         paths = sorted(self.history_dir.glob("*.json"))
+        protected = set(protected_versions or ())
+        protected.add(self.load_state().get("previous_active_version"))
+        for payload in (self.load_active(), self.load_proposed()):
+            if payload:
+                protected.add(payload["version"])
         excess = len(paths) - MAX_HISTORY_ENTRIES
-        for path in paths[: max(0, excess)]:
+        removable = [path for path in paths if path.stem not in protected]
+        for path in removable[: max(0, excess)]:
             path.unlink(missing_ok=True)
 
     def _existing_versions(self) -> set[str]:
@@ -1039,7 +1119,7 @@ class ModelCalibrationService:
         if active and active.get("version") == version:
             return active
         historical = _read_json(self.history_dir / f"{version}.json")
-        if historical:
+        if _is_calibration(historical):
             return historical
         raise CalibrationError(f"no calibration found for version {version}")
 
@@ -1052,20 +1132,52 @@ class ModelCalibrationService:
         return models
 
     def _write_catalog_override(self, calibration: dict[str, Any]) -> None:
-        _atomic_write_json(self.catalog_override_path, {"models": self._router_models(calibration)})
+        _atomic_write_json(self.catalog_override_path, {
+            "models": self._router_models(calibration), "calibration": calibration,
+        })
 
     def activate(self, version: str, *, initiated_by: str = "USER") -> dict[str, Any]:
         """Promote a proposed or historical calibration to active."""
+        self.acquire_lock()
+        try:
+            return self._activate_locked(version, initiated_by=initiated_by)
+        finally:
+            self.release_lock()
+
+    def _activate_locked(self, version: str, *, initiated_by: str) -> dict[str, Any]:
         calibration = self._find_calibration(version)
-        _atomic_write_json(self.active_path, calibration)
-        self._write_catalog_override(calibration)
+        previous = self.load_active()
+        if previous:
+            self._write_history(previous)
+            # Upgrade a legacy catalog before touching its compatibility copy.
+            catalog = _read_json(self.catalog_override_path)
+            if not isinstance(catalog, dict) or not _is_calibration(catalog.get("calibration")):
+                self._write_catalog_override(previous)
         state = self.load_state()
         state["active_version"] = calibration["version"]
+        if previous and previous["version"] != calibration["version"]:
+            state["previous_active_version"] = previous["version"]
         if state.get("proposed_version") == calibration["version"]:
             state["proposed_version"] = None
         state["last_activated_at"] = iso_now()
         state["last_activated_by"] = _normalize_initiator(initiated_by)
-        self.save_state(state)
+        backups = {path: path.read_bytes() if path.exists() else None
+                   for path in (self.active_path, self.state_path)}
+        written = []
+        try:
+            _atomic_write_json(self.active_path, calibration)
+            written.append(self.active_path)
+            self.save_state(state)
+            written.append(self.state_path)
+            # Commit last: load_active and the router now see the same version.
+            self._write_catalog_override(calibration)
+        except OSError:
+            for path in reversed(written):
+                if backups[path] is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _atomic_write_bytes(path, backups[path])
+            raise
         return calibration
 
     def approve_discovered_model(self, key: str, *, initiated_by: str = "USER") -> dict[str, Any]:
@@ -1076,6 +1188,13 @@ class ModelCalibrationService:
         next refresh, matching how a whole calibration version's `activate`
         already works -- there is no separate instant-apply path.
         """
+        self.acquire_lock()
+        try:
+            return self._approve_discovered_locked(key, initiated_by=initiated_by)
+        finally:
+            self.release_lock()
+
+    def _approve_discovered_locked(self, key: str, *, initiated_by: str) -> dict[str, Any]:
         key = str(key or "").strip()
         if "/" not in key or _UNSAFE_TEXT_RE.search(key):
             raise CalibrationError(f"invalid model key {key!r}")
@@ -1134,8 +1253,9 @@ class ModelCalibrationService:
             extra = raw_by_key.get(f"{entry['provider']}/{entry['model']}") or {}
             if extra.get("release_date"):
                 entry["release_date"] = sanitize_text(str(extra["release_date"]))[:40]
-            if extra.get("speed") is not None:
-                entry["speed"] = _finite_float(extra.get("speed"))
+            for field in ("speed", "latency_seconds"):
+                if extra.get(field) is not None:
+                    entry[field] = _finite_float(extra[field])
             if extra.get("external_evaluations"):
                 entry["external_evaluations"] = extra["external_evaluations"]
             entry["key"] = f"{entry['provider']}/{entry['model']}"
@@ -1198,9 +1318,18 @@ class ModelCalibrationService:
     def ensure_bootstrap(self, *, routing_optimization: str = "best", now: float | None = None) -> dict[str, Any]:
         """Load the last known-good calibration, or seed it from the bundled catalog."""
         active = self.load_active()
+        if active and self.catalog_override_path.is_file():
+            return active
+        self.acquire_lock()
+        try:
+            return self._bootstrap_locked(routing_optimization=routing_optimization, now=now)
+        finally:
+            self.release_lock()
+
+    def _bootstrap_locked(self, *, routing_optimization: str, now: float | None) -> dict[str, Any]:
+        active = self.load_active()
         if active:
-            if not self.catalog_override_path.is_file():
-                self._write_catalog_override(active)
+            self._write_catalog_override(active)
             return active
         now_ts = now if now is not None else time.time()
         bootstrap = self._build_calibration(
@@ -1210,14 +1339,10 @@ class ModelCalibrationService:
             now_ts=now_ts,
             source={"kind": "local", "url": None, "status": "local"},
             routing_optimization=routing_optimization,
-            existing_versions=set(),
+            existing_versions=self._existing_versions(),
         )
         self._write_history(bootstrap)
-        _atomic_write_json(self.active_path, bootstrap)
-        self._write_catalog_override(bootstrap)
-        state = self.load_state()
-        state["active_version"] = bootstrap["version"]
-        self.save_state(state)
+        self._activate_locked(bootstrap["version"], initiated_by="STARTUP")
         return bootstrap
 
     def _should_skip_interval(
@@ -1307,6 +1432,7 @@ class ModelCalibrationService:
                 "initiated_by": initiated_by,
                 "attempted_at": iso_now(now_ts),
             }
+        state_before = self.load_state()
         try:
             return self._refresh_locked(
                 source=source,
@@ -1321,9 +1447,15 @@ class ModelCalibrationService:
                 fetch_fn=fetch_fn,
                 now_ts=now_ts,
             )
+        except (OSError, CalibrationError) as error:
+            state = self.load_state()
+            state["last_successful_at"] = state_before.get("last_successful_at")
+            return self._record_failure(state, iso_now(now_ts), "error", error, initiated_by)
         finally:
-            self._clear_progress()
-            self.release_lock()
+            try:
+                self._clear_progress()
+            finally:
+                self.release_lock()
 
     def _refresh_locked(
         self,
@@ -1425,21 +1557,12 @@ class ModelCalibrationService:
             # Nothing was active yet, so there is no production calibration
             # to protect from a silent replacement: this successfully
             # fetched and validated data becomes the active baseline
-            # immediately, regardless of activation_policy. `activate` is
-            # the sole writer of `state.json` from this point on, so reload
-            # our copy from disk before layering the refresh-tracking
-            # fields on top of it and saving once.
+            # immediately, regardless of activation_policy. Persist refresh
+            # metadata before activation so publication is the final write.
             self._write_history(new_calibration)
-            self.activate(new_calibration["version"], initiated_by=initiated_by)
-            state = self.load_state()
-            state["last_attempted_at"] = attempted_at
-            state["last_successful_at"] = attempted_at
-            state["last_source_status"] = source_meta.get("status")
-            state["last_error"] = None
-            state["last_diff"] = diff
-            state["consecutive_failures"] = 0
             state["last_attempted_status"] = "changed"
             self.save_state(state)
+            self._activate_locked(new_calibration["version"], initiated_by=initiated_by)
             self._set_progress(*PROGRESS_STAGES[5])
             result = {
                 "status": "changed",
@@ -1487,7 +1610,7 @@ class ModelCalibrationService:
 
         activated = False
         if activation_policy == "auto" and simulation is not None and simulation["regression_ok"]:
-            self.activate(new_calibration["version"], initiated_by=initiated_by)
+            self._activate_locked(new_calibration["version"], initiated_by=initiated_by)
             activated = True
 
         self._set_progress(*PROGRESS_STAGES[5])
@@ -1515,13 +1638,22 @@ class ModelCalibrationService:
     def status_report(self, *, routing_optimization: str = "best") -> dict[str, Any]:
         try:
             self.ensure_bootstrap(routing_optimization=routing_optimization)
-        except CalibrationError:
+        except (CalibrationError, OSError):
             pass
         state = self.load_state()
         active = self.load_active()
         proposed = self.load_proposed()
-        active_version = state.get("active_version")
-        proposed_version = state.get("proposed_version")
+        # Metadata/progress are advisory. Only readable calibration documents
+        # can identify the live version or offer an update for activation.
+        active_version = (active or {}).get("version")
+        if not (
+            proposed
+            and proposed.get("version") == state.get("proposed_version")
+            and proposed.get("version") != active_version
+            and proposed.get("base_version") == active_version
+        ):
+            proposed = None
+        proposed_version = (proposed or {}).get("version")
         progress = self.load_progress()
         refresh_running = False
         if self.lock_path.exists():
@@ -1630,7 +1762,7 @@ def main(argv: list[str] | None = None) -> int:
             result = service.analyze()
         else:
             result = {"history": service.list_history(args.limit)}
-    except CalibrationError as error:
+    except (CalibrationError, OSError) as error:
         print(json.dumps({"error": sanitize_text(str(error))}))
         return 1
     print(json.dumps(result, default=str))

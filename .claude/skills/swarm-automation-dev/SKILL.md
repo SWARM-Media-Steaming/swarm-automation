@@ -208,6 +208,16 @@ The other new `AppConfig` fields (`model_data_refresh_on_startup`,
 per-repository, matching `dynamic_model_routing`/`routing_optimization` above
 rather than the Feedback view's per-page filter pattern.
 
+Activation publishes the full calibration and its filtered routing models in
+one atomic `active_catalog.json` document. `load_active()` reads that document
+first; `calibration_active.json` is a compatibility/recovery copy. Status uses
+the readable calibration's version, not the advisory state pointer. Refresh,
+activation, approval and bootstrap writes share an OS file lock; the separate
+`refresh.lock` JSON is only a status marker. History pruning protects the
+active, proposed and immediately previous active versions for rollback.
+The active catalog filters both the scoring fallback and the router's
+explicit model choices (including the catalog offered in its prompt).
+
 ## Issue outcomes and no-code flows
 
 Every assigned issue, including one labelled `Question`, goes through the

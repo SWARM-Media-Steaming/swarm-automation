@@ -103,6 +103,15 @@
           : `New calibration available for review (version ${info.calibration_version})`,
       },
     ];
+    if ((diff.performance_changes || []).length) {
+      lines.push({ label: "Performance changes", value: String(diff.performance_changes.length) });
+    }
+    if ((diff.cost_comparison_categories || []).length) {
+      lines.push({
+        label: "Cost estimate coverage",
+        value: `${diff.cost_comparison_categories.length} workloads with prices in both calibrations`,
+      });
+    }
     return lines;
   }
 
@@ -121,18 +130,27 @@
       lines.push({ heading: key, detail: "New model discovered" });
     });
     (info.pricing_changes || []).forEach((change) => {
-      const before = change.previous_output_cost;
-      const after = change.new_output_cost;
-      let detail;
-      if (before != null && after != null && before) {
-        const delta = Math.round(((after - before) / before) * 1000) / 10;
-        detail = `Output price ${before} → ${after} (${delta > 0 ? "+" : ""}${delta}%)`;
-      } else {
-        detail = `Cost rank ${change.previous_cost_rank ?? "—"} → ${change.new_cost_rank ?? "—"}`;
-      }
-      lines.push({ heading: `${change.provider}/${change.model}`, detail });
+      const details = [];
+      [
+        ["input_cost", "Input price"], ["output_cost", "Output price"],
+        ["reasoning_cost", "Reasoning price"], ["cost_rank", "Cost rank"],
+      ].forEach(([field, label]) => {
+        const before = change[`previous_${field}`] ?? null;
+        const after = change[`new_${field}`] ?? null;
+        if (before === after) return;
+        let detail = `${label} ${before ?? "unavailable"} → ${after ?? "unavailable"}`;
+        if (field !== "cost_rank") {
+          if (before && after != null) {
+            const delta = Math.round(((after - before) / before) * 1000) / 10;
+            detail += ` (${delta > 0 ? "+" : ""}${delta}%)`;
+          }
+          detail += " USD per million tokens";
+        }
+        details.push(detail);
+      });
+      lines.push({ heading: `${change.provider}/${change.model}`, detail: details.join("; ") });
     });
-    (info.benchmark_changes || []).forEach((change) => {
+    [...(info.benchmark_changes || []), ...(info.performance_changes || [])].forEach((change) => {
       lines.push({
         heading: `${change.provider}/${change.model}`,
         detail: `${change.field}: ${change.previous ?? "—"} → ${change.new ?? "—"}`,

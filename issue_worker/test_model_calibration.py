@@ -455,6 +455,91 @@ class SimulationAndDiffTests(unittest.TestCase):
         self.assertTrue(simulation["regressions"])
 
 
+class CalibrationPublicationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.service = calib.ModelCalibrationService(Path(tmp.name))
+        self.service.refresh(fetch_fn=lambda: [_entry("m1", cost=2)], now=1.0)
+        self.previous = self.service.load_active()
+        update = self.service.refresh(
+            fetch_fn=lambda: [_entry("m1", cost=4)], now=100.0, force=True,
+        )
+        self.version = update["calibration_version"]
+
+    def test_readers_observe_the_committed_version_throughout_publication(self) -> None:
+        reader = calib.ModelCalibrationService(self.service.state_dir)
+        real_replace = calib.os.replace
+        observations = []
+
+        def inspect_before_commit(source, destination):
+            if Path(destination) == self.service.catalog_override_path:
+                report = reader.status_report()
+                catalog = mr.load_model_catalog(reader.catalog_override_path)
+                observations.append((report["active_version"], catalog[0].relative_cost))
+            return real_replace(source, destination)
+
+        with mock.patch.object(calib.os, "replace", side_effect=inspect_before_commit):
+            self.service.activate(self.version)
+        self.assertEqual(observations, [(self.previous["version"], 2)])
+        self.assertEqual(reader.status_report()["active_version"], self.version)
+        self.assertEqual(mr.load_model_catalog(reader.catalog_override_path)[0].relative_cost, 4)
+
+    def test_failed_state_publication_keeps_active_bytes_and_releases_lock(self) -> None:
+        before = (self.service.active_path.read_bytes(), self.service.catalog_override_path.read_bytes())
+        real_replace = calib.os.replace
+
+        def fail_state(source, destination):
+            if Path(destination) == self.service.state_path:
+                raise OSError("fixture: state storage unavailable")
+            return real_replace(source, destination)
+
+        with mock.patch.object(calib.os, "replace", side_effect=fail_state):
+            with self.assertRaises(OSError):
+                self.service.activate(self.version)
+        self.assertEqual(
+            (self.service.active_path.read_bytes(), self.service.catalog_override_path.read_bytes()), before,
+        )
+        self.assertFalse(self.service.lock_path.exists())
+        self.service.activate(self.version)
+        self.assertEqual(self.service.load_active()["version"], self.version)
+
+    def test_invalid_lock_marker_cannot_allow_another_mutation(self) -> None:
+        other = calib.ModelCalibrationService(self.service.state_dir)
+        self.service.acquire_lock()
+        try:
+            self.service.lock_path.write_text("{truncated", encoding="utf-8")
+            with self.assertRaises(calib.CalibrationBusyError):
+                other.activate(self.version)
+            with self.assertRaises(calib.CalibrationBusyError):
+                other.approve_discovered_model("fixture/m2")
+            self.assertEqual(other.load_active(), self.previous)
+        finally:
+            self.service.release_lock()
+        other.activate(self.version)
+        self.assertEqual(other.load_active()["version"], self.version)
+
+    def test_catalog_publication_failure_is_reported_without_new_success_time(self) -> None:
+        real_replace = calib.os.replace
+        successful_at = self.service.status_report()["last_successful_refresh_at"]
+
+        def fail_catalog(source, destination):
+            if Path(destination) == self.service.catalog_override_path:
+                raise OSError("fixture: catalog storage unavailable")
+            return real_replace(source, destination)
+
+        with mock.patch.object(calib.os, "replace", side_effect=fail_catalog):
+            result = self.service.refresh(
+                fetch_fn=lambda: [_entry("m1", cost=5)], now=200.0, force=True,
+                activation_policy="auto",
+            )
+        self.assertEqual(result["status"], "failed")
+        status = self.service.status_report()
+        self.assertEqual(status["last_successful_refresh_at"], successful_at)
+        self.assertEqual(status["last_attempted_status"], "failed")
+        self.assertEqual(self.service.load_active(), self.previous)
+
+
 class DynamicRouterHookTests(unittest.TestCase):
     """Zero-behavior-change-by-default guarantee for the live routing hook."""
 
