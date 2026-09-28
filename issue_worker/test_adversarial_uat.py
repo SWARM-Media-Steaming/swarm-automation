@@ -145,7 +145,8 @@ class AdversarialUatTests(unittest.TestCase):
         with self.patches(never_fix), mock.patch.object(self.worker, "approve_pull_request") as approve, mock.patch.object(self.worker, "merge_pull_request") as merge, mock.patch.object(self.worker, "auto_promote_integration_branch") as promote, mock.patch.object(self.worker, "push_ref", wraps=self.worker.push_ref) as push, mock.patch.object(self.worker, "cleanup_no_code_branch") as cleanup:
             self.assertEqual(self.worker.run_adversarial_delivery(), 10)
         self.assertEqual([c[0] for c in self.calls].count("fix"), 3)
-        self.assertEqual([c[0] for c in self.calls].count("test"), 7)
+        # Round 0 assessment plus one re-test after each of the three fix rounds.
+        self.assertEqual([c[0] for c in self.calls].count("test"), 4)
         # A cap hit is not a verified-clean pass: the branch is pushed and the
         # PR opened, but automation never approves, merges, or promotes it.
         push.assert_called_once()
