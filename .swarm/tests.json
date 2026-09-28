@@ -2657,6 +2657,34 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue295_outcome_grouping.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-295-outcome-grouping",
+      "name": "Issue #295: usage query aggregation must support grouping by outcome (success/failure), not just as a filter",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/usage_report.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_issue295_outcome_grouping.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
