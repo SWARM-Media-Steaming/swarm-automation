@@ -5111,8 +5111,21 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                     state[stage.key] for stage in ADVERSARIAL_STAGES
                     if isinstance(state.get(stage.key), dict) and not state[stage.key].get("disabled")
                 ]
-                if not loops or any(
-                    loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"} for loop in loops
+                disabled_pipeline = (
+                    not self.adversarial_stages()
+                    and any(
+                        isinstance(state.get(stage.key), dict)
+                        and state[stage.key].get("disabled")
+                        for stage in ADVERSARIAL_STAGES
+                    )
+                    and not loops
+                )
+                if not disabled_pipeline and (
+                    not loops
+                    or any(
+                        loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"}
+                        for loop in loops
+                    )
                 ):
                     raise WorkerError("An adversarial cap-hit PR requires a passing UAT follow-up before automatic delivery")
                 self.github.gh(

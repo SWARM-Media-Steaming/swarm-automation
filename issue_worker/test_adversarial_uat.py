@@ -909,6 +909,40 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(existing["body"], "Keep reviewer notes")
         self.assertEqual(events[-2:], ["push", "release"])
 
+    def test_disabled_adversarial_pipeline_releases_an_old_cap_hit_pr(self):
+        self.prepare()
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_uat_enabled=False, adversarial_security_enabled=False
+        )
+        loop = self.worker.read_state()["adversarial"]
+        loop.update(active=False, disabled=True, outcome="disabled", status="DISABLED")
+        self.worker.save_adversarial(loop)
+        existing = {
+            "url": "https://example.invalid/pull/181",
+            "state": "OPEN",
+            "body": uat.CAP_HIT_PR_NOTICE + "Implementation",
+        }
+        events = []
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["pr", "list"]:
+                return json.dumps([existing])
+            if args[:2] == ["pr", "edit"]:
+                events.append("release" if uat.CAP_HIT_PR_MARKER not in body else "hold")
+                existing["body"] = body
+            return ""
+
+        def push(*args, **kwargs):
+            import subprocess
+            events.append("push")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                mock.patch.object(self.worker, "push_ref", side_effect=push):
+            self.worker.deliver_pull_request(self.git("rev-parse", "HEAD"))
+        self.assertEqual(events, ["push", "release"])
+        self.assertEqual(existing["body"], "Implementation")
+
     def test_malformed_report_retries_fresh_instead_of_replaying_invalid_checkpoint(self):
         self.prepare(fixed=True)
         def malformed(prompt, activity=""):
