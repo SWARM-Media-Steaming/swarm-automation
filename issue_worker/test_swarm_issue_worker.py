@@ -4032,8 +4032,10 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.maybe_apply_dynamic_routing()
         self.assertEqual(self.worker.routing["model_source"], "tier")
-        self.assertFalse(self.worker.routing["cost_consideration_enabled"])
-        self.assertEqual(self.worker.choice.model, "claude-sonnet-5")
+        self.assertTrue(self.worker.routing["cost_consideration_enabled"])
+        self.assertEqual(self.worker.choice.model, "claude-haiku-4-5")
+        self.assertEqual(self.worker.routing["jev"]["status"], "disabled")
+        self.assertIsNone(self.worker.routing["jev"]["jev"])
 
         self.worker.config = dataclasses.replace(self.worker.config, routing_optimization="cost")
         self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5", "medium", "session-515b")
@@ -4246,7 +4248,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(self.worker.start_usage, self.worker.provider_usages["Grok"])
         self.assertEqual(self.worker.routing["provider"], "grok")
         self.assertEqual(self.worker.routing["model_source"], "tier")
-        self.assertFalse(self.worker.routing["cost_consideration_enabled"])
+        self.assertTrue(self.worker.routing["cost_consideration_enabled"])
         self.assertEqual(
             self.worker.routing["provider_reason"],
             "Grok is quickest on a small scripted change.",

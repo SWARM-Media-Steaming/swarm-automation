@@ -31,6 +31,7 @@ from dynamic_router import (
     model_catalog,
     model_description,
     parse_router_payload,
+    apply_jev_signals_to_decision,
     pin_configured_routing_decision,
     resolve_routing_decision,
     router_description,
@@ -383,11 +384,11 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertIn("Reasoning: Low", notice)
         self.assertIn(
             "How this was chosen: Dynamic Model Routing applied this model and effort "
-            "(best model for the work, regardless of cost).",
+            "(cheapest model that fits the work).",
             notice,
         )
         self.assertIn("Routing Confidence: 91%", notice)
-        self.assertIn("Routing Preference: Best model for the work, regardless of cost", notice)
+        self.assertIn("Routing Preference: Cheapest model that fits the work", notice)
         self.assertNotIn("Grok Grok", notice)
         self.assertIn("AI Tools Considered: Codex, Grok", notice)
         self.assertIn("Why Codex: Codex is best at test-driven bug fixes", notice)
@@ -395,7 +396,7 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertIn("How complexity was determined (7/10): Touches the parser and two callers", notice)
         self.assertIn(
             "Complexity 7/10. The router chose Codex GPT-5.6 Luna at Low reasoning, optimizing for "
-            "the best fit for the work, regardless of cost.",
+            "the least expensive model that can do the work.",
             notice,
         )
         self.assertEqual(display_model_name("claude-haiku-4-5"), "Claude Haiku 4.5")
@@ -404,7 +405,7 @@ class DynamicRouterTest(unittest.TestCase):
         grok_choice = describe_model_choice(grok, "grok-4.6", "medium", 4, optimization="best")
         self.assertIn(
             "Complexity 4/10. The router chose Grok 4.6 at Medium reasoning, optimizing for "
-            "the best fit for the work, regardless of cost.",
+            "the least expensive model that can do the work.",
             grok_choice,
         )
         self.assertNotIn("Grok Grok", grok_choice)
@@ -787,16 +788,16 @@ class CostAwareRoutingTest(unittest.TestCase):
         self.assertNotIn("even at a lower complexity score", prompt)
         self.assertNotIn("ignore cost entirely", prompt)
 
-        best = build_router_prompt(
+        migrated = build_router_prompt(
             title="t",
             body="b",
             labels=[],
             candidates=candidates("codex"),
             routing_optimization="best",
         )
-        self.assertIn("optimize for the best fit, and ignore cost entirely", best)
-        self.assertNotIn("least expensive", best)
-        self.assertNotIn("Frontier complexity floor:", best)
+        self.assertIn("Routing preference: optimize for cost.", migrated)
+        self.assertIn("least expensive", migrated)
+        self.assertIn("Frontier complexity floor:", migrated)
 
     def test_cost_preference_names_fable_as_frontier_only_when_usage_credits_are_allowed(self) -> None:
         prompt = build_router_prompt(
@@ -840,7 +841,7 @@ class CostAwareRoutingTest(unittest.TestCase):
         self.assertEqual(decision["model_source"], "router")
         self.assertEqual(decision["complexity"], 4)
 
-    def test_best_preference_never_asks_the_router_to_economize(self) -> None:
+    def test_legacy_best_preference_migrates_to_cost_first(self) -> None:
         prompt = build_router_prompt(
             title="t",
             body="b",
@@ -848,34 +849,33 @@ class CostAwareRoutingTest(unittest.TestCase):
             candidates=candidates("codex"),
             routing_optimization="best",
         )
-        self.assertIn("optimize for the best fit, and ignore cost entirely", prompt)
-        self.assertNotIn("least expensive", prompt)
-        # Not a licence to always reach for the strongest model.
-        self.assertIn("This is not", prompt)
+        self.assertIn("optimize for cost", prompt)
+        self.assertIn("least expensive", prompt)
+        self.assertNotIn("ignore cost entirely", prompt)
 
-    def test_an_unknown_preference_falls_back_to_best(self) -> None:
+    def test_an_unknown_preference_falls_back_to_cost(self) -> None:
         prompt = build_router_prompt(
             title="t", body="b", labels=[], candidates=candidates("codex"), routing_optimization="???"
         )
-        self.assertIn("optimize for the best fit", prompt)
+        self.assertIn("optimize for cost", prompt)
         decision = resolve(sample_payload(), "codex", routing_optimization="")
-        self.assertEqual(decision["routing_optimization"], "best")
+        self.assertEqual(decision["routing_optimization"], "cost")
+        self.assertTrue(decision["cost_consideration_enabled"])
 
-    def test_scored_fallback_routes_the_same_task_differently_when_cost_consideration_changes(self) -> None:
+    def test_scored_fallback_is_always_cost_first(self) -> None:
         payload = sample_payload(
             complexity=1,
             task_type="debugging",
             selected_provider="claude",
             selected_model="no-such-model",
         )
-        off = resolve(payload, "claude", routing_optimization="best")
+        legacy = resolve(payload, "claude", routing_optimization="best")
         on = resolve(payload, "claude", routing_optimization="cost")
-        self.assertEqual(off["model_source"], "tier")
+        self.assertEqual(legacy["model_source"], "tier")
         self.assertEqual(on["model_source"], "tier")
-        self.assertFalse(off["cost_consideration_enabled"])
+        self.assertTrue(legacy["cost_consideration_enabled"])
         self.assertTrue(on["cost_consideration_enabled"])
-        self.assertEqual(off["selected_model"], "claude-sonnet-5")
-        self.assertEqual(off["reasoning_effort"], "low")
+        self.assertEqual(legacy["selected_model"], on["selected_model"])
         self.assertEqual(on["selected_model"], "claude-haiku-4-5")
         self.assertEqual(on["reasoning_effort"], "low")
 
@@ -924,6 +924,40 @@ class CostAwareRoutingTest(unittest.TestCase):
         decision = resolve(payload, "claude", allow_usage_credit_models=True)
         self.assertEqual(decision["selected_model"], "claude-fable-5-1")
         self.assertEqual(decision["model_source"], "router")
+
+    def test_jev_disabled_keeps_baseline_scores_and_does_not_imply_a_zero_jev_score(self) -> None:
+        decision = resolve(sample_payload(), "codex")
+        updated = apply_jev_signals_to_decision(
+            decision, None, candidates=candidates("codex"), jev_status="disabled"
+        )
+        jev = updated["jev"]
+        self.assertEqual(jev["status"], "disabled")
+        self.assertIsNone(jev["jev"])
+        self.assertEqual(jev["baseline"]["model"], jev["modified"]["model"])
+        self.assertEqual(jev["delta"]["absolute"], 0.0)
+        self.assertFalse(jev["delta"]["routing_changed"])
+
+    def test_jev_signals_are_stored_separately_from_the_swarm_baseline(self) -> None:
+        decision = resolve(sample_payload(complexity=4, selected_model="gpt-5.6-terra"), "codex")
+        payload = {
+            "decision": "FEATURE",
+            "confidence": 0.94,
+            "scores": {"complexity": 0.2, "securityRisk": 0.1},
+            "reasonCodes": ["FEATURE"],
+            "metadata": {"routerTaskType": "feature"},
+            "source": "jev",
+            "model": "jev-latest",
+        }
+        updated = apply_jev_signals_to_decision(
+            decision, payload, candidates=candidates("codex"), jev_status="enabled"
+        )
+        jev = updated["jev"]
+        self.assertEqual(jev["status"], "enabled")
+        self.assertEqual(jev["baseline"]["complexity"], 4)
+        self.assertIsNotNone(jev["jev"])
+        self.assertEqual(jev["jev"]["decision"], "FEATURE")
+        self.assertIn("modified", jev)
+        self.assertIn("delta", jev)
 
     def test_a_model_belonging_to_another_tool_is_not_accepted(self) -> None:
         payload = sample_payload(selected_provider="claude", selected_model="gpt-5.6-sol")

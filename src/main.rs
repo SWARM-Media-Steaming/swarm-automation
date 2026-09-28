@@ -16,7 +16,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 15] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 17] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
@@ -35,6 +35,8 @@ const REQUIRED_WORKER_RESOURCES: [&str; 15] = [
     // rather than invoked directly, matching the rest of this list.
     "model_calibration.py",
     "engineering_knowledge.py",
+    "jev_cli.py",
+    "decision_engine.py",
 ];
 
 struct AppState {
@@ -777,10 +779,7 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
         "--routing-tiers".into(),
         serde_json::to_string(&config.routing_tiers).unwrap_or_else(|_| "{}".into()),
     ]);
-    arguments.extend([
-        "--routing-optimization".into(),
-        config.routing_optimization.clone(),
-    ]);
+    arguments.extend(["--routing-optimization".into(), "cost".into()]);
     // The router names the worker model itself, so it needs the same
     // credit-model filter the desktop applies to every other model list.
     arguments.push(
@@ -791,6 +790,51 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
         }
         .into(),
     );
+    arguments.extend(jev_scheduler_arguments(config));
+    arguments
+}
+
+fn jev_scheduler_arguments(config: &AppConfig) -> Vec<String> {
+    let mut arguments = vec![
+        if config.jev_enabled {
+            "--jev-enabled".into()
+        } else {
+            "--no-jev-enabled".into()
+        },
+        "--jev-bin".into(),
+        tools::find_executable("jev", &config.jev_bin)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| config.jev_bin.clone()),
+        "--jev-model".into(),
+        config.jev_model.clone(),
+        "--jev-timeout-seconds".into(),
+        config.jev_timeout_seconds.to_string(),
+        "--jev-max-retries".into(),
+        config.jev_max_retries.to_string(),
+        "--jev-confidence-automation".into(),
+        config.jev_confidence_automation.to_string(),
+        "--jev-confidence-fallback".into(),
+        config.jev_confidence_fallback.to_string(),
+        "--jev-confidence-security".into(),
+        config.jev_confidence_security.to_string(),
+        "--jev-fallback".into(),
+        config.jev_fallback.clone(),
+    ];
+    for (flag, enabled) in [
+        ("jev-use-preflight", config.jev_use_preflight),
+        ("jev-use-workflow", config.jev_use_workflow),
+        ("jev-use-uat", config.jev_use_uat),
+        ("jev-use-cyber", config.jev_use_cyber),
+        ("jev-use-rag", config.jev_use_rag),
+        ("jev-use-triage", config.jev_use_triage),
+        ("jev-use-completion", config.jev_use_completion),
+    ] {
+        arguments.push(if enabled {
+            format!("--{flag}")
+        } else {
+            format!("--no-{flag}")
+        });
+    }
     arguments
 }
 
@@ -1099,8 +1143,9 @@ fn repo_worker_args(
         }
         .into(),
         "--routing-optimization".into(),
-        config.routing_optimization.clone(),
+        "cost".into(),
     ];
+    arguments.extend(jev_scheduler_arguments(config));
     for provider in &config.providers {
         arguments.extend([
             format!("--{}-minimum-remaining-percent", provider.id),
@@ -1340,6 +1385,128 @@ fn get_execution_history<R: tauri::Runtime>(
     }
     serde_json::from_str(raw.trim())
         .map_err(|error| format!("Execution history response could not be parsed: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn jev_feedback_query_args(
+    script: &Path,
+    database: &Path,
+    repositories: &[String],
+    offset: Option<i64>,
+    search: Option<String>,
+    jev_status: Option<String>,
+    provider: Option<String>,
+    outcome: Option<String>,
+    routing_changed: Option<String>,
+) -> Vec<String> {
+    let mut arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--db".into(),
+        database.to_string_lossy().into_owned(),
+        "--jev-feedback".into(),
+        "--limit".into(),
+        EXECUTION_HISTORY_PAGE_SIZE.to_string(),
+        "--offset".into(),
+        offset.unwrap_or(0).max(0).to_string(),
+        "--search".into(),
+        normalize_execution_history_search(search),
+        "--jev-status".into(),
+        jev_status.unwrap_or_default(),
+        "--jev-provider".into(),
+        provider.unwrap_or_default(),
+        "--jev-outcome".into(),
+        outcome.unwrap_or_default(),
+        "--jev-routing-changed".into(),
+        routing_changed.unwrap_or_default(),
+    ];
+    append_repository_args(&mut arguments, repositories);
+    arguments
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn get_jev_feedback<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_ids: Vec<String>,
+    offset: Option<i64>,
+    search: Option<String>,
+    jev_status: Option<String>,
+    provider: Option<String>,
+    outcome: Option<String>,
+    routing_changed: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    let repositories = feedback_repository_names(&config, &repo_ids)?;
+    let database_path = execution_history_db_path(&config);
+    if !database_path.is_file() {
+        return Ok(serde_json::json!({
+            "records": [],
+            "total": 0,
+            "offset": 0,
+            "limit": EXECUTION_HISTORY_PAGE_SIZE,
+            "summary": {
+                "comparisons": 0,
+                "enabledCount": 0,
+                "disabledCount": 0,
+                "fallbackCount": 0,
+                "fallbackRate": 0.0,
+                "completionRate": null,
+                "jevCost": 0.0,
+            }
+        }));
+    }
+    let script = worker_script_dir(&app)?.join("ai_execution_history.py");
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let (ok, raw) = run_capture_owned(
+        &python,
+        &jev_feedback_query_args(
+            &script,
+            &database_path,
+            &repositories,
+            offset,
+            search,
+            jev_status,
+            provider,
+            outcome,
+            routing_changed,
+        ),
+    );
+    if !ok {
+        return Err(format!("Jev feedback lookup failed: {raw}"));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("Jev feedback response could not be parsed: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn get_jev_feedback_background(
+    app: tauri::AppHandle,
+    repo_ids: Vec<String>,
+    offset: Option<i64>,
+    search: Option<String>,
+    jev_status: Option<String>,
+    provider: Option<String>,
+    outcome: Option<String>,
+    routing_changed: Option<String>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_jev_feedback(
+            app.clone(),
+            state,
+            repo_ids,
+            offset,
+            search,
+            jev_status,
+            provider,
+            outcome,
+            routing_changed,
+        )
+    })
+    .await
+    .map_err(|error| format!("Jev feedback lookup failed: {error}"))?
 }
 
 #[tauri::command]
@@ -4853,6 +5020,8 @@ fn main() {
             request_issue_scan,
             get_execution_history,
             get_execution_history_background,
+            get_jev_feedback,
+            get_jev_feedback_background,
             run_diagnostics,
             run_diagnostics_background,
             file_diagnostic_issue,

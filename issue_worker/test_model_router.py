@@ -413,6 +413,30 @@ class CostConsiderationTests(unittest.TestCase):
             )
             self.assertEqual(decision.model, "fable", f"cost_consideration_enabled={cost_on}")
 
+    def test_faster_model_cannot_beat_a_cheaper_adequately_capable_one(self) -> None:
+        cheap_slow = _fixture_model(
+            "cheap-slow",
+            capability=4,
+            cost=1,
+            token_efficiency=3,
+            latency=1,
+            efforts=("high",),
+        )
+        pricey_fast = _fixture_model(
+            "pricey-fast",
+            capability=4,
+            cost=4,
+            token_efficiency=3,
+            latency=5,
+            efforts=("high",),
+        )
+        decision = mr.route(
+            mr.RouteRequest("general_reasoning", "COMPLEX", cost_consideration_enabled=True),
+            catalog=[cheap_slow, pricey_fast],
+            rules=self.rules,
+        )
+        self.assertEqual(decision.model, "cheap-slow")
+
     def test_quality_tolerance_rejects_a_large_capability_gap(self) -> None:
         strong = _fixture_model("astra", capability=5, cost=5, token_efficiency=5, latency=3, efforts=("high",))
         far_behind = _fixture_model("luna", capability=2, cost=1, token_efficiency=5, latency=5, efforts=("high",))

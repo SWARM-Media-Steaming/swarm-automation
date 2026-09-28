@@ -17,10 +17,10 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -587,6 +587,98 @@ class ExecutionHistoryRepository:
                     "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                     (6,),
                 )
+            if 7 not in applied and 7 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                database.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS jev_decisions (
+                        decision_id TEXT PRIMARY KEY,
+                        execution_id TEXT NOT NULL DEFAULT '',
+                        issue_number INTEGER NOT NULL DEFAULT 0,
+                        repository TEXT NOT NULL DEFAULT '',
+                        decision_type TEXT NOT NULL DEFAULT '',
+                        input_fingerprint TEXT NOT NULL DEFAULT '',
+                        decision TEXT NOT NULL DEFAULT '',
+                        confidence REAL,
+                        scores TEXT NOT NULL DEFAULT '{}',
+                        reason_codes TEXT NOT NULL DEFAULT '[]',
+                        latency_ms REAL,
+                        provider TEXT NOT NULL DEFAULT 'jev',
+                        model TEXT NOT NULL DEFAULT '',
+                        version TEXT NOT NULL DEFAULT '',
+                        estimated_cost REAL,
+                        created_at TEXT NOT NULL DEFAULT '',
+                        fallback_used TEXT NOT NULL DEFAULT '',
+                        swarm_action TEXT NOT NULL DEFAULT '',
+                        recommendation_accepted INTEGER,
+                        workflow_outcome TEXT NOT NULL DEFAULT '',
+                        source TEXT NOT NULL DEFAULT '',
+                        error_type TEXT NOT NULL DEFAULT '',
+                        jev_enabled INTEGER NOT NULL DEFAULT 0,
+                        llm_calls_avoided INTEGER NOT NULL DEFAULT 0,
+                        estimated_tokens_avoided INTEGER,
+                        estimated_dollar_savings REAL
+                    );
+                    CREATE INDEX IF NOT EXISTS jev_decisions_execution_idx
+                        ON jev_decisions(execution_id, created_at);
+                    CREATE INDEX IF NOT EXISTS jev_decisions_issue_idx
+                        ON jev_decisions(repository, issue_number);
+                    CREATE INDEX IF NOT EXISTS jev_decisions_type_idx
+                        ON jev_decisions(decision_type, source);
+                    CREATE TABLE IF NOT EXISTS jev_score_comparisons (
+                        comparison_id TEXT PRIMARY KEY,
+                        execution_id TEXT NOT NULL DEFAULT '',
+                        repository TEXT NOT NULL DEFAULT '',
+                        issue_number INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL DEFAULT '',
+                        jev_status TEXT NOT NULL DEFAULT 'disabled',
+                        baseline_native_score REAL,
+                        baseline_normalized_score REAL,
+                        baseline_prompt_grade TEXT NOT NULL DEFAULT '',
+                        baseline_complexity INTEGER,
+                        baseline_task_type TEXT NOT NULL DEFAULT '',
+                        baseline_risk TEXT NOT NULL DEFAULT '',
+                        baseline_context TEXT NOT NULL DEFAULT '',
+                        baseline_provider TEXT NOT NULL DEFAULT '',
+                        baseline_model TEXT NOT NULL DEFAULT '',
+                        baseline_effort TEXT NOT NULL DEFAULT '',
+                        baseline_candidates TEXT NOT NULL DEFAULT '[]',
+                        baseline_inputs TEXT NOT NULL DEFAULT '{}',
+                        jev_native_score REAL,
+                        jev_normalized_score REAL,
+                        jev_component_scores TEXT NOT NULL DEFAULT '{}',
+                        jev_reason_codes TEXT NOT NULL DEFAULT '[]',
+                        jev_confidence REAL,
+                        jev_model TEXT NOT NULL DEFAULT '',
+                        jev_version TEXT NOT NULL DEFAULT '',
+                        modified_native_score REAL,
+                        modified_normalized_score REAL,
+                        modified_provider TEXT NOT NULL DEFAULT '',
+                        modified_model TEXT NOT NULL DEFAULT '',
+                        modified_effort TEXT NOT NULL DEFAULT '',
+                        modified_candidates TEXT NOT NULL DEFAULT '[]',
+                        score_delta_absolute REAL,
+                        score_delta_percent REAL,
+                        routing_changed INTEGER NOT NULL DEFAULT 0,
+                        estimated_jev_cost REAL,
+                        estimated_total_cost REAL,
+                        estimated_llm_calls_avoided INTEGER NOT NULL DEFAULT 0,
+                        estimated_tokens_avoided INTEGER,
+                        estimated_dollar_savings REAL,
+                        latency_ms REAL,
+                        workflow_outcome TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE INDEX IF NOT EXISTS jev_score_comparisons_execution_idx
+                        ON jev_score_comparisons(execution_id);
+                    CREATE INDEX IF NOT EXISTS jev_score_comparisons_status_idx
+                        ON jev_score_comparisons(jev_status, repository, created_at);
+                    """
+                )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (7,),
+                )
 
     def create(self, start: ExecutionStart, started_at: str) -> str:
         execution_id = str(uuid.uuid4())
@@ -1053,6 +1145,299 @@ class ExecutionHistoryRepository:
                 (sanitize_text(repository), int(issue_number)),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def record_jev_decision(self, payload: Mapping[str, Any]) -> None:
+        """Persist one sanitized Jev/fallback decision. Never stores raw prompts."""
+        now = payload.get("created_at") or dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        scores = payload.get("scores") if isinstance(payload.get("scores"), dict) else {}
+        reason_codes = payload.get("reason_codes") or payload.get("reasonCodes") or []
+        accepted = payload.get("recommendation_accepted")
+        if accepted is None:
+            accepted = payload.get("accepted")
+        row = (
+            sanitize_text(payload.get("decision_id")) or str(uuid.uuid4()),
+            sanitize_text(payload.get("execution_id")),
+            int(payload.get("issue_number") or 0),
+            sanitize_text(payload.get("repository")),
+            sanitize_text(payload.get("decision_type") or payload.get("decisionType")),
+            sanitize_text(payload.get("input_fingerprint") or payload.get("inputFingerprint")),
+            sanitize_text(payload.get("decision")),
+            _optional_float(payload.get("confidence")),
+            json.dumps(scores),
+            json.dumps([sanitize_text(item) for item in list(reason_codes)[:24]]),
+            _optional_float(payload.get("latency_ms") or payload.get("latencyMs")),
+            sanitize_text(payload.get("provider") or "jev") or "jev",
+            sanitize_text(payload.get("model")),
+            sanitize_text(payload.get("version")),
+            _optional_float(payload.get("estimated_cost") or payload.get("estimatedCost")),
+            sanitize_text(now),
+            sanitize_text(payload.get("fallback_used") or payload.get("fallbackUsed")),
+            sanitize_text(payload.get("swarm_action") or payload.get("swarmAction")),
+            None if accepted is None else (1 if accepted else 0),
+            sanitize_text(payload.get("workflow_outcome") or payload.get("workflowOutcome")),
+            sanitize_text(payload.get("source")),
+            sanitize_text(payload.get("error_type") or payload.get("errorType")),
+            1 if payload.get("jev_enabled", payload.get("source") == "jev") else 0,
+            int(payload.get("llm_calls_avoided") or payload.get("llmCallsAvoided") or 0),
+            None
+            if payload.get("estimated_tokens_avoided", payload.get("estimatedTokensAvoided")) is None
+            else int(payload.get("estimated_tokens_avoided") or payload.get("estimatedTokensAvoided") or 0),
+            _optional_float(payload.get("estimated_dollar_savings") or payload.get("estimatedDollarSavings")),
+        )
+        with self.connect() as database:
+            database.execute(
+                """INSERT OR REPLACE INTO jev_decisions (
+                    decision_id, execution_id, issue_number, repository, decision_type,
+                    input_fingerprint, decision, confidence, scores, reason_codes,
+                    latency_ms, provider, model, version, estimated_cost, created_at,
+                    fallback_used, swarm_action, recommendation_accepted, workflow_outcome,
+                    source, error_type, jev_enabled, llm_calls_avoided,
+                    estimated_tokens_avoided, estimated_dollar_savings
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                row,
+            )
+
+    def record_jev_score_comparison(self, payload: Mapping[str, Any]) -> None:
+        """Store distinct baseline, Jev, and modified scores for one execution."""
+        now = payload.get("created_at") or dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        baseline = payload.get("baseline") if isinstance(payload.get("baseline"), dict) else {}
+        jev = payload.get("jev") if isinstance(payload.get("jev"), dict) else {}
+        modified = payload.get("modified") if isinstance(payload.get("modified"), dict) else {}
+        delta = payload.get("delta") if isinstance(payload.get("delta"), dict) else {}
+        comparison_id = sanitize_text(payload.get("comparison_id")) or str(uuid.uuid4())
+        row = (
+            comparison_id,
+            sanitize_text(payload.get("execution_id")),
+            sanitize_text(payload.get("repository")),
+            int(payload.get("issue_number") or 0),
+            sanitize_text(now),
+            sanitize_text(payload.get("jev_status") or payload.get("status") or "disabled") or "disabled",
+            _optional_float(baseline.get("native_score")),
+            _optional_float(baseline.get("normalized_score")),
+            sanitize_text(baseline.get("prompt_grade")),
+            baseline.get("complexity"),
+            sanitize_text(baseline.get("task_type")),
+            sanitize_text(baseline.get("risk")),
+            sanitize_text(baseline.get("context_requirement") or baseline.get("context")),
+            sanitize_text(baseline.get("provider")),
+            sanitize_text(baseline.get("model")),
+            sanitize_text(baseline.get("effort")),
+            json.dumps(baseline.get("candidates") or []),
+            json.dumps(baseline.get("inputs") or {}),
+            _optional_float(jev.get("native_score") if jev else None),
+            _optional_float(jev.get("normalized_score") if jev else None),
+            json.dumps((jev or {}).get("scores") or (jev or {}).get("component_scores") or {}),
+            json.dumps((jev or {}).get("reason_codes") or (jev or {}).get("reasonCodes") or []),
+            _optional_float((jev or {}).get("confidence")),
+            sanitize_text((jev or {}).get("model")),
+            sanitize_text((jev or {}).get("version")),
+            _optional_float(modified.get("native_score")),
+            _optional_float(modified.get("normalized_score")),
+            sanitize_text(modified.get("provider")),
+            sanitize_text(modified.get("model")),
+            sanitize_text(modified.get("effort")),
+            json.dumps(modified.get("candidates") or []),
+            _optional_float(delta.get("absolute")),
+            _optional_float(delta.get("percent")),
+            1 if (delta.get("routing_changed") or payload.get("routing_changed")) else 0,
+            _optional_float(payload.get("estimated_jev_cost")),
+            _optional_float(payload.get("estimated_total_cost")),
+            int(payload.get("estimated_llm_calls_avoided") or 0),
+            None if payload.get("estimated_tokens_avoided") is None else int(payload.get("estimated_tokens_avoided") or 0),
+            _optional_float(payload.get("estimated_dollar_savings")),
+            _optional_float(payload.get("latency_ms")),
+            sanitize_text(payload.get("workflow_outcome")),
+        )
+        with self.connect() as database:
+            database.execute(
+                """INSERT OR REPLACE INTO jev_score_comparisons (
+                    comparison_id, execution_id, repository, issue_number, created_at, jev_status,
+                    baseline_native_score, baseline_normalized_score, baseline_prompt_grade,
+                    baseline_complexity, baseline_task_type, baseline_risk, baseline_context,
+                    baseline_provider, baseline_model, baseline_effort, baseline_candidates,
+                    baseline_inputs, jev_native_score, jev_normalized_score, jev_component_scores,
+                    jev_reason_codes, jev_confidence, jev_model, jev_version,
+                    modified_native_score, modified_normalized_score, modified_provider,
+                    modified_model, modified_effort, modified_candidates, score_delta_absolute,
+                    score_delta_percent, routing_changed, estimated_jev_cost, estimated_total_cost,
+                    estimated_llm_calls_avoided, estimated_tokens_avoided, estimated_dollar_savings,
+                    latency_ms, workflow_outcome
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                row,
+            )
+
+    def finish_jev_outcomes(self, execution_id: str, outcome: str) -> None:
+        """Stamp the eventual workflow outcome onto Jev rows for later calibration."""
+        if not execution_id:
+            return
+        status = sanitize_text(outcome)
+        with self.connect() as database:
+            database.execute(
+                "UPDATE jev_decisions SET workflow_outcome = ? WHERE execution_id = ? AND workflow_outcome = ''",
+                (status, execution_id),
+            )
+            database.execute(
+                "UPDATE jev_score_comparisons SET workflow_outcome = ? WHERE execution_id = ? AND workflow_outcome = ''",
+                (status, execution_id),
+            )
+
+    def jev_feedback(
+        self,
+        repositories: Sequence[str] | str | None = None,
+        *,
+        search: str = "",
+        jev_status: str = "",
+        provider: str = "",
+        outcome: str = "",
+        routing_changed: str = "",
+        limit: int = PAGE_SIZE,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Filterable Jev score comparisons joined to execution outcomes."""
+        limit = clamp_page_size(limit)
+        offset = clamp_offset(offset)
+        repository_clause, repository_params = _repository_filter(repositories)
+        conditions = []
+        params: list[Any] = []
+        if repository_clause:
+            conditions.append(repository_clause.replace("repository", "c.repository", 1))
+            params.extend(repository_params)
+        term = normalize_search(search)
+        if term:
+            escaped = term.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            conditions.append(
+                "("
+                "CAST(c.issue_number AS TEXT) LIKE ? ESCAPE '\\' OR "
+                "LOWER(COALESCE(e.issue_title, '')) LIKE ? ESCAPE '\\' OR "
+                "LOWER(COALESCE(e.ai_provider, c.modified_provider, '')) LIKE ? ESCAPE '\\' OR "
+                "LOWER(COALESCE(e.model, c.modified_model, '')) LIKE ? ESCAPE '\\' OR "
+                "LOWER(COALESCE(e.final_status, c.workflow_outcome, '')) LIKE ? ESCAPE '\\'"
+                ")"
+            )
+            params.extend([pattern, pattern, pattern, pattern, pattern])
+        status = str(jev_status or "").strip().lower()
+        if status in {"enabled", "disabled", "unavailable", "timeout", "malformed", "authentication", "low_confidence", "fallback"}:
+            conditions.append("c.jev_status = ?")
+            params.append(status)
+        provider_key = normalize_provider_key(provider)
+        if provider_key:
+            conditions.append("LOWER(COALESCE(c.modified_provider, e.ai_provider, '')) = ?")
+            params.append(provider_key)
+        outcome_key = sanitize_text(outcome)
+        if outcome_key:
+            conditions.append("COALESCE(e.final_status, c.workflow_outcome) = ?")
+            params.append(outcome_key)
+        if str(routing_changed).strip().lower() in {"1", "true", "yes"}:
+            conditions.append("c.routing_changed = 1")
+        elif str(routing_changed).strip().lower() in {"0", "false", "no"}:
+            conditions.append("c.routing_changed = 0")
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        join = (
+            "FROM jev_score_comparisons c "
+            "LEFT JOIN ai_executions e ON e.execution_id = c.execution_id"
+        )
+        with self.connect() as database:
+            tables = {
+                row[0]
+                for row in database.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            if "jev_score_comparisons" not in tables:
+                return _empty_jev_feedback(limit)
+            total = int(database.execute(f"SELECT COUNT(*) {join}{where}", params).fetchone()[0])
+            if total == 0:
+                offset = 0
+            elif offset >= total:
+                offset = ((total - 1) // limit) * limit
+            rows = list(
+                database.execute(
+                    "SELECT c.*, e.issue_title, e.issue_url, e.final_status, e.ai_provider, "
+                    "e.model AS execution_model, e.effort AS execution_effort, e.started_at AS execution_started "
+                    f"{join}{where} ORDER BY c.created_at DESC LIMIT ? OFFSET ?",
+                    (*params, limit, offset),
+                )
+            )
+            aggregates = database.execute(
+                "SELECT COUNT(*) AS comparisons, "
+                "AVG(c.baseline_normalized_score) AS avg_baseline, "
+                "AVG(c.jev_normalized_score) AS avg_jev, "
+                "AVG(c.modified_normalized_score) AS avg_modified, "
+                "AVG(c.score_delta_absolute) AS avg_delta, "
+                "AVG(c.latency_ms) AS avg_latency, "
+                "SUM(c.estimated_jev_cost) AS jev_cost, "
+                "SUM(CASE WHEN c.routing_changed = 1 THEN 1 ELSE 0 END) AS routing_changes, "
+                "SUM(CASE WHEN c.jev_status IN ('unavailable', 'timeout', 'malformed', 'authentication', 'low_confidence', 'fallback') THEN 1 ELSE 0 END) AS fallbacks, "
+                "SUM(CASE WHEN c.jev_status = 'disabled' THEN 1 ELSE 0 END) AS disabled, "
+                "SUM(CASE WHEN c.jev_status = 'enabled' THEN 1 ELSE 0 END) AS enabled, "
+                "SUM(c.estimated_llm_calls_avoided) AS llm_calls_avoided, "
+                "SUM(c.estimated_tokens_avoided) AS tokens_avoided, "
+                "SUM(c.estimated_dollar_savings) AS dollar_savings, "
+                "SUM(CASE WHEN COALESCE(e.final_status, c.workflow_outcome) IN ('completed', 'accepted', 'delivered') THEN 1 ELSE 0 END) AS completed "
+                f"{join}{where}",
+                params,
+            ).fetchone()
+            outcomes = list(
+                database.execute(
+                    "SELECT COALESCE(e.final_status, c.workflow_outcome, '') AS outcome, COUNT(*) "
+                    f"{join}{where} GROUP BY outcome",
+                    params,
+                )
+            )
+            decisions = database.execute(
+                "SELECT COUNT(*) AS calls, AVG(confidence) AS avg_confidence, "
+                "SUM(latency_ms) AS latency, SUM(estimated_cost) AS cost, "
+                "SUM(CASE WHEN fallback_used <> '' THEN 1 ELSE 0 END) AS fallbacks, "
+                "SUM(llm_calls_avoided) AS llm_calls_avoided "
+                "FROM jev_decisions"
+                + (
+                    " WHERE repository IN (" + ", ".join("?" for _ in repository_params) + ")"
+                    if repository_params
+                    else ""
+                ),
+                repository_params,
+            ).fetchone()
+        records = [_jev_comparison_row(row) for row in rows]
+        agg = dict(aggregates) if aggregates else {}
+        completed = int(agg.get("completed") or 0)
+        comparisons = int(agg.get("comparisons") or 0)
+        jev_cost = float(agg.get("jev_cost") or 0)
+        return {
+            "records": records,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "summary": {
+                "comparisons": comparisons,
+                "averageBaseline": agg.get("avg_baseline"),
+                "averageJev": agg.get("avg_jev"),
+                "averageModified": agg.get("avg_modified"),
+                "averageDelta": agg.get("avg_delta"),
+                "averageLatencyMs": agg.get("avg_latency"),
+                "jevCost": jev_cost,
+                "routingChanges": int(agg.get("routing_changes") or 0),
+                "fallbackCount": int(agg.get("fallbacks") or 0),
+                "fallbackRate": (int(agg.get("fallbacks") or 0) / comparisons) if comparisons else 0.0,
+                "disabledCount": int(agg.get("disabled") or 0),
+                "enabledCount": int(agg.get("enabled") or 0),
+                "llmCallsAvoided": int(agg.get("llm_calls_avoided") or 0),
+                "estimatedTokensAvoided": int(agg.get("tokens_avoided") or 0),
+                "estimatedDollarSavings": float(agg.get("dollar_savings") or 0),
+                "completed": completed,
+                "completionRate": (completed / comparisons) if comparisons else None,
+                "costPerCompleted": (jev_cost / completed) if completed else None,
+                "outcomes": {str(name or "unknown"): int(count) for name, count in outcomes},
+                "decisions": {
+                    "calls": int(decisions["calls"] or 0) if decisions else 0,
+                    "averageConfidence": decisions["avg_confidence"] if decisions else None,
+                    "latencyMs": decisions["latency"] if decisions else 0,
+                    "estimatedCost": decisions["cost"] if decisions else 0,
+                    "fallbacks": int(decisions["fallbacks"] or 0) if decisions else 0,
+                    "llmCallsAvoided": int(decisions["llm_calls_avoided"] or 0) if decisions else 0,
+                },
+            },
+        }
 
     def token_usage_totals(
         self,
@@ -1584,6 +1969,31 @@ class ExecutionHistoryService:
             except sqlite3.Error as error:
                 self.error = sanitize_text(error)
 
+    def record_jev_decision(self, payload: Mapping[str, Any]) -> None:
+        if self.repository:
+            try:
+                if self.execution_id and not payload.get("execution_id"):
+                    payload = {**payload, "execution_id": self.execution_id}
+                self.repository.record_jev_decision(payload)
+            except sqlite3.Error as error:
+                self.error = sanitize_text(error)
+
+    def record_jev_score_comparison(self, payload: Mapping[str, Any]) -> None:
+        if self.repository:
+            try:
+                if self.execution_id and not payload.get("execution_id"):
+                    payload = {**payload, "execution_id": self.execution_id}
+                self.repository.record_jev_score_comparison(payload)
+            except sqlite3.Error as error:
+                self.error = sanitize_text(error)
+
+    def finish_jev_outcomes(self, outcome: str) -> None:
+        if self.repository and self.execution_id:
+            try:
+                self.repository.finish_jev_outcomes(self.execution_id, outcome)
+            except sqlite3.Error as error:
+                self.error = sanitize_text(error)
+
 
 def _page_requested(limit: int | None, offset: int, search: str) -> bool:
     return limit is not None or offset != 0 or bool(normalize_search(search))
@@ -1611,6 +2021,113 @@ def _empty_security_summary() -> dict[str, Any]:
         "findingsFound": 0,
         "findingsFixed": 0,
         "testsAdded": 0,
+    }
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _empty_jev_feedback(limit: int = PAGE_SIZE) -> dict[str, Any]:
+    return {
+        "records": [],
+        "total": 0,
+        "offset": 0,
+        "limit": clamp_page_size(limit),
+        "summary": {
+            "comparisons": 0,
+            "averageBaseline": None,
+            "averageJev": None,
+            "averageModified": None,
+            "averageDelta": None,
+            "averageLatencyMs": None,
+            "jevCost": 0.0,
+            "routingChanges": 0,
+            "fallbackCount": 0,
+            "fallbackRate": 0.0,
+            "disabledCount": 0,
+            "enabledCount": 0,
+            "llmCallsAvoided": 0,
+            "estimatedTokensAvoided": 0,
+            "estimatedDollarSavings": 0.0,
+            "completed": 0,
+            "completionRate": None,
+            "costPerCompleted": None,
+            "outcomes": {},
+            "decisions": {
+                "calls": 0,
+                "averageConfidence": None,
+                "latencyMs": 0,
+                "estimatedCost": 0,
+                "fallbacks": 0,
+                "llmCallsAvoided": 0,
+            },
+        },
+    }
+
+
+def _jev_comparison_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    for key in ("baseline_candidates", "baseline_inputs", "jev_component_scores", "jev_reason_codes", "modified_candidates"):
+        raw = data.get(key)
+        if isinstance(raw, str) and raw:
+            try:
+                data[key] = json.loads(raw)
+            except json.JSONDecodeError:
+                data[key] = [] if "codes" in key or "candidates" in key else {}
+        elif raw in ("", None):
+            data[key] = [] if "codes" in key or "candidates" in key else {}
+    status = str(data.get("jev_status") or "disabled")
+    jev_present = status == "enabled" and data.get("jev_normalized_score") is not None
+    return {
+        "comparisonId": data.get("comparison_id"),
+        "executionId": data.get("execution_id"),
+        "repository": data.get("repository"),
+        "issueNumber": data.get("issue_number"),
+        "issueTitle": data.get("issue_title") or "",
+        "issueUrl": data.get("issue_url") or "",
+        "createdAt": data.get("created_at"),
+        "jevStatus": status,
+        "jevPresent": jev_present,
+        "baselineOnly": status == "disabled",
+        "baselineNativeScore": data.get("baseline_native_score"),
+        "baselineScore": data.get("baseline_normalized_score"),
+        "baselinePromptGrade": data.get("baseline_prompt_grade") or "",
+        "baselineComplexity": data.get("baseline_complexity"),
+        "baselineTaskType": data.get("baseline_task_type") or "",
+        "jevScore": data.get("jev_normalized_score") if jev_present else None,
+        "jevNativeScore": data.get("jev_native_score") if jev_present else None,
+        "jevConfidence": data.get("jev_confidence") if jev_present else None,
+        "jevComponentScores": data.get("jev_component_scores") if jev_present else None,
+        "jevReasonCodes": data.get("jev_reason_codes") if jev_present else [],
+        "jevModel": data.get("jev_model") or "",
+        "jevVersion": data.get("jev_version") or "",
+        "modifiedScore": data.get("modified_normalized_score"),
+        "modifiedNativeScore": data.get("modified_native_score"),
+        "scoreDelta": data.get("score_delta_absolute"),
+        "scoreDeltaPercent": data.get("score_delta_percent"),
+        "routingChanged": bool(data.get("routing_changed")),
+        "baselineProvider": data.get("baseline_provider") or "",
+        "baselineModel": data.get("baseline_model") or "",
+        "baselineEffort": data.get("baseline_effort") or "",
+        "modifiedProvider": data.get("modified_provider") or data.get("ai_provider") or "",
+        "modifiedModel": data.get("modified_model") or data.get("execution_model") or "",
+        "modifiedEffort": data.get("modified_effort") or data.get("execution_effort") or "",
+        "baselineCandidates": data.get("baseline_candidates") or [],
+        "modifiedCandidates": data.get("modified_candidates") or [],
+        "estimatedJevCost": data.get("estimated_jev_cost"),
+        "estimatedTotalCost": data.get("estimated_total_cost"),
+        "estimatedLlmCallsAvoided": data.get("estimated_llm_calls_avoided") or 0,
+        "estimatedTokensAvoided": data.get("estimated_tokens_avoided"),
+        "estimatedDollarSavings": data.get("estimated_dollar_savings"),
+        "latencyMs": data.get("latency_ms"),
+        "outcome": data.get("final_status") or data.get("workflow_outcome") or "",
+        "fallback": status in {"unavailable", "timeout", "malformed", "authentication", "low_confidence", "fallback"},
     }
 
 
@@ -1712,6 +2229,19 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Case-insensitive match on issue number, title, provider, model, branch, or status.",
     )
+    parser.add_argument(
+        "--jev-feedback",
+        action="store_true",
+        help="Print Jev score comparisons and aggregate effectiveness metrics.",
+    )
+    parser.add_argument("--jev-status", default="", help="With --jev-feedback, filter by Jev status.")
+    parser.add_argument("--jev-provider", default="", help="With --jev-feedback, filter by provider.")
+    parser.add_argument("--jev-outcome", default="", help="With --jev-feedback, filter by workflow outcome.")
+    parser.add_argument(
+        "--jev-routing-changed",
+        default="",
+        help="With --jev-feedback, filter to routing changes (true/false).",
+    )
     args = parser.parse_args(argv)
 
     database_path = Path(args.db).expanduser()
@@ -1730,6 +2260,25 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": str(error)}))
             return 1
         json.dump(import_missing_issues(repository, repository_name, issues), sys.stdout)
+        return 0
+
+    if args.jev_feedback:
+        if not database_path.is_file():
+            json.dump(_empty_jev_feedback(), sys.stdout)
+            return 0
+        json.dump(
+            ExecutionHistoryRepository(database_path).jev_feedback(
+                repository_names,
+                search=args.search,
+                jev_status=args.jev_status,
+                provider=args.jev_provider,
+                outcome=args.jev_outcome,
+                routing_changed=args.jev_routing_changed,
+                limit=PAGE_SIZE if args.limit is None else args.limit,
+                offset=args.offset,
+            ),
+            sys.stdout,
+        )
         return 0
 
     if args.grades:

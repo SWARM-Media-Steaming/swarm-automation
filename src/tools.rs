@@ -199,6 +199,7 @@ fn display_model_name(value: &str) -> String {
             "gpt" => "GPT".into(),
             "claude" => "Claude".into(),
             "grok" => "Grok".into(),
+            "jev" => "Jev".into(),
             _ if part
                 .chars()
                 .all(|character| character.is_ascii_digit() || character == '.') =>
@@ -783,6 +784,7 @@ pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
         basic_tool("python", "Python 3", "python3", true, &config.python_bin),
         basic_tool("node", "Node.js", "node", false, ""),
         basic_tool("npm", "npm", "npm", false, ""),
+        basic_tool("jev", "Jev", "jev", false, &config.jev_bin),
     ];
     for id in crate::config::KNOWN_PROVIDERS {
         let (label, name) = match id {
@@ -874,6 +876,42 @@ pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
                 // Terminal window, not npm — always offerable.
                 tool.installable = true;
                 tool.status = "Ready to install".into();
+            }
+            "jev" if tool.installed => {
+                let logged_in = std::env::var_os("JEV_API_KEY").is_some()
+                    || std::env::var_os("TYPESAFE_API_KEY").is_some()
+                    || std::env::var_os("TYPESAFE_KEY").is_some()
+                    || std::env::var_os("HOME")
+                        .map(PathBuf::from)
+                        .map(|home| {
+                            home.join(".config/jev/config.json").is_file()
+                                || home.join(".jev/auth.json").is_file()
+                                || home.join(".typesafe/credentials").is_file()
+                        })
+                        .unwrap_or(false);
+                tool.authenticated = Some(logged_in);
+                tool.models = vec![ModelInfo {
+                    value: if config.jev_model.trim().is_empty() {
+                        "jev-latest".into()
+                    } else {
+                        config.jev_model.clone()
+                    },
+                    label: "Jev Latest".into(),
+                    efforts: vec!["low".into()],
+                    default_effort: "low".into(),
+                    requires_usage_credits: false,
+                }];
+                tool.models_detected = true;
+                tool.status = if logged_in {
+                    "Signed in"
+                } else {
+                    "Sign-in required"
+                }
+                .into();
+            }
+            "jev" => {
+                tool.status = "Not installed".into();
+                tool.authenticated = Some(false);
             }
             _ => {}
         }
