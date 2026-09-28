@@ -16,7 +16,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 13] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 14] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
@@ -30,6 +30,10 @@ const REQUIRED_WORKER_RESOURCES: [&str; 13] = [
     "adversarial_uat.py",
     "issue_images.py",
     "handoff_context.py",
+    // model_data_sources.py, model_router.py, dynamic_router.py, and
+    // model_router_yaml.py are imported by this and other entry points
+    // rather than invoked directly, matching the rest of this list.
+    "model_calibration.py",
 ];
 
 struct AppState {
@@ -612,13 +616,21 @@ fn start_issue_worker(
         "--gh-bin".into(),
         gh.to_string_lossy().into_owned(),
     ]);
-    let environment = vec![
+    let mut environment = vec![
         ("PATH".into(), tools::enhanced_path()),
         (
             "SWARM_ISSUE_WORKER_SCRIPT_DIR".into(),
             script_dir.to_string_lossy().into_owned(),
         ),
     ];
+    if config.model_calibration_apply_to_routing {
+        if let Some(catalog) = model_calibration_active_catalog_path(&config) {
+            environment.push((
+                "SWARM_MODEL_CALIBRATION_CATALOG".into(),
+                catalog.to_string_lossy().into_owned(),
+            ));
+        }
+    }
     state.processes.spawn(
         &app,
         "issue",
@@ -923,6 +935,23 @@ fn scheduler_arguments(
 /// query it without a workspace being prepared.
 fn execution_history_db_path(config: &AppConfig) -> PathBuf {
     PathBuf::from(&config.worker_state_dir).join("swarm-automation.sqlite3")
+}
+
+/// One app-wide Model Routing Calibration state directory (issue #205),
+/// deliberately not per-repository: the model/pricing/benchmark catalog it
+/// refreshes feeds Dynamic Model Routing for every repository alike. See
+/// `issue_worker/model_calibration.py`'s `ModelCalibrationService`.
+fn model_calibration_state_dir(config: &AppConfig) -> PathBuf {
+    PathBuf::from(&config.worker_state_dir).join("model_calibration")
+}
+
+/// The `active_catalog.json` override a calibration is promoted to
+/// (`ModelCalibrationService.activate`), if one exists. Only ever read by
+/// `start_issue_worker` when the operator has turned on "Apply calibrated
+/// model data to live routing" (`model_calibration_apply_to_routing`).
+fn model_calibration_active_catalog_path(config: &AppConfig) -> Option<PathBuf> {
+    let path = model_calibration_state_dir(config).join("active_catalog.json");
+    path.is_file().then_some(path)
 }
 
 /// `swarm_issue_worker.py` flag list for one repo, embedded in `repos.json`.
@@ -1493,6 +1522,265 @@ async fn file_diagnostic_issue_background(
     })
     .await
     .map_err(|error| format!("Could not file the GitHub issue: {error}"))?
+}
+
+// ----- Model Routing Calibration (issue #205) ------------------------------
+//
+// Manual refresh, startup refresh, and any future scheduled/AI-triggered
+// refresh all shell out to the one `ModelCalibrationService.refresh` in
+// `issue_worker/model_calibration.py`, distinguished only by `--initiated-by`
+// -- see that module's docstring. Status is returned as a raw JSON `Value`
+// (matching `adversarial`/`routing_decision` elsewhere in this file) rather
+// than a mirrored Rust struct, since the shape is display-only and owned by
+// the Python service.
+
+fn calibration_script<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    Ok(worker_script_dir(app)?.join("model_calibration.py"))
+}
+
+fn run_model_calibration<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    arguments: Vec<String>,
+    failure_context: &str,
+) -> Result<serde_json::Value, String> {
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let script = calibration_script(app)?;
+    let state_dir = model_calibration_state_dir(config);
+    let mut full_arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--state-dir".into(),
+        state_dir.to_string_lossy().into_owned(),
+    ];
+    full_arguments.extend(arguments);
+    let (ok, raw) = run_capture_owned(&python, &full_arguments);
+    if !ok {
+        return Err(format!("{failure_context}: {raw}"));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("{failure_context}: response could not be parsed: {error}"))
+}
+
+#[tauri::command]
+fn get_model_calibration_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    run_model_calibration(
+        &app,
+        &config,
+        vec![
+            "status".into(),
+            "--routing-optimization".into(),
+            config.routing_optimization.clone(),
+        ],
+        "Could not read model calibration status",
+    )
+}
+
+#[tauri::command]
+async fn get_model_calibration_status_background(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_model_calibration_status(app.clone(), state)
+    })
+    .await
+    .map_err(|error| format!("Could not read model calibration status: {error}"))?
+}
+
+fn refresh_model_data_args(config: &AppConfig, initiated_by: &str, force: bool) -> Vec<String> {
+    let mut arguments = vec![
+        "refresh".into(),
+        "--initiated-by".into(),
+        initiated_by.into(),
+        "--source".into(),
+        config.model_data_source.clone(),
+        "--min-interval-hours".into(),
+        config.model_data_min_refresh_interval_hours.to_string(),
+        "--routing-optimization".into(),
+        config.routing_optimization.clone(),
+        "--activation-policy".into(),
+        if config.model_calibration_auto_activate {
+            "auto".into()
+        } else {
+            "manual".into()
+        },
+    ];
+    if !config.model_data_source_url.trim().is_empty() {
+        arguments.push("--source-url".into());
+        arguments.push(config.model_data_source_url.clone());
+    }
+    if force {
+        arguments.push("--force".into());
+    }
+    arguments
+}
+
+#[tauri::command]
+fn refresh_model_data<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    run_model_calibration(
+        &app,
+        &config,
+        refresh_model_data_args(&config, "USER", force),
+        "Model data refresh failed",
+    )
+}
+
+#[tauri::command]
+async fn refresh_model_data_background(
+    app: tauri::AppHandle,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        refresh_model_data(app.clone(), state, force)
+    })
+    .await
+    .map_err(|error| format!("Model data refresh failed: {error}"))?
+}
+
+#[tauri::command]
+fn activate_model_calibration<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    version: String,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    run_model_calibration(
+        &app,
+        &config,
+        vec![
+            "activate".into(),
+            version,
+            "--initiated-by".into(),
+            "USER".into(),
+        ],
+        "Could not activate that calibration",
+    )
+}
+
+#[tauri::command]
+async fn activate_model_calibration_background(
+    app: tauri::AppHandle,
+    version: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        activate_model_calibration(app.clone(), state, version)
+    })
+    .await
+    .map_err(|error| format!("Could not activate that calibration: {error}"))?
+}
+
+/// Clears a DISCOVERED model's review gate (`ModelCalibrationService.
+/// approve_discovered_model`) so the *next* refresh can assign it a normal
+/// ACTIVE/CANDIDATE status. Discovering a model never makes it routable by
+/// itself -- this is the only way an operator turns that into a deliberate
+/// decision, and takes effect on the next refresh rather than instantly.
+#[tauri::command]
+fn approve_discovered_model<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    run_model_calibration(
+        &app,
+        &config,
+        vec![
+            "approve".into(),
+            key,
+            "--initiated-by".into(),
+            "USER".into(),
+        ],
+        "Could not approve that model",
+    )
+}
+
+#[tauri::command]
+async fn approve_discovered_model_background(
+    app: tauri::AppHandle,
+    key: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        approve_discovered_model(app.clone(), state, key)
+    })
+    .await
+    .map_err(|error| format!("Could not approve that model: {error}"))?
+}
+
+/// Grounded, deterministic explanation of the latest stored calibration
+/// diff ("Analyze Routing Update" / "Why did this route change?"). Reads
+/// only already-computed calibration/simulation data -- it never invents a
+/// price, benchmark, or routing metric, and never makes a new AI call.
+#[tauri::command]
+fn analyze_model_calibration_update<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    run_model_calibration(
+        &app,
+        &config,
+        vec!["analyze".into()],
+        "Could not analyze the routing update",
+    )
+}
+
+#[tauri::command]
+async fn analyze_model_calibration_update_background(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        analyze_model_calibration_update(app.clone(), state)
+    })
+    .await
+    .map_err(|error| format!("Could not analyze the routing update: {error}"))?
+}
+
+/// Started from `setup()` on every launch. Always cheap and non-blocking:
+/// the Python service itself loads the last known-good calibration
+/// synchronously and independently of this (see `ensure_bootstrap`, called
+/// from `status_report`), and enforces
+/// `model_data_min_refresh_interval_hours` itself, so this can unconditionally
+/// ask for a `STARTUP` refresh without re-checking either concern here.
+fn spawn_startup_model_calibration_refresh(app: &tauri::AppHandle) {
+    let config = {
+        let state = app.state::<AppState>();
+        let Ok(config) = state.config.lock() else {
+            return;
+        };
+        config.clone()
+    };
+    if !config.model_data_refresh_on_startup {
+        return;
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let inner_handle = handle.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            run_model_calibration(
+                &inner_handle,
+                &config,
+                refresh_model_data_args(&config, "STARTUP", false),
+                "Startup model data refresh failed",
+            )
+        })
+        .await;
+        if let Ok(Ok(value)) = result {
+            let _ = handle.emit("model-calibration-refreshed", value);
+        }
+    });
 }
 
 /// One graded execution row from `ai_execution_history.py --grades`: just
@@ -4319,6 +4607,7 @@ fn main() {
             install_tray(app)?;
             spawn_startup_update_check(app.handle());
             spawn_permission_priming(app.handle());
+            spawn_startup_model_calibration_refresh(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -4349,6 +4638,16 @@ fn main() {
             run_diagnostics_background,
             file_diagnostic_issue,
             file_diagnostic_issue_background,
+            get_model_calibration_status,
+            get_model_calibration_status_background,
+            refresh_model_data,
+            refresh_model_data_background,
+            activate_model_calibration,
+            activate_model_calibration_background,
+            approve_discovered_model,
+            approve_discovered_model_background,
+            analyze_model_calibration_update,
+            analyze_model_calibration_update_background,
             get_prompt_grades,
             get_prompt_grades_background,
             import_execution_history,

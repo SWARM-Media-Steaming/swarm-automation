@@ -40,7 +40,7 @@ uses it whenever Dynamic Model Routing is enabled and the tool the pre-flight
 grader picked needs a deterministic model/effort decision (its own free-choice
 pick was invalid, or its tool pick was overruled) — see that module's
 docstring for the full picture of how AI-graded classification and this
-scoring engine fit together, and `skills/swarm-automation-dev/SKILL.md`'s
+scoring engine fit together, and `.claude/skills/swarm-automation-dev/SKILL.md`'s
 "Dynamic model routing" section for the surrounding feature.
 
 `issue_worker/model_router_yaml.py` is a small, dependency-free loader for the
@@ -55,6 +55,21 @@ Both YAML files are bundled into the packaged app as a sibling of
 `model_router.py`'s `_config_dir()` — `Path(__file__).resolve().parent.parent
 / "skills" / "model-router"` — resolves correctly both in a source checkout
 and inside the installed app.
+
+## Calibration refresh and review (issue #205)
+
+`issue_worker/model_calibration.py` provides the shared refresh service for
+AI Configuration, startup, and scheduled/AI callers. External data overlays
+the local catalog; discovered models require review before routing eligibility.
+Contradictory observations for the same provider/model (including API aliases)
+fail the entire refresh without publishing a proposal or changing active data.
+Equal normalized observations and complementary fields can be combined.
+
+Changes to supported efforts, strengths, weaknesses, and eligibility remain
+reviewable even when representative routing examples do not change. These
+inputs affect requests outside the simulation sample. Calibration version IDs
+are never recycled after history pruning or rollback, and refresh summaries
+retain their originating version independently of which version is active.
 
 ## Complexity levels
 

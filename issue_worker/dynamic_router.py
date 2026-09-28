@@ -621,6 +621,34 @@ def describe_scored_tier(
     return text
 
 
+def active_calibration_catalog_path() -> Path | None:
+    """Optional override catalog from an activated Model Routing Calibration.
+
+    ``SWARM_MODEL_CALIBRATION_CATALOG`` is set by the desktop app (only when
+    the operator has turned on "Apply calibrated model data to live routing")
+    to the ``active_catalog.json`` a calibration was promoted to (see
+    ``model_calibration.py``'s ``ModelCalibrationService.activate``). Unset,
+    missing, or unreadable, this returns ``None`` and every caller falls back
+    to the bundled ``models.yaml`` exactly as before this existed — activating
+    a calibration is the only thing that can ever change what gets loaded.
+    """
+    raw = os.environ.get("SWARM_MODEL_CALIBRATION_CATALOG", "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_file() else None
+
+
+def _active_calibration_catalog() -> tuple[_model_router.ModelSpec, ...] | None:
+    path = active_calibration_catalog_path()
+    if path is None:
+        return None
+    try:
+        return _model_router.load_model_catalog(path)
+    except _model_router.ModelRouterConfigError:
+        return None
+
+
 def _scored_tier_decision(
     candidate: RouterCandidate,
     complexity: int,
@@ -639,13 +667,20 @@ def _scored_tier_decision(
     that documented per-provider override still takes effect rather than
     being silently superseded by the scoring engine's own catalog.
     """
+    calibrated = _active_calibration_catalog()
+    eligible = None if calibrated is None else {
+        model.model for model in calibrated
+        if model.agent == candidate.key and model.active and not model.deprecated
+    }
     if tuple(candidate.tiers) != tuple(default_routing_tiers().get(candidate.key, ())):
         tier = tier_for_complexity(candidate.tiers, complexity)
-        return tier.model, tier.effort, describe_tier(candidate, tier, complexity)
+        if eligible is None or tier.model in eligible:
+            return tier.model, tier.effort, describe_tier(candidate, tier, complexity)
     try:
+        catalog = calibrated if calibrated is not None else _model_router.load_model_catalog()
         disabled = {
             model.model
-            for model in _model_router.load_model_catalog()
+            for model in catalog
             if not allow_usage_credit_models and requires_usage_credits(model.model)
         }
         disabled |= {str(model).strip() for model in candidate.excluded_models}
@@ -658,6 +693,7 @@ def _scored_tier_decision(
                 cost_sensitive=cost_on,
                 quality_requirement="high" if risk == "high" else "normal",
             ),
+            catalog=catalog,
             availability=_model_router.RoutingAvailability(
                 enabled_agents=frozenset({candidate.key}),
                 disabled_models=frozenset(disabled),
@@ -666,6 +702,8 @@ def _scored_tier_decision(
         return decision.model, decision.effort, describe_scored_tier(candidate, decision, complexity)
     except (_model_router.ModelRouterError, _model_router.ModelRouterConfigError):
         tier = tier_for_complexity(candidate.tiers, complexity)
+        if eligible is not None and tier.model not in eligible:
+            raise RouterError(f"No eligible calibrated model for {candidate.name}.")
         return tier.model, tier.effort, describe_tier(candidate, tier, complexity)
 
 
@@ -676,12 +714,17 @@ def candidate_catalog(
 ) -> tuple[CatalogModel, ...]:
     """Every model one AI tool may be asked to run, cheapest first."""
     excluded = {str(model).strip() for model in candidate.excluded_models}
+    calibrated = _active_calibration_catalog()
+    eligible = None if calibrated is None else {
+        model.model for model in calibrated
+        if model.agent == candidate.key and model.active and not model.deprecated
+    }
     return tuple(
         entry
         for entry in model_catalog(
             (candidate.key,), allow_usage_credit_models=allow_usage_credit_models
         )
-        if entry.model not in excluded
+        if entry.model not in excluded and (eligible is None or entry.model in eligible)
     )
 
 
