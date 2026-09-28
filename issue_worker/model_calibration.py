@@ -316,6 +316,25 @@ def _entry_text_fields(entry: dict[str, Any]) -> Sequence[str]:
     )
 
 
+def _calibration_model_entry(
+    spec: "_model_router.ModelSpec", raw: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize all published inputs, including observations outside ModelSpec.
+
+    Duplicate validation must compare the same values that publication uses;
+    otherwise a later row can silently overwrite performance or source data.
+    """
+    entry = _model_spec_to_dict(spec)
+    if raw.get("release_date"):
+        entry["release_date"] = sanitize_text(str(raw["release_date"]))[:40]
+    for field in ("speed", "latency_seconds"):
+        if raw.get(field) is not None:
+            entry[field] = _finite_float(raw[field])
+    if raw.get("external_evaluations"):
+        entry["external_evaluations"] = raw["external_evaluations"]
+    return entry
+
+
 def _validate_and_parse(raw_entries: Any) -> tuple[list["_model_router.ModelSpec"], list[str]]:
     if not isinstance(raw_entries, list) or not raw_entries:
         raise CalibrationValidationError("source data did not contain any model entries")
@@ -331,7 +350,7 @@ def _validate_and_parse(raw_entries: Any) -> tuple[list["_model_router.ModelSpec
         if not _TOKEN_RE.match(spec.provider) or not _TOKEN_RE.match(spec.model):
             warnings.append(f"entry {index}: provider/model has unsupported characters")
             continue
-        entry_dict = _model_spec_to_dict(spec)
+        entry_dict = _calibration_model_entry(spec, raw)
         if any(_UNSAFE_TEXT_RE.search(str(text)) for text in _entry_text_fields(entry_dict)):
             warnings.append(f"entry {index}: a text field contains an unsupported character")
             continue
@@ -1309,15 +1328,8 @@ class ModelCalibrationService:
             if isinstance(raw, dict) and raw.get("provider") and raw.get("model"):
                 raw_by_key[f"{raw['provider']}/{raw['model']}"] = raw
         for spec in specs:
-            entry = _model_spec_to_dict(spec)
-            extra = raw_by_key.get(f"{entry['provider']}/{entry['model']}") or {}
-            if extra.get("release_date"):
-                entry["release_date"] = sanitize_text(str(extra["release_date"]))[:40]
-            for field in ("speed", "latency_seconds"):
-                if extra.get(field) is not None:
-                    entry[field] = _finite_float(extra[field])
-            if extra.get("external_evaluations"):
-                entry["external_evaluations"] = extra["external_evaluations"]
+            extra = raw_by_key.get(f"{spec.provider}/{spec.model}") or {}
+            entry = _calibration_model_entry(spec, extra)
             entry["key"] = f"{entry['provider']}/{entry['model']}"
             entry["status"] = _status_for(
                 entry, prev_by_key, approved_keys, has_previous=previous is not None

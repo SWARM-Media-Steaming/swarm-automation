@@ -650,6 +650,42 @@ class SourceIdentityTests(unittest.TestCase):
         with self.assertRaises(calib.CalibrationValidationError):
             calib._validate_and_parse([_entry("m1", cost=2), _entry("m1", cost=4)])
 
+    def test_catalog_observation_conflicts_preserve_publications(self) -> None:
+        for field, values in (
+            ("speed", (0, 80)),
+            ("latency_seconds", (0, 10)),
+            ("external_evaluations", ({"coding": 60}, {"coding": 80})),
+            ("release_date", ("2026-01-01", "2026-02-01")),
+        ):
+            for reverse in (False, True):
+                with self.subTest(field=field, reverse=reverse), tempfile.TemporaryDirectory() as tmp:
+                    service = calib.ModelCalibrationService(Path(tmp))
+                    service.refresh(fetch_fn=lambda: [_entry("m1")], now=100, force=True)
+                    service.refresh(fetch_fn=lambda: [_entry("m1", cost=4)], now=101, force=True)
+                    paths = [service.active_path, service.catalog_override_path, service.proposed_path,
+                             *service.history_dir.glob("*.json")]
+                    before = {path: path.read_bytes() for path in paths}
+                    rows = [dict(_entry("m1"), **{field: value}) for value in values]
+                    with mock.patch.object(calib, "fetch_local_source", return_value=rows[::-1] if reverse else rows):
+                        result = service.refresh(source="local", now=102, force=True, activation_policy="auto")
+                    self.assertEqual(result["status"], "failed")
+                    self.assertEqual(result["source_status"], "error")
+                    self.assertIn("conflicting entries", result["error"])
+                    self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                    self.assertEqual(set(service.history_dir.glob("*.json")),
+                                     {path for path in paths if path.parent == service.history_dir})
+
+    def test_equal_normalized_catalog_performance_is_order_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = calib.ModelCalibrationService(Path(tmp))
+            rows = [dict(_entry("m1"), speed=value, latency_seconds=value) for value in (0, "0.0")]
+            initial = service.refresh(fetch_fn=lambda: rows, now=100, force=True)
+            self.assertEqual(initial["status"], "changed")
+            model = service.load_active()["models"][0]
+            self.assertEqual((model["speed"], model["latency_seconds"]), (0, 0))
+            retry = service.refresh(fetch_fn=lambda: rows[::-1], now=101, force=True)
+            self.assertEqual(retry["status"], "no_change")
+
 
 class VersionAllocationTests(unittest.TestCase):
     def test_clock_rollback_does_not_reuse_pruned_dates(self) -> None:
