@@ -93,6 +93,20 @@ def normalize(result: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise RuntimeError("Grok returned no billing config")
     used = config.get("creditUsagePercent")
+    if used is None:
+        # Grok's billing service omits the proto3 scalar when the newly reset
+        # allowance has 0% usage. The current period and explicit zero
+        # on-demand usage make that reset shape distinguishable from a
+        # genuinely incomplete billing response.
+        period = config.get("currentPeriod")
+        on_demand_used = config.get("onDemandUsed")
+        if (
+            isinstance(period, dict)
+            and period.get("type")
+            and isinstance(on_demand_used, dict)
+            and on_demand_used.get("val") == 0
+        ):
+            used = 0.0
     if isinstance(used, bool) or not isinstance(used, (int, float)):
         raise RuntimeError("Grok's billing response had no credit usage percentage")
     period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}

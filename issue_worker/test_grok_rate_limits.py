@@ -66,6 +66,26 @@ class NormalizeTestCase(unittest.TestCase):
         under = helper.normalize({"config": {"creditUsagePercent": -5}})
         self.assertEqual(under["usedPercent"], 0.0)
 
+    def test_treats_omitted_zero_usage_as_a_freshly_reset_allowance(self) -> None:
+        result = helper.normalize(
+            {
+                "config": {
+                    "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"},
+                    "onDemandUsed": {"val": 0},
+                }
+            }
+        )
+        self.assertEqual(result["usedPercent"], 0.0)
+        self.assertEqual(result["period"], "week")
+
+    def test_does_not_assume_full_usage_when_the_reset_shape_is_incomplete(self) -> None:
+        for config in (
+            {"currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"}},
+            {"onDemandUsed": {"val": 0}},
+        ):
+            with self.assertRaises(RuntimeError, msg=str(config)):
+                helper.normalize({"config": config})
+
     def test_rejects_a_response_without_a_usage_percentage(self) -> None:
         for bad in ({}, {"config": {}}, {"config": {"creditUsagePercent": "30"}}, {"config": {"creditUsagePercent": True}}):
             with self.assertRaises(RuntimeError, msg=str(bad)):
