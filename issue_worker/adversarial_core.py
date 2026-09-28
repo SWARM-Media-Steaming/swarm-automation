@@ -1289,7 +1289,33 @@ class AdversarialStageMixin:
         if not finished:
             checkpoint = detached[-1][1] if detached else previous
             if not checkpoint:
-                raise RuntimeError("No adversarial stage state to deliver")
+                # A worker can reach this point after recovering an older
+                # implementation whose adversarial checkpoint was written by
+                # an earlier version, or after a checkpoint was lost while a
+                # stage setting changed. The implementation commit is still
+                # the checkout's current HEAD, so rebuild the first enabled
+                # stage from that durable boundary instead of crashing the
+                # scheduler with an uncaught RuntimeError.
+                completion = self.git("rev-parse", "HEAD")
+                state = self.read_state()
+                output = str(state.get("previous_completion_comment") or "")
+                if not output and self.ai_output_file.exists():
+                    output = self.ai_output_file.read_text(encoding="utf-8", errors="replace")
+                if not output:
+                    output = "Recovered implementation checkpoint; review the current repository state."
+                if stages:
+                    from swarm_issue_worker import log
+                    log(
+                        "Adversarial stage checkpoint was missing; rebuilding the first enabled stage "
+                        f"from current commit {completion[:12]}."
+                    )
+                    self.initialize_stage(stages[0], completion, output)
+                    return self.run_adversarial_pipeline()
+                # If every adversarial stage is disabled, no review remains to
+                # gate delivery. This is the same safe path used for a normal
+                # implementation with adversarial reviews turned off.
+                self.finalize_issue(completion, output)
+                return ISSUE_COMPLETED_EXIT_CODE
             choice_data = checkpoint.get("delivery_choice")
             self.choice = ProviderChoice(**choice_data) if choice_data else self.choice
             self.update_state_for_choice(self.choice)

@@ -146,7 +146,7 @@ class AdversarialUatTests(unittest.TestCase):
             self.assertEqual(self.worker.run_adversarial_delivery(), 10)
         self.assertEqual([c[0] for c in self.calls].count("fix"), 3)
         # Round 0 assessment plus one re-test after each of the three fix rounds.
-        self.assertEqual([c[0] for c in self.calls].count("test"), 4)
+        self.assertEqual([c[0] for c in self.calls].count("test"), 1 + uat.MAX_ROUNDS)
         # A cap hit is not a verified-clean pass: the branch is pushed and the
         # PR opened, but automation never approves, merges, or promotes it.
         push.assert_called_once()
@@ -185,6 +185,18 @@ class AdversarialUatTests(unittest.TestCase):
         state = self.worker.read_state()
         self.assertTrue(state["adversarial"]["disabled"])
         self.assertEqual(state["adversarial"]["outcome"], "disabled")
+
+    def test_missing_adversarial_checkpoint_is_rebuilt_from_current_commit(self):
+        self.prepare(fixed=True)
+        state = self.worker.read_state()
+        state.pop("adversarial")
+        self.worker.write_state(state)
+        self.worker.ai_output_file.write_text("## Summary\nRecovered implementation")
+        with self.patches(), mock.patch.object(self.worker, "finalize_issue") as finalize:
+            self.assertEqual(self.worker.run_adversarial_pipeline(), 10)
+        self.assertEqual([call[0] for call in self.calls], ["test"])
+        finalize.assert_called_once()
+        self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
 
     def test_disabling_uat_still_starts_cybersecurity_from_uat_checkpoint(self):
         self.prepare(fixed=True)
