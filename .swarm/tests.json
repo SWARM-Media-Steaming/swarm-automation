@@ -2491,6 +2491,35 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_model_calibration_alias_row_order.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-205-model-calibration-alias-row-order",
+      "name": "Issue #205: One feed's row order decides neither the refresh verdict nor what is published",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "tests/adversarial/calibration_uat_fixture.py",
+          "tests/adversarial/test_model_calibration_alias_row_order.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
