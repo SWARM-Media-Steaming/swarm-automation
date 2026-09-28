@@ -83,9 +83,10 @@ class NormalizedUsage:
 
     ``None`` on any field means the provider did not report that figure —
     never a fabricated ``0``. ``total_tokens`` is the provider's own reported
-    total when it gave one; otherwise it is computed by the normalizer that
-    built this object, following that provider's own input/cache semantics
-    (see the module docstring of each ``normalize_*_usage`` function).
+    total when it gave one — that figure is authoritative and is never
+    replaced by summing the other fields. Otherwise it is computed by the
+    normalizer that built this object, following that provider's own
+    input/cache semantics (see each ``normalize_*_usage`` function).
 
     ``cached_tokens_included_in_input`` records which of the two cache wire
     semantics this usage follows, so ``estimate_cost`` can bill it correctly
@@ -164,8 +165,10 @@ def normalize_claude_usage(raw: str) -> NormalizedUsage | None:
     ``input_tokens``/``output_tokens`` plus ``cache_creation_input_tokens``
     and ``cache_read_input_tokens``. Anthropic bills both cache counters
     *in addition to* ``input_tokens`` (they are not a subset of it), so both
-    are folded into ``cached_input_tokens`` and added into the computed
-    total rather than treated as already counted.
+    are folded into ``cached_input_tokens``. When the provider also supplies
+    ``total_tokens``, that figure is kept as-is; cached and reasoning tokens
+    are never added on top of it. The additive input + cache + output total
+    is only computed when the provider did not report one.
     """
     usage_payload: dict[str, Any] | None = None
     for event in _iter_json_events(raw):
@@ -178,7 +181,12 @@ def normalize_claude_usage(raw: str) -> NormalizedUsage | None:
     cache_read = _as_int(usage_payload.get("cache_read_input_tokens"))
     cache_creation = _as_int(usage_payload.get("cache_creation_input_tokens"))
     cached_input_tokens = _sum_optional(cache_read, cache_creation)
-    total_tokens = _sum_optional(input_tokens, cached_input_tokens, output_tokens)
+    # A supplied total is the provider's own figure. Recomputing
+    # input + cache + output would invent a different number when the
+    # provider already counted those fields (or reported only a total).
+    total_tokens = _as_int(usage_payload.get("total_tokens"))
+    if total_tokens is None:
+        total_tokens = _sum_optional(input_tokens, cached_input_tokens, output_tokens)
     return NormalizedUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,

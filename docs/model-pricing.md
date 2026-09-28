@@ -124,9 +124,14 @@ the row says which rate it used.
 
 ## Token semantics
 
-Two rules keep the arithmetic honest, and both live in the normalized usage
+Three rules keep the arithmetic honest, and they live in the normalized usage
 rather than in a provider check inside the estimator:
 
+- **Provider totals win.** When the usage object includes `total_tokens`,
+  that figure is stored as-is. Cached and reasoning tokens are never added
+  on top of it. A computed total (Anthropic: input + cache + output;
+  OpenAI-shaped: input + output) is used only when the provider did not
+  report one.
 - **Cached tokens are billed once.** Anthropic reports cache counters *in
   addition to* `input_tokens`; the OpenAI-shaped APIs (Codex, Grok) report
   cached tokens *inside* `input_tokens`. `NormalizedUsage.
