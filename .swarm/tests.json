@@ -2572,6 +2572,91 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue295_pricing_and_token_semantics.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-295-pricing-and-token-semantics",
+      "name": "Issue #295: versioned pricing catalog, no rank-based guesses, cache/reasoning semantics",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_pricing.py",
+          "issue_worker/token_usage.py",
+          "docs/model-pricing.md",
+          "tests/adversarial/test_issue295_pricing_and_token_semantics.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue295_usage_query_and_history.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-295-usage-query-and-history",
+      "name": "Issue #295: usage query filters, grouping, coverage, history joins, and worker persistence",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/usage_report.py",
+          "issue_worker/ai_execution_history.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/test_swarm_issue_worker.py",
+          "tests/adversarial/test_issue295_usage_query_and_history.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue295_usage_cost_ui.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-295-usage-cost-ui",
+      "name": "Issue #295: Usage & cost tab wiring, Estimated cost labels, accessibility, and cross-links",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/usage-cost.js",
+          "ui/prompt-grades.js",
+          "tests/adversarial/test_issue295_usage_cost_ui.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
