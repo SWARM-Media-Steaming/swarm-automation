@@ -168,6 +168,70 @@ side (Python vs. `config.rs`) is a real way to introduce drift — the router
 prompt and the saved config would disagree about that provider's defaults. The
 model catalog is the one exception: Python-only by design, see above.
 
+## Model Routing Calibration
+
+Optional, app-wide companion to Dynamic Model Routing (issue #205) that keeps
+the model/pricing/benchmark data the router scores against fresh, without ever
+making startup or routing depend on an external source being reachable.
+`issue_worker/model_calibration.py`'s `ModelCalibrationService` is the single
+implementation manual refresh (AI Configuration's "Refresh Model Data"
+button), startup refresh, and any future scheduled/AI-triggered refresh all
+call — distinguished only by `initiated_by` (`USER`/`STARTUP`/`SCHEDULED`/
+`AI_AGENT`). `issue_worker/model_data_sources.py` holds the bounded,
+IP-pinned HTTPS adapters for the public sources (`models.dev`, Artificial
+Analysis, or a configured JSON URL); `"local"` re-reads the bundled
+`skills/model-router/models.yaml` with no network access at all.
+
+A refresh never replaces the active calibration on failure or on a
+no-meaningful-change result. Before fetching any external source, the shared
+refresh service loads or publishes the bundled offline baseline under its
+existing writer lock, then reloads state so bootstrap activation metadata
+cannot be overwritten. The first external update therefore follows the same
+manual review or safe automatic activation policy as later updates, even if
+AI Configuration has never been opened. A local or complete catalog can
+provide the initial offline baseline directly. `status_report()` also calls
+`ensure_bootstrap()` so data is visible before any refresh. Existing active
+calibrations are never rebuilt from the bundled catalog.
+
+The live routing hook is `dynamic_router.active_calibration_catalog_path()`,
+gated by `SWARM_MODEL_CALIBRATION_CATALOG` — set by `start_issue_worker` in
+`src/main.rs` only when the repo-independent, app-wide
+`model_calibration_apply_to_routing` setting is on and an activated
+calibration's `active_catalog.json` exists. Unset or missing, every routing
+path falls back to the bundled `models.yaml` exactly as before this existed.
+The other new `AppConfig` fields (`model_data_refresh_on_startup`,
+`model_data_min_refresh_interval_hours`, `model_data_source`,
+`model_data_source_url`, `model_calibration_auto_activate`) are app-wide, not
+per-repository, matching `dynamic_model_routing`/`routing_optimization` above
+rather than the Feedback view's per-page filter pattern.
+
+Activation publishes the full calibration and its filtered routing models in
+one atomic `active_catalog.json` document. `load_active()` reads that document
+first; `calibration_active.json` is a compatibility/recovery copy. Status uses
+the readable calibration's version, not the advisory state pointer. Refresh,
+activation, approval and bootstrap writes share an OS file lock; the separate
+`refresh.lock` JSON is only a status marker. History pruning protects the
+active, proposed and immediately previous active versions for rollback.
+New version IDs advance past the newest retained version, including after a
+clock rollback; pruning never makes an old review or rollback ID reusable.
+The active catalog filters both the scoring fallback and the router's
+explicit model choices (including the catalog offered in its prompt).
+Bootstrap validates the published document and its filtered model list,
+repairing missing or damaged publications from the last activated recovery
+copy under the same lock. Catalog removals, supported reasoning levels, task
+strengths/weaknesses, and other routing eligibility inputs are meaningful
+changes even when the five representative routes stay the same. The review
+UI keeps pending proposal details visible after unchanged checks. Refresh
+status stores the version that produced its diff separately from the
+active/proposed pointers, so both cached and reopened pages describe
+rolled-back changes as historical.
+
+Within one source refresh, provider/model aliases resolve to one observation.
+Equal normalized values and complementary fields can coalesce; conflicting
+prices, benchmarks, performance, or retirement observations fail validation
+before any proposal, history, or active calibration is published. Never let
+source row order select a value, including for newly discovered models.
+
 ## Issue outcomes and no-code flows
 
 Every assigned issue, including one labelled `Question`, goes through the

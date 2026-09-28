@@ -171,6 +171,59 @@
             <article class="panel"><div class="panel-header"><div><p class="eyebrow">HISTORY &amp; FEEDBACK</p><h3>Execution history <span class="opt">optional</span> <button class="help-dot" data-help="execution-history" aria-label="About execution history">?</button></h3></div></div><div class="stacked-form"><label class="toggle policy-toggle"><input type="checkbox" data-config="ai_execution_history_enabled" /><span></span><div><strong>Store AI execution history</strong><small>Keep sanitized prompts, outcomes, and lifecycle details in the local SQLite database.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-config="prompt_feedback_upload_enabled" /><span></span><div><strong>Allow prompt feedback upload</strong><small>Independently allow future uploads to a human-review platform. No uploader is configured yet.</small></div></label></div></article>
             <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">PROVIDER EXECUTABLES</p><h3>CLI path overrides <span class="opt">optional</span> <button class="help-dot" data-help="provider-bins" aria-label="About provider executable overrides">?</button></h3></div></div><div class="form-grid three"><label>Claude <input data-provider-bin="claude" placeholder="Auto-detect" /></label><label>Codex <input data-provider-bin="codex" placeholder="Auto-detect" /></label><label>Grok <input data-provider-bin="grok" placeholder="Auto-detect" /></label></div></article>
           </div>
+
+          <div class="section-heading"><div><p class="eyebrow">DYNAMIC ROUTING CALIBRATION</p><h2>Model data behind the router <button class="help-dot" data-help="model-calibration" aria-label="About Dynamic Routing Calibration">?</button></h2><p>The pricing and benchmark data Dynamic Model Routing scores models with, refreshed and validated before it ever changes what the router picks.</p></div><div class="control-row"><button id="refresh-model-data" class="secondary-button">Refresh Model Data</button></div></div>
+          <div class="settings-grid">
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">STATUS</p><h3>Calibration health</h3></div><span id="model-calibration-health-pill" class="status-pill idle">—</span></div>
+              <div id="model-calibration-progress" class="banner policy hidden" aria-live="polite"></div>
+              <div id="model-calibration-fields" class="form-grid three"></div>
+              <div id="model-calibration-result" class="verification-results hidden" aria-live="polite"></div>
+              <details id="model-calibration-changes" class="hidden"><summary>View detailed changes</summary><div id="model-calibration-changes-body" class="verification-results"></div></details>
+              <div class="control-row"><button id="model-calibration-analyze" class="secondary-button">Analyze Routing Update</button><button id="model-calibration-activate" class="secondary-button hidden">Activate proposed calibration</button></div>
+              <div id="model-calibration-analysis" class="stacked-form hidden"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">HOW IT WORKS</p><h3>How Dynamic Routing works <button class="help-dot" data-help="routing-algorithm" aria-label="About the routing algorithm">?</button></h3></div></div>
+              <p class="panel-copy">Dynamic Routing automatically chooses the AI model and reasoning level best suited for each request. Models that do not meet the minimum capability requirements are removed before cost optimization occurs — the cheapest model does not automatically win.</p>
+              <div id="model-calibration-flow" class="concept-list"></div>
+              <div id="model-calibration-modes" class="faq-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">CURRENT STRATEGY</p><h3>Current routing strategy</h3></div></div>
+              <div id="model-calibration-strategy" class="form-grid two"></div>
+              <details id="model-calibration-technical"><summary>View Technical Details</summary><div id="model-calibration-technical-body" class="verification-results"></div></details>
+            </article>
+
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">MODELS</p><h3>Model routing table <button class="help-dot" data-help="model-routing-table" aria-label="About the model routing table">?</button></h3></div><span id="model-calibration-model-count" class="availability">0 models</span></div>
+              <p class="panel-copy">Discovering a new model does not automatically make it available for routing — only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are ever chosen by the router. Select a column heading to sort; select a row for its full detail, including an <strong>Approve for routing</strong> action on any DISCOVERED model.</p>
+              <div id="model-routing-table-head" class="router-legend" role="group" aria-label="Sort the model routing table"></div>
+              <div id="model-routing-table" class="execution-list"><p class="panel-copy">No calibrated model data yet. Select Refresh Model Data above.</p></div>
+            </article>
+
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">EXAMPLES</p><h3>Example routing decisions</h3></div></div>
+              <p class="panel-copy">Generated from the active calibration, not hard-coded.</p>
+              <div id="model-calibration-examples" class="concept-list"></div>
+            </article>
+
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">REFRESH SETTINGS</p><h3>Model data source &amp; schedule <span class="opt">optional</span> <button class="help-dot" data-help="model-data-refresh-settings" aria-label="About refresh settings">?</button></h3></div></div>
+              <div class="stacked-form">
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="model_data_refresh_on_startup" /><span></span><div><strong>Refresh model data on startup</strong><small>Runs asynchronously once the app is already usable. The last known-good calibration always loads first, whether or not this refresh succeeds.</small></div></label>
+                <div class="form-grid three">
+                  <label>Minimum hours between refreshes<input type="number" min="0" max="336" step="0.5" data-config="model_data_min_refresh_interval_hours" /></label>
+                  <label>Model data source<select data-config="model_data_source"><option value="local">Bundled catalog only (offline)</option><option value="models_dev">models.dev</option><option value="artificial_analysis">Artificial Analysis</option><option value="json">Custom JSON URL</option></select></label>
+                  <label>Custom source URL<input type="text" placeholder="https://…" data-config="model_data_source_url" /></label>
+                </div>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="model_calibration_auto_activate" /><span></span><div><strong>Automatically activate clean refreshes</strong><small>Off by default. A refresh that finds a meaningful, regression-free change becomes active immediately instead of waiting in review.</small></div></label>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="model_calibration_apply_to_routing" /><span></span><div><strong>Apply calibrated model data to live routing</strong><small>Off by default. When on, the issue worker's Dynamic Model Routing reads the active calibration's catalog instead of only the bundled models.yaml.</small></div></label>
+              </div>
+            </article>
+          </div>
         </section>
 
         <section id="view-feedback" class="view">
@@ -296,6 +349,7 @@
     </div>
 
     <script src="dynamic-routing-ui.js"></script>
+    <script src="model-calibration-ui.js"></script>
     <script src="logging.js"></script>
     <script src="now-working.js"></script>
     <script src="prompt-grades.js"></script>
