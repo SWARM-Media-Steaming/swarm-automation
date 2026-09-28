@@ -189,6 +189,24 @@ class SummaryAndCoverageTests(UsageReportTestCase):
         self.assertLess(summary["pricedInvocations"], summary["invocations"])
         self.assertAlmostEqual(summary["estimatedCost"], 0.1890, places=4)
 
+    def test_a_stored_zero_cost_on_an_unreported_row_is_ignored(self) -> None:
+        self.repository.record_token_usage_batch(self.second, "acme/app", 7, [
+            _event(
+                "ghost-cost",
+                agent_type="other",
+                input_tokens=None,
+                output_tokens=None,
+                total_tokens=None,
+                estimated_cost=0.0,
+                pricing_status="priced",
+                started_at="2026-04-06T09:00:00+00:00",
+            ),
+        ])
+        payload = self.report(agent_type="other")
+        self.assertEqual(payload["coverage"]["unreported"], 1)
+        self.assertIsNone(payload["summary"]["estimatedCost"])
+        self.assertEqual(payload["summary"]["pricedInvocations"], 0)
+
     def test_unreported_totals_stay_null_rather_than_becoming_zero(self) -> None:
         # Nothing in this fixture reports reasoning tokens, so the reasoning
         # total must be unavailable — not 0, which would claim the providers
@@ -301,6 +319,30 @@ class FilterTests(UsageReportTestCase):
         self.assertEqual(self.report(start_date="2026-04-02", end_date="2026-04-02")
                          ["summary"]["invocations"], 5)
         self.assertEqual(self.report(start_date="2027-01-01")["summary"]["invocations"], 0)
+
+    def test_an_execution_with_empty_routing_decision_is_still_queryable(self) -> None:
+        unrouted = self.repository.create(
+            ExecutionStart(
+                repository="acme/app",
+                issue_number=55,
+                issue_url="https://github.com/acme/app/issues/55",
+                issue_title="No router",
+                issue_body="",
+                provider="Claude",
+                model="claude-sonnet-5",
+                effort="high",
+                branch_name="ai/claude/issue-55",
+                application_version="0.1.0",
+            ),
+            "2026-02-11T09:00:00+00:00",
+        )
+        self.repository.record_token_usage_batch(unrouted, "acme/app", 55, [
+            _event("plain-1", started_at="2026-02-11T09:05:00+00:00"),
+        ])
+        payload = self.report(["acme/app"], issue_number=55)
+        self.assertEqual(payload["summary"]["invocations"], 1)
+        self.assertEqual(payload["invocations"]["rows"][0]["id"], "plain-1")
+        self.assertEqual(payload["invocations"]["rows"][0]["grade"], "")
 
     def test_a_router_call_before_its_execution_row_still_joins(self) -> None:
         rows = self.report(agent_type="router")["invocations"]["rows"]

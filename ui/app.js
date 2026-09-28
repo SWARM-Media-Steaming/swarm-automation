@@ -4337,8 +4337,11 @@
         }
         const execution = event.target.closest("[data-usage-execution]");
         if (execution) {
-          state.executionHistorySearch = "";
+          const executionId = execution.dataset.usageExecution || "";
+          state.executionHistorySearch = executionId;
           state.executionHistoryOffset = 0;
+          const searchInput = byId("execution-history-search");
+          if (searchInput) searchInput.value = executionId;
           showFeedbackTab("history");
           void refreshExecutionHistory({ quiet: true });
           return;

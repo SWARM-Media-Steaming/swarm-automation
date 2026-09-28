@@ -16,6 +16,7 @@ from model_pricing import (  # noqa: E402
     PRICING_CATALOG,
     PRICING_STATUS_AMBIGUOUS,
     PRICING_STATUS_NO_EFFECTIVE_PRICE,
+    PRICING_STATUS_NO_USAGE,
     PRICING_STATUS_PRICED,
     PRICING_STATUS_UNKNOWN_MODEL,
     ModelPrice,
@@ -255,6 +256,19 @@ class CostEstimateTests(unittest.TestCase):
                 reasoning_tokens=500_000,
             )
         self.assertAlmostEqual(billed.cost, 15.0 + 5.0)
+
+    def test_missing_token_fields_are_unpriced_not_a_free_call(self) -> None:
+        with _catalog((_price(),)):
+            estimate = estimate_invocation_cost(
+                model="test-model", input_tokens=None, output_tokens=None
+            )
+            zeros = estimate_invocation_cost(
+                model="test-model", input_tokens=0, output_tokens=0
+            )
+        self.assertIsNone(estimate.cost)
+        self.assertEqual(estimate.status, PRICING_STATUS_NO_USAGE)
+        self.assertEqual(zeros.status, PRICING_STATUS_PRICED)
+        self.assertEqual(zeros.cost, 0.0)
 
     def test_an_unknown_model_yields_no_cost_and_a_reason(self) -> None:
         estimate = estimate_invocation_cost(

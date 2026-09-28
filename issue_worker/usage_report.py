@@ -112,7 +112,15 @@ _ACTIVITY_DATE = f"COALESCE(date({_ACTIVITY}), substr({_ACTIVITY}, 1, 10))"
 _REPOSITORY = "COALESCE(NULLIF(u.repository, ''), e.repository, '')"
 _ISSUE_NUMBER = "COALESCE(NULLIF(u.issue_number, 0), e.issue_number, 0)"
 _ISSUE_KEY = f"({_REPOSITORY} || '#' || {_ISSUE_NUMBER})"
-_GRADE = "COALESCE(json_extract(e.routing_decision, '$.prompt_grade'), '')"
+# History is independent of Dynamic Model Routing. An execution with an empty
+# or non-JSON ``routing_decision`` (the default when the router did not run)
+# must still be queryable — ``json_extract`` on '' raises "malformed JSON"
+# and would abort the whole Usage & cost tab.
+_ROUTING_JSON = (
+    "CASE WHEN e.routing_decision IS NOT NULL AND json_valid(e.routing_decision) "
+    "THEN e.routing_decision ELSE NULL END"
+)
+_GRADE = f"COALESCE(json_extract({_ROUTING_JSON}, '$.prompt_grade'), '')"
 
 #: Order matters: a failed call is reported as failed even if it also came
 #: back with partial usage, and an invocation with no usage fields at all is
@@ -128,6 +136,16 @@ _COVERAGE = """CASE
     WHEN u.estimated_cost IS NULL THEN 'tokens_only'
     ELSE 'complete'
 END"""
+
+#: A row that recorded no token fields at all may still carry a leftover
+#: ``estimated_cost = 0.0`` from older pricing. Those zeros must not enter
+#: the estimated-cost total or the priced-invocation count — $0.00 on an
+#: unreported call is a lie. Genuine zeros keep a non-NULL token field.
+_HAS_TOKEN_USAGE = (
+    "NOT (u.total_tokens IS NULL AND u.input_tokens IS NULL AND u.output_tokens IS NULL)"
+)
+_PRICED_COST = f"CASE WHEN {_HAS_TOKEN_USAGE} THEN u.estimated_cost END"
+_COST_SELECT = f"SUM({_PRICED_COST}), COUNT({_PRICED_COST})"
 
 _GROUP_EXPRESSIONS: dict[str, str] = {
     "issue": _ISSUE_KEY,
@@ -406,7 +424,7 @@ def _summary(connection: sqlite3.Connection, filters: UsageFilters) -> dict[str,
         "SELECT COUNT(*), "
         f"COUNT(DISTINCT {_ISSUE_KEY}), "
         "COUNT(DISTINCT NULLIF(u.execution_id, '')), "
-        "SUM(u.estimated_cost), COUNT(u.estimated_cost), "
+        f"{_COST_SELECT}, "
         f"{_token_select()}, {_COVERAGE_SELECT}, "
         "COUNT(DISTINCT NULLIF(u.currency, '')), "
         "MIN(NULLIF(u.currency, '')) "
@@ -467,7 +485,7 @@ def _group_rows(
     rows = connection.execute(
         f"SELECT {expression} AS group_value, "
         f"COUNT(DISTINCT {_ISSUE_KEY}) AS issues, COUNT(*) AS invocations, "
-        "SUM(u.estimated_cost) AS estimated_cost, COUNT(u.estimated_cost), "
+        f"SUM({_PRICED_COST}) AS estimated_cost, COUNT({_PRICED_COST}), "
         f"{_token_select()}, {_COVERAGE_SELECT}, "
         "MAX(COALESCE(e.issue_title, '')), "
         f"MAX({_REPOSITORY}), MAX({_ISSUE_NUMBER}), MAX(COALESCE(e.issue_url, '')), "
@@ -808,7 +826,7 @@ def usage_summaries_for_executions(
         rows.extend(
             connection.execute(
                 "SELECT u.execution_id, COUNT(*), SUM(u.total_tokens), COUNT(u.total_tokens), "
-                "SUM(u.estimated_cost), COUNT(u.estimated_cost), "
+                f"{_COST_SELECT}, "
                 f"{_COVERAGE_SELECT} "
                 f"{_JOIN} WHERE u.execution_id IN ({slots}) GROUP BY u.execution_id",
                 batch,

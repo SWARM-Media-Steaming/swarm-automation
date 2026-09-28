@@ -491,6 +491,21 @@ def estimate_invocation_cost(
       into ``output_tokens`` where the provider does, so they are only billed
       separately when the catalog entry carries an explicit reasoning rate.
     """
+    token_fields = (
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+    )
+    # A provider that returned `"usage": {}` (or no usage object) reported
+    # nothing — that is unreported, not a free call. Treating every missing
+    # count as 0 would attach $0.00 / "priced" to telemetry that never
+    # happened. Genuine zeros are still priced: those fields are 0, not None.
+    if all(value is None for value in token_fields):
+        return _unpriced(PRICING_STATUS_NO_USAGE)
+
     resolution = resolve_price(model, provider=provider, at=at)
     if not resolution.priced or resolution.price is None:
         return _unpriced(resolution.status)

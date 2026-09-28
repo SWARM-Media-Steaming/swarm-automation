@@ -50,6 +50,7 @@ _SEARCHABLE_TEXT_COLUMNS = (
     "model",
     "branch_name",
     "final_status",
+    "execution_id",
 )
 
 # Columns persisted as JSON-encoded text; the desktop UI wants them decoded
@@ -293,9 +294,9 @@ def normalize_provider_key(provider: str) -> str:
 def _search_filter(search: str) -> tuple[str, list[str]]:
     """SQL fragment for the Feedback search box.
 
-    The term must sit inside issue number, title, provider, model, branch, or
-    status. `%`, `_`, and `\\` are matched literally. Issue body and prompt
-    text are not searched.
+    The term must sit inside issue number, title, provider, model, branch,
+    status, or execution id. `%`, `_`, and `\\` are matched literally. Issue
+    body and prompt text are not searched.
     """
     term = normalize_search(search)
     if not term:
