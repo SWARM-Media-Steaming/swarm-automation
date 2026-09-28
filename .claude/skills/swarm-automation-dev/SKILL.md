@@ -351,6 +351,13 @@ origin, or log prefix is a latent bug; use the stage. The rules files
 registered adversarial suites under `tests/adversarial/` import them from
 there; keep those aliases when moving code around.
 
+`MAX_ROUNDS` (currently 3) counts **fix/re-test rounds after round 0**, not
+total tester calls. A continually failing stage therefore runs
+`1 + MAX_ROUNDS` tester phases and `MAX_ROUNDS` fixer phases before
+`cap_hit` (today: 4 tests, 3 fixes). When changing the cap, update both
+counts in unit tests (`test_cap_holds_…`) and keep them aligned with
+`tests/adversarial/test_issue294_three_round_cap.py`.
+
 ## Per-prompt AI token usage is centralized, not per-agent
 
 Every Claude/Codex/Grok invocation's token usage (issue #280) is captured at

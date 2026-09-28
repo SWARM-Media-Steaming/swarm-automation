@@ -2572,6 +2572,72 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue321_ci_cap_hit_tester_count.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-321-ci-cap-hit-tester-count",
+      "name": "CI cap-hit unit test stays aligned with 1+MAX_ROUNDS tester phases (issue #321)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          ".github/workflows/ci.yml",
+          "issue_worker/adversarial_core.py",
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_adversarial_uat.py",
+          "tests/adversarial/test_issue294_three_round_cap.py",
+          "tests/adversarial/test_issue321_ci_cap_hit_tester_count.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue321_ci_python_discover_alignment.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-321-ci-python-discover-alignment",
+      "name": "GitHub Actions issue-worker discover still collects the cap-hit case at 1+MAX_ROUNDS (issue #321)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          ".github/workflows/ci.yml",
+          ".swarm/tests.json",
+          "issue_worker/adversarial_core.py",
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/test_adversarial_uat.py",
+          "tests/adversarial/test_issue321_ci_python_discover_alignment.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
