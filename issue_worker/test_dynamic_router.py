@@ -86,6 +86,24 @@ def resolve(payload, *keys, **kwargs):
 
 
 class DynamicRouterTest(unittest.TestCase):
+    def test_historical_knowledge_signals_are_optional_router_input(self) -> None:
+        prompt = build_router_prompt(
+            title="Auth",
+            body=ORIGINAL_BODY,
+            labels=["bug"],
+            candidates=candidates("claude"),
+        )
+        self.assertNotIn("Historical SWARM engineering knowledge", prompt)
+        with_history = build_router_prompt(
+            title="Auth",
+            body=ORIGINAL_BODY,
+            labels=["bug"],
+            candidates=candidates("claude"),
+            historical_signals="Similar historical work: sample size 4, estimated cost 2.1.",
+        )
+        self.assertIn("sample size 4", with_history)
+        self.assertIn("not a rule you must follow", with_history)
+
     def test_parse_accepts_fenced_json(self) -> None:
         raw = "```json\n" + json.dumps(sample_payload()) + "\n```"
         parsed = parse_router_payload(raw)

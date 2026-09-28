@@ -16,7 +16,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 14] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 15] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
@@ -34,6 +34,7 @@ const REQUIRED_WORKER_RESOURCES: [&str; 14] = [
     // model_router_yaml.py are imported by this and other entry points
     // rather than invoked directly, matching the rest of this list.
     "model_calibration.py",
+    "engineering_knowledge.py",
 ];
 
 struct AppState {
@@ -1069,6 +1070,22 @@ fn repo_worker_args(
             "--no-prompt-feedback-upload-enabled"
         }
         .into(),
+        if config.engineering_knowledge_enabled {
+            "--engineering-knowledge-enabled"
+        } else {
+            "--no-engineering-knowledge-enabled"
+        }
+        .into(),
+        if config.automatic_knowledge_generation {
+            "--automatic-knowledge-generation"
+        } else {
+            "--no-automatic-knowledge-generation"
+        }
+        .into(),
+        "--knowledge-context-token-limit".into(),
+        config.knowledge_context_token_limit.to_string(),
+        "--knowledge-owner-scope-id".into(),
+        config.knowledge_owner_scope_id.clone(),
         "--application-version".into(),
         env!("CARGO_PKG_VERSION").into(),
         "--execution-history-db".into(),
@@ -2117,6 +2134,208 @@ async fn import_execution_history_background(
     })
     .await
     .map_err(|error| format!("Importing GitHub issues into execution history failed: {error}"))?
+}
+
+fn knowledge_script<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    Ok(worker_script_dir(app)?.join("engineering_knowledge.py"))
+}
+
+fn knowledge_settings_payload(config: &AppConfig) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": config.engineering_knowledge_enabled,
+        "automaticGeneration": config.automatic_knowledge_generation,
+        "generateRepositorySummaries": config.generate_repository_summaries,
+        "generateArchitectureSummaries": config.generate_architecture_summaries,
+        "generateEngineeringDecisions": config.generate_engineering_decisions,
+        "generateComponentDocumentation": config.generate_component_documentation,
+        "generateRiskSummaries": config.generate_risk_summaries,
+        "generateIssueClustering": config.generate_issue_clustering,
+        "contextTokenLimit": config.knowledge_context_token_limit,
+        "ownerScopeId": config.knowledge_owner_scope_id,
+    })
+}
+
+fn knowledge_routing_payload(config: &AppConfig) -> serde_json::Value {
+    serde_json::json!({
+        "dynamicModelRouting": config.dynamic_model_routing,
+        "routingOptimization": config.routing_optimization,
+        "allowUsageCreditModels": config.allow_usage_credit_models,
+        "providers": config.providers.iter().map(|provider| {
+            serde_json::json!({
+                "id": provider.id,
+                "enabled": provider.enabled,
+                "model": provider.model,
+                "effort": provider.effort,
+                "routerModel": provider.router_model,
+                "routerEffort": provider.router_effort,
+                "bin": provider.bin,
+                "strengths": provider.strengths,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn knowledge_repository_payloads<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+) -> Vec<serde_json::Value> {
+    config
+        .repositories
+        .iter()
+        .filter(|repo| !repo.github_repository.trim().is_empty())
+        .map(|repo| {
+            let workspace = resolve_workspace(app, config, repo)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let project_id = repo
+                .github_repository
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            serde_json::json!({
+                "name": repo.github_repository,
+                "workspace": workspace,
+                "projectId": project_id,
+                "enabled": repo.enabled,
+            })
+        })
+        .collect()
+}
+
+fn run_knowledge<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    mut payload: serde_json::Value,
+    failure_context: &str,
+) -> Result<serde_json::Value, String> {
+    if payload.get("settings").is_none() {
+        payload["settings"] = knowledge_settings_payload(config);
+    }
+    if payload.get("repositories").is_none() {
+        payload["repositories"] =
+            serde_json::Value::Array(knowledge_repository_payloads(app, config));
+    }
+    if payload.get("routing").is_none() {
+        payload["routing"] = knowledge_routing_payload(config);
+    }
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let script = knowledge_script(app)?;
+    let database = execution_history_db_path(config);
+    let action = payload
+        .get("action")
+        .and_then(|value| value.as_str())
+        .unwrap_or("status")
+        .to_string();
+    let arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--db".into(),
+        database.to_string_lossy().into_owned(),
+        "--action".into(),
+        action,
+    ];
+    let (ok, raw) = run_capture_with_input(&python, &arguments, &payload.to_string());
+    if !ok {
+        return Err(format!("{failure_context}: {raw}"));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("{failure_context}: response could not be parsed: {error}"))
+}
+
+#[tauri::command]
+fn get_knowledge_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    run_knowledge(
+        &app,
+        &config,
+        serde_json::json!({"action": "status"}),
+        "Could not read engineering knowledge status",
+    )
+}
+
+#[tauri::command]
+async fn get_knowledge_status_background(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_knowledge_status(app.clone(), state)
+    })
+    .await
+    .map_err(|error| format!("Could not read engineering knowledge status: {error}"))?
+}
+
+#[tauri::command]
+fn refresh_knowledge<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    mode: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    let action = if mode.as_deref() == Some("rebuild") {
+        "rebuild"
+    } else {
+        "refresh"
+    };
+    run_knowledge(
+        &app,
+        &config,
+        serde_json::json!({"action": action, "initiatedBy": "user"}),
+        "Could not refresh engineering knowledge",
+    )
+}
+
+#[tauri::command]
+async fn refresh_knowledge_background(
+    app: tauri::AppHandle,
+    mode: Option<String>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        refresh_knowledge(app.clone(), state, mode)
+    })
+    .await
+    .map_err(|error| format!("Could not refresh engineering knowledge: {error}"))?
+}
+
+#[tauri::command]
+fn ask_swarm<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    question: String,
+    scope_kind: Option<String>,
+    scope_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let config = current_config(&state)?;
+    run_knowledge(
+        &app,
+        &config,
+        serde_json::json!({
+            "action": "ask",
+            "question": question,
+            "scopeKind": scope_kind.unwrap_or_else(|| "all".into()),
+            "scopeId": scope_id.unwrap_or_default(),
+        }),
+        "Ask SWARM failed",
+    )
+}
+
+#[tauri::command]
+async fn ask_swarm_background(
+    app: tauri::AppHandle,
+    question: String,
+    scope_kind: Option<String>,
+    scope_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        ask_swarm(app.clone(), state, question, scope_kind, scope_id)
+    })
+    .await
+    .map_err(|error| format!("Ask SWARM failed: {error}"))?
 }
 
 #[tauri::command]
@@ -4652,6 +4871,12 @@ fn main() {
             get_prompt_grades_background,
             import_execution_history,
             import_execution_history_background,
+            get_knowledge_status,
+            get_knowledge_status_background,
+            refresh_knowledge,
+            refresh_knowledge_background,
+            ask_swarm,
+            ask_swarm_background,
             pause_process,
             resume_process,
             stop_process,

@@ -394,6 +394,15 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
 .now-working-empty span { color: var(--muted-2); font-size: 9px; }
 .status-pill.idle { color: #8994a8; background: #202737; }
 .status-pill.ok { color: #70e3a9; background: rgba(66,217,146,.12); }
+.stacked-form textarea { width: 100%; margin-top: 7px; min-height: 92px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); padding: 9px 10px; outline: none; font-size: 12px; line-height: 1.5; }
+.stacked-form textarea:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(141,112,255,.09); }
+.ask-swarm-thread { display: grid; gap: 12px; margin-top: 18px; }
+.ask-swarm-turn { border: 1px solid var(--line-soft); border-radius: 10px; padding: 12px 14px; background: var(--panel-2); }
+.ask-swarm-turn .ask-swarm-question { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.ask-swarm-turn .ask-swarm-answer { margin: 0; color: var(--text); font-size: 13px; line-height: 1.55; white-space: pre-wrap; }
+.ask-swarm-citations { display: grid; gap: 6px; margin-top: 10px; }
+.ask-swarm-citations a, .ask-swarm-citations span { color: var(--cyan); font-size: 11px; }
+.ask-swarm-meta { margin: 8px 0 0; color: var(--muted-2); font-size: 11px; }
 @media (max-width: 1060px) {
   .router-row { grid-template-columns: 96px minmax(0, 1fr); }
   .execution-record.grade-record > summary { grid-template-columns: auto minmax(0, 1fr); }.grade-record .execution-tagging { grid-column: 1 / -1; grid-row: 2; }
