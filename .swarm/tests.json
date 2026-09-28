@@ -2768,6 +2768,59 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue295_coverage_empty_group_and_time_buckets.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-295-coverage-empty-group-and-time-buckets",
+      "name": "Issue #295: cache-only coverage, empty group drill-down, week buckets, timezone dates, no guessed cache rates",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/usage_report.py",
+          "issue_worker/model_pricing.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_issue295_coverage_empty_group_and_time_buckets.py"
+        ]
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue295_empty_group_drilldown_ui.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-295-empty-group-drilldown-ui",
+      "name": "Issue #295: empty aggregate groups (Not graded) remain selectable drill-downs",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/usage-cost.js",
+          "tests/adversarial/test_issue295_empty_group_drilldown_ui.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
