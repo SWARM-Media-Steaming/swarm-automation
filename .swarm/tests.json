@@ -2685,6 +2685,89 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue295_provider_total_tokens.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-295-provider-total-tokens",
+      "name": "Issue #295: provider-reported total_tokens is authoritative; cached/reasoning are not added on top",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/token_usage.py",
+          "issue_worker/usage_report.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue295_provider_total_tokens.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue295_activity_time_and_history_contracts.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-295-activity-time-and-history-contracts",
+      "name": "Issue #295: activity-time date filters, v6 migration, coverage edges, History cross-links, stored-cost stability",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/usage_report.py",
+          "issue_worker/ai_execution_history.py",
+          "issue_worker/token_usage.py",
+          "tests/adversarial/test_issue295_activity_time_and_history_contracts.py"
+        ]
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue295_execution_history_usage_ui.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-295-execution-history-usage-ui",
+      "name": "Issue #295: Execution History usage headlines, View usage cross-links, History-by-execution-id",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/usage-cost.js",
+          "tests/adversarial/test_issue295_execution_history_usage_ui.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
