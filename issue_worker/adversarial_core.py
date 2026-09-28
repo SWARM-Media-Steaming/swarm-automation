@@ -36,6 +36,7 @@ TEST_ROOT = "tests/adversarial/"
 CAP_HIT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-cap-hit -->"
 CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing after three fix/re-test rounds. "
                      "Automation is held; review the failing tests and adjudicate on the linked issue.\n\n")
+ADVERSARIAL_HANDOFF_MARKER = "swarm-issue-worker:adversarial-disabled-handoff"
 # A later round's fresh-context tester rediscovering an earlier round's
 # out-of-scope bug almost never reproduces the same title/body wording, so an
 # exact-digest marker match cannot dedup it. Title token overlap is a coarse
@@ -464,6 +465,150 @@ class AdversarialStageMixin:
 
     def read_stage(self, stage: AdversarialStage) -> dict[str, Any] | None:
         return self.read_state().get(stage.key)
+
+    def _known_adversarial_stages(self) -> tuple[AdversarialStage, ...]:
+        # Imported lazily because swarm_issue_worker imports this mixin while
+        # defining Worker.
+        from swarm_issue_worker import ADVERSARIAL_STAGES
+        return ADVERSARIAL_STAGES
+
+    def _disabled_stage_handoff(self, stage: AdversarialStage, loop: dict[str, Any]) -> dict[str, Any]:
+        """Create the durable continuation issue for dirty disabled work.
+
+        The issue is deliberately created before the commit so the commit can
+        reference its number. The checkpoint contains provider/session data,
+        but never the agent's private transcript or raw completion.
+        """
+        from swarm_issue_worker import WorkerError, github_issue_url_from_output, log
+
+        existing = loop.get("disabled_handoff")
+        if isinstance(existing, dict):
+            return existing
+        state = self.read_state()
+        choice = loop.get("delivery_choice") or {}
+        session_id = str(state.get("session_id") or choice.get("session_id") or "")
+        provider = str(choice.get("name") or getattr(self.choice, "name", "worker"))
+        provider_key = getattr(self.choice, "key", provider.lower())
+        details = [
+            f"<!-- {ADVERSARIAL_HANDOFF_MARKER}:issue-{self.issue.number};stage-{stage.slug} -->",
+            f"Continuation of {stage.label.lower()} work interrupted for issue #{self.issue.number}.",
+            "",
+            "The original issue's adversarial stage was disabled while this work-round was in progress. "
+            "The worker committed the repository state reached so far and will continue the original issue "
+            "without this stage.",
+            "",
+            f"- Original issue: #{self.issue.number} ({self.issue.url})",
+            f"- Branch: `{self.expected_branch()}`",
+            f"- Stage: `{stage.slug}`",
+            f"- Phase: `{loop.get('phase', '')}`",
+            f"- Round: `{loop.get('round', 0)}`",
+            f"- Provider: `{provider}`",
+            f"- Model: `{choice.get('model', '')}`",
+            f"- Effort: `{choice.get('effort', '')}`",
+            f"- Session ID: `{session_id or 'unavailable'}`",
+            f"- Execution ID: `{state.get('execution_id', '') or 'unavailable'}`",
+            f"- Last checkpoint: `{loop.get('completion', '')}`",
+            f"- Stage base: `{loop.get('stage_base', '')}`",
+            "",
+            "This issue is a continuation record for the preserved adversarial work. Review it before "
+            "re-enabling the stage or making further adversarial changes.",
+        ]
+        labels = (("adversarial-handoff", "FBCA04", "Continuation of interrupted adversarial work"),) + tuple(
+            label for label in stage.finding_labels if label[0] != "bug"
+        )
+        try:
+            output = self.file_labelled_issue(
+                f"Continue {stage.label} work for issue #{self.issue.number}",
+                "\n".join(details),
+                labels,
+                provider_key,
+            )
+        except WorkerError as error:
+            # Delivery must not be held hostage by a transient GitHub issue
+            # filing failure. The checkpoint and commit still preserve the
+            # handoff locally and the operator log makes the degradation clear.
+            log(f"WARNING: Could not file disabled {stage.slug} handoff issue: {error}")
+            return {"status": "issue_create_failed", "error": str(error)}
+        url = github_issue_url_from_output(output)
+        return {"status": "created" if url else "issue_create_unknown", "url": url}
+
+    def _commit_disabled_stage_work(
+        self, stage: AdversarialStage, loop: dict[str, Any], handoff: dict[str, Any]
+    ) -> str:
+        from swarm_issue_worker import WorkerError, log
+
+        if not self.worktree_status():
+            return self.git("rev-parse", "HEAD")
+        run_start = self.git("rev-parse", "HEAD")
+        issue_number = None
+        match = re.search(r"/issues/(\d+)$", str(handoff.get("url") or ""))
+        if match:
+            issue_number = int(match.group(1))
+        commit = self.commit_completed_work(
+            run_start,
+            issue_number=issue_number,
+            commit_title=f"Continue {stage.label} work from issue #{self.issue.number}",
+        )
+        if handoff.get("url"):
+            try:
+                self.github.gh(
+                    [
+                        "issue", "comment", str(issue_number),
+                        "--repo", self.config.github_repository,
+                        "--body-file", "-",
+                    ],
+                    getattr(self.choice, "key", ""),
+                    f"Committed the preserved {stage.label.lower()} work as `{commit}` on "
+                    f"`{self.expected_branch()}`. Original issue: #{self.issue.number}.",
+                )
+            except WorkerError as error:
+                log(f"WARNING: Could not add commit {commit} to disabled-stage issue {handoff['url']}: {error}")
+        return commit
+
+    def _reconcile_disabled_adversarial_stages(self) -> list[tuple[AdversarialStage, dict[str, Any]]]:
+        """Detach disabled stages and preserve any work they left behind."""
+        from swarm_issue_worker import iso_timestamp
+
+        enabled = {stage.key for stage in self.adversarial_stages()}
+        detached: list[tuple[AdversarialStage, dict[str, Any]]] = []
+        for stage in self._known_adversarial_stages():
+            if stage.key in enabled:
+                continue
+            loop = self.read_stage(stage)
+            if not isinstance(loop, dict) or loop.get("disabled"):
+                continue
+            if self.worktree_status():
+                handoff = self._disabled_stage_handoff(stage, loop)
+                handoff["base_sha"] = self.git("rev-parse", "HEAD")
+                loop["disabled_handoff"] = handoff
+                self.save_stage(stage, loop)
+                commit = self._commit_disabled_stage_work(stage, loop, handoff)
+                handoff["commit_sha"] = commit
+                loop["completion"] = commit
+            elif isinstance(loop.get("disabled_handoff"), dict):
+                # If the process died after the commit but before the final
+                # checkpoint write, recover the commit from the saved base.
+                handoff = loop["disabled_handoff"]
+                commit = str(handoff.get("commit_sha") or "")
+                base = str(handoff.get("base_sha") or "")
+                head = self.git("rev-parse", "HEAD")
+                if not commit and base and head != base and self.git_ok("merge-base", "--is-ancestor", base, head):
+                    commit = head
+                    handoff["commit_sha"] = commit
+                if commit:
+                    loop["completion"] = commit
+            loop.update(
+                active=False,
+                response=None,
+                outcome="disabled",
+                status="DISABLED",
+                disabled=True,
+                disabled_at=iso_timestamp(),
+            )
+            self.save_stage(stage, loop)
+            self.history.update(iso_timestamp(), **stage.disabled_history_fields())
+            detached.append((stage, loop))
+        return detached
 
     def initialize_stage(self, stage: AdversarialStage, completion: str, output: str,
                          delivery_choice: dict[str, Any] | None = None,
@@ -1095,7 +1240,8 @@ class AdversarialStageMixin:
     def adversarial_capacity_consumed(self) -> float | None:
         state = self.read_state()
         values = [state[stage.key]["consumed_percent"] for stage in self.adversarial_stages()
-                  if state.get(stage.key) and state[stage.key].get("consumed_percent") is not None]
+                  if state.get(stage.key) and not state[stage.key].get("disabled")
+                  and state[stage.key].get("consumed_percent") is not None]
         return sum(values) if values else None
 
     def record_stage_failure(self, stage: AdversarialStage, loop: dict[str, Any], reason: str) -> None:
@@ -1116,11 +1262,19 @@ class AdversarialStageMixin:
     def run_adversarial_pipeline(self) -> int:
         """Run every enabled adversarial stage in order, then deliver once."""
         from swarm_issue_worker import ISSUE_COMPLETED_EXIT_CODE, ProviderChoice, WorkerError
+        detached = self._reconcile_disabled_adversarial_stages()
         stages = self.adversarial_stages()
         previous = None
+        known = self._known_adversarial_stages()
         for stage in stages:
             loop = self.read_stage(stage)
+            if isinstance(loop, dict) and loop.get("disabled"):
+                loop = None
             if loop is None:
+                prior_detached = [checkpoint for prior_stage, checkpoint in detached
+                                  if known.index(prior_stage) < known.index(stage)]
+                if previous is None and prior_detached:
+                    previous = prior_detached[-1]
                 if previous is None:
                     continue
                 self.initialize_stage(stage, previous["completion"], previous["implementation_output"],
@@ -1133,7 +1287,14 @@ class AdversarialStageMixin:
         finished = [(stage, loop) for stage, loop in
                     ((stage, self.read_stage(stage)) for stage in stages) if loop]
         if not finished:
-            raise RuntimeError("No adversarial stage state to deliver")
+            checkpoint = detached[-1][1] if detached else previous
+            if not checkpoint:
+                raise RuntimeError("No adversarial stage state to deliver")
+            choice_data = checkpoint.get("delivery_choice")
+            self.choice = ProviderChoice(**choice_data) if choice_data else self.choice
+            self.update_state_for_choice(self.choice)
+            self.finalize_issue(checkpoint["completion"], checkpoint["implementation_output"])
+            return ISSUE_COMPLETED_EXIT_CODE
         # Checked once, here, after every enabled stage has reached "done" —
         # not inside run_adversarial_stage, which runs once per stage on
         # every pipeline invocation including ones where that stage did no

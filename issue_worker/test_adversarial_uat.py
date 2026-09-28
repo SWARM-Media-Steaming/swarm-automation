@@ -15,6 +15,7 @@ from unittest import mock
 
 import ai_test_assist
 import adversarial_uat as uat
+import adversarial_security as security
 import test_swarm_issue_worker as fixtures
 from ai_execution_history import ExecutionHistoryRepository, ExecutionHistoryService, ExecutionStart
 from dynamic_router import COMPLEXITY_SCALE_TOP, FRONTIER_COMPLEXITY_FLOOR
@@ -168,6 +169,67 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertFalse(self.calls[0][3])
         self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
         self.assertFalse((self.state / "history.sqlite3").exists())
+
+    def test_disabling_the_only_active_stage_delivers_its_last_checkpoint(self):
+        self.prepare(fixed=True)
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_uat_enabled=False, adversarial_security_enabled=False
+        )
+        with mock.patch.object(self.worker, "finalize_issue") as finalize:
+            self.assertEqual(self.worker.run_adversarial_delivery(), 10)
+        finalize.assert_called_once_with(
+            self.worker.read_state()["adversarial"]["completion"],
+            self.worker.read_state()["adversarial"]["implementation_output"],
+        )
+        state = self.worker.read_state()
+        self.assertTrue(state["adversarial"]["disabled"])
+        self.assertEqual(state["adversarial"]["outcome"], "disabled")
+
+    def test_disabling_uat_still_starts_cybersecurity_from_uat_checkpoint(self):
+        self.prepare(fixed=True)
+        completion = self.worker.read_state()["adversarial"]["completion"]
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_uat_enabled=False, adversarial_security_enabled=True
+        )
+        with mock.patch.object(self.worker, "run_adversarial_stage", return_value=None) as run_stage, \
+                mock.patch.object(self.worker, "finalize_issue") as finalize:
+            self.assertEqual(self.worker.run_adversarial_delivery(), 10)
+        run_stage.assert_called_once()
+        self.assertIs(run_stage.call_args.args[0], security.SECURITY_STAGE)
+        cyber = self.worker.read_state()[security.SECURITY_STAGE.key]
+        self.assertEqual(cyber["completion"], completion)
+        self.assertEqual(cyber["implementation_output"], "## Summary\nSECRET implementer reasoning\n## Changes\nImplementation")
+        finalize.assert_called_once()
+
+    def test_dirty_disabled_stage_files_follow_up_issue_and_commit_reference_it(self):
+        self.prepare(fixed=True)
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_uat_enabled=False, adversarial_security_enabled=False
+        )
+        loop = self.worker.read_state()["adversarial"]
+        loop.update(phase="fix", active=True, round=1)
+        self.worker.save_adversarial(loop)
+        self.worker.update_state(session_id="session-dirty", session_started=True)
+        (self.repo / "tracked.txt").write_text("partial adversarial fix\n")
+        issue_bodies = []
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "create"]:
+                issue_bodies.append(body)
+            return self.gh(args, provider, body)
+
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                mock.patch.object(self.worker, "finalize_issue") as finalize:
+            self.assertEqual(self.worker.run_adversarial_delivery(), 10)
+        self.assertEqual(len(issue_bodies), 1)
+        self.assertIn("session-dirty", issue_bodies[0])
+        self.assertIn("Phase: `fix`", issue_bodies[0])
+        self.assertTrue(any(args[:2] == ["issue", "comment"] for args in self.api))
+        subject = self.git("log", "-1", "--format=%s")
+        self.assertIn("(#182)", subject)
+        finalize.assert_called_once()
+        self.assertEqual(finalize.call_args.args[0], self.git("rev-parse", "HEAD"))
+        self.assertFalse(self.worker.worktree_status())
 
     def test_fixer_cannot_edit_or_retire_tests_fresh_tester_adjudicates_dispute(self):
         self.prepare()

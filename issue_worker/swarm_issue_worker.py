@@ -1015,7 +1015,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         if not self.in_progress_file.exists():
             return False
         state = self.read_state()
-        return any(state.get(stage.key) for stage in ADVERSARIAL_STAGES)
+        return any(
+            isinstance(state.get(stage.key), dict) and not state[stage.key].get("disabled")
+            for stage in ADVERSARIAL_STAGES
+        )
 
     def record_disabled_adversarial_stages(self) -> None:
         """Say so explicitly when a stage was switched off for this work-round."""
@@ -1614,7 +1617,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             # would hide the test definition for every other issue that runs
             # while this one is paused.
             exclusions = [":(exclude).swarm"]
-            if any(state.get(stage.key) for stage in ADVERSARIAL_STAGES):
+            if any(
+                isinstance(state.get(stage.key), dict) and not state[stage.key].get("disabled")
+                for stage in ADVERSARIAL_STAGES
+            ):
                 # The adversarial stages own the tracked suite definition.
                 # Shelve that along with the tests, while keeping unrelated
                 # untracked app drafts local.
@@ -4764,7 +4770,13 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             f"{VERSION_FILE} {current[0]}.{current[1]}.{current[2]} -> {new[0]}.{new[1]}.{new[2]}."
         )
 
-    def commit_completed_work(self, run_start: str) -> str:
+    def commit_completed_work(
+        self,
+        run_start: str,
+        *,
+        issue_number: int | None = None,
+        commit_title: str | None = None,
+    ) -> str:
         assert self.issue and self.choice
         self.enforce_version_policy(run_start)
         if not self.worktree_status():
@@ -4779,11 +4791,12 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             )
         current = self.git("rev-parse", "HEAD")
         tag = f"[{ai_tool_key(self.choice.key)}] "
+        reference_number = issue_number if issue_number is not None else self.issue.number
         if current == run_start:
-            title = re.sub(r"\s+", " ", self.issue.title).strip()
-            message = f"{tag}{title} (#{self.issue.number})"
+            title = re.sub(r"\s+", " ", commit_title or self.issue.title).strip()
+            message = f"{tag}{title} (#{reference_number})"
         else:
-            message = f"{tag}Commit remaining completed work (#{self.issue.number})"
+            message = f"{tag}Commit remaining completed work (#{reference_number})"
         run_command(
             [
                 self.config.git_bin,
@@ -5094,7 +5107,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 # head, and every stage that ran has to be clean — a green UAT
                 # re-run must not release a PR its security review capped out on.
                 state = self.read_state()
-                loops = [state[stage.key] for stage in ADVERSARIAL_STAGES if state.get(stage.key)]
+                loops = [
+                    state[stage.key] for stage in ADVERSARIAL_STAGES
+                    if isinstance(state.get(stage.key), dict) and not state[stage.key].get("disabled")
+                ]
                 if not loops or any(
                     loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"} for loop in loops
                 ):
