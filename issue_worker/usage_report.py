@@ -39,8 +39,11 @@ import sqlite3
 from typing import Any, Sequence
 
 
-#: Group-by dimensions the aggregate table offers, in the order the UI lists
-#: them. The first entry is the fallback for an unknown value.
+#: Group-by dimensions the query API supports. The Feedback selector lists
+#: a subset of these (everything except ``outcome``); ``outcome`` is still a
+#: first-class grouping so a caller can break totals down by success vs.
+#: failure rather than only filter to one or the other. The first entry is
+#: the fallback for an unknown value.
 GROUP_BY_KEYS: tuple[str, ...] = (
     "issue",
     "model",
@@ -49,6 +52,7 @@ GROUP_BY_KEYS: tuple[str, ...] = (
     "effort",
     "agent",
     "prompt",
+    "outcome",
     "repository",
     "day",
     "week",
@@ -121,6 +125,11 @@ _ROUTING_JSON = (
     "THEN e.routing_decision ELSE NULL END"
 )
 _GRADE = f"COALESCE(json_extract({_ROUTING_JSON}, '$.prompt_grade'), '')"
+#: Success vs. failure of the invocation itself. Matches the outcome *filter*
+#: (``success = 0`` is failure; anything else is success) so grouping by
+#: outcome and then drilling into one bucket is the same partition the
+#: filter would have produced.
+_OUTCOME = "CASE WHEN u.success = 0 THEN 'failure' ELSE 'success' END"
 
 #: Order matters: a failed call is reported as failed even if it also came
 #: back with partial usage, and an invocation with no usage fields at all is
@@ -155,6 +164,7 @@ _GROUP_EXPRESSIONS: dict[str, str] = {
     "effort": "COALESCE(NULLIF(u.reasoning_effort, ''), '')",
     "agent": "COALESCE(NULLIF(u.agent_type, ''), '')",
     "prompt": "COALESCE(NULLIF(u.prompt_type, ''), '')",
+    "outcome": _OUTCOME,
     "repository": _REPOSITORY,
     "day": _ACTIVITY_DATE,
     # %W is a Monday-based week-of-year, which is what the day bucket's

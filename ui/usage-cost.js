@@ -16,8 +16,9 @@
   // starts lying about coverage.
   const UNAVAILABLE = "—";
 
-  // Group-by dimensions, in the order the selector lists them. Must stay in
-  // step with GROUP_BY_KEYS in issue_worker/usage_report.py.
+  // Group-by dimensions the selector lists, in that order. The query API
+  // also accepts `outcome` (success vs. failure); that is a grouping the
+  // CLI and other callers use, not a Feedback dropdown option.
   const USAGE_GROUPS = [
     { value: "issue", label: "Issue" },
     { value: "model", label: "Model" },

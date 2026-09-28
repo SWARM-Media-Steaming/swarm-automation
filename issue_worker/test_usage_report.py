@@ -417,6 +417,21 @@ class GroupingTests(UsageReportTestCase):
                 for row in self.report(group_by="grade")["groups"]["rows"]}
         self.assertEqual(rows, {"B+": 9, "A": 1})
 
+    def test_grouping_by_outcome_partitions_success_from_failure(self) -> None:
+        payload = self.report(group_by="outcome")
+        self.assertEqual(payload["groupBy"], "outcome")
+        rows = {row["group"]: row for row in payload["groups"]["rows"]}
+        self.assertEqual(set(rows), {"success", "failure"})
+        self.assertEqual(rows["success"]["invocations"], 9)
+        self.assertEqual(rows["failure"]["invocations"], 1)
+        self.assertEqual(rows["failure"]["pricedInvocations"], 0)
+        self.assertIsNone(rows["failure"]["estimatedCost"])
+        drilled = self.report(group_by="outcome", group_value="failure")
+        self.assertEqual(drilled["invocations"]["total"], 1)
+        self.assertEqual(drilled["invocations"]["rows"][0]["id"], "f1")
+        self.assertEqual(drilled["invocations"]["rows"][0]["inputTokens"], 10_000)
+        self.assertIsNone(drilled["invocations"]["rows"][0]["outputTokens"])
+
 
 class SortingAndPagingTests(UsageReportTestCase):
     def test_sorting_orders_by_the_requested_column_and_direction(self) -> None:
@@ -634,6 +649,16 @@ class CommandLineTests(UsageReportTestCase):
         self.assertEqual(payload["summary"]["invocations"], 10)
         self.assertIn("coverage", payload)
         self.assertIn("facets", payload)
+
+    def test_the_usage_mode_groups_by_outcome(self) -> None:
+        payload = self._run([
+            "--db", str(self.database_path), "--usage", "--group-by", "outcome",
+        ])
+        self.assertEqual(payload["groupBy"], "outcome")
+        self.assertEqual(
+            {row["group"] for row in payload["groups"]["rows"]},
+            {"success", "failure"},
+        )
 
     def test_the_usage_mode_applies_repository_and_filter_arguments(self) -> None:
         payload = self._run([

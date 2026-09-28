@@ -433,7 +433,10 @@ Usage & cost (issue #295) is `issue_worker/usage_report.py` →
 → `get_usage_report` in `src/main.rs` → `ui/usage-cost.js` + the
 `feedback-panel-usage` panel. Every filter, grouping, aggregate and page is
 computed in SQLite; the desktop must never receive the `ai_token_usage` table
-to total it itself. The Rust command is a deliberate pass-through of
+to total it itself. The query API groups by `outcome` (success vs. failure)
+as well as issue, effort, grade and time bucket; the Feedback selector does
+not list that dimension, but `normalize_group_by("outcome")` must still
+return `"outcome"` rather than silently falling back to `"issue"`. The Rust command is a deliberate pass-through of
 already-camelCase JSON rather than a deep mirror of a dozen nullable token
 columns — a second place for "missing" to become zero is the bug that shape
 avoids.
