@@ -695,6 +695,7 @@ def _score_candidate(
     required_capability: int,
     min_effort: str,
     normalizer: _BenchmarkNormalizer,
+    cheapest_cost: int | None = None,
 ) -> tuple[float, float]:
     """Return ``(score, expected_success)``. See SKILL.md for the formula."""
     coding_capability, data_quality = _coding_capability(model, effort, group, normalizer)
@@ -736,6 +737,10 @@ def _score_candidate(
     positive = sum(weights.get(key, 0.0) * value for key, value in components.items())
 
     overqualification = max(0, model.relative_capability - required_capability) * rules.overqualification_penalty_per_level
+    if cost_on and cheapest_cost is not None and model.relative_cost <= cheapest_cost:
+        # Cost-first: the cheapest capable model must not lose to a more
+        # expensive just-capable peer because it is overqualified.
+        overqualification = 0.0
     extra_effort_levels = max(0, rules.effort_ladder.index(effort) - rules.effort_ladder.index(min_effort))
     reasoning_penalty = rules.unnecessary_reasoning_penalty_per_level
     if cost_on:
@@ -783,8 +788,10 @@ def route(
     min_effort_index = rules.effort_ladder.index(min_effort)
     normalizer = _BenchmarkNormalizer(catalog)
 
+    eligible = _eligible_models(catalog, availability)
+    cheapest_cost = min((model.relative_cost for model in eligible), default=None)
     scored: list[RoutingCandidate] = []
-    for model in _eligible_models(catalog, availability):
+    for model in eligible:
         for effort in model.supported_efforts:
             if effort not in rules.effort_ladder:
                 continue
@@ -800,6 +807,7 @@ def route(
                 required_capability=required_capability,
                 min_effort=min_effort,
                 normalizer=normalizer,
+                cheapest_cost=cheapest_cost,
             )
             scored.append(
                 RoutingCandidate(
@@ -874,7 +882,22 @@ def route(
     else:
         normalized = (winner.score - lowest) / (highest - lowest)
 
-    runner_up_score = remaining[0].score if remaining else winner.score
+    # Confidence measures how close a *realistic* alternative was, not the
+    # score of a strictly more expensive (cost-on) or ineligible model. A
+    # one-unit cost-rank bump on a dominated bystander must not change the
+    # reported decision, including confidence.
+    confidence_peers = remaining
+    if cost_on:
+        winner_cost = winner.relative_cost if winner.relative_cost else winner.model.relative_cost
+        confidence_peers = [
+            candidate
+            for candidate in pool
+            if candidate is not winner
+            and (candidate.relative_cost if candidate.relative_cost else candidate.model.relative_cost)
+            <= winner_cost
+        ]
+        confidence_peers.sort(key=lambda candidate: candidate.score, reverse=True)
+    runner_up_score = confidence_peers[0].score if confidence_peers else winner.score
     gap = max(0.0, winner.score - runner_up_score)
     confidence = min(1.0, rules.confidence_floor + gap / rules.confidence_score_gap_scale)
 

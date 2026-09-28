@@ -484,25 +484,29 @@ def _status_for(
 
 
 def _weights_summary(routing_optimization: str) -> dict[str, str]:
-    cost_on = routing_optimization == "cost"
+    """Automatic routing is always cost-first after capability gates."""
+    _ = routing_optimization
     return {
         "capability": "high",
         "task_fit": "high",
-        "cost_efficiency": "high" if cost_on else "medium",
+        "cost_efficiency": "high",
         "performance": "medium",
         "reliability": "medium",
     }
 
 
 def routing_mode_label(routing_optimization: str) -> str:
-    return "cost_aware" if routing_optimization == "cost" else "quality"
+    """Saved ``best``/``quality`` labels migrate to cost-aware automatic routing."""
+    _ = routing_optimization
+    return "cost_aware"
 
 
 def recalculate_routing(
     specs: Sequence["_model_router.ModelSpec"], *, routing_optimization: str
 ) -> dict[str, dict[str, Any]]:
     """Example routing decisions, computed with the real scoring engine."""
-    cost_on = routing_optimization == "cost"
+    cost_on = True
+    _ = routing_optimization
     try:
         rules = _model_router.load_routing_rules()
     except _model_router.ModelRouterConfigError:

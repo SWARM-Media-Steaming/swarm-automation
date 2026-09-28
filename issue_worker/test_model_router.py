@@ -437,6 +437,47 @@ class CostConsiderationTests(unittest.TestCase):
         )
         self.assertEqual(decision.model, "cheap-slow")
 
+    def test_dominated_peer_cost_rank_does_not_change_the_winner_or_confidence(self) -> None:
+        preferred = _fixture_model(
+            "winner",
+            capability=5,
+            cost=1,
+            token_efficiency=3,
+            latency=3,
+            efforts=("medium",),
+        )
+        bystander_cheaper = _fixture_model(
+            "bystander",
+            capability=1,
+            cost=2,
+            token_efficiency=1,
+            latency=1,
+            efforts=("medium",),
+        )
+        bystander_pricier = _fixture_model(
+            "bystander",
+            capability=1,
+            cost=3,
+            token_efficiency=1,
+            latency=1,
+            efforts=("medium",),
+        )
+        before = mr.route(
+            mr.RouteRequest("general_reasoning", 1, cost_consideration_enabled=True),
+            catalog=[preferred, bystander_cheaper],
+            rules=self.rules,
+        )
+        after = mr.route(
+            mr.RouteRequest("general_reasoning", 1, cost_consideration_enabled=True),
+            catalog=[preferred, bystander_pricier],
+            rules=self.rules,
+        )
+        self.assertEqual(before.model, "winner")
+        self.assertEqual(after.model, "winner")
+        self.assertEqual(before.effort, after.effort)
+        self.assertEqual(before.confidence, after.confidence)
+        self.assertEqual(before.reason, after.reason)
+
     def test_quality_tolerance_rejects_a_large_capability_gap(self) -> None:
         strong = _fixture_model("astra", capability=5, cost=5, token_efficiency=5, latency=3, efforts=("high",))
         far_behind = _fixture_model("luna", capability=2, cost=1, token_efficiency=5, latency=5, efforts=("high",))

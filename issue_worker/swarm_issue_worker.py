@@ -2789,11 +2789,17 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             payload.setdefault("issue_number", self.issue.number)
         payload.setdefault("repository", self.config.github_repository)
         result = self.decision_engine().evaluate(decision_type, payload)
+        blocking_security = bool(payload.get("blocking_security"))
+        if result.decision_type in {
+            DecisionType.CYBER_FINDING.value,
+            DecisionType.UAT_FINDING.value,
+        }:
+            blocking_security = blocking_security or bool(payload.get("blocking"))
         action = swarm_policy_action(
             result,
             settings=self.config.jev,
             failed_tests=bool(payload.get("failed_tests")),
-            blocking_security=bool(payload.get("blocking_security")),
+            blocking_security=blocking_security,
             uat_required=bool(self.config.adversarial_uat_enabled),
             cyber_required=bool(self.config.adversarial_security_enabled),
             default=str(payload.get("default_action") or result.decision),
@@ -2914,6 +2920,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 "finding": str(finding.get("title") or finding.get("summary") or finding.get("id") or "")[:800],
                 "in_scope": in_scope,
                 "blocking": blocking,
+                "blocking_security": blocking and kind == DecisionType.CYBER_FINDING.value,
                 "severity": finding.get("severity") or "",
                 "default_action": default_action,
                 "security": kind == DecisionType.CYBER_FINDING.value,
@@ -5788,6 +5795,14 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             # than reported as a normal "Completed" (see issue-branch-delivery.md).
             self.finalize_needs_input(ai_output, delivery=(pr_url, branch, commit_sha))
             return
+        # Jev may assess completeness; Swarm still owns the delivery that already
+        # cleared tests and security gates. A low-confidence or incomplete signal
+        # is recorded and cannot independently reopen those gates.
+        self.evaluate_completion_gate(
+            failed_tests=False,
+            blocking_security=False,
+            default="COMPLETE",
+        )
         usage_at_start = self.read_state().get("usage_at_start")
         pending = {
             "issue_number": self.issue.number,

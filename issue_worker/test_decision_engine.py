@@ -159,6 +159,22 @@ class CompositeTests(unittest.TestCase):
             swarm_policy_action(cyber, settings=settings, blocking_security=True, default="FIX_NOW"),
             "FIX_NOW",
         )
+        high_conf_pass = DecisionResult(
+            decision_type="CYBER_FINDING",
+            decision="PASS",
+            confidence=0.99,
+            source="jev",
+            metadata={"security": True},
+        )
+        self.assertEqual(
+            swarm_policy_action(
+                high_conf_pass,
+                settings=settings,
+                blocking_security=True,
+                default="FIX_NOW",
+            ),
+            "FIX_NOW",
+        )
 
 
 class PersistenceAndReportTests(unittest.TestCase):

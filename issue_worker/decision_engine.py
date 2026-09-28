@@ -1066,6 +1066,14 @@ def swarm_policy_action(
             return CompletionVerdict.INCOMPLETE.value
         if recommended in {WorkflowAction.PASS.value, WorkflowAction.SKIP_UAT.value, WorkflowAction.SKIP_CYBER.value}:
             return WorkflowAction.FIX_NOW.value if blocking_security or failed_tests else WorkflowAction.RETRY.value
+    if kind == DecisionType.CYBER_FINDING.value and blocking_security:
+        # A blocking security finding cannot be accepted as PASS, even at high
+        # Jev confidence. Swarm rules keep the finding open.
+        if recommended in {WorkflowAction.PASS.value, WorkflowAction.SKIP_CYBER.value}:
+            return str(default or WorkflowAction.FIX_NOW.value)
+    if kind == DecisionType.UAT_FINDING.value and blocking_security:
+        if recommended in {WorkflowAction.PASS.value, WorkflowAction.SKIP_UAT.value}:
+            return str(default or WorkflowAction.FIX_NOW.value)
     if uat_required and recommended == WorkflowAction.SKIP_UAT.value:
         return WorkflowAction.RUN_UAT.value
     if cyber_required and recommended == WorkflowAction.SKIP_CYBER.value:

@@ -227,6 +227,67 @@ def sanitize_text(value: Any) -> str:
     return text
 
 
+# Nested analytics payloads must never keep raw prompts, CLI transcripts, or
+# credential-shaped keys. Matching is case-insensitive on the key name.
+_SENSITIVE_STRUCTURED_KEYS = frozenset(
+    {
+        "prompt",
+        "body",
+        "raw",
+        "raw_prompt",
+        "cli",
+        "cli_output",
+        "stdout",
+        "stderr",
+        "transcript",
+        "api_key",
+        "access_token",
+        "auth_token",
+        "password",
+        "secret",
+        "token",
+        "authorization",
+        "credentials",
+        "private_key",
+    }
+)
+_SENSITIVE_KEY_FRAGMENTS = (
+    "prompt",
+    "secret",
+    "password",
+    "api_key",
+    "credential",
+    "authorization",
+    "private_key",
+)
+
+
+def sanitize_structured(value: Any) -> Any:
+    """Drop sensitive keys and redact secrets in nested JSON-like values."""
+    if isinstance(value, Mapping):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key)
+            lowered = name.strip().lower().replace("-", "_")
+            if lowered in _SENSITIVE_STRUCTURED_KEYS or any(
+                fragment in lowered for fragment in _SENSITIVE_KEY_FRAGMENTS
+            ):
+                continue
+            cleaned[name] = sanitize_structured(item)
+        return cleaned
+    if isinstance(value, (list, tuple)):
+        return [sanitize_structured(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return sanitize_text(value)
+
+
+def _json_sanitized(value: Any) -> str:
+    return sanitize_text(json.dumps(sanitize_structured(value)))
+
+
 def sanitize_values(values: Iterable[Any]) -> list[str]:
     return [sanitize_text(value) for value in values]
 
@@ -1163,8 +1224,8 @@ class ExecutionHistoryRepository:
             sanitize_text(payload.get("input_fingerprint") or payload.get("inputFingerprint")),
             sanitize_text(payload.get("decision")),
             _optional_float(payload.get("confidence")),
-            json.dumps(scores),
-            json.dumps([sanitize_text(item) for item in list(reason_codes)[:24]]),
+            _json_sanitized(scores),
+            _json_sanitized([sanitize_text(item) for item in list(reason_codes)[:24]]),
             _optional_float(payload.get("latency_ms") or payload.get("latencyMs")),
             sanitize_text(payload.get("provider") or "jev") or "jev",
             sanitize_text(payload.get("model")),
@@ -1222,12 +1283,12 @@ class ExecutionHistoryRepository:
             sanitize_text(baseline.get("provider")),
             sanitize_text(baseline.get("model")),
             sanitize_text(baseline.get("effort")),
-            json.dumps(baseline.get("candidates") or []),
-            json.dumps(baseline.get("inputs") or {}),
+            _json_sanitized(baseline.get("candidates") or []),
+            _json_sanitized(baseline.get("inputs") or {}),
             _optional_float(jev.get("native_score") if jev else None),
             _optional_float(jev.get("normalized_score") if jev else None),
-            json.dumps((jev or {}).get("scores") or (jev or {}).get("component_scores") or {}),
-            json.dumps((jev or {}).get("reason_codes") or (jev or {}).get("reasonCodes") or []),
+            _json_sanitized((jev or {}).get("scores") or (jev or {}).get("component_scores") or {}),
+            _json_sanitized((jev or {}).get("reason_codes") or (jev or {}).get("reasonCodes") or []),
             _optional_float((jev or {}).get("confidence")),
             sanitize_text((jev or {}).get("model")),
             sanitize_text((jev or {}).get("version")),
@@ -1236,7 +1297,7 @@ class ExecutionHistoryRepository:
             sanitize_text(modified.get("provider")),
             sanitize_text(modified.get("model")),
             sanitize_text(modified.get("effort")),
-            json.dumps(modified.get("candidates") or []),
+            _json_sanitized(modified.get("candidates") or []),
             _optional_float(delta.get("absolute")),
             _optional_float(delta.get("percent")),
             1 if (delta.get("routing_changed") or payload.get("routing_changed")) else 0,
@@ -1373,7 +1434,7 @@ class ExecutionHistoryRepository:
                 "SUM(CASE WHEN c.jev_status = 'enabled' THEN 1 ELSE 0 END) AS enabled, "
                 "SUM(c.estimated_llm_calls_avoided) AS llm_calls_avoided, "
                 "SUM(c.estimated_tokens_avoided) AS tokens_avoided, "
-                "SUM(c.estimated_dollar_savings) AS dollar_savings, "
+                "SUM(CASE WHEN COALESCE(e.final_status, c.workflow_outcome) IN ('completed', 'accepted', 'delivered') THEN COALESCE(c.estimated_dollar_savings, 0) ELSE 0 END) AS dollar_savings, "
                 "SUM(CASE WHEN COALESCE(e.final_status, c.workflow_outcome) IN ('completed', 'accepted', 'delivered') THEN 1 ELSE 0 END) AS completed "
                 f"{join}{where}",
                 params,
