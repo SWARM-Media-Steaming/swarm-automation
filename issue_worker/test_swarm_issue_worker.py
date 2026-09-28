@@ -5706,6 +5706,69 @@ class WorkerTestCase(unittest.TestCase):
             }
         )
 
+    def test_a_priced_invocation_records_the_rate_it_was_priced_at(self) -> None:
+        # The link between #280's capture and #295's report: an estimate is
+        # only explainable later if the rate that produced it is stored with
+        # it, and a catalogued model must not silently come back unpriced.
+        self.worker.issue = IssueContext(295, "Title", "body", [], "https://example.invalid/295")
+        self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5", "high", "session-p")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = json.dumps({
+                "type": "result",
+                "result": "done",
+                "usage": {
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 100_000,
+                    "cache_read_input_tokens": 500_000,
+                    "cache_creation_input_tokens": 200_000,
+                },
+            })
+            self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.assertEqual(self.worker.run_ai("do the work"), 0)
+        event = self.worker.read_state()["token_usage_events"][0]
+        self.assertEqual(event["pricing_status"], "priced")
+        self.assertTrue(event["pricing_rate_id"])
+        self.assertTrue(event["pricing_version"])
+        self.assertTrue(event["pricing_source"])
+        self.assertIsNotNone(event["estimated_cost"])
+        self.assertEqual(event["input_rate_per_million"], 3.0)
+        self.assertEqual(event["output_rate_per_million"], 15.0)
+        # Anthropic's cache counters are additional to input_tokens and are
+        # billed at two different rates, so both halves have to survive.
+        self.assertEqual(event["cache_read_tokens"], 500_000)
+        self.assertEqual(event["cache_write_tokens"], 200_000)
+        self.assertEqual(event["cached_input_tokens"], 700_000)
+        # 1M fresh input @ $3 + 500k reads @ $0.30 + 200k writes @ $3.75
+        # + 100k output @ $15.
+        self.assertAlmostEqual(event["estimated_cost"], 3.0 + 0.15 + 0.75 + 1.5, places=6)
+
+    def test_an_uncatalogued_model_records_tokens_without_a_guessed_cost(self) -> None:
+        self.worker.issue = IssueContext(296, "Title", "body", [], "https://example.invalid/296")
+        self.worker.choice = ProviderChoice("Claude", "claude-unreleased-9", "high", "session-u")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(
+                input_tokens=1000, output_tokens=200
+            )
+            self.worker.ai_output_file.write_text("done\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude):
+            self.assertEqual(self.worker.run_ai("do the work"), 0)
+        event = self.worker.read_state()["token_usage_events"][0]
+        # Telemetry is kept in full; only the money is withheld.
+        self.assertEqual(event["input_tokens"], 1000)
+        self.assertEqual(event["output_tokens"], 200)
+        self.assertIsNone(event["estimated_cost"])
+        self.assertEqual(event["pricing_status"], "unknown_model")
+        self.assertEqual(event["pricing_rate_id"], "")
+
     def test_run_ai_records_primary_usage_for_the_initial_call(self) -> None:
         self.worker.issue = IssueContext(360, "Title", "body", [], "https://example.invalid/360")
         self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-1")

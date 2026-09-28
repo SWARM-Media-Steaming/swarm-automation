@@ -42,6 +42,23 @@
     promptGradesRequest: 0,
     promptGradesSearchTimer: null,
     feedbackTab: "grades",
+    // Usage & cost (Feedback's fourth tab). `filters` is the combinable
+    // filter set sent to the backend; `groupValue` is the aggregate row the
+    // invocation list is drilled into, null when it is showing everything.
+    // Filters survive moving between Feedback tabs for the session, which is
+    // what makes "View usage" from a grade or a router card useful.
+    usage: {
+      report: null,
+      filters: null,
+      groupBy: "issue",
+      sort: "cost",
+      direction: "desc",
+      groupOffset: 0,
+      detailOffset: 0,
+      groupValue: null,
+      request: 0,
+      searchTimer: null,
+    },
     repositoryTab: "source",
     // Feedback owns this filter. It never follows or changes activeRepoId.
     feedbackRepoFilter: [],
@@ -204,6 +221,10 @@
       html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Adversarial cybersecurity</strong> — after the implementation (and after Adversarial UAT when that is on too), a fresh security engineer attacks the change. Vulnerabilities it introduced are fixed and re-verified inside the issue; legitimate findings elsewhere become their own <code>adversarial-security</code> issues instead of widening this one. A review that could not run is reported as failed, never as a pass.</li><li><strong>Update Claude assets</strong> — asks the AI to update any Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository that the issue makes relevant.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
       links: [],
     },
+    "usage-cost": {
+      title: "Usage & cost",
+      html: "<p>Every AI invocation recorded locally since per-prompt token tracking was added (#280), explorable by model, issue, prompt grade, reasoning effort, provider, agent stage, prompt type, repository and date. Pick a <strong>Group by</strong> dimension, sort the aggregate table, then select a row to drill into the individual invocations behind it.</p><p><strong>Estimated cost</strong> is token-equivalent model pricing from a versioned, effective-dated catalog — it is not an invoice from your provider and not subscription-quota consumption. Each invocation stores the exact rate it was priced at, so correcting the catalog never changes a historical figure. Provider quota remaining stays on the Overview page.</p><p><strong>Reporting coverage</strong> says how much of the picture is real: <em>Complete</em> (provider totals recorded and priced), <em>Tokens only</em> (usage recorded but no price covers that model), <em>Partial</em> (some usage fields missing), <em>Unreported</em> (no authoritative usage returned), and <em>Failed</em>. A value the provider never reported shows as — rather than 0, and executions imported or run before #280 show as <strong>usage unavailable</strong>; GitHub comments are never scraped to fill them in.</p>",
+    },
     "execution-history": {
       title: "Execution history",
       html: "<p>Every AI issue execution across all repositories by default, newest first. The repository chips above the tabs independently filter all three reports; the repository dropdown in the header does not affect Feedback. The list loads ten at a time from the local database. Each row shows its repository, AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates over the filtered repositories.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see AI Configuration). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans every repository checked in the Feedback filter and adds a placeholder \"Imported\" entry for any issue with no execution history yet. It reports success or failure for each repository and never overwrites or duplicates a real execution.</p>",
@@ -339,6 +360,7 @@
     if (view === "feedback") {
       void refreshPromptGrades({ quiet: true });
       void refreshExecutionHistory({ quiet: true });
+      void refreshUsageReport({ quiet: true });
     }
     if (view === "ai") void refreshModelCalibration({ quiet: true });
     if (view === "knowledge") {
@@ -717,10 +739,13 @@
     state.feedbackRepoFilter = selected.length ? selected : allIds;
     state.executionHistoryOffset = 0;
     state.promptGradesOffset = 0;
+    state.usage.groupOffset = 0;
+    state.usage.detailOffset = 0;
     renderFeedbackRepoFilter();
     void persistFeedbackRepoFilter().catch((error) => showToast(errorText(error), "error"));
     void refreshPromptGrades({ quiet: true });
     void refreshExecutionHistory({ quiet: true });
+    void refreshUsageReport({ quiet: true });
   }
 
   function renderRepositorySelector() {
@@ -1427,7 +1452,23 @@
     head.append(titleRow, meta);
     const tagging = document.createElement("div");
     tagging.className = "execution-tagging";
-    [["AI tool", record.aiProvider], ["Model", record.model], ["Effort", record.effort], ["UAT rounds", window.SwarmAdversarialUat.roundCount(record)], ["Security review", window.SwarmAdversarialSecurity.reviewStatus(record)]].forEach(([label, value]) => {
+    const usage = record.tokenUsageSummary || null;
+    const usageApiRef = window.SwarmUsageCost;
+    [
+      ["AI tool", record.aiProvider],
+      ["Model", record.model],
+      ["Effort", record.effort],
+      ["UAT rounds", window.SwarmAdversarialUat.roundCount(record)],
+      ["Security review", window.SwarmAdversarialSecurity.reviewStatus(record)],
+      // Usage is absent, not zero, for an imported or pre-#280 execution:
+      // the tag has to say "unavailable" rather than show 0 invocations.
+      ["Invocations", usage ? usageApiRef.formatCount(usage.invocations) : "Usage unavailable"],
+      ["Total tokens", usage ? usageApiRef.formatTokens(usage.totalTokens) : "Usage unavailable"],
+      [
+        "Estimated cost",
+        usage ? usageApiRef.formatCost(usage.estimatedCost, "USD") : "Usage unavailable",
+      ],
+    ].forEach(([label, value]) => {
       const cell = document.createElement("div");
       cell.className = "execution-tag";
       const name = document.createElement("span");
@@ -1535,6 +1576,53 @@
           [routing.complexity_reason || "", routing.tier_explanation || ""].filter(Boolean).join(" "),
         );
       }
+    }
+
+    // Usage detail: the headline above expands into this execution's own
+    // invocation records, using the same table the Usage & cost tab draws
+    // so both reads are one report rather than two lookalikes.
+    const usageRecords = Array.isArray(record.tokenUsage) ? record.tokenUsage : [];
+    if (usage) {
+      const usageLinks = document.createElement("div");
+      usageLinks.className = "control-row";
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "text-button";
+      open.dataset.executionUsage = String(record.executionId || "");
+      open.textContent = "View usage ↗";
+      open.title = "Open Usage & cost filtered to this execution";
+      usageLinks.appendChild(open);
+      const coverageChips = usageApiRef.coverageChips(usage.coverage);
+      coverageChips.forEach((chip) => {
+        const badge = document.createElement("span");
+        badge.className = `suite-state ${chip.tone}`.trim();
+        badge.textContent = `${chip.label} ${usageApiRef.formatCount(chip.count)}`;
+        badge.title = chip.help;
+        usageLinks.appendChild(badge);
+      });
+      const priced = document.createElement("span");
+      priced.className = "availability";
+      priced.textContent = usageApiRef.pricedLabel(usage.pricedInvocations, usage.invocations);
+      usageLinks.appendChild(priced);
+      body.appendChild(usageLinks);
+      if (usageRecords.length) {
+        const details = document.createElement("details");
+        details.className = "raw-graph-panel";
+        const summaryLabel = document.createElement("summary");
+        summaryLabel.textContent = `Usage records (${usageApiRef.formatCount(usageRecords.length)})`;
+        const wrap = document.createElement("div");
+        wrap.className = "usage-table-wrap";
+        wrap.appendChild(buildUsageInvocationTable(usageRecords, {
+          caption: `AI invocations for issue #${record.issueNumber}`,
+        }));
+        details.append(summaryLabel, wrap);
+        body.appendChild(details);
+      }
+    } else {
+      addSummaryParagraph(
+        "Usage",
+        "Usage unavailable. Per-invocation telemetry is recorded for runs made locally after #280; imported and older executions have none, and GitHub comments are never scraped to fill them in.",
+      );
     }
 
     body.appendChild(rawTextPanel("Original GitHub issue", record.originalIssueBody));
@@ -1753,12 +1841,20 @@
       facts.appendChild(fact);
     });
     if (facts.children.length) body.appendChild(facts);
+    const links = document.createElement("div");
+    links.className = "control-row";
     if (record.issueUrl) {
-      const links = document.createElement("div");
-      links.className = "control-row";
       links.appendChild(externalLink(`Open issue #${record.issueNumber} ↗`, record.issueUrl, "text-button"));
-      body.appendChild(links);
     }
+    const usage = document.createElement("button");
+    usage.type = "button";
+    usage.className = "text-button";
+    usage.dataset.gradeUsageIssue = String(record.issueNumber);
+    usage.dataset.gradeUsageGrade = String(decision.prompt_grade || "");
+    usage.textContent = "View usage ↗";
+    usage.title = "Open Usage & cost filtered to this issue and grade";
+    links.appendChild(usage);
+    body.appendChild(links);
     item.appendChild(body);
     return item;
   }
@@ -1923,6 +2019,30 @@
       });
       shares.append(track, labels);
       detail.append(modelHeading, models, pickedHeading, shares);
+      if (row.interactive) {
+        // Cross-link into Usage & cost for this platform's own grading
+        // calls, so "who grades" and "what grading costs" are one click
+        // apart rather than two separately-filtered reports.
+        const usageLinks = document.createElement("div");
+        usageLinks.className = "control-row";
+        const link = document.createElement("button");
+        link.type = "button";
+        link.className = "text-button compact";
+        link.dataset.routerUsage = row.router;
+        link.textContent = "View usage ↗";
+        link.title = `Show ${providerLabel(row.router)} router usage and estimated cost`;
+        usageLinks.appendChild(link);
+        row.models.filter((entry) => entry.interactive).forEach((entry) => {
+          const modelLink = document.createElement("button");
+          modelLink.type = "button";
+          modelLink.className = "text-button compact";
+          modelLink.dataset.routerUsage = row.router;
+          modelLink.dataset.routerUsageModel = entry.model;
+          modelLink.textContent = `${window.SwarmPromptGrades.modelLabel(entry.model)} usage ↗`;
+          usageLinks.appendChild(modelLink);
+        });
+        detail.appendChild(usageLinks);
+      }
       element.append(platform, detail);
       box.appendChild(element);
     });
@@ -2022,7 +2142,537 @@
     records.forEach((record) => box.appendChild(buildPromptGradeItem(record)));
   }
 
-  // The Feedback view is a tablist over three reports rather than one long
+
+  // ---------------------------------------------------------------------
+  // Usage & cost (Feedback's fourth tab, issue #295)
+  //
+  // Everything shown here is aggregated in SQLite and arrives pre-summed —
+  // this code formats, it never totals. Two rules it must keep: money is
+  // always labelled "Estimated cost" and always carries how many of the
+  // invocations behind it could actually be priced, and a value the provider
+  // never reported is rendered as unavailable rather than as zero.
+  // ---------------------------------------------------------------------
+
+  function usageApi() {
+    return window.SwarmUsageCost;
+  }
+
+  function usageFilters() {
+    if (!state.usage.filters) state.usage.filters = usageApi().defaultFilters();
+    return state.usage.filters;
+  }
+
+  function usageReportView() {
+    const report = state.usage.report;
+    if (!report) {
+      return {
+        summary: null,
+        coverage: null,
+        groups: { rows: [], total: 0, offset: 0, limit: 25 },
+        invocations: { rows: [], total: 0, offset: 0, limit: 25 },
+        facets: null,
+        hasAnyUsage: false,
+        hasAnyActivity: false,
+      };
+    }
+    return {
+      summary: report.summary || null,
+      coverage: report.coverage || null,
+      groups: report.groups || { rows: [], total: 0, offset: 0, limit: 25 },
+      invocations: report.invocations || { rows: [], total: 0, offset: 0, limit: 25 },
+      facets: report.facets || null,
+      hasAnyUsage: Boolean(report.hasAnyUsage),
+      hasAnyActivity: Boolean(report.hasAnyActivity),
+    };
+  }
+
+  function usageCurrency() {
+    return (state.usage.report && state.usage.report.summary && state.usage.report.summary.currency) || "USD";
+  }
+
+  // One summary card. `detail` is the line under the value — for estimated
+  // cost that is the priced/total coverage the issue requires next to every
+  // monetary aggregate.
+  function usageSummaryCard(label, value, detail) {
+    const card = document.createElement("div");
+    card.className = "usage-card";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const strong = document.createElement("strong");
+    strong.textContent = value;
+    card.append(name, strong);
+    if (detail) {
+      const small = document.createElement("small");
+      small.textContent = detail;
+      card.appendChild(small);
+    }
+    return card;
+  }
+
+  function renderUsageSummary() {
+    const box = byId("usage-summary");
+    if (!box) return;
+    box.replaceChildren();
+    const api = usageApi();
+    const { summary, coverage } = usageReportView();
+    const invocations = Number(summary && summary.invocations) || 0;
+    const currency = usageCurrency();
+    box.appendChild(usageSummaryCard(
+      "Estimated cost",
+      api.formatCost(summary && summary.estimatedCost, currency),
+      api.pricedLabel(summary && summary.pricedInvocations, invocations),
+    ));
+    box.appendChild(usageSummaryCard(
+      "Total tokens",
+      api.formatTokens(summary && summary.totalTokens),
+      `${api.formatCount(summary && summary.totalReported)} of ${api.formatCount(invocations)} reported`,
+    ));
+    box.appendChild(usageSummaryCard(
+      "AI invocations",
+      api.formatCount(invocations),
+      `${api.formatCount(summary && summary.issues)} issue${(Number(summary && summary.issues) || 0) === 1 ? "" : "s"}`,
+    ));
+    box.appendChild(usageSummaryCard(
+      "Cached input tokens",
+      api.formatTokens(summary && summary.cachedTokens),
+      `${api.formatTokens(summary && summary.cacheReadTokens)} read · ${api.formatTokens(summary && summary.cacheWriteTokens)} written`,
+    ));
+    const chips = api.coverageChips(coverage);
+    const complete = chips.find((chip) => chip.key === "complete");
+    box.appendChild(usageSummaryCard(
+      "Reporting coverage",
+      `${api.formatCount(complete ? complete.count : 0)} of ${api.formatCount(invocations)}`,
+      "Complete: provider totals recorded and priced",
+    ));
+    const count = byId("usage-count");
+    if (count) {
+      count.textContent = `${api.formatCount(invocations)} invocation${invocations === 1 ? "" : "s"}`;
+    }
+  }
+
+  function renderUsageCoverage() {
+    const box = byId("usage-coverage");
+    if (!box) return;
+    box.replaceChildren();
+    const api = usageApi();
+    const chips = api.coverageChips(usageReportView().coverage);
+    if (!chips.length) return;
+    chips.forEach((chip) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `suite-state ${chip.tone} usage-coverage-chip`.trim();
+      button.dataset.usageCoverage = chip.key;
+      button.title = chip.help;
+      const active = usageFilters().coverage === chip.key;
+      button.classList.toggle("selected", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.textContent = `${chip.label} ${api.formatCount(chip.count)}`;
+      box.appendChild(button);
+    });
+  }
+
+  // Options are rebuilt from the report's facets, which the backend computes
+  // over the repository filter alone. That is deliberate: a dropdown that
+  // removes its own remaining options the moment one is chosen cannot be
+  // used to change the choice.
+  function fillUsageSelect(id, options, selected, emptyLabel) {
+    const select = byId(id);
+    if (!select) return;
+    select.replaceChildren();
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = emptyLabel;
+    select.appendChild(blank);
+    let matched = false;
+    options.forEach((option) => {
+      const element = document.createElement("option");
+      element.value = String(option.value);
+      element.textContent = option.label;
+      if (String(option.value) === String(selected || "")) matched = true;
+      select.appendChild(element);
+    });
+    // A filter carried in from another tab (or a value that has aged out of
+    // the facets) must stay selectable rather than silently resetting.
+    if (!matched && selected) {
+      const element = document.createElement("option");
+      element.value = String(selected);
+      element.textContent = String(selected);
+      select.appendChild(element);
+    }
+    select.value = String(selected || "");
+  }
+
+  function renderUsageFilters() {
+    const api = usageApi();
+    const filters = usageFilters();
+    const facets = usageReportView().facets || {};
+    const list = (key) => (Array.isArray(facets[key]) ? facets[key] : []);
+    const plain = (key) => list(key).map((entry) => ({
+      value: entry.value,
+      label: `${entry.value} (${api.formatCount(entry.count)})`,
+    }));
+    fillUsageSelect("usage-provider", plain("providers"), filters.provider, "Any provider");
+    fillUsageSelect("usage-model", plain("models"), filters.model, "Any model");
+    fillUsageSelect("usage-effort", plain("efforts"), filters.effort, "Any effort");
+    fillUsageSelect("usage-agent-type", plain("agentTypes"), filters.agentType, "Any agent");
+    fillUsageSelect("usage-prompt-type", plain("promptTypes"), filters.promptType, "Any prompt type");
+    fillUsageSelect("usage-grade", plain("grades"), filters.grade, "Any grade");
+    fillUsageSelect(
+      "usage-issue",
+      list("issues").map((entry) => ({
+        value: String(entry.number),
+        label: `#${entry.number} ${entry.title || ""}`.trim(),
+      })),
+      filters.issueNumber,
+      "Any issue",
+    );
+    fillUsageSelect(
+      "usage-coverage-filter",
+      api.COVERAGE.map((entry) => ({ value: entry.key, label: entry.label })),
+      filters.coverage,
+      "Any coverage",
+    );
+    const outcome = byId("usage-outcome");
+    if (outcome) outcome.value = filters.outcome || "all";
+    const start = byId("usage-start-date");
+    if (start) start.value = filters.startDate || "";
+    const end = byId("usage-end-date");
+    if (end) end.value = filters.endDate || "";
+    const search = byId("usage-search");
+    if (search && document.activeElement !== search) search.value = filters.search || "";
+    const groupBy = byId("usage-group-by");
+    if (groupBy && groupBy.options.length !== api.USAGE_GROUPS.length) {
+      groupBy.replaceChildren();
+      api.USAGE_GROUPS.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.value;
+        option.textContent = entry.label;
+        groupBy.appendChild(option);
+      });
+    }
+    if (groupBy) groupBy.value = state.usage.groupBy;
+    const note = byId("usage-filter-note");
+    if (note) {
+      note.textContent = filters.executionId ? `Scoped to one execution` : "";
+    }
+    const clear = byId("usage-clear-filters");
+    if (clear) clear.disabled = !api.hasActiveFilters(filters);
+  }
+
+  function renderUsageGroups() {
+    const box = byId("usage-groups");
+    if (!box) return;
+    box.replaceChildren();
+    const api = usageApi();
+    const view = usageReportView();
+    const page = view.groups;
+    const rows = Array.isArray(page.rows) ? page.rows : [];
+    if (!rows.length) {
+      box.appendChild(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: api.emptyStateMessage({
+          hasAnyUsage: view.hasAnyUsage,
+          hasAnyActivity: view.hasAnyActivity,
+          filtered: api.hasActiveFilters(usageFilters()),
+        }),
+      }));
+      renderUsagePager("groups", page);
+      return;
+    }
+    const table = document.createElement("table");
+    table.className = "usage-table";
+    const caption = document.createElement("caption");
+    caption.className = "sr-only";
+    caption.textContent = `Usage totals grouped by ${api.groupLabel(state.usage.groupBy).toLowerCase()}`;
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    api.GROUP_COLUMNS.forEach((column) => {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      if (column.numeric) cell.className = "numeric";
+      if (!column.sort) {
+        cell.textContent = column.label;
+        headRow.appendChild(cell);
+        return;
+      }
+      const active = state.usage.sort === column.sort;
+      cell.setAttribute("aria-sort", active ? (state.usage.direction === "asc" ? "ascending" : "descending") : "none");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "usage-sort";
+      button.dataset.usageSort = column.sort;
+      button.textContent = active
+        ? `${column.label} ${state.usage.direction === "asc" ? "▲" : "▼"}`
+        : column.label;
+      cell.appendChild(button);
+      headRow.appendChild(cell);
+    });
+    head.appendChild(headRow);
+    const body = document.createElement("tbody");
+    rows.forEach((row) => {
+      const tr = document.createElement("tr");
+      tr.className = "usage-row";
+      if (state.usage.groupValue === row.group) tr.classList.add("selected");
+      const label = document.createElement("td");
+      const select = document.createElement("button");
+      select.type = "button";
+      select.className = "text-button usage-drill";
+      select.dataset.usageGroup = row.group;
+      select.textContent = api.groupRowLabel(row, state.usage.groupBy);
+      select.title = "Show the individual invocations behind this row";
+      label.appendChild(select);
+      if (state.usage.groupBy === "issue" && row.issueUrl) {
+        label.appendChild(document.createTextNode(" "));
+        label.appendChild(externalLink("↗", row.issueUrl, "text-button compact"));
+      }
+      tr.appendChild(label);
+      [
+        api.formatCount(row.issues),
+        api.formatCount(row.invocations),
+        api.formatTokens(row.inputTokens),
+        api.formatTokens(row.cachedTokens),
+        api.formatTokens(row.reasoningTokens),
+        api.formatTokens(row.outputTokens),
+        api.formatTokens(row.totalTokens),
+      ].forEach((value) => {
+        const cell = document.createElement("td");
+        cell.className = "numeric";
+        cell.textContent = value;
+        tr.appendChild(cell);
+      });
+      const cost = document.createElement("td");
+      cost.className = "numeric";
+      const costValue = document.createElement("strong");
+      costValue.textContent = api.formatCost(row.estimatedCost, usageCurrency());
+      const priced = document.createElement("small");
+      priced.textContent = api.pricedLabel(row.pricedInvocations, row.invocations);
+      cost.append(costValue, priced);
+      tr.appendChild(cost);
+      const coverage = document.createElement("td");
+      const dominant = api.dominantCoverage(row.coverage);
+      const badge = document.createElement("span");
+      badge.className = `suite-state ${api.coverageTone(dominant)}`.trim();
+      badge.textContent = api.coverageLabel(dominant) || "—";
+      coverage.appendChild(badge);
+      tr.appendChild(coverage);
+      body.appendChild(tr);
+    });
+    table.append(caption, head, body);
+    box.appendChild(table);
+    renderUsagePager("groups", page);
+  }
+
+  function renderUsageDetail() {
+    const box = byId("usage-detail");
+    if (!box) return;
+    box.replaceChildren();
+    const api = usageApi();
+    const view = usageReportView();
+    const page = view.invocations;
+    const rows = Array.isArray(page.rows) ? page.rows : [];
+    const heading = byId("usage-detail-heading");
+    if (heading) {
+      heading.textContent = state.usage.groupValue
+        ? `Invocations in ${state.usage.groupValue}`
+        : "Every recorded invocation";
+    }
+    const clear = byId("usage-clear-drilldown");
+    if (clear) clear.classList.toggle("hidden", !state.usage.groupValue);
+    if (!rows.length) {
+      box.appendChild(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: api.emptyStateMessage({
+          hasAnyUsage: view.hasAnyUsage,
+          hasAnyActivity: view.hasAnyActivity,
+          filtered: api.hasActiveFilters(usageFilters()) || Boolean(state.usage.groupValue),
+        }),
+      }));
+      renderUsagePager("detail", page);
+      return;
+    }
+    box.appendChild(buildUsageInvocationTable(rows, {
+      caption: "Individual AI invocations",
+      showIssue: true,
+    }));
+    renderUsagePager("detail", page);
+  }
+
+  // Shared by the Usage & cost drill-down and the expandable usage detail on
+  // an Execution History card, so both read identically rather than being two
+  // tables that happen to show the same columns.
+  function buildUsageInvocationTable(rows, { caption = "AI invocations", showIssue = false } = {}) {
+    const api = usageApi();
+    const table = document.createElement("table");
+    table.className = "usage-table";
+    const captionElement = document.createElement("caption");
+    captionElement.className = "sr-only";
+    captionElement.textContent = caption;
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    const columns = showIssue
+      ? [{ key: "issue", label: "Issue" }, ...api.INVOCATION_COLUMNS]
+      : api.INVOCATION_COLUMNS;
+    columns.forEach((column) => {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      if (column.numeric) cell.className = "numeric";
+      cell.textContent = column.label;
+      headRow.appendChild(cell);
+    });
+    head.appendChild(headRow);
+    const body = document.createElement("tbody");
+    rows.forEach((row) => {
+      const tr = document.createElement("tr");
+      if (showIssue) {
+        const issue = document.createElement("td");
+        if (row.issueUrl) {
+          issue.appendChild(externalLink(`#${row.issueNumber}`, row.issueUrl, "text-button"));
+        } else {
+          issue.textContent = row.issueNumber ? `#${row.issueNumber}` : "—";
+        }
+        if (row.executionId) {
+          const link = document.createElement("button");
+          link.type = "button";
+          link.className = "text-button compact";
+          link.dataset.usageExecution = row.executionId;
+          link.textContent = "History";
+          link.title = "Open this invocation's execution in Execution history";
+          issue.append(document.createTextNode(" "), link);
+        }
+        tr.appendChild(issue);
+      }
+      const text = (value) => {
+        const cell = document.createElement("td");
+        cell.textContent = value || "—";
+        return cell;
+      };
+      const numeric = (value) => {
+        const cell = document.createElement("td");
+        cell.className = "numeric";
+        cell.textContent = value;
+        return cell;
+      };
+      tr.appendChild(text(row.agentType));
+      tr.appendChild(text([row.provider, row.model].filter(Boolean).join(" / ")));
+      tr.appendChild(text(row.promptType));
+      tr.appendChild(text(row.reasoningEffort));
+      tr.appendChild(numeric(api.formatCount(row.attemptNumber)));
+      tr.appendChild(numeric(api.formatTokens(row.inputTokens)));
+      tr.appendChild(numeric(api.formatTokens(row.cachedInputTokens)));
+      tr.appendChild(numeric(api.formatTokens(row.reasoningTokens)));
+      tr.appendChild(numeric(api.formatTokens(row.outputTokens)));
+      tr.appendChild(numeric(api.formatTokens(row.totalTokens)));
+      const cost = numeric(api.formatCost(row.estimatedCost, row.currency || "USD"));
+      // The stored pricing provenance, so an estimate can always be
+      // explained — and an unpriced row says why rather than looking free.
+      cost.title = row.pricingRateId
+        ? `Rate ${row.pricingRateId} (catalog ${row.pricingVersion || "unknown"})`
+        : `Unpriced: ${row.pricingStatus || "no matching price"}`;
+      tr.appendChild(cost);
+      tr.appendChild(numeric(api.formatDurationMs(row.durationMs)));
+      const result = document.createElement("td");
+      const badge = document.createElement("span");
+      badge.className = `suite-state ${api.coverageTone(row.coverage)}`.trim();
+      badge.textContent = api.coverageLabel(row.coverage);
+      badge.title = row.errorType || api.coverageLabel(row.coverage);
+      result.appendChild(badge);
+      tr.appendChild(result);
+      body.appendChild(tr);
+    });
+    table.append(captionElement, head, body);
+    return table;
+  }
+
+  function renderUsagePager(kind, page) {
+    const pager = byId(`usage-${kind}-pager`);
+    if (!pager) return;
+    const total = Number(page.total) || 0;
+    const limit = Number(page.limit) || 25;
+    const offset = Number(page.offset) || 0;
+    const shown = Array.isArray(page.rows) ? page.rows.length : 0;
+    pager.classList.toggle("hidden", total <= limit);
+    const label = byId(`usage-${kind}-page-label`);
+    if (label) {
+      const pageCount = Math.max(1, Math.ceil(total / limit));
+      const pageNumber = Math.floor(offset / limit) + 1;
+      label.textContent = `Page ${pageNumber} of ${pageCount}`;
+    }
+    const prev = byId(`usage-${kind}-prev`);
+    const next = byId(`usage-${kind}-next`);
+    if (prev) prev.disabled = offset <= 0;
+    if (next) next.disabled = offset + shown >= total;
+  }
+
+  function renderUsageReport() {
+    renderUsageSummary();
+    renderUsageCoverage();
+    renderUsageFilters();
+    renderUsageGroups();
+    renderUsageDetail();
+  }
+
+  async function refreshUsageReport({ quiet = false } = {}) {
+    const repoIds = feedbackRepoIdsForQuery();
+    const filterSignature = feedbackRepoFilterSignature();
+    const requestId = state.usage.request + 1;
+    state.usage.request = requestId;
+    if (!feedbackRepositories().length) {
+      state.usage.report = null;
+      renderUsageReport();
+      return;
+    }
+    const filters = usageFilters();
+    try {
+      const report = await invoke("get_usage_report_background", {
+        repoIds,
+        query: {
+          ...filters,
+          groupBy: state.usage.groupBy,
+          sort: state.usage.sort,
+          direction: state.usage.direction,
+          groupOffset: Math.max(0, Number(state.usage.groupOffset) || 0),
+          detailOffset: Math.max(0, Number(state.usage.detailOffset) || 0),
+          groupValue: state.usage.groupValue,
+        },
+      });
+      if (requestId !== state.usage.request || filterSignature !== feedbackRepoFilterSignature()) return;
+      state.usage.report = report;
+      state.usage.groupOffset = Number(report?.groups?.offset) || 0;
+      state.usage.detailOffset = Number(report?.invocations?.offset) || 0;
+      renderUsageReport();
+    } catch (error) {
+      if (requestId !== state.usage.request) return;
+      if (!quiet) showToast(errorText(error), "error");
+    }
+  }
+
+  // Every cross-link into this tab goes through here: apply a filter set,
+  // reset paging and any drill-down, switch to the tab, reload. Prompt
+  // Grades, Router Activity and Execution History all call it rather than
+  // each poking at usage state directly.
+  function openUsageWithFilters(filters, { groupBy = "" } = {}) {
+    state.usage.filters = usageApi().normalizeFilters(filters);
+    state.usage.groupValue = null;
+    state.usage.groupOffset = 0;
+    state.usage.detailOffset = 0;
+    if (groupBy) state.usage.groupBy = usageApi().normalizeGroupBy(groupBy);
+    // showFeedbackTab redraws the panel from the filters just applied; the
+    // refresh below replaces its data with the newly-filtered query.
+    showFeedbackTab("usage");
+    void refreshUsageReport({ quiet: true });
+  }
+
+  function setUsageFilter(key, value) {
+    const filters = usageFilters();
+    if (!usageApi().FILTER_KEYS.includes(key)) return;
+    filters[key] = String(value ?? "");
+    state.usage.groupOffset = 0;
+    state.usage.detailOffset = 0;
+    state.usage.groupValue = null;
+    void refreshUsageReport({ quiet: true });
+  }
+
+  // The Feedback view is a tablist over four reports rather than one long
   // stack. Same shape as the view-switcher: a button per panel, one panel
   // visible at a time, no route of its own.
   function showFeedbackTab(tab, { focus = false } = {}) {
@@ -2041,6 +2691,13 @@
       panel.classList.toggle("active", active);
       panel.hidden = !active;
     });
+    // Usage & cost is a separate query from the other three reports, so it
+    // is fetched when the tab is first opened rather than on every Feedback
+    // visit. Its filters persist for the session once loaded.
+    if (state.feedbackTab === "usage") {
+      renderUsageReport();
+      if (!state.usage.report) void refreshUsageReport({ quiet: true });
+    }
   }
 
   // The Repository view is a tablist over repo-specific setting groups
@@ -3607,6 +4264,112 @@
       else selected.delete(input.dataset.feedbackRepo);
       selectFeedbackRepositories([...selected]);
     });
+    byId("prompt-grades-list").addEventListener("click", (event) => {
+      const link = event.target.closest("[data-grade-usage-issue]");
+      if (!link) return;
+      openUsageWithFilters(
+        window.SwarmUsageCost.filtersForIssue(link.dataset.gradeUsageIssue, link.dataset.gradeUsageGrade),
+        { groupBy: "agent" },
+      );
+    });
+    byId("execution-history-list").addEventListener("click", (event) => {
+      const link = event.target.closest("[data-execution-usage]");
+      if (!link) return;
+      openUsageWithFilters(
+        window.SwarmUsageCost.filtersForExecution(link.dataset.executionUsage),
+        { groupBy: "agent" },
+      );
+    });
+
+    const usagePanel = byId("feedback-panel-usage");
+    if (usagePanel) {
+      usagePanel.addEventListener("change", (event) => {
+        const input = event.target.closest("[data-usage-filter]");
+        if (input) {
+          setUsageFilter(input.dataset.usageFilter, input.value);
+          return;
+        }
+        if (event.target.id === "usage-group-by") {
+          state.usage.groupBy = window.SwarmUsageCost.normalizeGroupBy(event.target.value);
+          // A selection made under one grouping means nothing under another.
+          state.usage.groupValue = null;
+          state.usage.groupOffset = 0;
+          state.usage.detailOffset = 0;
+          void refreshUsageReport({ quiet: true });
+        }
+      });
+      // The search box debounces like every other Feedback search rather
+      // than re-querying SQLite on each keystroke.
+      usagePanel.addEventListener("input", (event) => {
+        if (event.target.id !== "usage-search") return;
+        const value = event.target.value;
+        window.clearTimeout(state.usage.searchTimer);
+        state.usage.searchTimer = window.setTimeout(() => setUsageFilter("search", value), 250);
+      });
+      usagePanel.addEventListener("click", (event) => {
+        const sort = event.target.closest("[data-usage-sort]");
+        if (sort) {
+          const next = window.SwarmUsageCost.nextSort(
+            state.usage.sort,
+            state.usage.direction,
+            sort.dataset.usageSort,
+          );
+          state.usage.sort = next.sort;
+          state.usage.direction = next.direction;
+          state.usage.groupOffset = 0;
+          void refreshUsageReport({ quiet: true });
+          return;
+        }
+        const drill = event.target.closest("[data-usage-group]");
+        if (drill) {
+          const value = drill.dataset.usageGroup;
+          // Clicking the selected row again clears the drill-down.
+          state.usage.groupValue = state.usage.groupValue === value ? null : value;
+          state.usage.detailOffset = 0;
+          void refreshUsageReport({ quiet: true });
+          return;
+        }
+        const coverage = event.target.closest("[data-usage-coverage]");
+        if (coverage) {
+          const key = coverage.dataset.usageCoverage;
+          setUsageFilter("coverage", usageFilters().coverage === key ? "" : key);
+          return;
+        }
+        const execution = event.target.closest("[data-usage-execution]");
+        if (execution) {
+          state.executionHistorySearch = "";
+          state.executionHistoryOffset = 0;
+          showFeedbackTab("history");
+          void refreshExecutionHistory({ quiet: true });
+          return;
+        }
+        if (event.target.id === "usage-clear-filters") {
+          state.usage.filters = window.SwarmUsageCost.defaultFilters();
+          state.usage.groupValue = null;
+          state.usage.groupOffset = 0;
+          state.usage.detailOffset = 0;
+          void refreshUsageReport({ quiet: true });
+          return;
+        }
+        if (event.target.id === "usage-clear-drilldown") {
+          state.usage.groupValue = null;
+          state.usage.detailOffset = 0;
+          void refreshUsageReport({ quiet: true });
+        }
+      });
+    }
+    [["groups", "groupOffset"], ["detail", "detailOffset"]].forEach(([kind, key]) => {
+      const prev = byId(`usage-${kind}-prev`);
+      const next = byId(`usage-${kind}-next`);
+      const step = (direction) => {
+        const page = kind === "groups" ? usageReportView().groups : usageReportView().invocations;
+        const limit = Number(page.limit) || 25;
+        state.usage[key] = Math.max(0, (Number(state.usage[key]) || 0) + direction * limit);
+        void refreshUsageReport({ quiet: true });
+      };
+      if (prev) prev.addEventListener("click", () => step(-1));
+      if (next) next.addEventListener("click", () => step(1));
+    });
     const feedbackTabs = Array.from(document.querySelectorAll("[data-feedback-tab]"));
     feedbackTabs.forEach((button) => {
       button.addEventListener("click", () => showFeedbackTab(button.dataset.feedbackTab));
@@ -3640,6 +4403,17 @@
     });
     showRepositoryTab(state.repositoryTab);
     byId("prompt-grades-router-matrix").addEventListener("click", (event) => {
+      const usageLink = event.target.closest("[data-router-usage]");
+      if (usageLink) {
+        openUsageWithFilters(
+          window.SwarmUsageCost.filtersForRouterSelection(
+            usageLink.dataset.routerUsage,
+            usageLink.dataset.routerUsageModel || "",
+          ),
+          { groupBy: usageLink.dataset.routerUsageModel ? "issue" : "model" },
+        );
+        return;
+      }
       const model = event.target.closest("[data-router-model]");
       if (model) {
         const page = promptGradesView();

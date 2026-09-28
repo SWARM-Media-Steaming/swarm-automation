@@ -58,7 +58,7 @@ from token_usage import (
     AgentType,
     PromptType,
     UsageRecord,
-    estimate_cost,
+    estimate_cost_detailed,
     format_usage_log_line,
     normalize_usage,
     render_ai_usage_markdown,
@@ -3839,7 +3839,15 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         affect whether the underlying AI work is considered to have
         succeeded (item 15/17)."""
         try:
-            cost = estimate_cost(model, usage) if usage is not None else None
+            # Priced against the catalog entry effective at this call's own
+            # start time, not at read time, and stored with the rate it used
+            # so the estimate stays reproducible after the catalog moves on
+            # (issue #295). A model the catalog does not cover comes back
+            # unpriced; the token counts are recorded either way.
+            estimate = estimate_cost_detailed(
+                model, usage, provider=provider_key, at=started_at
+            )
+            cost = estimate.cost
             completed_at = iso_timestamp()
             duration_ms: int | None
             try:
@@ -3869,8 +3877,18 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 reasoning_tokens=usage.reasoning_tokens if usage else None,
                 cached_input_tokens=usage.cached_input_tokens if usage else None,
                 total_tokens=usage.total_tokens if usage else None,
+                cache_read_tokens=usage.cache_read_tokens if usage else None,
+                cache_write_tokens=usage.cache_write_tokens if usage else None,
                 estimated_cost=cost,
-                currency=DEFAULT_CURRENCY,
+                currency=estimate.currency or DEFAULT_CURRENCY,
+                pricing_status=estimate.status,
+                pricing_version=estimate.catalog_version,
+                pricing_rate_id=estimate.rate_id,
+                pricing_source=estimate.source,
+                input_rate_per_million=estimate.input_rate_per_million,
+                cached_input_rate_per_million=estimate.cached_input_rate_per_million,
+                cache_write_rate_per_million=estimate.cache_write_rate_per_million,
+                output_rate_per_million=estimate.output_rate_per_million,
                 started_at=started_at,
                 completed_at=completed_at,
                 duration_ms=duration_ms,

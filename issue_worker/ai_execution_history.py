@@ -19,8 +19,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+import usage_report
 
-SCHEMA_VERSION = 6
+
+SCHEMA_VERSION = 7
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -197,6 +199,42 @@ _TOKEN_USAGE_COLUMNS = (
     "duration_ms",
     "success",
     "error_type",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "pricing_status",
+    "pricing_version",
+    "pricing_rate_id",
+    "pricing_source",
+    "input_rate_per_million",
+    "cached_input_rate_per_million",
+    "cache_write_rate_per_million",
+    "output_rate_per_million",
+)
+
+# Migration 7 columns on ``ai_token_usage`` (issue #295). Two groups:
+#
+# * ``cache_read_tokens``/``cache_write_tokens`` split the single
+#   ``cached_input_tokens`` figure, because a cache write is a metered
+#   operation billed at a premium while a cache read is the discount — a
+#   report that cannot tell them apart cannot price them.
+# * The pricing-provenance columns record *which* catalog entry produced
+#   ``estimated_cost`` and at what rates. They exist so a stored estimate can
+#   be explained and reproduced later, and so correcting the catalog never
+#   silently restates history: nothing recomputes a persisted estimate.
+#   ``pricing_status`` says why a row has no cost (unknown model, ambiguous
+#   alias, no effective rate) rather than leaving "unpriced" and "free"
+#   indistinguishable.
+_MIGRATION_7_COLUMNS = (
+    ("cache_read_tokens", "INTEGER"),
+    ("cache_write_tokens", "INTEGER"),
+    ("pricing_status", "TEXT NOT NULL DEFAULT ''"),
+    ("pricing_version", "TEXT NOT NULL DEFAULT ''"),
+    ("pricing_rate_id", "TEXT NOT NULL DEFAULT ''"),
+    ("pricing_source", "TEXT NOT NULL DEFAULT ''"),
+    ("input_rate_per_million", "REAL"),
+    ("cached_input_rate_per_million", "REAL"),
+    ("cache_write_rate_per_million", "REAL"),
+    ("output_rate_per_million", "REAL"),
 )
 
 _SECRET_PATTERNS = (
@@ -586,6 +624,28 @@ class ExecutionHistoryRepository:
                 database.execute(
                     "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                     (6,),
+                )
+            if 7 not in applied and 7 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(ai_token_usage)")
+                }
+                for name, definition in _MIGRATION_7_COLUMNS:
+                    if name not in columns:
+                        database.execute(
+                            f"ALTER TABLE ai_token_usage ADD COLUMN {name} {definition}"
+                        )
+                # The Usage & cost report filters and buckets by the
+                # invocation's own activity time, never by the later batch
+                # ``created_at``, so that is the column that needs the index.
+                database.execute(
+                    "CREATE INDEX IF NOT EXISTS ai_token_usage_started_idx "
+                    "ON ai_token_usage(started_at)"
+                )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (7,),
                 )
 
     def create(self, start: ExecutionStart, started_at: str) -> str:
@@ -1015,11 +1075,16 @@ class ExecutionHistoryRepository:
                     values.append(int(issue_number or 0))
                 elif column in {
                     "attempt_number", "input_tokens", "output_tokens", "reasoning_tokens",
-                    "cached_input_tokens", "total_tokens", "duration_ms",
+                    "cached_input_tokens", "cache_read_tokens", "cache_write_tokens",
+                    "total_tokens", "duration_ms",
                 }:
                     raw_value = event.get(column)
                     values.append(None if raw_value is None else int(raw_value))
-                elif column == "estimated_cost":
+                elif column in {
+                    "estimated_cost", "input_rate_per_million",
+                    "cached_input_rate_per_million", "cache_write_rate_per_million",
+                    "output_rate_per_million",
+                }:
                     raw_value = event.get(column)
                     values.append(None if raw_value is None else float(raw_value))
                 elif column == "success":
@@ -1105,6 +1170,45 @@ class ExecutionHistoryRepository:
             "totalTokens": int(row[5] or 0),
             "estimatedCost": round(float(row[6] or 0.0), 6),
         }
+
+    def usage_report(
+        self,
+        repositories: Sequence[str] | str | None = None,
+        **options: Any,
+    ) -> dict[str, Any]:
+        """One Usage & cost payload (issue #295).
+
+        Read-only, filtered, grouped and paginated entirely in SQLite — see
+        ``usage_report`` for why none of that may move into the desktop. The
+        filter keyword arguments are the ones ``UsageFilters`` accepts; the
+        grouping/paging ones are ``build_usage_report``'s.
+        """
+        filter_fields = {
+            "start_date", "end_date", "issue_number", "grade", "provider", "model",
+            "effort", "agent_type", "prompt_type", "outcome", "coverage",
+            "execution_id", "search",
+        }
+        filters = usage_report.UsageFilters(
+            repositories,
+            **{key: value for key, value in options.items() if key in filter_fields},
+        )
+        query = {key: value for key, value in options.items() if key not in filter_fields}
+        with self.connect() as database:
+            return usage_report.build_usage_report(database, filters, **query)
+
+    def usage_summaries_for_executions(
+        self, execution_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Per-execution usage headline for the Execution History cards."""
+        with self.connect() as database:
+            return usage_report.usage_summaries_for_executions(database, execution_ids)
+
+    def usage_records_for_executions(
+        self, execution_ids: Sequence[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Every invocation of the given executions, for card expansion."""
+        with self.connect() as database:
+            return usage_report.usage_records_for_executions(database, execution_ids)
 
     def page_for_repository(
         self,
@@ -1445,6 +1549,26 @@ def attach_adversarial_rounds(
     return records
 
 
+def attach_token_usage(
+    repository: "ExecutionHistoryRepository", records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Give each record its usage headline and its individual invocations.
+
+    Two queries for the whole page rather than two per card. An execution
+    with no telemetry gets ``token_usage_summary = None`` rather than a row
+    of zeroes: an imported issue, or a run from before #280, has *no* usage
+    information, which the card must show as unavailable instead of free.
+    """
+    ids = [str(record.get("execution_id") or "") for record in records]
+    summaries = repository.usage_summaries_for_executions(ids)
+    invocations = repository.usage_records_for_executions(ids)
+    for record in records:
+        execution_id = str(record.get("execution_id") or "")
+        record["token_usage_summary"] = summaries.get(execution_id)
+        record["token_usage"] = invocations.get(execution_id, [])
+    return records
+
+
 def fetch_github_issues(gh_bin: str, repository: str) -> list[dict[str, Any]]:
     """Every open and closed issue (never pull requests — `gh issue list`
     already excludes those) for ``repository``, via the operator's own `gh`
@@ -1646,6 +1770,20 @@ def main(argv: list[str] | None = None) -> int:
     `routerMatrix` still covers every platform in the search so another can be
     chosen.
 
+    `--usage` instead prints the Usage & cost report: filtered summary totals,
+    reporting-coverage counts, one page of aggregate rows for `--group-by`, one
+    page of individual invocation records, and the stable filter facets. Every
+    filter (`--start-date`/`--end-date`, `--issue-number`, `--grade`,
+    `--provider`, `--model`, `--effort`, `--agent-type`, `--prompt-type`,
+    `--outcome`, `--coverage`, `--execution-id`, `--search`) combines, and all
+    of the filtering, grouping and paging happens in SQLite — the desktop never
+    receives the usage table itself. Dates match the invocation's own activity
+    timestamp, never the later batch-persistence time.
+
+    `--validate-pricing` instead validates the versioned pricing catalog and
+    exits non-zero if any rate is malformed, negative, or covered by two
+    overlapping effective windows.
+
     `--import-from-github` instead scans that repository's full GitHub issue
     backlog (open and closed) and adds a synthetic `imported` row for any
     issue with no existing execution history row, printing a JSON summary
@@ -1653,7 +1791,11 @@ def main(argv: list[str] | None = None) -> int:
     the Feedback view's "Import from GitHub" action.
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", required=True, help="Path to the SQLite database file.")
+    parser.add_argument(
+        "--db",
+        default="",
+        help="Path to the SQLite database file. Required except with --validate-pricing.",
+    )
     parser.add_argument(
         "--repository",
         action="append",
@@ -1712,7 +1854,62 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Case-insensitive match on issue number, title, provider, model, branch, or status.",
     )
+    parser.add_argument(
+        "--usage",
+        action="store_true",
+        help="Print the Usage & cost report (summary, coverage, grouped rows, invocations).",
+    )
+    parser.add_argument(
+        "--group-by",
+        default="issue",
+        choices=usage_report.GROUP_BY_KEYS,
+        help="With --usage, the aggregate table's grouping dimension.",
+    )
+    parser.add_argument("--usage-sort", default="cost", choices=usage_report.SORT_KEYS)
+    parser.add_argument("--usage-direction", default="desc", choices=("asc", "desc"))
+    parser.add_argument("--group-offset", type=int, default=0)
+    parser.add_argument("--detail-offset", type=int, default=0)
+    parser.add_argument(
+        "--group-value",
+        default=None,
+        help="With --usage, drill the invocation list down to one aggregate row.",
+    )
+    parser.add_argument("--start-date", default="", help="With --usage, earliest activity date (YYYY-MM-DD).")
+    parser.add_argument("--end-date", default="", help="With --usage, latest activity date (YYYY-MM-DD).")
+    parser.add_argument("--issue-number", default="", help="With --usage, one issue number.")
+    parser.add_argument("--provider", default="", help="With --usage, one provider.")
+    parser.add_argument("--model", default="", help="With --usage, one model.")
+    parser.add_argument("--effort", default="", help="With --usage, one reasoning effort.")
+    parser.add_argument("--agent-type", default="", help="With --usage, one agent type/stage.")
+    parser.add_argument("--prompt-type", default="", help="With --usage, one prompt type.")
+    parser.add_argument(
+        "--outcome", default="all", choices=("all", "success", "failure"),
+        help="With --usage, keep only successful or only failed invocations.",
+    )
+    parser.add_argument(
+        "--coverage", default="", help="With --usage, one reporting-coverage status.",
+    )
+    parser.add_argument(
+        "--execution-id", default="", help="With --usage, one execution's invocations.",
+    )
+    parser.add_argument(
+        "--validate-pricing",
+        action="store_true",
+        help="Validate the pricing catalog and exit; non-zero if anything is wrong.",
+    )
     args = parser.parse_args(argv)
+
+    if args.validate_pricing:
+        import model_pricing
+
+        problems = model_pricing.validate_catalog()
+        json.dump(
+            {"summary": model_pricing.catalog_summary(), "problems": problems}, sys.stdout
+        )
+        return 1 if problems else 0
+
+    if not args.db:
+        parser.error("--db is required")
 
     database_path = Path(args.db).expanduser()
     repository_names = [sanitize_text(value) for value in args.repository if value.strip()]
@@ -1730,6 +1927,38 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": str(error)}))
             return 1
         json.dump(import_missing_issues(repository, repository_name, issues), sys.stdout)
+        return 0
+
+    if args.usage:
+        if not database_path.is_file():
+            json.dump(usage_report.empty_report(args.group_by), sys.stdout)
+            return 0
+        json.dump(
+            ExecutionHistoryRepository(database_path).usage_report(
+                repository_names,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                issue_number=args.issue_number,
+                grade=args.grade,
+                provider=args.provider,
+                model=args.model,
+                effort=args.effort,
+                agent_type=args.agent_type,
+                prompt_type=args.prompt_type,
+                outcome=args.outcome,
+                coverage=args.coverage,
+                execution_id=args.execution_id,
+                search=args.search,
+                group_by=args.group_by,
+                sort=args.usage_sort,
+                direction=args.usage_direction,
+                group_offset=args.group_offset,
+                detail_offset=args.detail_offset,
+                limit=usage_report.USAGE_PAGE_SIZE,
+                group_value=args.group_value,
+            ),
+            sys.stdout,
+        )
         return 0
 
     if args.grades:
@@ -1766,7 +1995,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("unpaged export requires exactly one --repository")
         rows = repository.for_repository(repository_names[0])
         json.dump(
-            attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
+            attach_token_usage(
+                repository,
+                attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
+            ),
             sys.stdout,
         )
         return 0
@@ -1780,8 +2012,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     json.dump(
         {
-            "records": attach_adversarial_rounds(
-                repository, [row_to_dict(row) for row in rows]
+            "records": attach_token_usage(
+                repository,
+                attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
             ),
             "total": total,
             "offset": offset,

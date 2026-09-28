@@ -114,7 +114,9 @@ with `register_provider`. Do not add a source-specific schema.
 
 ## Feedback is app-wide, not tied to the header repository
 
-The Feedback view reads the one app-wide `swarm-automation.sqlite3` database.
+The Feedback view reads the one app-wide `swarm-automation.sqlite3` database
+across four tabs (prompt grades, router activity, execution history, usage &
+cost).
 Its repository chips are intentionally independent of the header's active
 repository: `AppConfig.feedback_repo_filter` stores repo ids for that page
 only, with an empty vector meaning all repositories. The Rust history/grade
@@ -364,11 +366,12 @@ the bug this design exists to prevent.
 
 `issue_worker/token_usage.py` owns provider-agnostic normalization
 (`normalize_claude_usage`/`normalize_codex_usage`/`normalize_grok_usage`,
-dispatched by `normalize_usage`), cost estimation (`estimate_cost`, which
-reuses `dynamic_router.model_cost`'s 1–5 relative rank — there is no other
-per-model dollar pricing table in this app, so a rank change is the only
-thing that ever needs to change a cost estimate), the `AgentType`/`PromptType`
-enums, and the GitHub `### AI Usage` table renderer (`render_ai_usage_markdown`).
+dispatched by `normalize_usage`), the `AgentType`/`PromptType` enums, and the
+GitHub `### AI Usage` table renderer (`render_ai_usage_markdown`).
+Cost estimation (`estimate_cost` / `estimate_cost_detailed`) delegates to
+`issue_worker/model_pricing.py` — see "Pricing is versioned and dated" below;
+it no longer derives a price from `dynamic_router.model_cost`'s 1–5 relative
+rank, so changing that rank is a routing change and nothing else.
 `Worker._record_usage_event` is the one place that normalizes, costs, logs
 (`AI_USAGE_RECORDED`), and stashes a usage event; `record_ai_usage` and
 `record_router_usage` are its two thin, context-specific callers.
@@ -393,6 +396,61 @@ other execution-history table (`adversarial_rounds` included); the GitHub
 report itself is not — it renders from the in-memory/state event list
 regardless of that setting, the same way `render_usage_report`'s quota lines
 already do.
+
+## Pricing is versioned and dated, and routing rank is not pricing
+
+`issue_worker/model_pricing.py` (issue #295) holds the effective-dated
+per-model rate catalog every estimated cost comes from, plus
+`validate_catalog` and `PRICING_CATALOG_VERSION`. Two rules it exists to
+enforce, both of which any change here must preserve:
+
+- **Never guess.** An unknown model, an alias resolving two ways, overlapping
+  effective windows, or no rate covering the invocation's timestamp all
+  resolve to *unpriced*; the tokens are still reported, under the report's
+  "Tokens only" coverage status. A wrong dollar figure is worse than none.
+- **Never break AI work.** Nothing here raises, and validation runs in tests
+  and `--validate-pricing`, not at import. A bad catalog must not stop an
+  issue from being delivered.
+
+A price is selected by the *invocation's own start timestamp*, and the rate
+that produced each estimate is persisted with it (`pricing_status`,
+`pricing_version`, `pricing_rate_id`, `pricing_source` and the four
+per-million rates, migration 7). Nothing recomputes a stored estimate, so
+correcting the catalog never restates history. Updating a rate is always
+additive: close the old entry with `effective_to`, append a new one, bump the
+version. `docs/model-pricing.md` is the maintenance procedure.
+
+Do not reconnect cost reporting to `dynamic_router.model_cost` or to Model
+Routing Calibration's `input_cost`/`output_cost` observations. Those answer
+"which model is cheaper" for routing; this answers "what did this cost" for
+reporting, and two models can share a routing rank while being billed very
+differently.
+
+## Feedback's fourth tab reads usage through one query, server-side
+
+Usage & cost (issue #295) is `issue_worker/usage_report.py` →
+`ExecutionHistoryRepository.usage_report` → `ai_execution_history.py --usage`
+→ `get_usage_report` in `src/main.rs` → `ui/usage-cost.js` + the
+`feedback-panel-usage` panel. Every filter, grouping, aggregate and page is
+computed in SQLite; the desktop must never receive the `ai_token_usage` table
+to total it itself. The Rust command is a deliberate pass-through of
+already-camelCase JSON rather than a deep mirror of a dozen nullable token
+columns — a second place for "missing" to become zero is the bug that shape
+avoids.
+
+Three semantics the queries depend on:
+
+- **Activity time, not write time.** Usage rows are persisted in one batch at
+  the end of a work-round, so `created_at` is a persistence detail. Date
+  filters and time buckets use `started_at` (then `completed_at`, then
+  `created_at` only as a last resort).
+- **Missing is not zero.** Nullable sums stay NULL and are paired with a
+  `COUNT` of how many rows reported them. Nothing coalesces a token count to
+  0, all the way through to the UI's `—`.
+- **Coverage is five distinct states** — complete / tokens_only / partial /
+  unreported / failed — and an execution with no telemetry at all (imported,
+  or from before #280) renders as *usage unavailable*, never as zero cost.
+  Never scrape GitHub comments to fill those in.
 
 ## Test suite
 

@@ -261,7 +261,7 @@
         </section>
 
         <section id="view-feedback" class="view">
-          <div class="section-intro"><div><p class="eyebrow">FEEDBACK</p><h2>Prompt grades, router activity, and execution history <button class="help-dot" data-help="execution-history" aria-label="About execution history">?</button></h2><p>Three reports over AI work across all repositories by default: how well each issue was written, which AI platform graded it and who that platform picked, and the full execution record. Use the filter below to focus every tab on specific repositories. Read-only — this never changes issue processing.</p></div><div class="control-row"><button id="import-execution-history" class="secondary-button">Import from GitHub</button><button id="refresh-execution-history" class="secondary-button">Refresh</button></div></div>
+          <div class="section-intro"><div><p class="eyebrow">FEEDBACK</p><h2>Prompt grades, router activity, execution history, and usage &amp; cost <button class="help-dot" data-help="execution-history" aria-label="About execution history">?</button></h2><p>Four reports over AI work across all repositories by default: how well each issue was written, which AI platform graded it and who that platform picked, the full execution record, and what all of it cost in tokens. Use the filter below to focus every tab on specific repositories. Read-only — this never changes issue processing.</p></div><div class="control-row"><button id="import-execution-history" class="secondary-button">Import from GitHub</button><button id="refresh-execution-history" class="secondary-button">Refresh</button></div></div>
           <div class="feedback-repo-filter" aria-labelledby="feedback-repo-filter-label">
             <div><strong id="feedback-repo-filter-label">Repositories</strong><small>Independent of the repository selected in the header.</small></div>
             <div id="feedback-repo-chips" class="feedback-repo-chips" role="group" aria-label="Filter Feedback by repository"></div>
@@ -270,6 +270,7 @@
             <button type="button" role="tab" id="feedback-tab-grades" class="active" data-feedback-tab="grades" aria-selected="true" aria-controls="feedback-panel-grades">Prompt grades</button>
             <button type="button" role="tab" id="feedback-tab-routing" data-feedback-tab="routing" aria-selected="false" aria-controls="feedback-panel-routing" tabindex="-1">Router activity</button>
             <button type="button" role="tab" id="feedback-tab-history" data-feedback-tab="history" aria-selected="false" aria-controls="feedback-panel-history" tabindex="-1">Execution history</button>
+            <button type="button" role="tab" id="feedback-tab-usage" data-feedback-tab="usage" aria-selected="false" aria-controls="feedback-panel-usage" tabindex="-1">Usage &amp; cost</button>
           </div>
           <div class="settings-grid tab-panel active" id="feedback-panel-grades" role="tabpanel" aria-labelledby="feedback-tab-grades" data-feedback-panel="grades">
             <article class="panel span-two">
@@ -300,6 +301,34 @@
               <p id="adversarial-history-summary" class="panel-copy" aria-live="polite">No adversarial UAT outcomes recorded yet.</p>
               <div id="execution-history-list" class="execution-list"><p class="panel-copy">No AI executions recorded yet.</p></div>
               <nav id="execution-history-pager" class="execution-pager hidden" aria-label="Execution history pages"><button type="button" id="execution-history-prev" class="secondary-button compact">Previous</button><span id="execution-history-page-label">Page 1 of 1</span><button type="button" id="execution-history-next" class="secondary-button compact">Next</button></nav>
+            </article>
+          </div>
+          <div class="settings-grid tab-panel" id="feedback-panel-usage" role="tabpanel" aria-labelledby="feedback-tab-usage" data-feedback-panel="usage" hidden>
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">USAGE &amp; COST</p><h3>Tokens and estimated cost per invocation <button class="help-dot" data-help="usage-cost" aria-label="About usage and cost">?</button></h3></div><span id="usage-count" class="availability">0 invocations</span></div>
+              <p class="panel-copy"><strong>Estimated cost</strong> is token-equivalent model pricing from a versioned catalog — not an account invoice, and not subscription-quota consumption. Provider quota remaining stays on the Overview page. Repositories follow the filter above; everything else is filtered here.</p>
+              <div id="usage-summary" class="usage-summary" aria-live="polite"></div>
+              <div id="usage-coverage" class="usage-coverage" role="group" aria-label="Reporting coverage" aria-live="polite"></div>
+              <div class="usage-filters">
+                <label>From<input type="date" id="usage-start-date" data-usage-filter="startDate" /></label>
+                <label>To<input type="date" id="usage-end-date" data-usage-filter="endDate" /></label>
+                <label>Issue<select id="usage-issue" data-usage-filter="issueNumber" aria-label="Filter usage by issue"></select></label>
+                <label>Prompt grade<select id="usage-grade" data-usage-filter="grade" aria-label="Filter usage by prompt grade"></select></label>
+                <label>Provider<select id="usage-provider" data-usage-filter="provider" aria-label="Filter usage by provider"></select></label>
+                <label>Model<select id="usage-model" data-usage-filter="model" aria-label="Filter usage by model"></select></label>
+                <label>Effort<select id="usage-effort" data-usage-filter="effort" aria-label="Filter usage by reasoning effort"></select></label>
+                <label>Agent<select id="usage-agent-type" data-usage-filter="agentType" aria-label="Filter usage by agent type"></select></label>
+                <label>Prompt type<select id="usage-prompt-type" data-usage-filter="promptType" aria-label="Filter usage by prompt type"></select></label>
+                <label>Result<select id="usage-outcome" data-usage-filter="outcome" aria-label="Filter usage by invocation result"><option value="all">All</option><option value="success">Succeeded</option><option value="failure">Failed</option></select></label>
+                <label>Coverage<select id="usage-coverage-filter" data-usage-filter="coverage" aria-label="Filter usage by reporting coverage"></select></label>
+                <label class="execution-search">Search usage<input id="usage-search" type="search" data-usage-filter="search" placeholder="Issue number, title, provider, or model" autocomplete="off" spellcheck="false" aria-controls="usage-groups" /></label>
+              </div>
+              <div class="control-row"><label>Group by <select id="usage-group-by" aria-label="Group usage totals"></select></label><span id="usage-filter-note" class="availability"></span><button type="button" id="usage-clear-filters" class="text-button">Clear filters</button></div>
+              <div id="usage-groups" class="usage-table-wrap" aria-live="polite"></div>
+              <nav id="usage-groups-pager" class="execution-pager hidden" aria-label="Usage aggregate pages"><button type="button" id="usage-groups-prev" class="secondary-button compact">Previous</button><span id="usage-groups-page-label">Page 1 of 1</span><button type="button" id="usage-groups-next" class="secondary-button compact">Next</button></nav>
+              <div class="section-heading compact-heading"><div><p class="eyebrow">INVOCATIONS</p><h3 id="usage-detail-heading">Every recorded invocation</h3></div><div class="control-row"><button type="button" id="usage-clear-drilldown" class="text-button hidden">Clear selection</button></div></div>
+              <div id="usage-detail" class="usage-table-wrap" aria-live="polite"></div>
+              <nav id="usage-detail-pager" class="execution-pager hidden" aria-label="Usage invocation pages"><button type="button" id="usage-detail-prev" class="secondary-button compact">Previous</button><span id="usage-detail-page-label">Page 1 of 1</span><button type="button" id="usage-detail-next" class="secondary-button compact">Next</button></nav>
             </article>
           </div>
         </section>
@@ -387,6 +416,7 @@
     <script src="logging.js"></script>
     <script src="now-working.js"></script>
     <script src="prompt-grades.js"></script>
+    <script src="usage-cost.js"></script>
     <script src="run-now.js"></script>
     <script src="adversarial-uat.js"></script>
     <script src="adversarial-security.js"></script>
