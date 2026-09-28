@@ -186,8 +186,15 @@ def merge_overlay(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Apply remote pricing/benchmark patches onto the bundled catalog.
 
-    Unmatched overlay rows become DISCOVERED candidates and are never made
-    routable by this merge alone.
+    A feed is a set, not a list: which model identity a row's (provider,
+    model[, model_id]) keys resolve to — and whether two rows contradict each
+    other — is decided from the whole feed's declared aliases before any row
+    is applied, so permuting a feed's row order can never change the verdict,
+    the published prices, or which name a newly discovered model is published
+    under. Two rows are the same identity if they share a key directly, if a
+    third row ties their keys together (even transitively), or if either
+    resolves to the same existing catalog entry. Unmatched overlay rows become
+    DISCOVERED candidates and are never made routable by this merge alone.
     """
     merged = [dict(entry) for entry in local_entries if isinstance(entry, dict)]
     previous_models = _calibration_models(previous)
@@ -205,8 +212,27 @@ def merge_overlay(
             entry["deprecated"] = True
         for key in _overlay_keys(entry):
             lookup[key] = entry
-    discovered: list[dict[str, Any]] = []
-    observed: dict[int, dict[str, Any]] = {}
+
+    # Pass 1: parse every row and union the keys it names as one identity.
+    # Union-find connectivity depends only on which keys are tied together by
+    # the row set, never on the order rows are visited in.
+    parent: dict[tuple[str, str], tuple[str, str]] = {}
+
+    def find(key: tuple[str, str]) -> tuple[str, str]:
+        parent.setdefault(key, key)
+        root = key
+        while parent[root] != root:
+            root = parent[root]
+        while parent[key] != root:
+            parent[key], key = root, parent[key]
+        return root
+
+    def union(a: tuple[str, str], b: tuple[str, str]) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    parsed_rows: list[tuple[set[tuple[str, str]], dict[str, Any]]] = []
     usable_rows = 0
     for raw in overlay_rows:
         if not isinstance(raw, dict):
@@ -217,7 +243,7 @@ def merge_overlay(
             continue
         if not provider.strip() or not model.strip():
             continue
-        observations = {}
+        observations: dict[str, Any] = {}
         for field in ("input_cost", "output_cost", "reasoning_cost", "speed", "latency_seconds"):
             parsed = _finite_float(raw.get(field))
             if parsed is not None:
@@ -240,28 +266,68 @@ def merge_overlay(
             continue
         usable_rows += 1
         keys = _overlay_keys(raw)
+        keys_list = list(keys)
+        for key in keys_list:
+            find(key)
+        for key in keys_list[1:]:
+            union(keys_list[0], key)
+        parsed_rows.append((keys, observations))
+    if not usable_rows:
+        raise CalibrationValidationError("Model source contained no usable model pricing, benchmark, or performance data.")
+
+    # Pass 2: group every row's keys by its final component, independent of
+    # row order. A component resolves to whichever single catalog entry any
+    # of its keys already names; two components that each resolve to that
+    # same catalog entry (one directly, one only via a shared alias key) are
+    # the same published identity and must not be validated independently.
+    component_keys: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for keys, _ in parsed_rows:
+        root = find(next(iter(keys)))
+        component_keys.setdefault(root, set()).update(keys)
+
+    group_key_for_root: dict[tuple[str, str], tuple[str, Any]] = {}
+    group_target: dict[tuple[str, Any], dict[str, Any] | None] = {}
+    group_all_keys: dict[tuple[str, Any], set[tuple[str, str]]] = {}
+    for root, keys in component_keys.items():
         targets = {id(lookup[key]): lookup[key] for key in keys if key in lookup}
         if len(targets) > 1:
             raise CalibrationValidationError("Model source contains ambiguous model aliases.")
         target = next(iter(targets.values()), None)
+        group_key = ("catalog", id(target)) if target is not None else ("new", root)
+        group_key_for_root[root] = group_key
+        group_target.setdefault(group_key, target)
+        group_all_keys.setdefault(group_key, set()).update(keys)
+
+    # Pass 3: accumulate every row's observations into its resolved group.
+    # Coalescing here (rather than per-component) is what makes a row reached
+    # only through an alias, or resolved through a pre-existing catalog
+    # alias, still conflict with a contradictory row for the same identity.
+    combined_by_group: dict[tuple[str, Any], dict[str, Any]] = {}
+    for keys, observations in parsed_rows:
+        group_key = group_key_for_root[find(next(iter(keys)))]
+        combined_by_group[group_key] = _merge_observations(
+            combined_by_group.get(group_key, {}), observations
+        )
+
+    discovered: list[dict[str, Any]] = []
+    for group_key, target in group_target.items():
+        all_keys = group_all_keys[group_key]
         if target is None:
+            canonical_provider, canonical_model = min(all_keys)
             target = {
-                "provider": provider.strip().lower()[:80],
-                "model": model.strip().lower()[:120],
+                "provider": canonical_provider[:80],
+                "model": canonical_model[:120],
                 "status": STATUS_DISCOVERED,
                 "active": False,
             }
             discovered.append(target)
-        combined = _merge_observations(observed.get(id(target), {}), observations)
-        observed[id(target)] = combined
-        for key in keys:
+        combined = combined_by_group.get(group_key, {})
+        for key in all_keys:
             lookup[key] = target
         # A public feed cannot re-enable a retired catalog model. Still compare
         # explicit false observations above so contradictory rows fail validation.
         target.update({field: value for field, value in combined.items()
                        if field != "deprecated" or value is True})
-    if not usable_rows:
-        raise CalibrationValidationError("Model source contained no usable model pricing, benchmark, or performance data.")
     return merged, discovered
 
 
