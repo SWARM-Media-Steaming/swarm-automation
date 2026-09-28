@@ -145,6 +145,16 @@ It is read-only and empty until "Store AI execution history" has recorded at
 least one execution; grades and router activity also need Dynamic Model Routing
 turned on.
 
+## Engineering Knowledge / Ask SWARM
+
+The **Knowledge** page is local engineering memory over the same SQLite
+database. SWARM links existing executions, adversarial rounds, and token usage
+instead of copying them, then indexes README/docs/ADRs and a bounded git
+history. **Ask SWARM** answers natural-language questions with citations.
+When an agent starts an issue, a bounded knowledge context pack is injected
+automatically. Generated summaries are optional and off by default because they
+spend extra AI tokens. See [docs/engineering-knowledge.md](docs/engineering-knowledge.md).
+
 ## Branch safety model
 
 The default AI integration branch is `ai-main` (the recommended name). Before
@@ -225,6 +235,7 @@ be read, the worker logs it and carries on with the normal queue.
 src/            Rust backend (Tauri commands, process supervision, tool detection)
 ui/             Frontend (plain HTML/CSS/JS, no build step)
 issue_worker/   Vendored Python issue-worker implementation, bundled into every build
+docs/           Architecture notes, including Engineering Knowledge
 icons/          Application icons
 capabilities/   Tauri v2 permission manifest
 ```

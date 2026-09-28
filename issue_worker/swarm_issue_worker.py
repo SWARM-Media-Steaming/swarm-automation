@@ -486,6 +486,10 @@ class Config:
     prompt_feedback_upload_enabled: bool
     application_version: str
     execution_history_db: Path
+    engineering_knowledge_enabled: bool
+    automatic_knowledge_generation: bool
+    knowledge_context_token_limit: int
+    knowledge_owner_scope_id: str
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
@@ -539,6 +543,10 @@ class Config:
             prompt_feedback_upload_enabled=args.prompt_feedback_upload_enabled,
             application_version=args.application_version,
             execution_history_db=history_db,
+            engineering_knowledge_enabled=bool(args.engineering_knowledge_enabled),
+            automatic_knowledge_generation=bool(args.automatic_knowledge_generation),
+            knowledge_context_token_limit=int(args.knowledge_context_token_limit),
+            knowledge_owner_scope_id=str(args.knowledge_owner_scope_id or "local"),
         )
 
     def spec(self, provider: str) -> ProviderSpec | None:
@@ -990,6 +998,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         )
         if self.history.error:
             log(f"WARNING: AI execution history is unavailable: {self.history.error}")
+        self._knowledge = None
 
     def adversarial_stages(self) -> list[AdversarialStage]:
         """The adversarial agents this repository runs, in pipeline order.
@@ -2398,6 +2407,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 ),
                 routing_optimization=self.config.routing_optimization,
                 allow_usage_credit_models=self.config.allow_usage_credit_models,
+                historical_signals=self.knowledge_routing_signals(),
             )
             raw = self.run_router(host, prompt, images)
             decision = self.resolve_router_response(
@@ -2678,6 +2688,77 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             )
         self.history.update(completed, **fields)
         self.flush_token_usage_to_history()
+        self.index_execution_knowledge()
+
+    def knowledge_service(self):
+        """Lazy Engineering Knowledge facade. None when the setting is off.
+
+        Failures constructing the store must never change issue delivery.
+        """
+        if not self.config.engineering_knowledge_enabled:
+            return None
+        if self._knowledge is None:
+            try:
+                from engineering_knowledge import KnowledgeService
+
+                self._knowledge = KnowledgeService(
+                    self.config.execution_history_db,
+                    owner_scope_id=self.config.knowledge_owner_scope_id,
+                    context_token_limit=self.config.knowledge_context_token_limit,
+                )
+            except Exception as error:  # noqa: BLE001
+                log(f"WARNING: Engineering knowledge is unavailable: {error}")
+                return None
+        return self._knowledge
+
+    def knowledge_context_section(self) -> str:
+        """Bounded retrieved knowledge for the implementing agent prompt."""
+        service = self.knowledge_service()
+        if service is None or self.issue is None:
+            return ""
+        try:
+            pack = service.build_context_pack(
+                repository=self.config.github_repository,
+                issue_title=self.issue.title,
+                issue_body=self.issue.body,
+                issue_number=self.issue.number,
+                execution_id=self.history.execution_id,
+                files=list(self.read_state().get("files_changed") or []) if self.in_progress_file.exists() else [],
+                token_limit=self.config.knowledge_context_token_limit,
+            )
+            if not pack.items:
+                return ""
+            return pack.render()
+        except Exception as error:  # noqa: BLE001
+            log(f"WARNING: Engineering knowledge context skipped: {error}")
+            return ""
+
+    def knowledge_routing_signals(self) -> str:
+        service = self.knowledge_service()
+        if service is None or self.issue is None:
+            return ""
+        try:
+            return service.routing_signals(
+                repository=self.config.github_repository,
+                issue_title=self.issue.title,
+                issue_body=self.issue.body,
+            )
+        except Exception as error:  # noqa: BLE001
+            log(f"WARNING: Engineering knowledge routing signals skipped: {error}")
+            return ""
+
+    def index_execution_knowledge(self) -> None:
+        service = self.knowledge_service()
+        if service is None or not self.history.execution_id:
+            return
+        try:
+            service.index_execution(
+                repository=self.config.github_repository,
+                execution_id=self.history.execution_id,
+                workspace=str(self.config.repo_dir),
+            )
+        except Exception as error:  # noqa: BLE001
+            log(f"WARNING: Engineering knowledge index skipped: {error}")
 
     def issue_from_state(self, state: dict[str, Any], remote_issue: dict[str, Any]) -> IssueContext:
         return IssueContext(
@@ -3270,6 +3351,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 f"work — do not write code. Provide the requested summary and put {ENVIRONMENT_ONLY_MARKER} "
                 "on its own final line."
             )
+        knowledge_section = self.knowledge_context_section()
+        if knowledge_section:
+            lines.extend(["", knowledge_section])
         if question_issue:
             lines.append(QUESTION_INSTRUCTION)
         lines.append(NEEDS_INPUT_INSTRUCTION)
@@ -6402,6 +6486,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--execution-history-db",
         default=env_value("SWARM_AI_EXECUTION_HISTORY_DB", ""),
         help="Shared application SQLite path; defaults beneath --state-dir.",
+    )
+    parser.add_argument(
+        "--engineering-knowledge-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_ENGINEERING_KNOWLEDGE_ENABLED", False),
+        help="Index existing execution history and inject a bounded knowledge context pack.",
+    )
+    parser.add_argument(
+        "--automatic-knowledge-generation",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_AUTOMATIC_KNOWLEDGE_GENERATION", False),
+        help="Generate higher-level summaries during knowledge refresh. Off by default.",
+    )
+    parser.add_argument(
+        "--knowledge-context-token-limit",
+        type=int,
+        default=int(env_value("SWARM_KNOWLEDGE_CONTEXT_TOKEN_LIMIT", "2500")),
+        help="Approximate token budget for the knowledge context pack injected into agents.",
+    )
+    parser.add_argument(
+        "--knowledge-owner-scope-id",
+        default=env_value("SWARM_KNOWLEDGE_OWNER_SCOPE_ID", "local"),
+        help="Ownership/scope identifier for knowledge objects. Default local.",
     )
     return parser
 

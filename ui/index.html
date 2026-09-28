@@ -20,6 +20,7 @@
           <button class="nav-item active" data-view-target="overview"><span class="nav-icon">⌂</span>Overview</button>
           <button class="nav-item" data-view-target="repository"><span class="nav-icon">⑂</span>Repository</button>
           <button class="nav-item" data-view-target="ai"><span class="nav-icon">✦</span>AI Configuration</button>
+          <button class="nav-item" data-view-target="knowledge"><span class="nav-icon">◎</span>Knowledge</button>
           <button class="nav-item" data-view-target="feedback"><span class="nav-icon">◆</span>Feedback</button>
           <button class="nav-item" data-view-target="debug"><span class="nav-icon">≡</span>Info &amp; Debug <span id="log-count" class="nav-count">0</span></button>
           <button class="nav-item" data-view-target="help"><span class="nav-icon">?</span>Help</button>
@@ -226,6 +227,39 @@
           </div>
         </section>
 
+        <section id="view-knowledge" class="view">
+          <div class="section-intro"><div><p class="eyebrow">ENGINEERING KNOWLEDGE</p><h2>Ask SWARM <button class="help-dot" data-help="ask-swarm" aria-label="About Ask SWARM">?</button></h2><p>Ask natural-language questions about the repositories, issues, executions, and decisions SWARM already knows. Answers cite their sources.</p></div><div class="control-row"><button id="refresh-knowledge" class="secondary-button">Refresh Knowledge</button><button id="rebuild-knowledge" class="secondary-button">Rebuild Knowledge</button></div></div>
+          <div id="knowledge-progress" class="banner policy hidden" aria-live="polite"></div>
+          <div class="settings-grid">
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">ASK SWARM</p><h3>Question</h3></div><span id="knowledge-enabled-pill" class="status-pill stopped">Off</span></div>
+              <div class="stacked-form">
+                <label>Scope <select id="ask-swarm-scope" aria-label="Knowledge scope"></select></label>
+                <label>Ask about your engineering environment<textarea id="ask-swarm-question" rows="4" placeholder="Why does this repository use Kafka?"></textarea></label>
+                <div class="control-row"><button id="ask-swarm-submit" class="primary-button">Ask SWARM</button></div>
+              </div>
+              <div id="ask-swarm-thread" class="ask-swarm-thread" aria-live="polite"><p class="panel-copy">Ask a question to search connected repositories, issues, executions, and decisions.</p></div>
+            </article>
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">STATUS</p><h3>Knowledge coverage <button class="help-dot" data-help="engineering-knowledge" aria-label="About Engineering Knowledge">?</button></h3></div></div>
+              <div id="knowledge-status-fields" class="form-grid two"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">SETTINGS</p><h3>What SWARM remembers</h3></div></div>
+              <div class="stacked-form">
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="engineering_knowledge_enabled" /><span></span><div><strong>Engineering Knowledge</strong><small>Index connected repositories and SWARM history, inject relevant context into agents, and power Ask SWARM.</small></div></label>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="automatic_knowledge_generation" /><span></span><div><strong>Automatic knowledge generation</strong><small>Off by default. Uses extra AI tokens to write higher-level summaries when knowledge refreshes.</small></div></label>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="generate_repository_summaries" /><span></span><div><strong>Repository summaries</strong></div></label>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="generate_architecture_summaries" /><span></span><div><strong>Architecture summaries</strong></div></label>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="generate_engineering_decisions" /><span></span><div><strong>Engineering decisions</strong></div></label>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="generate_component_documentation" /><span></span><div><strong>Component documentation</strong></div></label>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="generate_risk_summaries" /><span></span><div><strong>Risk summaries</strong></div></label>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="generate_issue_clustering" /><span></span><div><strong>Issue clustering</strong></div></label>
+              </div>
+            </article>
+          </div>
+        </section>
+
         <section id="view-feedback" class="view">
           <div class="section-intro"><div><p class="eyebrow">FEEDBACK</p><h2>Prompt grades, router activity, and execution history <button class="help-dot" data-help="execution-history" aria-label="About execution history">?</button></h2><p>Three reports over AI work across all repositories by default: how well each issue was written, which AI platform graded it and who that platform picked, and the full execution record. Use the filter below to focus every tab on specific repositories. Read-only — this never changes issue processing.</p></div><div class="control-row"><button id="import-execution-history" class="secondary-button">Import from GitHub</button><button id="refresh-execution-history" class="secondary-button">Refresh</button></div></div>
           <div class="feedback-repo-filter" aria-labelledby="feedback-repo-filter-label">
@@ -295,7 +329,7 @@
           <div class="settings-grid">
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">IN PLAIN TERMS</p><h3>What is SWARM Automation?</h3></div></div>
-              <p class="panel-copy">It watches assigned GitHub issues, asks an enabled AI provider to make the change, and asks another provider to review it. The work stays on protected AI branches until you choose to move it to the human-owned branch. It runs on this Mac using your existing AI accounts.</p>
+              <p class="panel-copy">It watches assigned GitHub issues, asks an enabled AI provider to make the change, and asks another provider to review it. The work stays on protected AI branches until you choose to move it to the human-owned branch. It runs on this Mac using your existing AI accounts. <button class="text-button" data-view-jump="knowledge">Knowledge / Ask SWARM</button> remembers source-backed engineering history from those runs so later work and questions can use it.</p>
             </article>
 
             <article class="panel">
@@ -357,6 +391,7 @@
     <script src="adversarial-uat.js"></script>
     <script src="adversarial-security.js"></script>
     <script src="debug-diagnose.js"></script>
+    <script src="engineering-knowledge.js"></script>
     <script src="version.js"></script>
     <script src="app.js"></script>
   </body>

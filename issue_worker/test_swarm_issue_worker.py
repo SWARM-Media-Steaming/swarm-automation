@@ -659,6 +659,57 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("2 image(s) uploaded on this issue", prompt)
         self.assertIn("1 of them come from later GitHub comments", prompt)
 
+    def test_engineering_knowledge_defaults_off_in_the_worker_cli(self) -> None:
+        args = build_parser().parse_args(self._worker_argv(auto=False))
+        config = Config.from_args(args)
+        self.assertFalse(config.engineering_knowledge_enabled)
+        self.assertFalse(config.automatic_knowledge_generation)
+        self.assertEqual(config.knowledge_owner_scope_id, "local")
+
+    def test_build_prompt_injects_bounded_knowledge_context(self) -> None:
+        from engineering_knowledge import KnowledgeService, KnowledgeSettings, RepositorySpec, SwarmExecutionProvider
+
+        self.worker.config = dataclasses.replace(
+            self.worker.config,
+            engineering_knowledge_enabled=True,
+            github_repository="acme/checkout",
+        )
+        history = ExecutionHistoryRepository(self.worker.config.execution_history_db)
+        execution_id = history.create(
+            ExecutionStart(
+                repository="acme/checkout",
+                issue_number=417,
+                issue_url="https://github.com/acme/checkout/issues/417",
+                issue_title="Use Kafka for checkout events",
+                issue_body="We chose Kafka instead of synchronous APIs.",
+                provider="Claude",
+                model="claude-sonnet-5",
+                effort="high",
+                branch_name="ai/claude/issue-417",
+                application_version="1.0.0",
+            ),
+            "2026-01-15T10:00:00+00:00",
+        )
+        history.update(
+            execution_id,
+            "2026-01-15T11:00:00+00:00",
+            files_changed=["src/payments/kafka.rs"],
+            final_status="completed",
+        )
+        KnowledgeService(self.worker.config.execution_history_db).refresh(
+            [RepositorySpec(name="acme/checkout", workspace=str(self.repo))],
+            KnowledgeSettings(),
+            providers=[SwarmExecutionProvider()],
+        )
+        self.worker.issue = IssueContext(
+            900, "Adjust Kafka producer", "Tune checkout events", [], "https://github.com/acme/checkout/issues/900"
+        )
+        self.worker.choice = ProviderChoice("Codex", "test-model", "high", "")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        prompt = self.worker.build_prompt(False, "", False)
+        self.assertIn("Engineering Knowledge Context", prompt)
+        self.assertIn("Kafka", prompt)
+
     def test_execution_history_configuration_is_independent(self) -> None:
         args = build_parser().parse_args(
             self._worker_argv(auto=False)

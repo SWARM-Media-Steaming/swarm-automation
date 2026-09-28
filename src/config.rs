@@ -119,6 +119,14 @@ fn default_model_data_source() -> String {
     "local".into()
 }
 
+fn default_knowledge_context_token_limit() -> u32 {
+    2500
+}
+
+fn default_owner_scope_id() -> String {
+    "local".into()
+}
+
 pub fn default_routing_tiers() -> HashMap<String, Vec<RoutingTier>> {
     HashMap::from([
         (
@@ -539,6 +547,37 @@ pub struct AppConfig {
     /// Allow a future review-platform uploader to transmit eligible records.
     /// Local persistence remains controlled independently above.
     pub prompt_feedback_upload_enabled: bool,
+
+    /// Engineering Knowledge Platform (issue #291). On by default so Ask SWARM
+    /// and automatic agent context can use the existing execution-history
+    /// database. Retrieval is deterministic; generated summaries are a
+    /// separate switch.
+    #[serde(default = "default_true")]
+    pub engineering_knowledge_enabled: bool,
+    /// Spend extra AI tokens to write repository/architecture/decision
+    /// summaries. Off by default.
+    #[serde(default)]
+    pub automatic_knowledge_generation: bool,
+    #[serde(default = "default_true")]
+    pub generate_repository_summaries: bool,
+    #[serde(default = "default_true")]
+    pub generate_architecture_summaries: bool,
+    #[serde(default = "default_true")]
+    pub generate_engineering_decisions: bool,
+    #[serde(default)]
+    pub generate_component_documentation: bool,
+    #[serde(default = "default_true")]
+    pub generate_risk_summaries: bool,
+    #[serde(default)]
+    pub generate_issue_clustering: bool,
+    /// Approximate token budget for the Knowledge Context Pack injected into
+    /// an implementing agent. Clamped on normalize.
+    #[serde(default = "default_knowledge_context_token_limit")]
+    pub knowledge_context_token_limit: u32,
+    /// Ownership/scope identifier so a future permission layer can restrict
+    /// retrieval. Defaults to `"local"` until login/multi-tenancy exists.
+    #[serde(default = "default_owner_scope_id")]
+    pub knowledge_owner_scope_id: String,
     pub schedule_mode: String,
     pub schedule_time: String,
     pub schedule_days: Vec<String>,
@@ -641,6 +680,16 @@ impl Default for AppConfig {
             ai_execution_history_enabled: false,
             feedback_repo_filter: Vec::new(),
             prompt_feedback_upload_enabled: false,
+            engineering_knowledge_enabled: true,
+            automatic_knowledge_generation: false,
+            generate_repository_summaries: true,
+            generate_architecture_summaries: true,
+            generate_engineering_decisions: true,
+            generate_component_documentation: false,
+            generate_risk_summaries: true,
+            generate_issue_clustering: false,
+            knowledge_context_token_limit: default_knowledge_context_token_limit(),
+            knowledge_owner_scope_id: default_owner_scope_id(),
             schedule_mode: "continuous".into(),
             schedule_time: "09:00".into(),
             schedule_days: vec!["mon", "tue", "wed", "thu", "fri"]
@@ -875,6 +924,7 @@ impl AppConfig {
         self.normalize_providers();
         self.normalize_routing();
         self.normalize_model_calibration();
+        self.normalize_knowledge();
         self.normalize_repositories();
         let repository_ids: HashSet<_> = self
             .repositories
@@ -991,6 +1041,13 @@ impl AppConfig {
                 default_model_data_min_refresh_interval_hours();
         } else if self.model_data_min_refresh_interval_hours > 336.0 {
             self.model_data_min_refresh_interval_hours = 336.0;
+        }
+    }
+
+    fn normalize_knowledge(&mut self) {
+        self.knowledge_context_token_limit = self.knowledge_context_token_limit.clamp(200, 20_000);
+        if self.knowledge_owner_scope_id.trim().is_empty() {
+            self.knowledge_owner_scope_id = default_owner_scope_id();
         }
     }
 
