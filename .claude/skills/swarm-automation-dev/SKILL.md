@@ -73,6 +73,45 @@ Related, still-accurate mechanics:
   heuristic for the UI, not something the worker's own execution path
   branches on.)
 
+## Engineering Knowledge / Ask SWARM
+
+Issue #291 adds a local Engineering Knowledge Platform on the same
+app-wide `swarm-automation.sqlite3` file as execution history. The current
+database remains the system of record: `issue_worker/engineering_knowledge.py`
+links to `ai_executions`, `adversarial_rounds`, and `ai_token_usage` instead of
+copying those rows. New tables (`knowledge_objects`, `knowledge_relationships`,
+`knowledge_object_revisions`, `knowledge_sources`, `knowledge_index_runs`,
+`knowledge_queries`, `knowledge_context_injections`) hold generalized objects,
+extensible relationship types, provenance, and historical snapshots.
+
+Do not introduce PostgreSQL, pgvector, Elasticsearch, or another database.
+Retrieval is behind `KnowledgeRetriever` (SQL + text matching + relationship
+traversal) so a later semantic/vector implementation can replace that class
+without rewriting Ask SWARM or agent context injection.
+
+Ownership lives on every object (`owner_scope_kind` / `owner_scope_id`,
+default `"environment"` / `"local"`). Project grouping is the GitHub owner
+today. Never design retrieval to bypass repository permissions.
+
+Agent context injection is automatic when `engineering_knowledge_enabled` is
+on: `Worker.build_prompt` appends a bounded Knowledge Context Pack, and
+`finish_execution_history` incrementally re-indexes the completed execution.
+Historical sample-backed signals are passed into `build_router_prompt` as
+`historical_signals`; they advise the existing router and must not become a
+second routing system. Knowledge failures log a warning and never block
+delivery.
+
+Ask SWARM is the Knowledge view (`ui/engineering-knowledge.js`,
+`get_knowledge_status` / `refresh_knowledge` / `ask_swarm` in `src/main.rs`).
+It uses the same dynamic-routing payload as the rest of the app when an LLM
+synthesis is needed; cost/history questions are answered deterministically
+from `ai_token_usage` and always report sample size. Automatic generated
+summaries are a separate switch (`automatic_knowledge_generation`) because
+they spend extra tokens.
+
+Future sources (Jira, Confluence, Slack, …) register a `KnowledgeProvider`
+with `register_provider`. Do not add a source-specific schema.
+
 ## Feedback is app-wide, not tied to the header repository
 
 The Feedback view reads the one app-wide `swarm-automation.sqlite3` database.

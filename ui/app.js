@@ -56,6 +56,12 @@
     // get_model_calibration_status response; `lastResult` is the last manual
     // refresh_model_data response (cleared on navigation away is unnecessary,
     // it just stops being shown once a new status makes it stale).
+    knowledge: {
+      status: null,
+      thread: [],
+      refreshing: false,
+      asking: false,
+    },
     modelCalibration: {
       status: null,
       lastResult: null,
@@ -73,6 +79,7 @@
     overview: "Automation overview",
     repository: "Repository",
     ai: "AI Configuration",
+    knowledge: "Knowledge",
     feedback: "Feedback",
     debug: "Info & Debug",
     help: "Help",
@@ -237,6 +244,21 @@
       html: "<p><strong>Local</strong> only re-reads the bundled catalog — no network access, always available offline. <strong>models.dev</strong> and <strong>Artificial Analysis</strong> are public pricing/benchmark sources; Artificial Analysis needs <code>ARTIFICIAL_ANALYSIS_API_KEY</code> set in the app's environment. <strong>Custom JSON URL</strong> reads a configured HTTPS endpoint.</p><p>The minimum refresh interval protects the configured source from being queried on every restart during development; the manual <strong>Refresh Model Data</strong> button always bypasses it.</p><p><strong>Apply calibrated model data to live routing</strong> is off by default: turning it on feeds the active calibration's catalog into the issue worker's own routing decisions instead of only the bundled catalog.</p>",
       links: [],
     },
+    "engineering-knowledge": {
+      title: "What is SWARM Engineering Knowledge?",
+      html: "<p>SWARM Engineering Knowledge is persistent, source-backed memory of the software systems you have connected: repositories, issues, pull requests, agent executions, adversarial findings, and the decisions they record.</p><p><strong>How does SWARM use my engineering data?</strong> SWARM uses this data locally on this Mac. It reuses the existing execution-history database rather than uploading your code. Agents receive a small relevant context pack automatically. You can also ask questions in Ask SWARM. Generated summaries are optional and spend extra AI tokens only when you turn them on.</p>",
+      links: [],
+    },
+    "ask-swarm": {
+      title: "Ask SWARM",
+      html: "<p>Ask natural-language questions about connected repositories, issues, executions, costs, and decisions. Scope defaults to the repository selected in the header; you can widen it to a project or all connected knowledge.</p><p>Answers cite their supporting sources. Cost estimates always include the sample size. Ask SWARM uses the same model router as the rest of SWARM when an AI synthesis is needed; retrieval itself is local and deterministic.</p>",
+      links: [],
+    },
+    "knowledge-refresh": {
+      title: "Refresh and rebuild knowledge",
+      html: "<p><strong>Refresh Knowledge</strong> indexes new or changed repositories, issues, executions, and files.</p><p><strong>Rebuild Knowledge</strong> recreates derived summaries and inferred relationships from the source-of-truth data without discarding historical revisions of source-backed objects.</p>",
+      links: [],
+    },
     "ai-agents-panel": {
       title: "AI agents",
       html: "<p>One row per <strong>enabled</strong> AI provider, combining what is otherwise scattered across the app: install/sign-in status from AI Configuration, live remaining quota, and whether the provider is currently working an issue (and where).</p><p>This covers every configured repository, not only the one selected above — quota is per account on this machine, and a provider can only be working one issue at a time across all of them. Quota is probed periodically rather than on every refresh, since each check runs the provider's own CLI.</p>",
@@ -244,6 +266,9 @@
     },
   };
   const HELP_CONCEPTS = [
+    ["What is SWARM Engineering Knowledge?", "engineering-knowledge"],
+    ["Ask SWARM", "ask-swarm"],
+    ["Refresh and rebuild knowledge", "knowledge-refresh"],
     ["AI agents (Overview)", "ai-agents-panel"],
     ["Including / excluding a provider", "provider-include-exclude"],
     ["GitHub App bot identities", "bot-identities"],
@@ -316,6 +341,10 @@
       void refreshExecutionHistory({ quiet: true });
     }
     if (view === "ai") void refreshModelCalibration({ quiet: true });
+    if (view === "knowledge") {
+      renderKnowledgeScope();
+      void refreshKnowledgeStatus({ quiet: true });
+    }
   }
 
   // A checkbox carrying data-checked-value/data-unchecked-value stores a
@@ -359,6 +388,8 @@
     byId("profile-kicker").textContent = (currentRepo()?.github_repository || "REPOSITORY").toUpperCase();
     renderSummaries();
     syncDynamicRoutingChrome();
+    renderKnowledgeScope();
+    renderKnowledgeStatus();
   }
 
   function syncDynamicRoutingChrome() {
@@ -372,6 +403,206 @@
     document.querySelectorAll("#provider-cards .provider-card").forEach((card) => {
       window.SwarmDynamicRouting.applyRoutingControlState(card, enabled);
     });
+  }
+
+  function knowledgeApi() {
+    return window.SwarmEngineeringKnowledge || {
+      defaultScope: () => ({ kind: "all", id: "", label: "All connected knowledge" }),
+      scopeOptions: () => [{ value: "all", id: "", label: "All connected knowledge" }],
+      formatStatus: () => ({
+        enabled: false,
+        enabledLabel: "Off",
+        lastRefresh: "Never",
+        lastRefreshStatus: "",
+        lastRefreshError: "",
+        repositoriesIndexed: 0,
+        issuesUnderstood: 0,
+        relationshipsDiscovered: 0,
+        generatedEnabled: false,
+        generatedCount: 0,
+        lastGeneratedUpdate: "",
+      }),
+      citationLabel: (citation) => (citation && citation.title) || "Source",
+      answerBlocks: (result) => ({
+        answer: (result && result.answer) || "No answer.",
+        citations: (result && result.citations) || [],
+        sample: "",
+        model: "",
+        insufficientData: true,
+      }),
+    };
+  }
+
+  function renderKnowledgeScope() {
+    const select = byId("ask-swarm-scope");
+    if (!select) return;
+    const previous = select.value;
+    const options = knowledgeApi().scopeOptions(currentRepo()?.github_repository || "");
+    select.replaceChildren();
+    options.forEach((option) => {
+      const node = document.createElement("option");
+      node.value = `${option.value}:${option.id}`;
+      node.textContent = option.label;
+      select.appendChild(node);
+    });
+    if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+    else {
+      const fallback = knowledgeApi().defaultScope(currentRepo()?.github_repository || "");
+      select.value = `${fallback.kind}:${fallback.id}`;
+    }
+  }
+
+  function selectedKnowledgeScope() {
+    const raw = String(byId("ask-swarm-scope")?.value || "all:");
+    const split = raw.indexOf(":");
+    if (split < 0) return { kind: "all", id: "" };
+    return { kind: raw.slice(0, split) || "all", id: raw.slice(split + 1) };
+  }
+
+  function renderKnowledgeStatus() {
+    const view = knowledgeApi().formatStatus(state.knowledge.status);
+    const pill = byId("knowledge-enabled-pill");
+    if (pill) {
+      pill.textContent = view.enabledLabel;
+      pill.className = `status-pill ${view.enabled ? "running" : "stopped"}`;
+    }
+    const fields = byId("knowledge-status-fields");
+    if (!fields) return;
+    const rows = [
+      ["Knowledge", view.enabledLabel],
+      ["Last refresh", view.lastRefresh],
+      ["Repositories indexed", String(view.repositoriesIndexed)],
+      ["Issues understood", String(view.issuesUnderstood)],
+      ["Relationships discovered", String(view.relationshipsDiscovered)],
+      ["Generated knowledge", view.generatedEnabled ? "On" : "Off"],
+    ];
+    if (view.lastRefreshError) rows.push(["Last error", view.lastRefreshError]);
+    fields.replaceChildren();
+    rows.forEach(([label, value]) => {
+      const wrap = document.createElement("div");
+      const dt = document.createElement("span");
+      dt.textContent = label;
+      const dd = document.createElement("strong");
+      dd.textContent = value;
+      wrap.append(dt, dd);
+      fields.appendChild(wrap);
+    });
+  }
+
+  function renderAskSwarmThread() {
+    const box = byId("ask-swarm-thread");
+    if (!box) return;
+    if (!state.knowledge.thread.length) {
+      box.replaceChildren(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: "Ask a question to search connected repositories, issues, executions, and decisions.",
+      }));
+      return;
+    }
+    box.replaceChildren();
+    state.knowledge.thread.forEach((turn) => {
+      const article = document.createElement("article");
+      article.className = "ask-swarm-turn";
+      const question = document.createElement("p");
+      question.className = "ask-swarm-question";
+      question.textContent = turn.question;
+      const answer = document.createElement("p");
+      answer.className = "ask-swarm-answer";
+      answer.textContent = turn.answer;
+      article.append(question, answer);
+      if (turn.citations.length) {
+        const list = document.createElement("div");
+        list.className = "ask-swarm-citations";
+        turn.citations.forEach((citation) => {
+          const label = knowledgeApi().citationLabel(citation);
+          if (citation.url) {
+            const link = document.createElement("button");
+            link.className = "text-button";
+            link.type = "button";
+            link.textContent = label;
+            link.addEventListener("click", () => openUrl(citation.url));
+            list.appendChild(link);
+          } else {
+            const span = document.createElement("span");
+            span.textContent = label;
+            list.appendChild(span);
+          }
+        });
+        article.appendChild(list);
+      }
+      if (turn.sample || turn.model) {
+        const meta = document.createElement("p");
+        meta.className = "ask-swarm-meta";
+        meta.textContent = [turn.sample, turn.model].filter(Boolean).join(" ");
+        article.appendChild(meta);
+      }
+      box.appendChild(article);
+    });
+  }
+
+  async function refreshKnowledgeStatus(options = {}) {
+    try {
+      const status = await invoke("get_knowledge_status_background");
+      state.knowledge.status = status;
+      renderKnowledgeStatus();
+    } catch (error) {
+      if (!options.quiet) showToast(errorText(error), "error");
+    }
+  }
+
+  async function refreshKnowledge(mode) {
+    if (state.knowledge.refreshing) return;
+    state.knowledge.refreshing = true;
+    const banner = byId("knowledge-progress");
+    if (banner) {
+      banner.classList.remove("hidden");
+      banner.textContent = mode === "rebuild"
+        ? "Rebuilding derived knowledge from source-of-truth data…"
+        : "Refreshing new and changed engineering knowledge…";
+    }
+    try {
+      const result = await invoke("refresh_knowledge_background", { mode });
+      state.knowledge.status = result.statusReport || result;
+      renderKnowledgeStatus();
+      const created = result.objectsCreated ?? result.statusReport?.objectsCreated ?? 0;
+      showToast(mode === "rebuild" ? "Knowledge rebuilt." : `Knowledge refreshed (${created} new objects).`);
+    } catch (error) {
+      showToast(errorText(error), "error");
+    } finally {
+      state.knowledge.refreshing = false;
+      if (banner) banner.classList.add("hidden");
+    }
+  }
+
+  async function askSwarm() {
+    const question = String(byId("ask-swarm-question")?.value || "").trim();
+    if (!question || state.knowledge.asking) return;
+    state.knowledge.asking = true;
+    const submit = byId("ask-swarm-submit");
+    if (submit) submit.disabled = true;
+    const scope = selectedKnowledgeScope();
+    try {
+      const result = await invoke("ask_swarm_background", {
+        question,
+        scopeKind: scope.kind,
+        scopeId: scope.id,
+      });
+      const blocks = knowledgeApi().answerBlocks(result);
+      state.knowledge.thread.push({
+        question,
+        answer: blocks.answer,
+        citations: blocks.citations,
+        sample: blocks.sample,
+        model: blocks.model,
+      });
+      renderAskSwarmThread();
+      byId("ask-swarm-question").value = "";
+    } catch (error) {
+      showToast(errorText(error), "error");
+    } finally {
+      state.knowledge.asking = false;
+      if (submit) submit.disabled = false;
+    }
   }
 
   function defaultRepository() {
@@ -3337,6 +3568,16 @@
       void refreshExecutionHistory();
     });
     byId("refresh-model-data").addEventListener("click", () => void refreshModelData());
+    byId("refresh-knowledge").addEventListener("click", () => void refreshKnowledge("refresh"));
+    byId("rebuild-knowledge").addEventListener("click", () => void refreshKnowledge("rebuild"));
+    byId("ask-swarm-submit").addEventListener("click", () => void askSwarm());
+    byId("ask-swarm-question").addEventListener("keydown", (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+        event.preventDefault();
+        void askSwarm();
+      }
+    });
+    byId("active-repo-select").addEventListener("change", () => renderKnowledgeScope());
     byId("model-calibration-activate").addEventListener("click", () => void activateProposedCalibration());
     byId("model-calibration-analyze").addEventListener("click", () => void analyzeModelCalibrationUpdate());
     byId("model-routing-table-head").addEventListener("click", (event) => {

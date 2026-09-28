@@ -2,13 +2,13 @@ use super::{
     automation_log_path, bot_app_slugs_from_config, decide_bot_push_access, detect_tools,
     execution_history_query_args, feedback_repository_names, get_config, get_execution_history,
     get_prompt_grades, grant_apps_request, inspect_repository, issue_branch_pr_is_visible,
-    mark_permission_primed, needs_promotion, parse_pr_ref, promotion_approval_args,
-    prompt_grades_query_args, provider_scheduler_arguments, push_access_message,
-    reconcile_integration_for_promotion, refresh_running_scheduler, repo_status_args,
-    repo_worker_args, request_issue_scan, require_closed_issue, run_now_request_path, save_config,
-    save_feedback_repo_filter, scheduler_arguments, validate_worker_script_dir, write_repos_file,
-    AiExecutionRecord, AppState, BranchAheadBehind, ExecutionHistoryPage, PromptGradesQuery,
-    ResolvedProvider,
+    knowledge_routing_payload, knowledge_settings_payload, mark_permission_primed, needs_promotion,
+    parse_pr_ref, promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
+    push_access_message, reconcile_integration_for_promotion, refresh_running_scheduler,
+    repo_status_args, repo_worker_args, request_issue_scan, require_closed_issue,
+    run_now_request_path, save_config, save_feedback_repo_filter, scheduler_arguments,
+    validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
+    ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -1223,6 +1223,56 @@ fn repo_worker_args_carries_independent_history_settings() {
     assert!(pair(&args, "--execution-history-db")
         .expect("history database path")
         .ends_with("swarm-automation.sqlite3"));
+}
+
+#[test]
+fn repo_worker_args_carries_engineering_knowledge_settings() {
+    let repo = repo("octocat/example");
+    let mut config = AppConfig {
+        engineering_knowledge_enabled: true,
+        automatic_knowledge_generation: false,
+        knowledge_context_token_limit: 1800,
+        knowledge_owner_scope_id: "local".into(),
+        ..AppConfig::default()
+    };
+    config.repositories.push(repo.clone());
+    let args = repo_worker_args(
+        &config,
+        &repo,
+        &PathBuf::from("/tmp/ws"),
+        &PathBuf::from("/usr/bin/git"),
+        &PathBuf::from("/usr/bin/gh"),
+    );
+    assert!(args.contains(&"--engineering-knowledge-enabled".to_string()));
+    assert!(args.contains(&"--no-automatic-knowledge-generation".to_string()));
+    assert_eq!(pair(&args, "--knowledge-context-token-limit"), Some("1800"));
+    assert_eq!(pair(&args, "--knowledge-owner-scope-id"), Some("local"));
+}
+
+#[test]
+fn knowledge_payloads_reuse_existing_router_and_scope_settings() {
+    let mut config = AppConfig {
+        engineering_knowledge_enabled: true,
+        automatic_knowledge_generation: true,
+        generate_issue_clustering: true,
+        dynamic_model_routing: true,
+        routing_optimization: "cost".into(),
+        ..AppConfig::default()
+    };
+    config.repositories.push(repo("acme/checkout"));
+    let settings = knowledge_settings_payload(&config);
+    assert_eq!(settings["enabled"], true);
+    assert_eq!(settings["automaticGeneration"], true);
+    assert_eq!(settings["generateIssueClustering"], true);
+    assert_eq!(settings["ownerScopeId"], "local");
+    let routing = knowledge_routing_payload(&config);
+    assert_eq!(routing["dynamicModelRouting"], true);
+    assert_eq!(routing["routingOptimization"], "cost");
+    assert!(routing["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|provider| { provider["id"] == "claude" && provider["enabled"] == true }));
 }
 
 #[test]

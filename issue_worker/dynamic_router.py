@@ -859,6 +859,7 @@ def build_router_prompt(
     comment_image_count: int = 0,
     routing_optimization: str = DEFAULT_ROUTING_OPTIMIZATION,
     allow_usage_credit_models: bool = False,
+    historical_signals: str = "",
 ) -> str:
     """Ask for a grade of the original issue. The issue text is quoted only.
 
@@ -921,6 +922,14 @@ def build_router_prompt(
             image_lines.append(
                 f"{comment_image_count} of them come from later GitHub comments rather than the original description."
             )
+    history_lines: list[str] = []
+    signals = str(historical_signals or "").strip()
+    if signals:
+        history_lines = [
+            "",
+            "Historical SWARM engineering knowledge (sample-backed; not a rule you must follow):",
+            signals,
+        ]
     return "\n".join(
         [
             "You are the SWARM dynamic AI router.",
@@ -967,6 +976,7 @@ def build_router_prompt(
             "Original issue tags:",
             ", ".join(labels) if labels else "none",
             *image_lines,
+            *history_lines,
         ]
     ) + "\n"
 

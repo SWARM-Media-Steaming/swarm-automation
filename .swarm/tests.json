@@ -2520,6 +2520,58 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_engineering_knowledge.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-engineering-knowledge",
+      "name": "Engineering Knowledge reuses existing records, relationships, provenance, and Ask SWARM retrieval",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/engineering_knowledge.py",
+          "issue_worker/test_engineering_knowledge.py",
+          "tests/adversarial/test_engineering_knowledge.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_engineering_knowledge_ui.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-engineering-knowledge-ui",
+      "name": "Knowledge / Ask SWARM is a first-class view with refresh, rebuild, and help topics",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/engineering-knowledge.js",
+          "tests/adversarial/test_engineering_knowledge_ui.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
