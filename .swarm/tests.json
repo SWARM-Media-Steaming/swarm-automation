@@ -3235,6 +3235,29 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue314_attribution_default_sentinel_collision.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue314-attribution-default-sentinel-collision",
+      "name": "Adversarial attribution does not collapse a real 'default'-named model/effort into an unrecorded value",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "issue_worker/adversarial_core.py",
+          "tests/adversarial/test_issue314_attribution_default_sentinel_collision.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
