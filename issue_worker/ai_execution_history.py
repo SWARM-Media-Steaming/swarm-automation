@@ -1877,7 +1877,7 @@ class ExecutionHistoryRepository:
         end_date: str = "",
     ) -> dict[str, Any]:
         """Aggregate token/cost totals, optionally filtered by any combination
-        of agent type, provider, model, prompt type, and a ``created_at``
+        of agent type, provider, model, prompt type, and an ``started_at``
         date range — the shape a future usage dashboard needs without any
         schema change (issue #280 item 10)."""
         repository_clause, params = _repository_filter(repositories)
@@ -1893,28 +1893,28 @@ class ExecutionHistoryRepository:
                 conditions.append(f"{column} = ?")
                 params.append(text)
         if start_date:
-            conditions.append("created_at >= ?")
+            conditions.append("started_at >= ?")
             params.append(sanitize_text(start_date))
         if end_date:
-            conditions.append("created_at <= ?")
+            conditions.append("started_at <= ?")
             params.append(sanitize_text(end_date))
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         with self.connect() as database:
             row = database.execute(
-                "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
-                "COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), "
-                "COALESCE(SUM(total_tokens), 0), COALESCE(SUM(estimated_cost), 0.0) "
+                "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens), "
+                "SUM(reasoning_tokens), SUM(cached_input_tokens), "
+                "SUM(total_tokens), SUM(estimated_cost) "
                 f"FROM ai_token_usage{where}",
                 params,
             ).fetchone()
         return {
             "invocations": int(row[0] or 0),
-            "inputTokens": int(row[1] or 0),
-            "outputTokens": int(row[2] or 0),
-            "reasoningTokens": int(row[3] or 0),
-            "cachedInputTokens": int(row[4] or 0),
-            "totalTokens": int(row[5] or 0),
-            "estimatedCost": round(float(row[6] or 0.0), 6),
+            "inputTokens": int(row[1]) if row[1] is not None else None,
+            "outputTokens": int(row[2]) if row[2] is not None else None,
+            "reasoningTokens": int(row[3]) if row[3] is not None else None,
+            "cachedInputTokens": int(row[4]) if row[4] is not None else None,
+            "totalTokens": int(row[5]) if row[5] is not None else None,
+            "estimatedCost": round(float(row[6]), 6) if row[6] is not None else None,
         }
 
     def usage_report(
