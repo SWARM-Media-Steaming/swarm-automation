@@ -2615,6 +2615,35 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue301_non_finite_quota.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-301-non-finite-quota",
+      "name": "Non-finite Codex quota percentages are rejected as unavailable (issue #301)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/ai_test_assist.py",
+          "tests/adversarial/test_issue301_non_finite_quota.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue321_ci_python_discover_alignment.py",
         "-v"
       ],

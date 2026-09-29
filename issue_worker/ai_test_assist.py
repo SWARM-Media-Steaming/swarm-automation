@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -96,6 +97,8 @@ def codex_capacity(bin_path: str, minimum_remaining_percent: float, python_bin: 
         return {"available": False, "detail": "Codex's rate-limit response was invalid"}
     if not used:
         return {"available": False, "detail": "Codex's rate-limit response had no active windows"}
+    if any(not math.isfinite(amount) for amount in used):
+        return {"available": False, "detail": "Codex's rate-limit response was invalid"}
     remaining = min(100 - amount for amount in used)
     available = (
         remaining > 0
