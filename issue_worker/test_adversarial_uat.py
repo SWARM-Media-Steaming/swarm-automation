@@ -17,7 +17,12 @@ import ai_test_assist
 import adversarial_uat as uat
 import adversarial_security as security
 import test_swarm_issue_worker as fixtures
-from ai_execution_history import ExecutionHistoryRepository, ExecutionHistoryService, ExecutionStart
+from ai_execution_history import (
+    SCHEMA_VERSION,
+    ExecutionHistoryRepository,
+    ExecutionHistoryService,
+    ExecutionStart,
+)
 from dynamic_router import COMPLEXITY_SCALE_TOP, FRONTIER_COMPLEXITY_FLOOR
 from swarm_issue_worker import Worker, ProviderChoice, ProviderUsage, IssueContext, WorkerError, iso_timestamp
 
@@ -650,7 +655,10 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(rows[0]["tester_provider"], "Grok")
         self.assertEqual(repository.adversarial_summary(self.worker.config.github_repository)["averageRounds"], 3)
         with repository.connect() as database:
-            self.assertEqual({r[0] for r in database.execute("SELECT version FROM schema_migrations")}, {1, 2, 3, 4, 5, 6, 7})
+            self.assertEqual(
+                {r[0] for r in database.execute("SELECT version FROM schema_migrations")},
+                set(range(1, SCHEMA_VERSION + 1)),
+            )
             database.execute("DELETE FROM ai_executions WHERE execution_id = ?", (execution,))
             self.assertEqual(database.execute("SELECT COUNT(*) FROM adversarial_rounds").fetchone()[0], 0)
 

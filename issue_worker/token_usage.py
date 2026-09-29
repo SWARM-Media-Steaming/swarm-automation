@@ -20,6 +20,8 @@ import enum
 import json
 from typing import Any, Iterable
 
+import model_pricing
+
 
 class AgentType(str, enum.Enum):
     """Which kind of agent made the call. Prefer this over a bare string so a
@@ -81,9 +83,10 @@ class NormalizedUsage:
 
     ``None`` on any field means the provider did not report that figure —
     never a fabricated ``0``. ``total_tokens`` is the provider's own reported
-    total when it gave one; otherwise it is computed by the normalizer that
-    built this object, following that provider's own input/cache semantics
-    (see the module docstring of each ``normalize_*_usage`` function).
+    total when it gave one — that figure is authoritative and is never
+    replaced by summing the other fields. Otherwise it is computed by the
+    normalizer that built this object, following that provider's own
+    input/cache semantics (see each ``normalize_*_usage`` function).
 
     ``cached_tokens_included_in_input`` records which of the two cache wire
     semantics this usage follows, so ``estimate_cost`` can bill it correctly
@@ -97,6 +100,13 @@ class NormalizedUsage:
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
     cached_input_tokens: int | None = None
+    #: The two halves of ``cached_input_tokens``, kept apart because they are
+    #: billed at different rates where the provider distinguishes them (a
+    #: cache *write* is a metered operation; a cache *read* is the discount).
+    #: ``None`` means the provider did not report that class at all, which is
+    #: not the same as reporting zero of it.
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
     total_tokens: int | None = None
     cached_tokens_included_in_input: bool = False
     raw: dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -155,8 +165,10 @@ def normalize_claude_usage(raw: str) -> NormalizedUsage | None:
     ``input_tokens``/``output_tokens`` plus ``cache_creation_input_tokens``
     and ``cache_read_input_tokens``. Anthropic bills both cache counters
     *in addition to* ``input_tokens`` (they are not a subset of it), so both
-    are folded into ``cached_input_tokens`` and added into the computed
-    total rather than treated as already counted.
+    are folded into ``cached_input_tokens``. When the provider also supplies
+    ``total_tokens``, that figure is kept as-is; cached and reasoning tokens
+    are never added on top of it. The additive input + cache + output total
+    is only computed when the provider did not report one.
     """
     usage_payload: dict[str, Any] | None = None
     for event in _iter_json_events(raw):
@@ -169,12 +181,19 @@ def normalize_claude_usage(raw: str) -> NormalizedUsage | None:
     cache_read = _as_int(usage_payload.get("cache_read_input_tokens"))
     cache_creation = _as_int(usage_payload.get("cache_creation_input_tokens"))
     cached_input_tokens = _sum_optional(cache_read, cache_creation)
-    total_tokens = _sum_optional(input_tokens, cached_input_tokens, output_tokens)
+    # A supplied total is the provider's own figure. Recomputing
+    # input + cache + output would invent a different number when the
+    # provider already counted those fields (or reported only a total).
+    total_tokens = _as_int(usage_payload.get("total_tokens"))
+    if total_tokens is None:
+        total_tokens = _sum_optional(input_tokens, cached_input_tokens, output_tokens)
     return NormalizedUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         reasoning_tokens=None,
         cached_input_tokens=cached_input_tokens,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_creation,
         total_tokens=total_tokens,
         raw={"usage": usage_payload},
     )
@@ -228,6 +247,10 @@ def _openai_style_usage(payload: dict[str, Any]) -> NormalizedUsage:
         output_tokens=output_tokens,
         reasoning_tokens=_as_int(reasoning),
         cached_input_tokens=_as_int(cached),
+        # OpenAI-shaped usage reports one cached figure and never meters a
+        # cache write of its own, so every cached token here is a read.
+        cache_read_tokens=_as_int(cached),
+        cache_write_tokens=None,
         total_tokens=total_tokens,
         cached_tokens_included_in_input=True,
         raw={"usage": payload},
@@ -294,68 +317,78 @@ def normalize_usage(provider: str, raw: str) -> NormalizedUsage | None:
         return None
 
 
-# Approximate USD list price per million tokens, keyed by the 1 (cheapest)
-# through 5 (most expensive) relative rank already assigned to every model in
-# dynamic_router's catalog (``model_cost``). There is no per-model dollar
-# pricing table anywhere in this app; reusing that existing routing
-# calibration data — rather than inventing a second, parallel pricing concept
-# — means a cost estimate changes if that ranking changes, with nothing here
-# to edit. Update these rates directly if real pricing drifts; nothing that
-# calls ``estimate_cost`` needs to change.
-_RANK_RATES_PER_MILLION: dict[int, dict[str, float]] = {
-    1: {"input": 0.25, "output": 1.25},
-    2: {"input": 0.50, "output": 2.50},
-    3: {"input": 1.00, "output": 5.00},
-    4: {"input": 3.00, "output": 15.00},
-    5: {"input": 5.00, "output": 25.00},
-}
-# Cached/reused input tokens are conventionally billed at a steep discount off
-# the base input rate (prompt caching across providers is commonly ~10% of
-# the fresh-input price).
-CACHED_INPUT_RATE_FACTOR = 0.1
-DEFAULT_CURRENCY = "USD"
+# Per-model dollar pricing lives in ``model_pricing.py`` — a versioned,
+# effective-dated catalog (issue #295). It replaced the five generic
+# rank-keyed rate pairs this module used to carry, which could not tell two
+# differently-billed models apart once they shared a routing cost rank.
+# ``CACHED_INPUT_RATE_FACTOR`` stays exported here for the callers that
+# already imported it; the catalog is now what defines it.
+CACHED_INPUT_RATE_FACTOR = model_pricing.CACHED_INPUT_RATE_FACTOR
+DEFAULT_CURRENCY = model_pricing.DEFAULT_CURRENCY
 
 
-def estimate_cost(model: str, usage: NormalizedUsage | None) -> float | None:
-    """Estimated USD cost of one invocation, or ``None`` when it cannot be
-    estimated (no usage, or the model has no cost rank). Reasoning tokens are
-    not charged separately: every normalizer above already folds them inside
-    ``output_tokens`` when the provider does, per that provider's own
-    semantics, so charging them again here would double-count.
+def estimate_cost_detailed(
+    model: str,
+    usage: NormalizedUsage | None,
+    *,
+    provider: str = "",
+    at: str = "",
+) -> model_pricing.CostEstimate:
+    """Cost one invocation and return the provenance with it.
 
-    Cached input tokens are always billed at ``CACHED_INPUT_RATE_FACTOR`` of
-    the fresh-input rate, but *which* tokens are "fresh" depends on the
-    provider's own wire semantics (``usage.cached_tokens_included_in_input``):
-    OpenAI-shaped usage (Codex, Grok) already counts cached tokens inside
-    ``input_tokens``, so those must be subtracted out of the full-price
-    portion before charging them again at the discount — otherwise a cache
-    hit would be billed twice and could raise the estimate above an entirely
-    uncached call. Claude's cache counters are genuinely additional to
-    ``input_tokens``, so no subtraction happens there.
+    ``at`` is the invocation's own start timestamp, so a call is priced with
+    the rate that was effective when it ran rather than whatever the catalog
+    says today. The returned estimate carries the catalog version, rate id,
+    source and the individual rates used, which is what lets a stored
+    estimate still be explained after the catalog moves on.
+
+    Never raises and never guesses: an unknown model, an ambiguous alias or a
+    gap in the effective windows comes back with ``cost=None`` and a status
+    saying which, and the caller reports the tokens with no money attached.
     """
     if usage is None:
-        return None
-    from dynamic_router import model_cost  # local import: keeps this module import-light
-
-    rank = model_cost(model)
-    if rank is None:
-        return None
-    rates = _RANK_RATES_PER_MILLION.get(rank)
-    if rates is None:
-        return None
+        return model_pricing.CostEstimate(
+            cost=None,
+            status=model_pricing.PRICING_STATUS_NO_USAGE,
+            catalog_version=model_pricing.PRICING_CATALOG_VERSION,
+        )
     try:
-        input_tokens = usage.input_tokens or 0
-        cached_tokens = usage.cached_input_tokens or 0
-        if usage.cached_tokens_included_in_input:
-            fresh_input_tokens = max(0, input_tokens - cached_tokens)
-        else:
-            fresh_input_tokens = input_tokens
-        input_cost = fresh_input_tokens / 1_000_000 * rates["input"]
-        cached_cost = cached_tokens / 1_000_000 * rates["input"] * CACHED_INPUT_RATE_FACTOR
-        output_cost = (usage.output_tokens or 0) / 1_000_000 * rates["output"]
-        return round(input_cost + cached_cost + output_cost, 6)
-    except (TypeError, ValueError):
-        return None
+        return model_pricing.estimate_invocation_cost(
+            model=model,
+            provider=provider,
+            at=at,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            cached_tokens_included_in_input=usage.cached_tokens_included_in_input,
+        )
+    except Exception:  # noqa: BLE001 - pricing must never break AI work
+        return model_pricing.CostEstimate(
+            cost=None,
+            status=model_pricing.PRICING_STATUS_NO_EFFECTIVE_PRICE,
+            catalog_version=model_pricing.PRICING_CATALOG_VERSION,
+        )
+
+
+def estimate_cost(
+    model: str,
+    usage: NormalizedUsage | None,
+    *,
+    provider: str = "",
+    at: str = "",
+) -> float | None:
+    """Estimated cost of one invocation, or ``None`` when it cannot be priced.
+
+    The thin form of ``estimate_cost_detailed`` for callers that only want the
+    number. Reasoning tokens are not charged separately unless the catalog
+    entry says the provider bills them that way: every normalizer above
+    already folds them inside ``output_tokens`` where the provider does, so
+    charging them again would double-count.
+    """
+    return estimate_cost_detailed(model, usage, provider=provider, at=at).cost
 
 
 @dataclasses.dataclass
@@ -386,6 +419,25 @@ class UsageRecord:
     workflow_run_id: str = ""
     agent_run_id: str = ""
     prompt_id: str = ""
+    #: The cache-read/cache-write split behind ``cached_input_tokens``. Kept
+    #: separately because the two are billed differently where a provider
+    #: distinguishes them, and because a report must be able to say which it
+    #: was rather than only how many cached tokens there were.
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    #: Pricing provenance (issue #295). Persisted with the estimate so it can
+    #: be reproduced and explained later, and so a catalog update never
+    #: silently restates a historical cost: nothing recomputes these.
+    #: ``pricing_status`` is ``priced`` or the reason there is no money on
+    #: this row — an unpriced invocation still keeps all of its tokens.
+    pricing_status: str = ""
+    pricing_version: str = ""
+    pricing_rate_id: str = ""
+    pricing_source: str = ""
+    input_rate_per_million: float | None = None
+    cached_input_rate_per_million: float | None = None
+    cache_write_rate_per_million: float | None = None
+    output_rate_per_million: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -415,7 +467,8 @@ def render_ai_usage_markdown(events: Iterable[dict[str, Any]]) -> str:
     lines = [
         "### AI Usage",
         "",
-        "| # | Agent | Provider / Model | Prompt | Input | Cached | Reasoning | Output | Total | Cost |",
+        "| # | Agent | Provider / Model | Prompt | Input | Cached | Reasoning | Output | Total "
+        "| Estimated cost |",
         "|---|---|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     total_input = total_cached = total_reasoning = total_output = total_tokens = 0

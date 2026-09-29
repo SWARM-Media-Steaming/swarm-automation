@@ -403,14 +403,47 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
 .ask-swarm-citations { display: grid; gap: 6px; margin-top: 10px; }
 .ask-swarm-citations a, .ask-swarm-citations span { color: var(--cyan); font-size: 11px; }
 .ask-swarm-meta { margin: 8px 0 0; color: var(--muted-2); font-size: 11px; }
+/* Usage & cost (Feedback's fourth tab). Built out of the existing tokens and
+   the shared .suite-state palette — the tables and summary cards are new
+   shapes, not new colors. */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.usage-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.usage-card { display: grid; gap: 3px; align-content: start; padding: 11px 13px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel-2); }
+.usage-card span { color: var(--muted-2); font-size: 8px; font-weight: 850; text-transform: uppercase; letter-spacing: .08em; }
+.usage-card strong { color: var(--text); font-size: 17px; }
+.usage-card small { color: var(--muted); font-size: 9px; }
+.usage-coverage { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.usage-coverage-chip { border: 1px solid transparent; cursor: pointer; }
+.usage-coverage-chip.selected { border-color: var(--violet); }
+.usage-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.usage-filters label { display: grid; gap: 4px; color: var(--muted-2); font-size: 9px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
+.usage-filters label.execution-search { grid-column: span 2; display: flex; align-items: center; text-transform: none; letter-spacing: 0; margin-top: 0; }
+.usage-filters input, .usage-filters select { margin: 0; }
+.usage-table-wrap { margin-top: 12px; overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 9px; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.usage-table th, .usage-table td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+.usage-table thead th { position: sticky; top: 0; color: var(--muted-2); font-size: 8px; font-weight: 850; text-transform: uppercase; letter-spacing: .06em; background: var(--panel-2); }
+.usage-table tbody tr:last-child td { border-bottom: 0; }
+.usage-table .numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.usage-table td strong { display: block; color: var(--text); }
+.usage-table td small { display: block; color: var(--muted-2); font-size: 8px; }
+.usage-table .usage-row.selected { background: rgba(139,109,255,.09); }
+.usage-sort { border: 0; padding: 0; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; background: none; cursor: pointer; }
+.usage-sort:hover { color: var(--text); }
+.usage-drill { text-align: left; white-space: normal; }
+.compact-heading { margin-top: 18px; }
 @media (max-width: 1060px) {
   .router-row { grid-template-columns: 96px minmax(0, 1fr); }
   .execution-record.grade-record > summary { grid-template-columns: auto minmax(0, 1fr); }.grade-record .execution-tagging { grid-column: 1 / -1; grid-row: 2; }
   .execution-record > summary { grid-template-columns: minmax(0, 1fr) auto; }.execution-tagging { grid-column: 1 / -1; grid-row: 2; }
+  .usage-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .usage-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .app-shell { grid-template-columns: 190px minmax(0, 1fr); }.feedback-loop { display: none; }.tool-grid { grid-template-columns: repeat(2, 1fr); }.form-grid.four { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 820px) {
   .grade-summary { grid-template-columns: 1fr; }
+  .usage-summary { grid-template-columns: 1fr; }
+  .usage-filters { grid-template-columns: 1fr; }.usage-filters label.execution-search { grid-column: auto; }
   .router-row { grid-template-columns: 1fr; }
   .feedback-repo-filter { align-items: flex-start; flex-direction: column; }
   .feedback-repo-chips { justify-content: flex-start; }

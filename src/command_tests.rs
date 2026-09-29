@@ -1,14 +1,15 @@
 use super::{
     automation_log_path, bot_app_slugs_from_config, decide_bot_push_access, detect_tools,
     execution_history_query_args, feedback_repository_names, get_config, get_execution_history,
-    get_prompt_grades, grant_apps_request, inspect_repository, issue_branch_pr_is_visible,
-    knowledge_routing_payload, knowledge_settings_payload, mark_permission_primed, needs_promotion,
-    parse_pr_ref, promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
-    push_access_message, reconcile_integration_for_promotion, refresh_running_scheduler,
-    repo_status_args, repo_worker_args, request_issue_scan, require_closed_issue,
-    run_now_request_path, save_config, save_feedback_repo_filter, scheduler_arguments,
+    get_prompt_grades, get_usage_report, grant_apps_request, inspect_repository,
+    issue_branch_pr_is_visible, knowledge_routing_payload, knowledge_settings_payload,
+    mark_permission_primed, needs_promotion, parse_pr_ref, promotion_approval_args,
+    prompt_grades_query_args, provider_scheduler_arguments, push_access_message,
+    reconcile_integration_for_promotion, refresh_running_scheduler, repo_status_args,
+    repo_worker_args, request_issue_scan, require_closed_issue, run_now_request_path, save_config,
+    save_feedback_repo_filter, scheduler_arguments, usage_report_query_args,
     validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
-    ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider,
+    ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider, UsageReportQuery,
 };
 use crate::config::{AppConfig, RepoConfig};
 use std::path::{Path, PathBuf};
@@ -718,6 +719,183 @@ fn prompt_grades_page_decodes_the_router_matrix_the_history_cli_prints() {
     assert_eq!(row.selections[0].provider, "codex");
     assert_eq!(row.selections[0].count, 2);
     assert!((row.selections[0].percent - 66.7).abs() < f64::EPSILON);
+}
+
+#[test]
+fn usage_report_lookup_is_safe_before_any_usage_exists() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    // Nothing has ever written a history database at this path, so the
+    // command must answer without python or the bundled scripts — and it
+    // must say there is no activity, not merely no usage.
+    config.worker_state_dir = test_app
+        ._data_dir
+        .path()
+        .join("worker-state")
+        .to_string_lossy()
+        .into_owned();
+    save_config(app.clone(), app.state(), config).unwrap();
+
+    let report = get_usage_report(
+        app.clone(),
+        app.state(),
+        vec!["octocat__example".into()],
+        UsageReportQuery {
+            group_by: Some("model".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report.group_by, "model");
+    assert!(!report.has_any_usage);
+    assert!(!report.has_any_activity);
+    assert_eq!(report.executions_without_usage, 0);
+
+    let global = get_usage_report(
+        app.clone(),
+        app.state(),
+        vec![],
+        UsageReportQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(global.group_by, "issue");
+}
+
+#[test]
+fn usage_report_query_passes_every_filter_through_to_the_history_cli() {
+    let args = usage_report_query_args(
+        Path::new("ai_execution_history.py"),
+        Path::new("history.sqlite3"),
+        &["octocat/example".into()],
+        UsageReportQuery {
+            group_by: Some(" model ".into()),
+            sort: Some(" total ".into()),
+            direction: Some("asc".into()),
+            group_offset: Some(-4),
+            detail_offset: Some(25),
+            group_value: Some("claude-sonnet-5".into()),
+            start_date: Some(" 2026-03-01 ".into()),
+            end_date: Some("2026-03-31".into()),
+            issue_number: Some(" 295 ".into()),
+            grade: Some(" B- ".into()),
+            provider: Some(" Claude ".into()),
+            model: Some(" claude-sonnet-5 ".into()),
+            effort: Some("high".into()),
+            agent_type: Some("router".into()),
+            prompt_type: Some("initial".into()),
+            outcome: Some("failure".into()),
+            coverage: Some("tokens_only".into()),
+            execution_id: Some("exec-1".into()),
+            search: Some("  Widget  ".into()),
+        },
+    );
+    assert!(args.contains(&"--usage".to_string()));
+    let value_after = |flag: &str| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .map(|index| args[index + 1].as_str())
+    };
+    assert_eq!(value_after("--group-by"), Some("model"));
+    assert_eq!(value_after("--usage-sort"), Some("total"));
+    assert_eq!(value_after("--usage-direction"), Some("asc"));
+    // A negative offset is a bug upstream, not a request to page backwards.
+    assert_eq!(value_after("--group-offset"), Some("0"));
+    assert_eq!(value_after("--detail-offset"), Some("25"));
+    assert_eq!(value_after("--group-value"), Some("claude-sonnet-5"));
+    assert_eq!(value_after("--start-date"), Some("2026-03-01"));
+    assert_eq!(value_after("--end-date"), Some("2026-03-31"));
+    assert_eq!(value_after("--issue-number"), Some("295"));
+    assert_eq!(value_after("--grade"), Some("B-"));
+    assert_eq!(value_after("--provider"), Some("Claude"));
+    assert_eq!(value_after("--model"), Some("claude-sonnet-5"));
+    assert_eq!(value_after("--effort"), Some("high"));
+    assert_eq!(value_after("--agent-type"), Some("router"));
+    assert_eq!(value_after("--prompt-type"), Some("initial"));
+    assert_eq!(value_after("--outcome"), Some("failure"));
+    assert_eq!(value_after("--coverage"), Some("tokens_only"));
+    assert_eq!(value_after("--execution-id"), Some("exec-1"));
+    assert_eq!(value_after("--search"), Some("Widget"));
+    assert_eq!(value_after("--repository"), Some("octocat/example"));
+}
+
+#[test]
+fn an_unset_usage_query_still_sends_valid_choices_and_no_selection() {
+    let args = usage_report_query_args(
+        Path::new("ai_execution_history.py"),
+        Path::new("history.sqlite3"),
+        &[],
+        UsageReportQuery::default(),
+    );
+    let value_after = |flag: &str| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .map(|index| args[index + 1].as_str())
+    };
+    // These four are argparse *choices*; an empty string is not one of them,
+    // so an unset filter has to carry the default rather than fail the run.
+    assert_eq!(value_after("--group-by"), Some("issue"));
+    assert_eq!(value_after("--usage-sort"), Some("cost"));
+    assert_eq!(value_after("--usage-direction"), Some("desc"));
+    assert_eq!(value_after("--outcome"), Some("all"));
+    // Everything else is an ordinary optional filter and stays empty.
+    assert_eq!(value_after("--model"), Some(""));
+    assert_eq!(value_after("--coverage"), Some(""));
+    // No aggregate row is selected, which is a different query from one
+    // whose selected group value happens to be empty.
+    assert!(!args.iter().any(|argument| argument == "--group-value"));
+    assert!(!args.iter().any(|argument| argument == "--repository"));
+}
+
+#[test]
+fn usage_report_decodes_the_payload_the_history_cli_prints() {
+    let report: super::UsageReport = serde_json::from_str(
+        r#"{"groupBy":"model","sort":"cost","direction":"desc",
+            "summary":{"invocations":3,"estimatedCost":0.19,"pricedInvocations":2,
+                       "totalTokens":null,"reasoningTokens":null},
+            "coverage":{"complete":2,"tokens_only":1,"partial":0,"unreported":0,"failed":0},
+            "groups":{"rows":[{"group":"claude-sonnet-5","invocations":2,
+                               "estimatedCost":0.19,"reasoningTokens":null}],
+                      "total":1,"offset":0,"limit":25},
+            "invocations":{"rows":[],"total":0,"offset":0,"limit":25,"groupValue":null},
+            "facets":{"models":[{"value":"claude-sonnet-5","count":2}]},
+            "filters":{"model":""},
+            "hasAnyUsage":true,"hasAnyActivity":true,"executionsWithoutUsage":4}"#,
+    )
+    .expect("usage report should decode");
+    assert_eq!(report.group_by, "model");
+    assert!(report.has_any_usage);
+    assert_eq!(report.executions_without_usage, 4);
+    assert_eq!(report.summary["pricedInvocations"], 2);
+    // A null token total must survive the round trip as null: turning it
+    // into 0 here would claim the providers reported zero tokens.
+    assert!(report.summary["totalTokens"].is_null());
+    assert!(report.groups["rows"][0]["reasoningTokens"].is_null());
+    assert_eq!(report.coverage["tokens_only"], 1);
+}
+
+#[test]
+fn an_execution_record_without_usage_decodes_as_unavailable_not_zero() {
+    let record: AiExecutionRecord = serde_json::from_str(
+        r#"{"execution_id":"e1","repository":"octocat/example","issue_number":7,
+            "issue_title":"Imported","ai_provider":"","started_at":"2026-01-01T00:00:00Z",
+            "final_status":"imported","attempt_number":1,"updated_at":"2026-01-01T00:00:00Z"}"#,
+    )
+    .expect("record should decode");
+    assert!(record.token_usage_summary.is_null());
+    assert!(record.token_usage.is_empty());
+
+    let with_usage: AiExecutionRecord = serde_json::from_str(
+        r#"{"execution_id":"e2","repository":"octocat/example","issue_number":8,
+            "issue_title":"Worked","ai_provider":"Claude","started_at":"2026-01-01T00:00:00Z",
+            "final_status":"completed","attempt_number":1,"updated_at":"2026-01-01T00:00:00Z",
+            "token_usage_summary":{"invocations":2,"estimatedCost":0.1,"pricedInvocations":1},
+            "token_usage":[{"id":"u1"},{"id":"u2"}]}"#,
+    )
+    .expect("record should decode");
+    assert_eq!(with_usage.token_usage_summary["invocations"], 2);
+    assert_eq!(with_usage.token_usage.len(), 2);
 }
 
 #[test]

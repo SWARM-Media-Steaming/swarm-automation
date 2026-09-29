@@ -121,7 +121,7 @@ upload. The database includes upload and reviewer-feedback state for a future
 review-platform integration, but this release does not transmit records.
 
 The **Feedback** tab reads that same local database for the selected
-repository, split across three tabs:
+repository, split across four tabs:
 
 - **Prompt grades** — the router's grade of each issue's original prompt, with
   the reason, the complexity score, and the AI platform, model, and reasoning
@@ -135,7 +135,15 @@ repository, split across three tabs:
   expandable to the original GitHub issue, the exact prompt submitted, the AI's
   summary of the requested and completed work, files/branch/commits/pull
   request, lifecycle notes and warnings, and any reviewer feedback once a
-  review platform has provided it.
+  review platform has provided it. Each card also carries its invocation
+  count, total tokens, estimated cost and reporting coverage, and expands
+  into the individual usage records behind them.
+- **Usage & cost** — tokens and estimated cost for every AI invocation
+  recorded locally since per-prompt token tracking was added, explorable by
+  model, issue, prompt grade, reasoning effort, provider, agent stage, prompt
+  type, repository and date. Pick a grouping, sort the aggregate table, and
+  select a row to drill through to the exact invocations behind it. Prompt
+  Grades, Router Activity and Execution History all link into it.
 
 The execution view also shows a sortable UAT round column, per-round provider
 pairings and disputes, and aggregate average rounds, clean-first-pass rate and
@@ -144,9 +152,20 @@ approximate percentage-point drop from remaining-quota snapshots across used
 providers, not metered token or dollar cost. Existing history databases migrate
 automatically to schema 3 when history is enabled.
 
+**Estimated cost** is token-equivalent model list pricing from a versioned,
+effective-dated catalog — never an invoice, and never subscription-quota
+consumption, which stays separate on the Overview page. Each invocation is
+priced at the rate in force when it ran and stores that rate, so correcting
+the catalog never restates a historical figure. A model the catalog does not
+cover is reported as *Tokens only* rather than given a guessed price, and a
+value the provider never reported renders as unavailable rather than as zero.
+See [docs/model-pricing.md](docs/model-pricing.md) for how to update a rate.
+
 It is read-only and empty until "Store AI execution history" has recorded at
 least one execution; grades and router activity also need Dynamic Model Routing
-turned on.
+turned on. Usage & cost covers locally recorded runs only — imported or older
+executions show as *usage unavailable*, and GitHub comments are never scraped
+to backfill them.
 
 ## Engineering Knowledge / Ask SWARM
 
@@ -238,7 +257,7 @@ be read, the worker logs it and carries on with the normal queue.
 src/            Rust backend (Tauri commands, process supervision, tool detection)
 ui/             Frontend (plain HTML/CSS/JS, no build step)
 issue_worker/   Vendored Python issue-worker implementation, bundled into every build
-docs/           Architecture notes, including Engineering Knowledge
+docs/           Architecture notes: Engineering Knowledge, model pricing
 icons/          Application icons
 capabilities/   Tauri v2 permission manifest
 ```
