@@ -2220,6 +2220,131 @@ class WorkerTestCase(unittest.TestCase):
         # Strongest label wins when several are present.
         self.assertEqual(priority_rank(["low", "priority: high", "medium"]), 1)
 
+    # ----- a saved attempt whose issue the person closed or unassigned ------
+
+    def _start_attempt(self, number: int, *, dirty: bool = False, commit: bool = False) -> str:
+        """Leave the worker mid-way through issue ``number`` on its own branch."""
+        self.worker.issue = IssueContext(number, "Title", "body", [], f"https://example.invalid/{number}")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-1")
+        branch = self.worker.expected_branch()
+        self.git("switch", "-q", "-c", branch, "ai-main")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        if commit:
+            (self.repo / "work.txt").write_text("unpushed\n", encoding="utf-8")
+            self.git("add", "work.txt")
+            self.git("commit", "-q", "-m", "local only")
+        if dirty:
+            (self.repo / "tracked.txt").write_text("half-done edit\n", encoding="utf-8")
+            (self.repo / "scratch.txt").write_text("untracked\n", encoding="utf-8")
+        return branch
+
+    def _select(self, *, remote_issue: dict | None, open_issues: list, lookup_error: bool = False):
+        def api_get(endpoint: str) -> dict:
+            if lookup_error:
+                raise WorkerError("GitHub is unreachable")
+            assert remote_issue is not None
+            return remote_issue
+
+        with (
+            mock.patch.object(self.worker, "assigned_issues", return_value=open_issues),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "api_get", side_effect=api_get),
+        ):
+            return self.worker.select_issue()
+
+    def test_a_closed_issue_releases_the_saved_attempt_and_the_worker_moves_on(self) -> None:
+        branch = self._start_attempt(304, dirty=True)
+        other = self.issue_payload(310)
+        selected = self._select(
+            remote_issue={"state": "closed", "assignees": [{"login": self.worker.config.github_assignee}]},
+            open_issues=[other],
+        )
+        assert selected is not None
+        self.assertEqual(selected.number, 310)
+        self.assertFalse(self.worker.in_progress_file.exists())
+        archived = list((self.state / "abandoned").glob("issue-304-*.json"))
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(json.loads(archived[0].read_text())["issue_number"], 304)
+        # Back on the integration branch with a clean tree, nothing deleted.
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+        self.assertEqual(self.worker.worktree_status(), "")
+        stash = self.git("stash", "list")
+        self.assertIn("abandoned attempt for issue #304", stash)
+        self.assertEqual(
+            self.git("show", "stash@{0}:tracked.txt"), "half-done edit"
+        )
+        self.assertNotIn(branch, self.git("branch", "--list", branch))
+
+    def test_releasing_an_attempt_marks_its_history_row_abandoned(self) -> None:
+        self.worker.issue = IssueContext(304, "Title", "body", [], "https://example.invalid/304")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-1")
+        execution_id = self.worker.history.start(
+            ExecutionStart(
+                repository=self.worker.config.github_repository, issue_number=304,
+                issue_url="https://example.invalid/304", issue_title="Title", issue_body="body",
+                provider="Claude", model="test-model", effort="high",
+                branch_name=self.worker.expected_branch(), application_version="1.0.0",
+            ),
+            "2026-09-28T22:03:00+00:00",
+        )
+        self.assertTrue(execution_id)
+        self.worker.history.update("2026-09-28T22:03:01+00:00", final_status="running")
+        self._start_attempt(304)
+        self._select(remote_issue={"state": "closed", "assignees": []}, open_issues=[])
+        with self.worker.history.repository.connect() as database:
+            row = database.execute(
+                "SELECT final_status, operational_notes FROM ai_executions WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+        self.assertEqual(row[0], "abandoned")
+        self.assertIn("issue #304 was closed", row[1])
+
+    def test_an_unassigned_open_issue_is_released_too(self) -> None:
+        self._start_attempt(304)
+        selected = self._select(
+            remote_issue={"state": "open", "assignees": [{"login": "someone-else"}]},
+            open_issues=[],
+        )
+        self.assertIsNone(selected)
+        self.assertFalse(self.worker.in_progress_file.exists())
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+
+    def test_the_attempt_is_kept_when_github_still_says_the_issue_is_open_and_assigned(self) -> None:
+        # The open list can miss an issue for reasons that do not mean it was
+        # withdrawn; the worker must stop rather than discard the attempt.
+        self._start_attempt(304, dirty=True)
+        with self.assertRaisesRegex(WorkerError, "no longer open and assigned"):
+            self._select(
+                remote_issue={"state": "open", "assignees": [{"login": self.worker.config.github_assignee}]},
+                open_issues=[],
+            )
+        self.assertTrue(self.worker.in_progress_file.exists())
+        self.assertNotEqual(self.worker.worktree_status(), "")
+
+    def test_the_attempt_is_kept_when_the_issue_cannot_be_checked(self) -> None:
+        self._start_attempt(304, dirty=True)
+        with self.assertRaisesRegex(WorkerError, "no longer open and assigned"):
+            self._select(remote_issue=None, open_issues=[], lookup_error=True)
+        self.assertTrue(self.worker.in_progress_file.exists())
+        self.assertNotEqual(self.worker.worktree_status(), "")
+
+    def test_unpushed_commits_are_never_discarded(self) -> None:
+        branch = self._start_attempt(304, commit=True)
+        commit = self.git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(WorkerError, "no longer open and assigned"):
+            self._select(remote_issue={"state": "closed", "assignees": []}, open_issues=[])
+        self.assertTrue(self.worker.in_progress_file.exists())
+        self.assertEqual(self.git("branch", "--show-current"), branch)
+        self.assertEqual(self.git("rev-parse", branch), commit)
+
+    def test_pushed_commits_do_not_block_releasing_the_attempt(self) -> None:
+        branch = self._start_attempt(304, commit=True)
+        self.git("push", "-q", "origin", branch)
+        selected = self._select(remote_issue={"state": "closed", "assignees": []}, open_issues=[])
+        self.assertIsNone(selected)
+        self.assertFalse(self.worker.in_progress_file.exists())
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+
     def test_higher_priority_issue_is_selected_before_lower_numbered_one(self) -> None:
         issues = [
             self.issue_payload(20, labels=("priority: medium",)),

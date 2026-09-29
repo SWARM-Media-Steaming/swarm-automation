@@ -52,7 +52,13 @@ if __name__ == "__main__":
     sys.modules["swarm_issue_worker"] = sys.modules[__name__]
 
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
-from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION, sanitize_text
+from ai_execution_history import (
+    ExecutionHistoryRepository,
+    ExecutionHistoryService,
+    ExecutionStart,
+    PROMPT_TEMPLATE_VERSION,
+    sanitize_text,
+)
 from token_usage import (
     DEFAULT_CURRENCY,
     AgentType,
@@ -3146,6 +3152,113 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         )
         return True
 
+    def issue_departed(self, issue_number: int) -> str:
+        """Why the person took ``issue_number`` away from this worker, or "".
+
+        The open-and-assigned list can be missing an issue for reasons that do
+        not mean it was withdrawn (an API hiccup, paging), so this asks GitHub
+        about the one issue directly. It only answers when the issue is closed
+        or no longer assigned to this worker; anything else, including a failed
+        lookup, returns "" and leaves the caller to stop instead of guessing.
+        """
+        try:
+            issue = self.github.api_get(
+                f"repos/{self.config.github_repository}/issues/{issue_number}"
+            )
+        except (WorkerError, ValueError, json.JSONDecodeError) as error:
+            log(f"Could not confirm the state of issue #{issue_number}: {error}")
+            return ""
+        if str(issue.get("state") or "").lower() == "closed":
+            return "closed"
+        assignees = {str(a.get("login") or "") for a in issue.get("assignees") or []}
+        if self.config.github_assignee not in assignees:
+            return "no longer assigned to " + self.config.github_assignee
+        return ""
+
+    def unpushed_commits(self, branch: str) -> int:
+        """Commits on the local ``branch`` that exist nowhere on the remote."""
+        if not branch or not self.git_ok("show-ref", "--verify", f"refs/heads/{branch}"):
+            return 0
+        remote = self.config.remote_name
+        self.git("fetch", remote, "--prune", check=False)
+        excluded = [
+            f"{remote}/{name}"
+            for name in (branch, self.config.integration_branch, self.config.base_branch)
+            if self.git_ok("show-ref", "--verify", f"refs/remotes/{remote}/{name}")
+        ]
+        args = ["rev-list", "--count", branch]
+        if excluded:
+            args += ["--not", *excluded]
+        counted = self.git(*args, check=False)
+        return int(counted) if counted.isdigit() else 1
+
+    def release_departed_in_progress(self, saved_state: dict[str, Any]) -> bool:
+        """Let go of a saved attempt whose issue was closed or unassigned.
+
+        A person closing or unassigning an issue the worker is mid-way through
+        is normal, and the worker must not stay wedged on it. Recoverable
+        everything: uncommitted edits are stashed (never deleted), the saved
+        state is archived under ``abandoned/``, and the attempt is marked
+        abandoned in execution history. It refuses — leaving the original
+        error to stop the worker — when it cannot confirm the issue really
+        departed, or when the local branch holds commits that were never
+        pushed, because that is the one case where real work could be lost.
+        """
+        number = int(saved_state["issue_number"])
+        reason = self.issue_departed(number)
+        if not reason:
+            return False
+        branch = str(saved_state.get("branch_name") or "")
+        unpushed = self.unpushed_commits(branch)
+        if unpushed:
+            log(
+                f"Issue #{number} is {reason}, but {branch} has {unpushed} unpushed "
+                "commit(s); keeping the saved attempt so that work is not lost."
+            )
+            return False
+
+        if self.worktree_status():
+            stashed = self.git(
+                "stash", "push", "--include-untracked", "-m",
+                f"swarm: abandoned attempt for issue #{number} ({reason})",
+                check=False,
+            )
+            log(f"Stashed uncommitted work from the abandoned issue #{number} attempt: {stashed}")
+            if self.worktree_status():
+                log(f"Could not clear the working tree after abandoning issue #{number}.")
+                return False
+        integration = self.config.integration_branch
+        if self.git("branch", "--show-current") != integration:
+            if not (self.git_ok("switch", integration) or self.git_ok("switch", self.config.base_branch)):
+                log(f"Could not switch back to {integration} after abandoning issue #{number}.")
+                return False
+        if branch and branch != self.git("branch", "--show-current"):
+            self.git("branch", "-D", branch, check=False)
+
+        archive = self.state / "abandoned"
+        archive.mkdir(parents=True, exist_ok=True)
+        stamp = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+        atomic_write_json(archive / f"issue-{number}-{stamp}.json", saved_state)
+        self.clear_in_progress(number)
+
+        execution_id = str(saved_state.get("execution_id") or "")
+        if execution_id:
+            try:
+                history = ExecutionHistoryRepository(self.config.execution_history_db)
+                now = iso_timestamp()
+                history.update(execution_id, now, final_status="abandoned")
+                history.append(
+                    execution_id, "operational_notes",
+                    f"Attempt abandoned: issue #{number} was {reason}.", now,
+                )
+            except Exception as error:  # noqa: BLE001 - bookkeeping must never block the worker
+                log(f"Could not mark execution {execution_id} abandoned: {sanitize_text(error)}")
+        log(
+            f"Released issue #{number} ({reason}): saved attempt archived in "
+            f"{archive}, working tree restored to {integration}."
+        )
+        return True
+
     def select_issue(self) -> IssueContext | None:
         # A resumable in-progress issue always wins; otherwise the next issue is
         # the highest-priority ready one (see ``priority_rank``), breaking ties by
@@ -3177,10 +3290,15 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         if in_progress_number is not None:
             remote = next((item for item in issues if int(item["number"]) == in_progress_number), None)
             if remote is None:
-                raise WorkerError(
-                    f"Saved in-progress issue #{in_progress_number} is no longer open and assigned to "
-                    f"{self.config.github_assignee}; review {self.in_progress_file}."
-                )
+                assert saved_state is not None
+                if not self.release_departed_in_progress(saved_state):
+                    raise WorkerError(
+                        f"Saved in-progress issue #{in_progress_number} is no longer open and assigned to "
+                        f"{self.config.github_assignee}; review {self.in_progress_file}."
+                    )
+                in_progress_number = None
+                saved_state = None
+        if in_progress_number is not None:
             assert saved_state is not None
             return self.issue_from_state(saved_state, remote)
 
