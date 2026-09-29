@@ -1,12 +1,17 @@
 """Reusable Dynamic Model Router (issue #195).
 
 The router's job is choosing a provider/model/reasoning-effort combination
-reasonably expected to complete a given task successfully. When the UI Cost
-Consideration setting is on (``RouteRequest.cost_consideration_enabled``), it
-additionally prefers the least expensive, least token-intensive combination
-that still clears a minimum expected-success bar — never simply the strongest
-model available, and never a cheaper model that is not expected to succeed.
-When that setting is off, dollar cost and token consumption have no weight.
+reasonably expected to complete a given task successfully. Automatic routing
+is always cost-first after capability, expected-success, safety, and
+context-fit gates: among candidates that clear those floors, the lowest
+estimated total cost wins. Latency and provider preference only break a
+cost/capability tie. A cheaper model is never selected when its expected
+ability to complete the task is below the configured safety threshold.
+
+``RouteRequest.cost_consideration_enabled`` defaults to on. Passing False is
+only for isolated scoring-formula tests of the non-cost weight set; it is
+not a user-facing routing mode.
+
 Model selection and effort selection are scored together but are independently
 justified: see ``_score_candidate``.
 
@@ -211,7 +216,7 @@ class RouteRequest:
 
     task_type: str
     complexity: str | int
-    cost_consideration_enabled: bool = False
+    cost_consideration_enabled: bool = True
     cost_sensitive: bool = False
     token_sensitive: bool = False
     latency_sensitive: bool = False
@@ -240,6 +245,9 @@ class RoutingCandidate:
     effort: str
     score: float
     expected_success: float = 0.0
+    estimated_cost: float | None = None
+    relative_cost: int = 0
+    relative_latency: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -248,6 +256,10 @@ class RoutingCandidate:
             "model": self.model.model,
             "effort": self.effort,
             "score": round(self.score, 4),
+            "expected_success": round(self.expected_success, 4),
+            "estimated_cost": self.estimated_cost,
+            "relative_cost": self.relative_cost,
+            "relative_latency": self.relative_latency,
         }
 
 
@@ -262,7 +274,11 @@ class RoutingDecision:
     confidence: float
     reason: str
     alternatives: tuple[dict[str, Any], ...]
-    cost_consideration_enabled: bool = False
+    cost_consideration_enabled: bool = True
+    native_score: float = 0.0
+    normalized_score: float = 0.0
+    candidates: tuple[dict[str, Any], ...] = ()
+    estimated_cost: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -276,6 +292,10 @@ class RoutingDecision:
             "reason": self.reason,
             "alternatives": list(self.alternatives),
             "cost_consideration_enabled": self.cost_consideration_enabled,
+            "native_score": round(self.native_score, 4),
+            "normalized_score": round(self.normalized_score, 4),
+            "candidates": list(self.candidates),
+            "estimated_cost": self.estimated_cost,
         }
 
 
@@ -675,6 +695,7 @@ def _score_candidate(
     required_capability: int,
     min_effort: str,
     normalizer: _BenchmarkNormalizer,
+    cheapest_cost: int | None = None,
 ) -> tuple[float, float]:
     """Return ``(score, expected_success)``. See SKILL.md for the formula."""
     coding_capability, data_quality = _coding_capability(model, effort, group, normalizer)
@@ -707,12 +728,19 @@ def _score_candidate(
             weights["token_efficiency"] = rules.cost_consideration_weights.get("token_efficiency", 0.08)
         else:
             weights["token_efficiency"] = current * rules.sensitivity_boost
-    if request.latency_sensitive:
+    if cost_on and not request.latency_sensitive:
+        # Automatic cost-first routing: latency may only break a cost tie.
+        weights["latency"] = 0.0
+    elif request.latency_sensitive:
         weights["latency"] = weights.get("latency", 0.0) * rules.sensitivity_boost
 
     positive = sum(weights.get(key, 0.0) * value for key, value in components.items())
 
     overqualification = max(0, model.relative_capability - required_capability) * rules.overqualification_penalty_per_level
+    if cost_on and cheapest_cost is not None and model.relative_cost <= cheapest_cost:
+        # Cost-first: the cheapest capable model must not lose to a more
+        # expensive just-capable peer because it is overqualified.
+        overqualification = 0.0
     extra_effort_levels = max(0, rules.effort_ladder.index(effort) - rules.effort_ladder.index(min_effort))
     reasoning_penalty = rules.unnecessary_reasoning_penalty_per_level
     if cost_on:
@@ -760,8 +788,10 @@ def route(
     min_effort_index = rules.effort_ladder.index(min_effort)
     normalizer = _BenchmarkNormalizer(catalog)
 
+    eligible = _eligible_models(catalog, availability)
+    cheapest_cost = min((model.relative_cost for model in eligible), default=None)
     scored: list[RoutingCandidate] = []
-    for model in _eligible_models(catalog, availability):
+    for model in eligible:
         for effort in model.supported_efforts:
             if effort not in rules.effort_ladder:
                 continue
@@ -777,10 +807,17 @@ def route(
                 required_capability=required_capability,
                 min_effort=min_effort,
                 normalizer=normalizer,
+                cheapest_cost=cheapest_cost,
             )
             scored.append(
                 RoutingCandidate(
-                    model=model, effort=effort, score=score, expected_success=expected_success
+                    model=model,
+                    effort=effort,
+                    score=score,
+                    expected_success=expected_success,
+                    estimated_cost=estimated_dollar_cost(model, effort),
+                    relative_cost=model.relative_cost,
+                    relative_latency=model.relative_latency,
                 )
             )
 
@@ -806,7 +843,17 @@ def route(
     top_score = pool[0].score
     tied = [c for c in pool if top_score - c.score <= rules.tie_break_margin]
     if cost_on:
-        tied.sort(key=lambda c: (c.model.relative_cost, rules.effort_ladder.index(c.effort)))
+        # Cost, then effort, then latency. A faster model cannot beat a cheaper
+        # adequately capable one solely because it is faster.
+        tied.sort(
+            key=lambda c: (
+                c.relative_cost if c.relative_cost else c.model.relative_cost,
+                rules.effort_ladder.index(c.effort),
+                c.relative_latency if c.relative_latency else c.model.relative_latency,
+                -c.expected_success,
+                -c.score,
+            )
+        )
     else:
         tied.sort(
             key=lambda c: (
@@ -817,15 +864,40 @@ def route(
         )
     if availability.preferred_provider:
         preferred = [c for c in tied if c.model.provider == availability.preferred_provider]
-        if preferred:
+        if preferred and (
+            not cost_on
+            or all(c.relative_cost == preferred[0].relative_cost for c in tied)
+        ):
             tied = preferred
     winner = tied[0]
 
     remaining = [c for c in scored if c is not winner]
     remaining.sort(key=lambda candidate: candidate.score, reverse=True)
     alternatives = tuple(candidate.as_dict() for candidate in remaining[:2])
+    snapshot = tuple(candidate.as_dict() for candidate in sorted(scored, key=lambda item: item.score, reverse=True)[:12])
+    native_scores = [candidate.score for candidate in scored]
+    lowest, highest = min(native_scores), max(native_scores)
+    if highest <= lowest:
+        normalized = 1.0
+    else:
+        normalized = (winner.score - lowest) / (highest - lowest)
 
-    runner_up_score = remaining[0].score if remaining else winner.score
+    # Confidence measures how close a *realistic* alternative was, not the
+    # score of a strictly more expensive (cost-on) or ineligible model. A
+    # one-unit cost-rank bump on a dominated bystander must not change the
+    # reported decision, including confidence.
+    confidence_peers = remaining
+    if cost_on:
+        winner_cost = winner.relative_cost if winner.relative_cost else winner.model.relative_cost
+        confidence_peers = [
+            candidate
+            for candidate in pool
+            if candidate is not winner
+            and (candidate.relative_cost if candidate.relative_cost else candidate.model.relative_cost)
+            <= winner_cost
+        ]
+        confidence_peers.sort(key=lambda candidate: candidate.score, reverse=True)
+    runner_up_score = confidence_peers[0].score if confidence_peers else winner.score
     gap = max(0.0, winner.score - runner_up_score)
     confidence = min(1.0, rules.confidence_floor + gap / rules.confidence_score_gap_scale)
 
@@ -841,6 +913,10 @@ def route(
         reason=reason,
         alternatives=alternatives,
         cost_consideration_enabled=cost_on,
+        native_score=winner.score,
+        normalized_score=normalized,
+        candidates=snapshot,
+        estimated_cost=winner.estimated_cost,
     )
 
 

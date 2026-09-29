@@ -58,7 +58,8 @@ test("summarizes how many prompts earned a B or better", () => {
 });
 
 test("falls back to the first tab for an unknown feedback tab", () => {
-  assert.deepEqual(FEEDBACK_TABS, ["grades", "routing", "history"]);
+  assert.deepEqual(FEEDBACK_TABS, ["grades", "routing", "jev", "history"]);
+  assert.equal(activeTab("jev"), "jev");
   assert.equal(activeTab("routing"), "routing");
   assert.equal(activeTab("history"), "history");
   assert.equal(activeTab("nope"), "grades");

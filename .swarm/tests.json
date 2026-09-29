@@ -2667,6 +2667,294 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_safety_authority.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-safety-authority",
+      "name": "Issue #299: Jev remains advisory; safety gates, fallback, and configured UAT/Cyber stay Swarm-owned",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/jev_cli.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/issue299/test_jev_safety_authority.py",
+          "tests/adversarial/issue299/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_routing_and_scores.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-routing-and-scores",
+      "name": "Issue #299: Jev scores feed cost-first Swarm routing without replacing the router or manual selections",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/dynamic_router.py",
+          "issue_worker/model_router.py",
+          "issue_worker/model_calibration.py",
+          "tests/adversarial/issue299/test_jev_routing_and_scores.py",
+          "tests/adversarial/issue299/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_persistence_feedback.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-persistence-feedback",
+      "name": "Issue #299: baseline/Jev/combined scores persist, fallback is labelled, failures are not savings",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/ai_execution_history.py",
+          "issue_worker/decision_engine.py",
+          "tests/adversarial/issue299/test_jev_persistence_feedback.py",
+          "tests/adversarial/issue299/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_response_contract.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-response-contract",
+      "name": "Issue #299: Jev score/noul answers fail safe on malformed input instead of silently inverting risk",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/jev_cli.py",
+          "issue_worker/model_router.py",
+          "tests/adversarial/issue299/test_jev_response_contract.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/issue299/test_jev_surfaces.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-surfaces",
+      "name": "Issue #299: Jev AI Configuration and Feedback surfaces, no cost-optimize toggle, baseline-only labels",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/jev-decision-ui.js",
+          "tests/adversarial/issue299/test_jev_surfaces.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_workflow_invariants.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-workflow-invariants",
+      "name": "Issue #299: blocking findings, RAG fallback retrieval, category toggles, CLI fail-closed, pre-flight score fields",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/jev_cli.py",
+          "issue_worker/dynamic_router.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/issue299/test_jev_workflow_invariants.py",
+          "tests/adversarial/issue299/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_fail_closed_authority.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-fail-closed-authority",
+      "name": "Issue #299: low-confidence COMPLETE, health auth, API-key fail-closed, RAG critical-context fallback",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/jev_cli.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/issue299/test_jev_fail_closed_authority.py",
+          "tests/adversarial/issue299/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_feedback_query_filters.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-feedback-query-filters",
+      "name": "Issue #299: Feedback date/cost/delta filters query full history; retries are not savings",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/issue299/test_jev_feedback_query_filters.py",
+          "tests/adversarial/issue299/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_cost_first_capable.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-cost-first-capable",
+      "name": "Issue #299: cheaper adequately capable models beat extra capability, preference, and latency",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_router.py",
+          "tests/adversarial/issue299/test_jev_cost_first_capable.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/issue299/test_jev_feedback_analysis.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-feedback-analysis",
+      "name": "Issue #299: Feedback query wiring for provider/date/delta/cost; failures counted on summary cards",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "ui/jev-decision-ui.js",
+          "tests/adversarial/issue299/test_jev_feedback_analysis.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1

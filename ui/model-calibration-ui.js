@@ -35,7 +35,7 @@
     const info = status || {};
     return [
       { label: "Dynamic routing", value: cfg.dynamic_model_routing ? "Enabled" : "Disabled" },
-      { label: "Cost-aware routing", value: cfg.routing_optimization === "cost" ? "Enabled" : "Disabled" },
+      { label: "Cost-first routing", value: "Enabled" },
       { label: "Active calibration", value: info.active_version || "None yet" },
       { label: "Last successful refresh", value: info.last_successful_refresh_at || "Never" },
       { label: "Last attempted refresh", value: info.last_attempted_refresh_at || "Never" },
@@ -238,19 +238,13 @@
     { name: "Performance", detail: "Model speed, latency, reliability, and historical success." },
   ];
 
-  // This app has two routing_optimization values ("best"/"cost"), not three
-  // literal modes -- these explanations describe the concept space from the
-  // issue; `currentStrategy` below reports which of the two the app actually
-  // runs.
   const ROUTING_MODE_EXPLANATIONS = [
-    { name: "Quality", detail: "Prioritizes model capability and task fit. Cost has little or no influence." },
-    { name: "Balanced", detail: "Balances capability, expected cost, speed, and task requirements." },
     {
       name: "Cost Aware",
       detail:
-        "Prioritizes cost efficiency while still enforcing minimum task capability requirements. " +
-        "This means: find the least expensive model that is sufficiently capable for this task. " +
-        "It does not mean: always select the cheapest model.",
+        "Automatic routing is always cost-first after capability, expected-success, safety, and context-fit gates. " +
+        "Find the least expensive model that is sufficiently capable for this task. " +
+        "Latency never beats a cheaper adequately capable model.",
     },
   ];
 
@@ -258,10 +252,10 @@
 
   function currentStrategy(status) {
     const info = status || {};
-    const costOn = info.routing_mode === "cost_aware";
+    const costOn = true;
     const weights = info.weights || {};
     return {
-      mode: costOn ? "Cost Aware" : "Balanced",
+      mode: "Cost Aware",
       costOptimizationEnabled: costOn,
       factors: [
         { name: "Capability", level: weights.capability || "high" },

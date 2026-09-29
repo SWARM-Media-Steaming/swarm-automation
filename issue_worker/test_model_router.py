@@ -229,7 +229,8 @@ class RealCatalogRoutingTests(unittest.TestCase):
             "cost_consideration_enabled",
         ):
             self.assertIn(key, payload)
-        self.assertFalse(payload["cost_consideration_enabled"])
+        # Automatic routing is cost-first by default (issue #299).
+        self.assertTrue(payload["cost_consideration_enabled"])
         self.assertLessEqual(len(payload["alternatives"]), 2)
         for alt in payload["alternatives"]:
             self.assertIn("provider", alt)
@@ -253,7 +254,15 @@ class SensitivityFlagTests(unittest.TestCase):
         cheap_but_so_so = _fixture_model("cheap", capability=3, cost=1, token_efficiency=1, latency=3)
         catalog = [pricier_but_better_token, cheap_but_so_so]
 
-        default = mr.route(mr.RouteRequest("general_reasoning", "STANDARD"), catalog=catalog, rules=self.rules)
+        # Isolated scoring-formula test of the non-cost weight set (see
+        # model_router.py's module docstring): cost_consideration_enabled
+        # defaults to on for automatic routing, so this baseline opts out
+        # explicitly to isolate cost_sensitive's own effect.
+        default = mr.route(
+            mr.RouteRequest("general_reasoning", "STANDARD", cost_consideration_enabled=False),
+            catalog=catalog,
+            rules=self.rules,
+        )
         cost_sensitive = mr.route(
             mr.RouteRequest("general_reasoning", "STANDARD", cost_sensitive=True), catalog=catalog, rules=self.rules
         )
@@ -284,9 +293,21 @@ class SensitivityFlagTests(unittest.TestCase):
         pricier_but_fast = _fixture_model("fast", capability=3, cost=3, token_efficiency=3, latency=4)
         catalog = [cheap_but_slow, pricier_but_fast]
 
-        default = mr.route(mr.RouteRequest("simple_bug_fix", "STANDARD"), catalog=catalog, rules=self.rules)
+        # Isolated scoring-formula test of the non-cost weight set: under
+        # cost-first (the new default), latency only breaks a cost tie, so
+        # this baseline opts out explicitly to isolate latency_sensitive's
+        # own effect on the quality weight set.
+        default = mr.route(
+            mr.RouteRequest("simple_bug_fix", "STANDARD", cost_consideration_enabled=False),
+            catalog=catalog,
+            rules=self.rules,
+        )
         latency_sensitive = mr.route(
-            mr.RouteRequest("simple_bug_fix", "STANDARD", latency_sensitive=True), catalog=catalog, rules=self.rules
+            mr.RouteRequest(
+                "simple_bug_fix", "STANDARD", cost_consideration_enabled=False, latency_sensitive=True
+            ),
+            catalog=catalog,
+            rules=self.rules,
         )
         self.assertEqual(default.model, "cheap")
         self.assertEqual(latency_sensitive.model, "fast")
@@ -412,6 +433,71 @@ class CostConsiderationTests(unittest.TestCase):
                 rules=self.rules,
             )
             self.assertEqual(decision.model, "fable", f"cost_consideration_enabled={cost_on}")
+
+    def test_faster_model_cannot_beat_a_cheaper_adequately_capable_one(self) -> None:
+        cheap_slow = _fixture_model(
+            "cheap-slow",
+            capability=4,
+            cost=1,
+            token_efficiency=3,
+            latency=1,
+            efforts=("high",),
+        )
+        pricey_fast = _fixture_model(
+            "pricey-fast",
+            capability=4,
+            cost=4,
+            token_efficiency=3,
+            latency=5,
+            efforts=("high",),
+        )
+        decision = mr.route(
+            mr.RouteRequest("general_reasoning", "COMPLEX", cost_consideration_enabled=True),
+            catalog=[cheap_slow, pricey_fast],
+            rules=self.rules,
+        )
+        self.assertEqual(decision.model, "cheap-slow")
+
+    def test_dominated_peer_cost_rank_does_not_change_the_winner_or_confidence(self) -> None:
+        preferred = _fixture_model(
+            "winner",
+            capability=5,
+            cost=1,
+            token_efficiency=3,
+            latency=3,
+            efforts=("medium",),
+        )
+        bystander_cheaper = _fixture_model(
+            "bystander",
+            capability=1,
+            cost=2,
+            token_efficiency=1,
+            latency=1,
+            efforts=("medium",),
+        )
+        bystander_pricier = _fixture_model(
+            "bystander",
+            capability=1,
+            cost=3,
+            token_efficiency=1,
+            latency=1,
+            efforts=("medium",),
+        )
+        before = mr.route(
+            mr.RouteRequest("general_reasoning", 1, cost_consideration_enabled=True),
+            catalog=[preferred, bystander_cheaper],
+            rules=self.rules,
+        )
+        after = mr.route(
+            mr.RouteRequest("general_reasoning", 1, cost_consideration_enabled=True),
+            catalog=[preferred, bystander_pricier],
+            rules=self.rules,
+        )
+        self.assertEqual(before.model, "winner")
+        self.assertEqual(after.model, "winner")
+        self.assertEqual(before.effort, after.effort)
+        self.assertEqual(before.confidence, after.confidence)
+        self.assertEqual(before.reason, after.reason)
 
     def test_quality_tolerance_rejects_a_large_capability_gap(self) -> None:
         strong = _fixture_model("astra", capability=5, cost=5, token_efficiency=5, latency=3, efforts=("high",))
