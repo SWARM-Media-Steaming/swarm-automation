@@ -2,8 +2,14 @@
 
 The issue defines round zero as the independent assessment.  A continually
 failing acceptance test must therefore get exactly three counted repair rounds
-(and four tester invocations total), then be delivered as best effort with
-the unresolved notes handed to a follow-up issue.  This runs the durable UAT pipeline against a local checkout:
+(and four tester invocations total) before its epoch is exhausted.  What
+happens next is issue #305's explicit, never-inferred repository policy:
+with `adversarial_best_effort_merge` on, that exhausted epoch is delivered as
+best effort with the unresolved notes handed to a follow-up issue, which is
+what this test exercises below. (Left at its off-by-default value, the same
+exhausted epoch must instead renew as a fresh escalated epoch and must not
+merge — see `tests/adversarial/test_issue305_strict_epoch_boundary.py` for
+that path.)  This runs the durable UAT pipeline against a local checkout:
 providers and GitHub are the only fakes, while each registered acceptance suite
 is a real subprocess.
 """
@@ -41,6 +47,11 @@ class ThreeRoundCapTests(unittest.TestCase):
         self.worker.config = dataclasses.replace(
             self.worker.config,
             adversarial_uat_enabled=True,
+            # Issue #305: best-effort delivery of an exhausted epoch is an
+            # explicit, never-inferred repository setting. This fixture is
+            # specifically exercising that opt-in delivery path, not the
+            # strict (default) one.
+            adversarial_best_effort_merge=True,
             auto_approve=True,
             auto_merge=True,
             auto_promote=True,
@@ -113,6 +124,11 @@ class ThreeRoundCapTests(unittest.TestCase):
 
     def test_persistent_failure_has_three_repairs_then_best_effort_followup(self) -> None:
         self.prepare()
+        self.assertTrue(
+            self.worker.config.adversarial_best_effort_merge,
+            "this scenario only delivers a cap-hit; without the explicit opt-in "
+            "the worker must instead renew a strict escalated epoch (exit 13)",
+        )
         with (
             mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 80)),
             mock.patch.object(self.worker, "ensure_bot_auth"),
