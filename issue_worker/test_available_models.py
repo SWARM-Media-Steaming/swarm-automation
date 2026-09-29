@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import unittest
 
@@ -124,6 +125,35 @@ class RoutingCatalogTests(AvailableModelsTestCase):
         )
         self.assertIsNone(estimate.cost)
         self.assertNotEqual(estimate.status, model_pricing.PRICING_STATUS_PRICED)
+
+    def test_a_discovered_model_takes_its_dollar_costs_from_the_pricing_catalog(self) -> None:
+        available_models.configure({"claude": [{"value": "claude-opus-5-5"}, {"value": "claude-quartz-9"}]})
+        catalog = {spec.model: spec for spec in model_router.load_model_catalog()}
+        priced = catalog["claude-opus-5-5"]
+        self.assertEqual((priced.input_cost, priced.output_cost), (4.0, 20.0))
+        self.assertIn("Priced from the pricing catalog", priced.notes)
+        unknown = catalog["claude-quartz-9"]
+        self.assertEqual((unknown.input_cost, unknown.output_cost), (None, None))
+        self.assertIn("Unpriced", unknown.notes)
+
+    def test_a_cheaper_new_release_beats_the_priced_model_it_replaces(self) -> None:
+        # Regression: an unpriced discovered model used to be scored as if it
+        # were expensive, so Opus 5 ($5/$25) beat the cheaper Opus 5.5 ($4/$20).
+        available_models.configure({"claude": [{"value": "claude-opus-5-5"}, {"value": "claude-opus-5"}]})
+        catalog = tuple(
+            dataclasses.replace(spec, input_cost=5.0, output_cost=25.0) if spec.model == "claude-opus-5" else spec
+            for spec in model_router.load_model_catalog()
+        )
+        request = model_router.RouteRequest(
+            task_type="feature", complexity=7, cost_consideration_enabled=True,
+            cost_sensitive=True, quality_requirement="high",
+        )
+        availability = model_router.RoutingAvailability(
+            enabled_agents=frozenset({"claude"}),
+            disabled_models=frozenset(s.model for s in catalog if dynamic_router.requires_usage_credits(s.model)),
+        )
+        decision = model_router.route(request, catalog=catalog, availability=availability)
+        self.assertEqual(decision.model, "claude-opus-5-5")
 
     def test_usage_credit_models_stay_filtered(self) -> None:
         available_models.configure({"claude": [{"value": "claude-fable-5-2"}]})

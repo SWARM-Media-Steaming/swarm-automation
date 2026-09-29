@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import available_models as _available_models
+import model_pricing as _model_pricing
 from model_router_yaml import YamlError
 from model_router_yaml import load as load_yaml
 
@@ -388,6 +389,18 @@ def _inferred_spec(agent, found, relative, known) -> ModelSpec:
     efforts = tuple(found.efforts) or (peer.supported_efforts if peer else ("low", "medium", "high"))
     unmeasured = BenchmarkEntry(None, None, None, None, None, None, None, "HEURISTIC")
     basis = f"inferred from {peer.model}" if peer else "assumed from defaults (no catalogued relative)"
+    # Dollar prices come from the versioned pricing catalog, not from the
+    # relative: a model with no price is scored as if it were expensive, so a
+    # cheaper new release would otherwise lose to the older, priced one.
+    resolution = _model_pricing.resolve_price(found.value, provider=agent)
+    price = resolution.price if resolution.priced else None
+    input_cost = price.input_per_million if price else None
+    output_cost = price.output_per_million if price else None
+    reasoning_cost = price.reasoning_per_million if price else None
+    price_note = (
+        f"Priced from the pricing catalog ({price.rate_id})."
+        if price else "Unpriced until a price is catalogued."
+    )
     return ModelSpec(
         provider=peer.provider if peer else agent,
         agent=agent,
@@ -408,7 +421,10 @@ def _inferred_spec(agent, found, relative, known) -> ModelSpec:
         benchmark_source=None,
         benchmark_date=None,
         notes=f"Discovered from the {agent} CLI; capability and cost {basis}. "
-              "Not benchmarked and unpriced until a price is catalogued.",
+              f"Not benchmarked. {price_note}",
+        input_cost=input_cost,
+        output_cost=output_cost,
+        reasoning_cost=reasoning_cost,
     )
 
 
