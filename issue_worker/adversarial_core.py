@@ -747,7 +747,10 @@ class AdversarialStageMixin:
         # --no-renames sees a moved test as a deletion plus an addition.
         paths = self.git("diff", "--no-renames", "--name-only", "-z", baseline).split("\0")
         paths += self.git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
-        return {p for p in paths if p and (not p.startswith(".swarm/") or p == DEFINITION)}
+        # Bytecode is a side effect of running tests, never a deliberate edit;
+        # a repo that committed it must not fail every tester run.
+        return {p for p in paths if p and (not p.startswith(".swarm/") or p == DEFINITION)
+                and "__pycache__" not in p.split("/") and not p.endswith(".pyc")}
 
     def reject_adversarial_edits(self, baseline: str, error: Exception) -> tuple[list[str], Path]:
         """Archive rejected tester work, then restore the guarded baseline.
