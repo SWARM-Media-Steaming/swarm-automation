@@ -229,7 +229,8 @@ class RealCatalogRoutingTests(unittest.TestCase):
             "cost_consideration_enabled",
         ):
             self.assertIn(key, payload)
-        self.assertFalse(payload["cost_consideration_enabled"])
+        # Automatic routing is cost-first by default (issue #299).
+        self.assertTrue(payload["cost_consideration_enabled"])
         self.assertLessEqual(len(payload["alternatives"]), 2)
         for alt in payload["alternatives"]:
             self.assertIn("provider", alt)
@@ -253,7 +254,15 @@ class SensitivityFlagTests(unittest.TestCase):
         cheap_but_so_so = _fixture_model("cheap", capability=3, cost=1, token_efficiency=1, latency=3)
         catalog = [pricier_but_better_token, cheap_but_so_so]
 
-        default = mr.route(mr.RouteRequest("general_reasoning", "STANDARD"), catalog=catalog, rules=self.rules)
+        # Isolated scoring-formula test of the non-cost weight set (see
+        # model_router.py's module docstring): cost_consideration_enabled
+        # defaults to on for automatic routing, so this baseline opts out
+        # explicitly to isolate cost_sensitive's own effect.
+        default = mr.route(
+            mr.RouteRequest("general_reasoning", "STANDARD", cost_consideration_enabled=False),
+            catalog=catalog,
+            rules=self.rules,
+        )
         cost_sensitive = mr.route(
             mr.RouteRequest("general_reasoning", "STANDARD", cost_sensitive=True), catalog=catalog, rules=self.rules
         )
@@ -284,9 +293,21 @@ class SensitivityFlagTests(unittest.TestCase):
         pricier_but_fast = _fixture_model("fast", capability=3, cost=3, token_efficiency=3, latency=4)
         catalog = [cheap_but_slow, pricier_but_fast]
 
-        default = mr.route(mr.RouteRequest("simple_bug_fix", "STANDARD"), catalog=catalog, rules=self.rules)
+        # Isolated scoring-formula test of the non-cost weight set: under
+        # cost-first (the new default), latency only breaks a cost tie, so
+        # this baseline opts out explicitly to isolate latency_sensitive's
+        # own effect on the quality weight set.
+        default = mr.route(
+            mr.RouteRequest("simple_bug_fix", "STANDARD", cost_consideration_enabled=False),
+            catalog=catalog,
+            rules=self.rules,
+        )
         latency_sensitive = mr.route(
-            mr.RouteRequest("simple_bug_fix", "STANDARD", latency_sensitive=True), catalog=catalog, rules=self.rules
+            mr.RouteRequest(
+                "simple_bug_fix", "STANDARD", cost_consideration_enabled=False, latency_sensitive=True
+            ),
+            catalog=catalog,
+            rules=self.rules,
         )
         self.assertEqual(default.model, "cheap")
         self.assertEqual(latency_sensitive.model, "fast")

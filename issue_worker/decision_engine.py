@@ -32,6 +32,7 @@ from jev_cli import (
     answer_confidence,
     answer_distribution,
     answer_score,
+    clamp_confidence_threshold,
     context_fingerprint,
     settings_from_mapping,
 )
@@ -325,6 +326,60 @@ def _scores(**values: Any) -> dict[str, float]:
             number /= 100
         out[key] = max(0.0, min(1.0, number))
     return out
+
+
+# The exact "criteria" label lists build_jev_request offers for each "score"
+# question, low to high. A response that answers with one of these labels
+# instead of a synthesized float must be mapped from its position here, never
+# silently misread as a low/near-zero score (see
+# tests/adversarial/issue299/test_jev_response_contract.py).
+_SCORE_CRITERIA: dict[str, tuple[str, ...]] = {
+    "complexity": ("trivial", "simple", "standard", "complex", "very_complex", "extreme"),
+    "security_risk": ("none", "low", "moderate", "high", "critical"),
+    "ambiguity": ("clear", "mostly_clear", "mixed", "ambiguous", "undefined"),
+    "failure_risk": ("low", "moderate", "high"),
+    "reasoning_intensity": ("low", "medium", "high", "very_high"),
+    "relevance": ("unrelated", "weak", "related", "strong", "critical"),
+}
+
+# The exact true/false label text build_jev_request offers for each "noul"
+# question. An answer using this app's own offered label must resolve to the
+# matching boolean, never the generic (and here wrong-polarity) parsing that
+# only recognizes bare true/yes/1/recommended.
+_NOUL_LABELS: dict[str, tuple[str, str]] = {
+    "cross_repo": ("cross-repository work", "single repository"),
+    "uat_recommended": ("uat recommended", "uat not needed from the issue text alone"),
+    "cyber_recommended": ("cyber recommended", "cyber not needed from the issue text alone"),
+    "testing_likely": ("tests needed", "tests unlikely"),
+    "blocking": ("blocking", "non-blocking"),
+}
+
+
+def _ordinal_label_score(value: str, criteria: Sequence[str]) -> float | None:
+    key = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not key or not criteria:
+        return None
+    for index, label in enumerate(criteria):
+        if key == label:
+            return index / (len(criteria) - 1) if len(criteria) > 1 else 1.0
+    return None
+
+
+def _field_score(answer: Any, field: str) -> float | None:
+    """Numeric score, or a criteria-label answer mapped by its offered position.
+
+    Never falls back to ``answer_score``'s bare-float parsing for an
+    unrecognized string: that path silently reads a label like "critical" as
+    0.0 (its float-parse default), which is indistinguishable from a
+    correctly parsed near-zero score.
+    """
+    raw = answer.get("value") if isinstance(answer, Mapping) else answer
+    if isinstance(raw, str):
+        try:
+            return clamp_confidence_threshold(float(raw), 0.0)
+        except ValueError:
+            return _ordinal_label_score(raw, _SCORE_CRITERIA.get(field, ()))
+    return answer_score(answer)
 
 
 def disabled_result(decision_type: str, context: Mapping[str, Any], *, reason: str = "disabled") -> DecisionResult:
@@ -687,17 +742,17 @@ def interpret_jev_response(kind: str, context: Mapping[str, Any], response: JevR
     if kind in {DecisionType.TASK_CLASSIFICATION.value, DecisionType.ISSUE_TRIAGE.value}:
         task = _enum_value(answer_choice(answers.get("task_type")), TASK_CLASSES, TaskClass.UNKNOWN.value)
         scores = _scores(
-            complexity=answer_score(answers.get("complexity")),
-            securityRisk=answer_score(answers.get("security_risk")),
+            complexity=_field_score(answers.get("complexity"), "complexity"),
+            securityRisk=_field_score(answers.get("security_risk"), "security_risk"),
             crossRepoProbability=answer_score(answers.get("cross_repo")),
-            ambiguity=answer_score(answers.get("ambiguity")),
-            failureRisk=answer_score(answers.get("failure_risk")),
-            reasoningIntensity=answer_score(answers.get("reasoning_intensity")),
+            ambiguity=_field_score(answers.get("ambiguity"), "ambiguity"),
+            failureRisk=_field_score(answers.get("failure_risk"), "failure_risk"),
+            reasoningIntensity=_field_score(answers.get("reasoning_intensity"), "reasoning_intensity"),
         )
         rag = _enum_value(answer_choice(answers.get("rag_scope")), RAG_SCOPES, RagScope.REPOSITORY.value)
-        uat = _truthy(answers.get("uat_recommended"))
-        cyber = _truthy(answers.get("cyber_recommended"))
-        testing = _truthy(answers.get("testing_likely"))
+        uat = _truthy(answers.get("uat_recommended"), "uat_recommended")
+        cyber = _truthy(answers.get("cyber_recommended"), "cyber_recommended")
+        testing = _truthy(answers.get("testing_likely"), "testing_likely")
         confidence = _aggregate_confidence(answers, ("task_type", "complexity"))
         codes = _reason_codes(
             task,
@@ -728,7 +783,7 @@ def interpret_jev_response(kind: str, context: Mapping[str, Any], response: JevR
             reason_codes=_reason_codes(decision),
         )
     if kind == DecisionType.CONTEXT_RELEVANCE.value:
-        score = answer_score(answers.get("relevance")) or 0.0
+        score = _field_score(answers.get("relevance"), "relevance") or 0.0
         return DecisionResult(
             decision_type=kind,
             decision="KEEP" if score >= 0.35 else "LOW",
@@ -762,7 +817,7 @@ def interpret_jev_response(kind: str, context: Mapping[str, Any], response: JevR
             {item.value for item in FindingSeverity},
             FindingSeverity.MEDIUM.value,
         )
-        blocking = _truthy(answers.get("blocking"))
+        blocking = _truthy(answers.get("blocking"), "blocking")
         return DecisionResult(
             decision_type=kind,
             decision=action,
@@ -792,7 +847,15 @@ def interpret_jev_response(kind: str, context: Mapping[str, Any], response: JevR
     )
 
 
-def _truthy(answer: Any) -> bool:
+def _truthy(answer: Any, field: str = "") -> bool:
+    """True/False for a "noul" answer.
+
+    Checks the exact true/false label text build_jev_request offered for
+    ``field`` (see ``_NOUL_LABELS``) before the generic bare true/yes/1/
+    recommended parsing, so an answer that echoes this app's own offered
+    label — e.g. "Cyber recommended" — resolves correctly instead of
+    silently falling through to the not-recommended default.
+    """
     if isinstance(answer, Mapping):
         for key in ("value", "yes", "p_yes", "decision"):
             if key in answer:
@@ -802,6 +865,13 @@ def _truthy(answer: Any) -> bool:
                 if isinstance(value, (int, float)):
                     return float(value) >= 0.5
                 text = str(value).strip().lower()
+                labels = _NOUL_LABELS.get(field)
+                if labels:
+                    true_label, false_label = labels
+                    if text == true_label:
+                        return True
+                    if text == false_label:
+                        return False
                 return text in {"true", "yes", "1", "recommended"}
         score = answer_score(answer)
         return bool(score is not None and score >= 0.5)

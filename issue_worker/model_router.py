@@ -216,7 +216,7 @@ class RouteRequest:
 
     task_type: str
     complexity: str | int
-    cost_consideration_enabled: bool = False
+    cost_consideration_enabled: bool = True
     cost_sensitive: bool = False
     token_sensitive: bool = False
     latency_sensitive: bool = False
