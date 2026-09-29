@@ -2972,9 +2972,17 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             relevance = float(scores.get("relevance") or 0)
             scored.append((relevance, item))
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        keep = [item for relevance, item in scored if relevance >= 0.15]
-        if not keep:
-            keep = [item for _, item in scored[: max(3, len(scored) // 2)] or scored]
+        threshold = 0.15
+        above_threshold = [item for relevance, item in scored if relevance >= threshold]
+        # Section 9: a single low score must not permanently discard
+        # potentially critical context. Always retain at least this many
+        # ranked candidates as fallback retrieval, even when their score fell
+        # below the relevance threshold.
+        minimum_retained = min(3, len(scored))
+        if len(above_threshold) < minimum_retained:
+            keep = [item for _, item in scored[:minimum_retained]]
+        else:
+            keep = above_threshold
         pack.items = keep
         metadata = getattr(pack, "metadata", None)
         if isinstance(metadata, dict):

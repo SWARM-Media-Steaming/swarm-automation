@@ -156,6 +156,19 @@ IRREVERSIBLE_ACTIONS = frozenset(
     }
 )
 
+# Any of these on a UAT/Cyber finding would unblock or drop it. Existing
+# Swarm rules — not Jev's own scope/severity read — decide whether a finding
+# actually blocks (see issue-lifecycle-comments.md's UAT/Cyber section).
+NON_BLOCKING_FINDING_DECISIONS = frozenset(
+    {
+        WorkflowAction.PASS.value,
+        WorkflowAction.SKIP_UAT.value,
+        WorkflowAction.SKIP_CYBER.value,
+        WorkflowAction.OUT_OF_SCOPE.value,
+        WorkflowAction.CREATE_NEW_ISSUE.value,
+    }
+)
+
 SECURITY_DECISION_TYPES = frozenset(
     {DecisionType.CYBER_FINDING.value, DecisionType.UAT_FINDING.value}
 )
@@ -263,7 +276,13 @@ def may_act_on(result: DecisionResult, settings: JevSettings) -> bool:
     band = confidence_band(result.confidence, settings, security=security)
     if band is ConfidenceBand.FALLBACK:
         return False
-    if result.decision in IRREVERSIBLE_ACTIONS and band is not ConfidenceBand.AUTOMATION:
+    # A security-sensitive PASS is itself irreversible (it would let a
+    # finding through), so it must clear the stricter security threshold
+    # the same way FAIL/SKIP_UAT/SKIP_CYBER/COMPLETE already do.
+    irreversible = result.decision in IRREVERSIBLE_ACTIONS or (
+        security and result.decision == WorkflowAction.PASS.value
+    )
+    if irreversible and band is not ConfidenceBand.AUTOMATION:
         return False
     return True
 
@@ -340,6 +359,8 @@ _SCORE_CRITERIA: dict[str, tuple[str, ...]] = {
     "failure_risk": ("low", "moderate", "high"),
     "reasoning_intensity": ("low", "medium", "high", "very_high"),
     "relevance": ("unrelated", "weak", "related", "strong", "critical"),
+    "context_size": ("issue_only", "repository", "multi_repository", "project", "organization"),
+    "expected_success": ("low", "moderate", "high", "very_high"),
 }
 
 # The exact true/false label text build_jev_request offers for each "noul"
@@ -379,6 +400,52 @@ def _field_score(answer: Any, field: str) -> float | None:
             return clamp_confidence_threshold(float(raw), 0.0)
         except ValueError:
             return _ordinal_label_score(raw, _SCORE_CRITERIA.get(field, ()))
+    return answer_score(answer)
+
+
+def _security_risk_score(answer: Any) -> float | None:
+    """Security-risk score that fails closed instead of vanishing to zero.
+
+    A string that is neither a number nor one of the offered criteria labels
+    is invalid, not "no risk". Issue #299 section 2 requires validating Jev
+    responses before use; dropping the field (or reading it as 0.0) would be
+    indistinguishable from Jev reporting no security sensitivity at all.
+    Unrecognized answers map to a conservative high reading instead.
+    """
+    if answer is None:
+        return None
+    score = _field_score(answer, "security_risk")
+    if score is not None:
+        return score
+    raw = answer.get("value") if isinstance(answer, Mapping) else answer
+    if raw in (None, ""):
+        return None
+    return 0.75
+
+
+def _probability_score(answer: Any, field: str) -> float | None:
+    """0..1 probability score for a field Jev may answer with its offered
+
+    "noul" true/false label instead of a synthesized float (see
+    ``_NOUL_LABELS``). Falling back to ``answer_score``'s bare-float parsing
+    for an offered label text would silently read it as 0.0 — the same
+    wrong-polarity failure ``_field_score`` guards against for "score"
+    questions.
+    """
+    raw = answer.get("value") if isinstance(answer, Mapping) else answer
+    if isinstance(raw, str):
+        try:
+            return clamp_confidence_threshold(float(raw), 0.0)
+        except ValueError:
+            labels = _NOUL_LABELS.get(field)
+            if labels:
+                text = raw.strip().lower()
+                true_label, false_label = labels
+                if text == true_label:
+                    return 1.0
+                if text == false_label:
+                    return 0.0
+            return None
     return answer_score(answer)
 
 
@@ -662,6 +729,19 @@ def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, 
                 "true": "Tests needed",
                 "false": "Tests unlikely",
             },
+            "context_size": {
+                "type": "score",
+                "instructions": "How large is the likely context size needed for this task?",
+                "criteria": ["issue_only", "repository", "multi_repository", "project", "organization"],
+            },
+            "expected_success": {
+                "type": "score",
+                "instructions": (
+                    "Given the required capability for this task, what is the expected "
+                    "success probability?"
+                ),
+                "criteria": ["low", "moderate", "high", "very_high"],
+            },
         }
         return state, questions
     if kind == DecisionType.RAG_SCOPE.value:
@@ -743,11 +823,13 @@ def interpret_jev_response(kind: str, context: Mapping[str, Any], response: JevR
         task = _enum_value(answer_choice(answers.get("task_type")), TASK_CLASSES, TaskClass.UNKNOWN.value)
         scores = _scores(
             complexity=_field_score(answers.get("complexity"), "complexity"),
-            securityRisk=_field_score(answers.get("security_risk"), "security_risk"),
-            crossRepoProbability=answer_score(answers.get("cross_repo")),
+            securityRisk=_security_risk_score(answers.get("security_risk")),
+            crossRepoProbability=_probability_score(answers.get("cross_repo"), "cross_repo"),
             ambiguity=_field_score(answers.get("ambiguity"), "ambiguity"),
             failureRisk=_field_score(answers.get("failure_risk"), "failure_risk"),
             reasoningIntensity=_field_score(answers.get("reasoning_intensity"), "reasoning_intensity"),
+            contextSize=_field_score(answers.get("context_size"), "context_size"),
+            expectedSuccess=_field_score(answers.get("expected_success"), "expected_success"),
         )
         rag = _enum_value(answer_choice(answers.get("rag_scope")), RAG_SCOPES, RagScope.REPOSITORY.value)
         uat = _truthy(answers.get("uat_recommended"), "uat_recommended")
@@ -1137,12 +1219,13 @@ def swarm_policy_action(
         if recommended in {WorkflowAction.PASS.value, WorkflowAction.SKIP_UAT.value, WorkflowAction.SKIP_CYBER.value}:
             return WorkflowAction.FIX_NOW.value if blocking_security or failed_tests else WorkflowAction.RETRY.value
     if kind == DecisionType.CYBER_FINDING.value and blocking_security:
-        # A blocking security finding cannot be accepted as PASS, even at high
-        # Jev confidence. Swarm rules keep the finding open.
-        if recommended in {WorkflowAction.PASS.value, WorkflowAction.SKIP_CYBER.value}:
+        # A blocking security finding cannot be accepted as PASS, reclassified
+        # OUT_OF_SCOPE, or filed away, even at high Jev confidence. Swarm
+        # rules — not Jev's own scope read — keep the finding open.
+        if recommended in NON_BLOCKING_FINDING_DECISIONS:
             return str(default or WorkflowAction.FIX_NOW.value)
     if kind == DecisionType.UAT_FINDING.value and blocking_security:
-        if recommended in {WorkflowAction.PASS.value, WorkflowAction.SKIP_UAT.value}:
+        if recommended in NON_BLOCKING_FINDING_DECISIONS:
             return str(default or WorkflowAction.FIX_NOW.value)
     if uat_required and recommended == WorkflowAction.SKIP_UAT.value:
         return WorkflowAction.RUN_UAT.value

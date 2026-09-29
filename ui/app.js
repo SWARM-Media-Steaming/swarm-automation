@@ -47,6 +47,10 @@
     jevFeedbackStatus: "",
     jevFeedbackRouting: "",
     jevFeedbackOutcome: "",
+    jevFeedbackProvider: "",
+    jevFeedbackFrom: "",
+    jevFeedbackDelta: "",
+    jevFeedbackCost: "",
     jevFeedbackOffset: 0,
     jevFeedbackRequest: 0,
     jevFeedbackSearchTimer: null,
@@ -1618,6 +1622,34 @@
     return state.jevFeedback || { records: [], total: 0, offset: 0, limit: 10, summary: {} };
   }
 
+  // Provider/model, date, delta, and cost narrow the current page client-side.
+  // The server-side query already handles status, routing, outcome, and search.
+  function jevFeedbackVisibleRecords(records) {
+    const provider = state.jevFeedbackProvider.trim().toLowerCase();
+    const from = state.jevFeedbackFrom.trim();
+    const minDelta = Number(state.jevFeedbackDelta);
+    const maxCost = Number(state.jevFeedbackCost);
+    return (Array.isArray(records) ? records : []).filter((record) => {
+      if (provider) {
+        const haystack = `${record.modifiedProvider || ""} ${record.modifiedModel || ""} ${record.baselineProvider || ""} ${record.baselineModel || ""}`.toLowerCase();
+        if (!haystack.includes(provider)) return false;
+      }
+      if (from) {
+        const created = String(record.createdAt || "").slice(0, 10);
+        if (created && created < from) return false;
+      }
+      if (state.jevFeedbackDelta.trim() !== "" && Number.isFinite(minDelta)) {
+        const delta = Math.abs(Number(record.scoreDelta) || 0);
+        if (delta < minDelta) return false;
+      }
+      if (state.jevFeedbackCost.trim() !== "" && Number.isFinite(maxCost)) {
+        const cost = record.estimatedJevCost;
+        if (cost !== null && cost !== undefined && Number(cost) > maxCost) return false;
+      }
+      return true;
+    });
+  }
+
   function renderJevFeedback() {
     const box = byId("jev-feedback-list");
     if (!box) return;
@@ -1652,11 +1684,19 @@
       if (next) next.disabled = offset + (page.records || []).length >= total;
     }
     box.replaceChildren();
-    const rows = jevApi().tableRows(page.records);
+    const visible = jevFeedbackVisibleRecords(page.records);
+    const rows = jevApi().tableRows(visible);
+    const anyFilterActive = Boolean(
+      state.jevFeedbackSearch.trim() ||
+        state.jevFeedbackProvider.trim() ||
+        state.jevFeedbackFrom.trim() ||
+        state.jevFeedbackDelta.trim() ||
+        state.jevFeedbackCost.trim(),
+    );
     if (!rows.length) {
       box.appendChild(Object.assign(document.createElement("p"), {
         className: "panel-copy",
-        textContent: state.jevFeedbackSearch.trim()
+        textContent: anyFilterActive
           ? "No Jev comparisons match this filter."
           : "No Jev score comparisons yet. Turn on Store AI execution history, then run an issue.",
       }));
@@ -3920,6 +3960,24 @@
       state.jevFeedbackOutcome = event.target.value;
       state.jevFeedbackOffset = 0;
       void refreshJevFeedback({ quiet: true });
+    });
+    // Provider/model, date, delta, and cost filter the already-fetched page
+    // client-side (see jevFeedbackVisibleRecords), so these just re-render.
+    byId("jev-feedback-provider")?.addEventListener("input", (event) => {
+      state.jevFeedbackProvider = event.target.value;
+      renderJevFeedback();
+    });
+    byId("jev-feedback-from")?.addEventListener("change", (event) => {
+      state.jevFeedbackFrom = event.target.value;
+      renderJevFeedback();
+    });
+    byId("jev-feedback-delta")?.addEventListener("input", (event) => {
+      state.jevFeedbackDelta = event.target.value;
+      renderJevFeedback();
+    });
+    byId("jev-feedback-cost")?.addEventListener("input", (event) => {
+      state.jevFeedbackCost = event.target.value;
+      renderJevFeedback();
     });
     byId("jev-feedback-prev")?.addEventListener("click", () => {
       const page = jevFeedbackView();
