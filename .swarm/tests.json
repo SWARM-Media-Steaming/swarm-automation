@@ -3334,6 +3334,33 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue317_token_usage_totals_null_and_started_at.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue317-token-usage-totals-null-and-started-at",
+      "name": "token_usage_totals keeps missing values as None and filters by started_at (issue #317)",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_issue317_token_usage_totals_null_and_started_at.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
