@@ -105,10 +105,37 @@ pub fn provider_strengths_preset(id: &str) -> &'static str {
 /// Built-in complexity bands. An empty saved table is filled from this on
 /// normalize so the mapping stays in config instead of being scattered
 /// through the worker.
-/// Routing ignores cost and picks the best fit for the work until the operator
-/// turns "Optimize routing for cost" on.
+/// Automatic routing is always cost-first after capability gates.
 fn default_routing_optimization() -> String {
-    "best".into()
+    "cost".into()
+}
+
+fn default_jev_model() -> String {
+    "jev-latest".into()
+}
+
+fn default_jev_timeout_seconds() -> f64 {
+    8.0
+}
+
+fn default_jev_max_retries() -> u8 {
+    2
+}
+
+fn default_jev_confidence_automation() -> f64 {
+    0.90
+}
+
+fn default_jev_confidence_fallback() -> f64 {
+    0.70
+}
+
+fn default_jev_confidence_security() -> f64 {
+    0.95
+}
+
+fn default_jev_fallback() -> String {
+    "rules".into()
 }
 
 fn default_model_data_min_refresh_interval_hours() -> f64 {
@@ -473,14 +500,9 @@ pub struct AppConfig {
     /// Per-provider complexity bands. Empty until [`Self::normalize`] fills
     /// the built-in table, which a saved config can replace.
     pub routing_tiers: HashMap<String, Vec<RoutingTier>>,
-    /// How dynamic routing weighs price against capability when it picks the
-    /// worker model: `"cost"` (the "Optimize routing for cost" toggle on) asks
-    /// the router for the least expensive capable model and treats a frontier
-    /// model as a last resort at complexity 9 or 10; `"best"` (the default,
-    /// toggle off) asks for the best fit for the task and ignores price.
-    /// Anything else is read as `"best"`. The router itself lives in
-    /// `issue_worker/dynamic_router.py`; this is only the preference forwarded
-    /// to it.
+    /// Automatic routing is always cost-first after capability, expected-success,
+    /// safety, and context-fit gates. Legacy `"best"` values migrate to `"cost"`
+    /// on normalize. Manual operator model selections are unchanged.
     #[serde(default = "default_routing_optimization")]
     pub routing_optimization: String,
     /// Off by default: a model that draws on a separate usage-credit balance
@@ -578,6 +600,41 @@ pub struct AppConfig {
     /// retrieval. Defaults to `"local"` until login/multi-tenancy exists.
     #[serde(default = "default_owner_scope_id")]
     pub knowledge_owner_scope_id: String,
+
+    /// Jev decision engine (issue #299). Off by default: Swarm behavior is
+    /// unchanged and Jev adds no call, cost, or latency.
+    #[serde(default)]
+    pub jev_enabled: bool,
+    #[serde(default)]
+    pub jev_bin: String,
+    #[serde(default = "default_jev_model")]
+    pub jev_model: String,
+    #[serde(default = "default_jev_timeout_seconds")]
+    pub jev_timeout_seconds: f64,
+    #[serde(default = "default_jev_max_retries")]
+    pub jev_max_retries: u8,
+    #[serde(default = "default_jev_confidence_automation")]
+    pub jev_confidence_automation: f64,
+    #[serde(default = "default_jev_confidence_fallback")]
+    pub jev_confidence_fallback: f64,
+    #[serde(default = "default_jev_confidence_security")]
+    pub jev_confidence_security: f64,
+    #[serde(default = "default_jev_fallback")]
+    pub jev_fallback: String,
+    #[serde(default = "default_true")]
+    pub jev_use_preflight: bool,
+    #[serde(default = "default_true")]
+    pub jev_use_workflow: bool,
+    #[serde(default = "default_true")]
+    pub jev_use_uat: bool,
+    #[serde(default = "default_true")]
+    pub jev_use_cyber: bool,
+    #[serde(default = "default_true")]
+    pub jev_use_rag: bool,
+    #[serde(default = "default_true")]
+    pub jev_use_triage: bool,
+    #[serde(default = "default_true")]
+    pub jev_use_completion: bool,
     pub schedule_mode: String,
     pub schedule_time: String,
     pub schedule_days: Vec<String>,
@@ -690,6 +747,22 @@ impl Default for AppConfig {
             generate_issue_clustering: false,
             knowledge_context_token_limit: default_knowledge_context_token_limit(),
             knowledge_owner_scope_id: default_owner_scope_id(),
+            jev_enabled: false,
+            jev_bin: String::new(),
+            jev_model: default_jev_model(),
+            jev_timeout_seconds: default_jev_timeout_seconds(),
+            jev_max_retries: default_jev_max_retries(),
+            jev_confidence_automation: default_jev_confidence_automation(),
+            jev_confidence_fallback: default_jev_confidence_fallback(),
+            jev_confidence_security: default_jev_confidence_security(),
+            jev_fallback: default_jev_fallback(),
+            jev_use_preflight: true,
+            jev_use_workflow: true,
+            jev_use_uat: true,
+            jev_use_cyber: true,
+            jev_use_rag: true,
+            jev_use_triage: true,
+            jev_use_completion: true,
             schedule_mode: "continuous".into(),
             schedule_time: "09:00".into(),
             schedule_days: vec!["mon", "tue", "wed", "thu", "fri"]
@@ -1011,9 +1084,12 @@ impl AppConfig {
     }
 
     fn normalize_routing(&mut self) {
-        if !matches!(self.routing_optimization.trim(), "cost" | "best") {
+        // Cost-first is the only automatic mode. Legacy "best" (and anything
+        // else) migrates here so older config files keep routing.
+        if self.routing_optimization.trim() != "cost" {
             self.routing_optimization = default_routing_optimization();
         }
+        self.normalize_jev();
         for (id, tiers) in default_routing_tiers() {
             let slot = self.routing_tiers.entry(id).or_default();
             if slot.is_empty() {
@@ -1041,6 +1117,53 @@ impl AppConfig {
                 default_model_data_min_refresh_interval_hours();
         } else if self.model_data_min_refresh_interval_hours > 336.0 {
             self.model_data_min_refresh_interval_hours = 336.0;
+        }
+    }
+
+    fn normalize_jev(&mut self) {
+        if self.jev_model.trim().is_empty() {
+            self.jev_model = default_jev_model();
+        }
+        if !self.jev_timeout_seconds.is_finite() || self.jev_timeout_seconds < 1.0 {
+            self.jev_timeout_seconds = default_jev_timeout_seconds();
+        } else if self.jev_timeout_seconds > 60.0 {
+            self.jev_timeout_seconds = 60.0;
+        }
+        if self.jev_max_retries > 5 {
+            self.jev_max_retries = 5;
+        }
+        let clamp = |value: f64, default: f64| {
+            if !value.is_finite() {
+                return default;
+            }
+            let number = if value > 1.0 && value <= 100.0 {
+                value / 100.0
+            } else {
+                value
+            };
+            if !(0.0..=1.0).contains(&number) {
+                default
+            } else {
+                number
+            }
+        };
+        self.jev_confidence_automation = clamp(
+            self.jev_confidence_automation,
+            default_jev_confidence_automation(),
+        );
+        self.jev_confidence_fallback = clamp(
+            self.jev_confidence_fallback,
+            default_jev_confidence_fallback(),
+        );
+        self.jev_confidence_security = clamp(
+            self.jev_confidence_security,
+            default_jev_confidence_security(),
+        );
+        if self.jev_confidence_security < self.jev_confidence_automation {
+            self.jev_confidence_security = self.jev_confidence_automation;
+        }
+        if !matches!(self.jev_fallback.trim(), "rules" | "llm" | "rules_then_llm") {
+            self.jev_fallback = default_jev_fallback();
         }
     }
 
@@ -1453,27 +1576,31 @@ mod tests {
     }
 
     #[test]
-    fn routing_optimization_defaults_to_best_and_only_accepts_the_two_values() {
+    fn routing_optimization_defaults_to_cost_and_migrates_best() {
         let mut config = config_with_one_repo();
         config.normalize();
-        assert_eq!(config.routing_optimization, "best");
+        assert_eq!(config.routing_optimization, "cost");
 
-        config.routing_optimization = "cost".into();
+        config.routing_optimization = "best".into();
+        config.normalize();
+        assert_eq!(config.routing_optimization, "cost");
+
         let encoded = serde_json::to_string(&config).unwrap();
         let mut decoded: AppConfig = serde_json::from_str(&encoded).unwrap();
         decoded.normalize();
         assert_eq!(decoded.routing_optimization, "cost");
         assert!(decoded.validate().is_ok());
 
-        // Anything else — including a config file written before the setting
-        // existed — routes for the best fit rather than silently economizing.
         decoded.routing_optimization = "cheapest".into();
         decoded.normalize();
-        assert_eq!(decoded.routing_optimization, "best");
+        assert_eq!(decoded.routing_optimization, "cost");
         let mut older: AppConfig =
             serde_json::from_str(r#"{"dynamic_model_routing": true}"#).unwrap();
         older.normalize();
-        assert_eq!(older.routing_optimization, "best");
+        assert_eq!(older.routing_optimization, "cost");
+        assert!(!older.jev_enabled);
+        assert_eq!(older.jev_model, "jev-latest");
+        assert!((older.jev_confidence_automation - 0.90).abs() < f64::EPSILON);
     }
 
     #[test]
