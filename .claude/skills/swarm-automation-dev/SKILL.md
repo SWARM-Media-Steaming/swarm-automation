@@ -244,7 +244,7 @@ Optional, app-wide companion to Dynamic Model Routing (issue #205) that keeps
 the model/pricing/benchmark data the router scores against fresh, without ever
 making startup or routing depend on an external source being reachable.
 `issue_worker/model_calibration.py`'s `ModelCalibrationService` is the single
-implementation manual refresh (AI Configuration's "Refresh Model Data"
+implementation manual refresh (the Guides page's "Refresh Model Data"
 button), startup refresh, and any future scheduled/AI-triggered refresh all
 call — distinguished only by `initiated_by` (`USER`/`STARTUP`/`SCHEDULED`/
 `AI_AGENT`). `issue_worker/model_data_sources.py` holds the bounded,

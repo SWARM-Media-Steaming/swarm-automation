@@ -42,6 +42,7 @@
     promptGradesRequest: 0,
     promptGradesSearchTimer: null,
     feedbackTab: "grades",
+    guidesTab: "routing",
     // Usage & cost (Feedback's fifth tab). `filters` is the combinable
     // filter set sent to the backend; `groupValue` is the aggregate row the
     // invocation list is drilled into, null when it is showing everything.
@@ -81,7 +82,7 @@
     branchPushAccess: {},
     botReadinessPoll: null,
     pendingUpdate: null,
-    // Dynamic Routing Calibration (AI Configuration). `status` is the last
+    // Dynamic Routing Calibration (Guides page). `status` is the last
     // get_model_calibration_status response; `lastResult` is the last manual
     // refresh_model_data response (cleared on navigation away is unnecessary,
     // it just stops being shown once a new status makes it stale).
@@ -111,6 +112,7 @@
     ai: "AI Configuration",
     knowledge: "Knowledge",
     feedback: "Feedback",
+    guides: "Guides",
     debug: "Info & Debug",
     help: "Help",
   };
@@ -269,23 +271,23 @@
       links: [],
     },
     "model-calibration": {
-      title: "Dynamic Routing Calibration",
-      html: "<p>Dynamic Model Routing scores models using a local catalog of pricing and benchmark data. This panel refreshes and validates that data, shows whether it is current, and never silently replaces what is already active.</p><p><strong>Refresh Model Data</strong> fetches from models.dev (plus Artificial Analysis benchmarks when a key is saved), validates and normalizes it, compares it against the active calibration, recalculates routing metrics, and runs a routing simulation. A refresh that finds a meaningful, regression-free change is applied to routing automatically; only a change that would make routing worse is held as a <em>proposed</em> calibration awaiting your review.</p><p>The app also refreshes on startup and every few hours (configurable below), always after the last known-good calibration is already loaded and usable — startup never waits on or depends on the external source.</p><p>Discovering a new model never makes it available for routing by itself; only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are ever chosen.</p>",
+      title: "Model data refresh",
+      html: "<p>Dynamic Routing scores models on pricing and benchmark data. This page controls how that data stays current; a clean refresh is applied to routing automatically, and one that would make routing worse is held for review. See <strong>Guides</strong> for the current status, strategy and model table.</p>",
       links: [],
     },
     "routing-algorithm": {
       title: "How Dynamic Routing works",
-      html: "<p>The router removes models that do not meet the task's minimum capability, expected-success, safety, and context-fit requirements, then chooses the lowest estimated total cost among what remains. Latency is only a tie-breaker.</p><p><strong>Cost-first</strong> is the only automatic routing mode. It means finding the least expensive model that is still sufficiently capable for the task — not always picking the cheapest model outright, and never picking a faster model solely because it is faster.</p><p>The routing examples and current strategy shown here are generated from the active calibration, not hard-coded, and update the next time a refresh changes them.</p>",
+      html: "<p>The router drops models that fall short of the task's capability, success, safety or context needs, then picks the lowest estimated total cost among the rest. Latency only breaks ties, and the cheapest model never wins if it cannot do the work.</p><p>The strategy and examples shown come from the active calibration and change when a refresh changes it.</p>",
       links: [],
     },
     "model-routing-table": {
       title: "Model routing table",
-      html: "<p>One row per model the active calibration knows about. <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routable; <strong>DISCOVERED</strong> models were just found by a refresh and are not yet available for routing; <strong>DEPRECATED</strong> and <strong>DISABLED</strong> models are excluded. Benchmark scores are comparative data points, not a guarantee of real-world quality. Select a row to expand its full detail: pricing, benchmarks, supported reasoning levels, and recent history.</p>",
+      html: "<p>One row per model in the active calibration. <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routable; <strong>DISCOVERED</strong> ones await your approval; <strong>DEPRECATED</strong> and <strong>DISABLED</strong> are excluded. Benchmarks are comparative, not a guarantee of quality.</p>",
       links: [],
     },
     "model-data-refresh-settings": {
       title: "Model data schedule & benchmarks",
-      html: "<p>Model prices and lifecycle come from <strong>models.dev</strong>, a public source that needs no account. The app refreshes it when it starts and again every few hours while it runs. A refresh that finds a meaningful change with no routing regressions is applied to live routing automatically; one that would make routing worse is held back for review, and a failed refresh keeps the last good data. Every refresh result, including failures, is written to <strong>Info &amp; Debug</strong> under <em>Model data</em>.</p><p><strong>Benchmarks</strong> (coding scores, speed and latency) come from <strong>Artificial Analysis</strong> and are optional. Paste a free API key to include them; without one, routing works from prices and its built-in capability ranks. The key is stored in the macOS Keychain, and Artificial Analysis asks that its data be attributed to artificialanalysis.ai.</p><p>The minimum interval keeps the source from being queried on every restart; the manual <strong>Refresh Model Data</strong> button always bypasses it.</p>",
+      html: "<p>Prices and model lifecycle come from <strong>models.dev</strong>, which needs no account. The app refreshes at startup and every few hours; a clean change is applied to routing, a regression is held for review, and a failure keeps the last good data. Results, failures included, are logged in <strong>Info &amp; Debug</strong> under <em>Model data</em>.</p><p><strong>Benchmarks</strong> (coding scores, speed, latency) are optional and come from <strong>Artificial Analysis</strong> with a free API key, kept in the macOS Keychain. Please credit artificialanalysis.ai. Without a key, routing uses prices and its built-in capability ranks.</p>",
       links: [{ label: "Artificial Analysis", url: "https://artificialanalysis.ai/" }],
     },
     "engineering-knowledge": {
@@ -386,10 +388,8 @@
       void refreshUsageReport({ quiet: true });
       void refreshJevFeedback({ quiet: true });
     }
-    if (view === "ai") {
-      void refreshModelCalibration({ quiet: true });
-      void refreshModelDataKeyStatus();
-    }
+    if (view === "guides") void refreshModelCalibration({ quiet: true });
+    if (view === "ai") void refreshModelDataKeyStatus();
     if (view === "knowledge") {
       renderKnowledgeScope();
       void refreshKnowledgeStatus({ quiet: true });
@@ -2874,6 +2874,26 @@
     }
   }
 
+  // Guides is a tablist of short references, one per mechanism. Dynamic
+  // Routing is the first; add a tab here and a matching data-guides-panel.
+  const GUIDES_TABS = ["routing"];
+
+  function showGuidesTab(tab, { focus = false } = {}) {
+    state.guidesTab = GUIDES_TABS.includes(tab) ? tab : GUIDES_TABS[0];
+    document.querySelectorAll("[data-guides-tab]").forEach((button) => {
+      const active = button.dataset.guidesTab === state.guidesTab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      button.tabIndex = active ? 0 : -1;
+      if (active && focus) button.focus();
+    });
+    document.querySelectorAll("[data-guides-panel]").forEach((panel) => {
+      const active = panel.dataset.guidesPanel === state.guidesTab;
+      panel.classList.toggle("active", active);
+      panel.hidden = !active;
+    });
+  }
+
   // The Repository view is a tablist over repo-specific setting groups
   // instead of one long scroll, same shape as the Feedback view above.
   const REPOSITORY_TABS = ["source", "bots", "queue", "delivery"];
@@ -4572,6 +4592,22 @@
       });
     });
     showFeedbackTab(state.feedbackTab);
+    const guidesTabs = Array.from(document.querySelectorAll("[data-guides-tab]"));
+    guidesTabs.forEach((button) => {
+      button.addEventListener("click", () => showGuidesTab(button.dataset.guidesTab));
+      button.addEventListener("keydown", (event) => {
+        const steps = { ArrowRight: 1, ArrowLeft: -1, Home: "first", End: "last" };
+        const step = steps[event.key];
+        if (step === undefined) return;
+        event.preventDefault();
+        const current = guidesTabs.indexOf(button);
+        const index = step === "first" ? 0
+          : step === "last" ? guidesTabs.length - 1
+          : (current + step + guidesTabs.length) % guidesTabs.length;
+        showGuidesTab(guidesTabs[index].dataset.guidesTab, { focus: true });
+      });
+    });
+    showGuidesTab(state.guidesTab);
     const repositoryTabs = Array.from(document.querySelectorAll("[data-repository-tab]"));
     repositoryTabs.forEach((button) => {
       button.addEventListener("click", () => showRepositoryTab(button.dataset.repositoryTab));
@@ -4820,7 +4856,7 @@
     });
   }
 
-  // ----- Dynamic Routing Calibration (AI Configuration, issue #205) ------
+  // ----- Dynamic Routing Calibration (Guides page, issue #205) ------------
 
   function modelCalibrationStatus() {
     return state.modelCalibration.status || {};
@@ -4929,19 +4965,6 @@
       line.textContent = api.ALGORITHM_FLOW_STEPS.join(" → ");
       flow.appendChild(line);
     }
-    const modes = byId("model-calibration-modes");
-    if (modes) {
-      modes.replaceChildren();
-      api.ROUTING_MODE_EXPLANATIONS.forEach(({ name, detail }) => {
-        const details = document.createElement("details");
-        const summary = document.createElement("summary");
-        summary.textContent = name;
-        const body = document.createElement("p");
-        body.textContent = detail;
-        details.append(summary, body);
-        modes.appendChild(details);
-      });
-    }
   }
 
   function renderModelCalibrationStrategy() {
@@ -4949,10 +4972,8 @@
     const strategy = api.currentStrategy(modelCalibrationStatus());
     const box = byId("model-calibration-strategy");
     if (box) {
-      box.replaceChildren();
-      box.appendChild(labeledCell("Mode", strategy.mode));
-      box.appendChild(labeledCell("Cost optimization", strategy.costOptimizationEnabled ? "Enabled" : "Disabled"));
-      strategy.factors.forEach((factor) => box.appendChild(labeledCell(factor.name, factor.level)));
+      const weights = strategy.factors.map((factor) => `${factor.name} ${factor.level}`).join(" · ");
+      box.textContent = `Strategy: ${strategy.mode}, cheapest model that fits. Weights: ${weights}.`;
     }
     const technical = byId("model-calibration-technical-body");
     if (!technical) return;

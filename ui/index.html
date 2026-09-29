@@ -22,6 +22,7 @@
           <button class="nav-item" data-view-target="ai"><span class="nav-icon">✦</span>AI Configuration</button>
           <button class="nav-item" data-view-target="knowledge"><span class="nav-icon">◎</span>Knowledge</button>
           <button class="nav-item" data-view-target="feedback"><span class="nav-icon">◆</span>Feedback</button>
+          <button class="nav-item" data-view-target="guides"><span class="nav-icon">◈</span>Guides</button>
           <button class="nav-item" data-view-target="debug"><span class="nav-icon">≡</span>Info &amp; Debug <span id="log-count" class="nav-count">0</span></button>
           <button class="nav-item" data-view-target="help"><span class="nav-icon">?</span>Help</button>
         </nav>
@@ -198,44 +199,8 @@
             <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">PROVIDER EXECUTABLES</p><h3>CLI path overrides <span class="opt">optional</span> <button class="help-dot" data-help="provider-bins" aria-label="About provider executable overrides">?</button></h3></div></div><div class="form-grid three"><label>Claude <input data-provider-bin="claude" placeholder="Auto-detect" /></label><label>Codex <input data-provider-bin="codex" placeholder="Auto-detect" /></label><label>Grok <input data-provider-bin="grok" placeholder="Auto-detect" /></label><label>Jev <input data-config="jev_bin" placeholder="Auto-detect" /></label></div></article>
           </div>
 
-          <div class="section-heading"><div><p class="eyebrow">DYNAMIC ROUTING CALIBRATION</p><h2>Model data behind the router <button class="help-dot" data-help="model-calibration" aria-label="About Dynamic Routing Calibration">?</button></h2><p>The pricing and benchmark data Dynamic Model Routing scores models with, refreshed and validated before it ever changes what the router picks.</p></div><div class="control-row"><button id="refresh-model-data" class="secondary-button">Refresh Model Data</button></div></div>
+          <div class="section-heading"><div><p class="eyebrow">MODEL DATA</p><h2>Model data refresh <button class="help-dot" data-help="model-calibration" aria-label="About model data refresh">?</button></h2><p>Keeps the prices and benchmarks behind Dynamic Routing current. Status, strategy and the model table are in <button type="button" class="text-button" data-view-jump="guides">Guides</button>.</p></div></div>
           <div class="settings-grid">
-            <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">STATUS</p><h3>Calibration health</h3></div><span id="model-calibration-health-pill" class="status-pill idle">—</span></div>
-              <div id="model-calibration-progress" class="banner policy hidden" aria-live="polite"></div>
-              <div id="model-calibration-fields" class="form-grid three"></div>
-              <div id="model-calibration-result" class="verification-results hidden" aria-live="polite"></div>
-              <details id="model-calibration-changes" class="hidden"><summary>View detailed changes</summary><div id="model-calibration-changes-body" class="verification-results"></div></details>
-              <div class="control-row"><button id="model-calibration-analyze" class="secondary-button">Analyze Routing Update</button><button id="model-calibration-activate" class="secondary-button hidden">Activate proposed calibration</button></div>
-              <div id="model-calibration-analysis" class="stacked-form hidden"></div>
-            </article>
-
-            <article class="panel">
-              <div class="panel-header"><div><p class="eyebrow">HOW IT WORKS</p><h3>How Dynamic Routing works <button class="help-dot" data-help="routing-algorithm" aria-label="About the routing algorithm">?</button></h3></div></div>
-              <p class="panel-copy">Dynamic Routing automatically chooses the AI model and reasoning level that can complete the work at the lowest estimated total cost. Models that do not meet the minimum capability, expected-success, safety, or context-fit requirements are removed first — the cheapest model does not automatically win, and a faster model never beats a cheaper adequately capable one.</p>
-              <div id="model-calibration-flow" class="concept-list"></div>
-              <div id="model-calibration-modes" class="faq-list"></div>
-            </article>
-
-            <article class="panel">
-              <div class="panel-header"><div><p class="eyebrow">CURRENT STRATEGY</p><h3>Current routing strategy</h3></div></div>
-              <div id="model-calibration-strategy" class="form-grid two"></div>
-              <details id="model-calibration-technical"><summary>View Technical Details</summary><div id="model-calibration-technical-body" class="verification-results"></div></details>
-            </article>
-
-            <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">MODELS</p><h3>Model routing table <button class="help-dot" data-help="model-routing-table" aria-label="About the model routing table">?</button></h3></div><span id="model-calibration-model-count" class="availability">0 models</span></div>
-              <p class="panel-copy">Discovering a new model does not automatically make it available for routing — only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are ever chosen by the router. Select a column heading to sort; select a row for its full detail, including an <strong>Approve for routing</strong> action on any DISCOVERED model.</p>
-              <div id="model-routing-table-head" class="router-legend" role="group" aria-label="Sort the model routing table"></div>
-              <div id="model-routing-table" class="execution-list"><p class="panel-copy">No calibrated model data yet. Select Refresh Model Data above.</p></div>
-            </article>
-
-            <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">EXAMPLES</p><h3>Example routing decisions</h3></div></div>
-              <p class="panel-copy">Generated from the active calibration, not hard-coded.</p>
-              <div id="model-calibration-examples" class="concept-list"></div>
-            </article>
-
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">REFRESH SETTINGS</p><h3>Model data schedule &amp; benchmarks <span class="opt">optional</span> <button class="help-dot" data-help="model-data-refresh-settings" aria-label="About refresh settings">?</button></h3></div></div>
               <div class="stacked-form">
@@ -380,6 +345,44 @@
               <div class="section-heading compact-heading"><div><p class="eyebrow">INVOCATIONS</p><h3 id="usage-detail-heading">Every recorded invocation</h3></div><div class="control-row"><button type="button" id="usage-clear-drilldown" class="text-button hidden">Clear selection</button></div></div>
               <div id="usage-detail" class="usage-table-wrap" aria-live="polite"></div>
               <nav id="usage-detail-pager" class="execution-pager hidden" aria-label="Usage invocation pages"><button type="button" id="usage-detail-prev" class="secondary-button compact">Previous</button><span id="usage-detail-page-label">Page 1 of 1</span><button type="button" id="usage-detail-next" class="secondary-button compact">Next</button></nav>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-guides" class="view">
+          <div class="section-intro"><div><p class="eyebrow">GUIDES</p><h2>How SWARM decides</h2><p>Short references for the mechanisms that make choices on your behalf.</p></div></div>
+          <div class="panel-tabs" role="tablist" aria-label="Guides">
+            <button type="button" role="tab" id="guides-tab-routing" class="active" data-guides-tab="routing" aria-selected="true" aria-controls="guides-panel-routing">Dynamic Routing</button>
+          </div>
+          <div class="settings-grid tab-panel active" id="guides-panel-routing" role="tabpanel" aria-labelledby="guides-tab-routing" data-guides-panel="routing">
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">STATUS</p><h3>Routing data &amp; strategy</h3></div><span id="model-calibration-health-pill" class="status-pill idle">—</span></div>
+              <div id="model-calibration-progress" class="banner policy hidden" aria-live="polite"></div>
+              <div id="model-calibration-fields" class="form-grid three"></div>
+              <p id="model-calibration-strategy" class="panel-copy"></p>
+              <div id="model-calibration-result" class="verification-results hidden" aria-live="polite"></div>
+              <details id="model-calibration-changes" class="hidden"><summary>View detailed changes</summary><div id="model-calibration-changes-body" class="verification-results"></div></details>
+              <div class="control-row"><button id="refresh-model-data" class="secondary-button">Refresh Model Data</button><button id="model-calibration-analyze" class="secondary-button">Analyze Routing Update</button><button id="model-calibration-activate" class="secondary-button hidden">Activate proposed calibration</button></div>
+              <div id="model-calibration-analysis" class="stacked-form hidden"></div>
+              <details id="model-calibration-technical"><summary>Technical details</summary><div id="model-calibration-technical-body" class="verification-results"></div></details>
+            </article>
+
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">HOW IT WORKS</p><h3>How Dynamic Routing works <button class="help-dot" data-help="routing-algorithm" aria-label="About the routing algorithm">?</button></h3></div></div>
+              <p class="panel-copy">Each issue is routed to the cheapest AI model and reasoning level that can do the work. Models below the task's capability, safety or context needs are dropped first; among the rest, the lowest estimated cost wins.</p>
+              <div id="model-calibration-flow" class="concept-list"></div>
+            </article>
+
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">MODELS</p><h3>Model routing table <button class="help-dot" data-help="model-routing-table" aria-label="About the model routing table">?</button></h3></div><span id="model-calibration-model-count" class="availability">0 models</span></div>
+              <p class="panel-copy">Only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routed to. Select a heading to sort, or a row for detail and to approve a DISCOVERED model.</p>
+              <div id="model-routing-table-head" class="router-legend" role="group" aria-label="Sort the model routing table"></div>
+              <div id="model-routing-table" class="execution-list"><p class="panel-copy">No calibrated model data yet. Select Refresh Model Data above.</p></div>
+            </article>
+
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">EXAMPLES</p><h3>Example routing decisions</h3></div></div>
+              <div id="model-calibration-examples" class="concept-list"></div>
             </article>
           </div>
         </section>

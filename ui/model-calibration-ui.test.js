@@ -75,12 +75,10 @@ test("status fields cover every plain-language item the issue calls for", () => 
   );
   const byLabel = Object.fromEntries(fields.map((field) => [field.label, field.value]));
   assert.equal(byLabel["Dynamic routing"], "Enabled");
-  assert.equal(byLabel["Cost-first routing"], "Enabled");
   assert.equal(byLabel["Active calibration"], "2026-01-01-001");
-  assert.equal(byLabel["Active models"], "12");
-  assert.equal(byLabel["Discovered models"], "2");
-  assert.equal(byLabel["Calibration healthy"], "Yes");
-  assert.equal(byLabel["Newer calibration proposed"], "Yes — awaiting review");
+  assert.equal(byLabel["Models"], "12 active · 2 discovered");
+  assert.equal(byLabel["Proposed update"], "Awaiting review");
+  assert.equal(fields.length, 7);
 });
 
 test("status fields fall back to honest defaults before anything has run", () => {
@@ -90,6 +88,8 @@ test("status fields fall back to honest defaults before anything has run", () =>
   assert.equal(byLabel["Active calibration"], "None yet");
   assert.equal(byLabel["Last successful refresh"], "Never");
   assert.equal(byLabel["Refresh status"], "Not yet run");
+  assert.equal(byLabel["Models"], "0 active · 0 discovered");
+  assert.equal(byLabel["Proposed update"], "None");
 });
 
 test("refresh status label covers every value the service returns", () => {

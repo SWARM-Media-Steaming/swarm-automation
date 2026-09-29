@@ -5,7 +5,7 @@
 })(typeof window === "undefined" ? globalThis : window, () => {
   "use strict";
 
-  // Pure helpers for the AI Configuration page's "Dynamic Routing
+  // Pure helpers for the Guides page's "Dynamic Routing
   // Calibration" section (issue #205). DOM building and `invoke()` calls stay
   // in app.js; everything here is formatting/derivation that is worth unit
   // testing without a document.
@@ -33,18 +33,19 @@
   function statusFields(config, status) {
     const cfg = config || {};
     const info = status || {};
+    // Seven fields: what an operator checks at a glance. Health is the pill,
+    // and a failed attempt shows in Refresh status and Source status.
     return [
       { label: "Dynamic routing", value: cfg.dynamic_model_routing ? "Enabled" : "Disabled" },
-      { label: "Cost-first routing", value: "Enabled" },
       { label: "Active calibration", value: info.active_version || "None yet" },
       { label: "Last successful refresh", value: info.last_successful_refresh_at || "Never" },
-      { label: "Last attempted refresh", value: info.last_attempted_refresh_at || "Never" },
       { label: "Refresh status", value: refreshStatusLabel(info.last_attempted_status) },
       { label: "Source status", value: info.source_status || "—" },
-      { label: "Active models", value: String(info.active_model_count ?? 0) },
-      { label: "Discovered models", value: String(info.discovered_model_count ?? 0) },
-      { label: "Calibration healthy", value: info.healthy ? "Yes" : "No" },
-      { label: "Newer calibration proposed", value: info.has_newer_proposed ? "Yes — awaiting review" : "No" },
+      {
+        label: "Models",
+        value: `${info.active_model_count ?? 0} active · ${info.discovered_model_count ?? 0} discovered`,
+      },
+      { label: "Proposed update", value: info.has_newer_proposed ? "Awaiting review" : "None" },
     ];
   }
 
@@ -217,13 +218,12 @@
   // ----- How Dynamic Routing works (static, plain-language) -------------
 
   const ALGORITHM_FLOW_STEPS = [
-    "User Prompt",
-    "Pre-Flight Analysis",
-    "Task Type + Complexity",
-    "Minimum Capability Required",
-    "Eligible Models",
-    "Capability + Cost + Performance",
-    "Model + Reasoning Effort",
+    "Prompt",
+    "Pre-flight analysis",
+    "Task type + complexity",
+    "Eligible models",
+    "Lowest cost that fits",
+    "Model + reasoning effort",
   ];
 
   const ROUTING_FACTORS = [
@@ -236,16 +236,6 @@
     { name: "Expected Cost", detail: "Estimated input, output, and reasoning token costs for completing the task." },
     { name: "Reasoning Level", detail: "Whether the task is expected to require low, medium, or high reasoning effort." },
     { name: "Performance", detail: "Model speed, latency, reliability, and historical success." },
-  ];
-
-  const ROUTING_MODE_EXPLANATIONS = [
-    {
-      name: "Cost Aware",
-      detail:
-        "Automatic routing is always cost-first after capability, expected-success, safety, and context-fit gates. " +
-        "Find the least expensive model that is sufficiently capable for this task. " +
-        "Latency never beats a cheaper adequately capable model.",
-    },
   ];
 
   // ----- Current strategy summary ----------------------------------------
@@ -339,7 +329,6 @@
     routingImpactLines,
     ALGORITHM_FLOW_STEPS,
     ROUTING_FACTORS,
-    ROUTING_MODE_EXPLANATIONS,
     currentStrategy,
     SORTABLE_COLUMNS,
     sortModels,
