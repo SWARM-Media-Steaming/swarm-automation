@@ -6537,6 +6537,34 @@ class WorkerTestCase(unittest.TestCase):
         issue_rows = repository.token_usage_for_issue(self.worker.config.github_repository, 364)
         self.assertEqual(len(issue_rows), 1)
 
+    def test_token_usage_totals_keep_missing_values_and_filter_by_started_at(self) -> None:
+        repository = ExecutionHistoryRepository(self.state / "token-totals.sqlite3")
+        with repository.connect() as database:
+            database.executemany(
+                """INSERT INTO ai_token_usage (
+                    id, repository, issue_number, started_at, created_at,
+                    input_tokens, output_tokens, reasoning_tokens, cached_input_tokens,
+                    total_tokens, estimated_cost
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    ("missing-fields", "acme/widgets", 364,
+                     "2026-04-15T12:00:00+00:00", "2026-09-29T12:00:00+00:00",
+                     10, None, None, None, None, None),
+                    ("known-fields", "acme/widgets", 364,
+                     "2026-05-15T12:00:00+00:00", "2026-05-15T12:00:00+00:00",
+                     90, 90, 0, 0, 180, 0.01),
+                ],
+            )
+        totals = repository.token_usage_totals(
+            ["acme/widgets"], start_date="2026-04-01", end_date="2026-04-30"
+        )
+        self.assertEqual(totals["invocations"], 1)
+        self.assertEqual(totals["inputTokens"], 10)
+        self.assertIsNone(totals["outputTokens"])
+        self.assertIsNone(totals["totalTokens"])
+        self.assertIsNone(totals["estimatedCost"])
+
+
 
 class RunnerTestCase(unittest.TestCase):
     def test_saved_routing_flags_win_over_scheduler_startup_flags(self) -> None:

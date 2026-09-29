@@ -2156,7 +2156,11 @@ fn spawn_startup_model_calibration_refresh(app: &tauri::AppHandle) {
                 // attempt drifted the next check far past the last success
                 // (a launch 5 hours after one skipped, then slept 6 more).
                 std::thread::sleep(std::time::Duration::from_secs_f64(
-                    config.model_data_min_refresh_interval_hours.clamp(0.0, 1.0).max(0.25) * 3600.0,
+                    config
+                        .model_data_min_refresh_interval_hours
+                        .clamp(0.0, 1.0)
+                        .max(0.25)
+                        * 3600.0,
                 ));
             }
         })

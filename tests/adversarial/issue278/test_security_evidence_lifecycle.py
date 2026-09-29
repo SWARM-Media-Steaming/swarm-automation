@@ -9,6 +9,7 @@ All code under attack is generated in a disposable checkout. The production
 worker runs real child-process suites and writes real SQLite history; coding
 providers, GitHub, and final delivery are intercepted by the existing harness.
 """
+import dataclasses
 import json
 import runpy
 import unittest
@@ -102,6 +103,8 @@ class SecurityEvidenceLifecycleTests(EvidenceFixture, unittest.TestCase):
 
     def test_fixing_only_one_of_two_same_file_findings_receives_partial_credit(self):
         self.prepare_service()
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True)
 
         def role(prompt, activity=""):
             if self.loop()["phase"] == "fix":
@@ -124,6 +127,8 @@ class SecurityEvidenceLifecycleTests(EvidenceFixture, unittest.TestCase):
 
     def test_a_later_fix_that_reintroduces_a_vulnerability_revokes_fixed_status(self):
         self.prepare_service(separate_files=True)
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True)
 
         def role(prompt, activity=""):
             if self.loop()["phase"] == "fix":
@@ -146,6 +151,8 @@ class SecurityEvidenceLifecycleTests(EvidenceFixture, unittest.TestCase):
 
     def test_more_precise_file_evidence_is_not_itself_a_security_fix(self):
         self.prepare(vulnerable=True)
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True)
         (self.repo / "read_api.py").write_text("from access import can_read\n")
         self.git("add", "read_api.py")
         self.git("commit", "-qm", "[claude] Add reader adapter fixture (#278)")
