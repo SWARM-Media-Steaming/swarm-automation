@@ -3288,6 +3288,30 @@
         ]
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue314_quota_restart_attribution.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue314-quota-restart-attribution",
+      "name": "Issue #314: quota checkpoints and worker restarts retain and refresh UAT/security attribution",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "issue_worker/install_swarm_issue_cron.py",
+          "issue_worker/swarm_issue_worker.py",
+          "ui/now-working.js",
+          "tests/adversarial/test_issue314_quota_restart_attribution.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
