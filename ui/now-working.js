@@ -171,8 +171,14 @@
       String(item.number) === String(number) && (!repository || item.repository === repository));
     const updateAdversarial = (entry, repository, number, round, maximum, title, phase, kind = "adversarial") => {
       const key = `${kind}:${repository}#${number}`;
-      // The attribution log follows the round-start log; until it arrives the
-      // previous phase's attribution stays (a "fix applied" line has none).
+      const role = phase === "Fix in progress" ? "fixer"
+        : phase === "Re-test in progress" || /^Round \d+ of \d+$/.test(phase) ? "tester" : null;
+      const previous = items.get(key)?.attribution || null;
+      // A new phase must not briefly display the previous phase's agent while
+      // its attribution line is still arriving. "Fix applied" is a milestone
+      // within the fixer phase, so it keeps that agent until re-test starts.
+      const attribution = (role && previous?.role === role) || phase === "Fix applied; re-test pending"
+        ? previous : null;
       const item = {
         kind,
         key,
@@ -182,10 +188,10 @@
         phase,
         state: "running",
         since: entry.time,
-        attribution: items.get(key)?.attribution || null,
+        attribution,
       };
       items.set(key, item);
-      checkpoints.set(key, { title, phase, attribution: item.attribution });
+      checkpoints.set(key, { title, phase, role: role || attribution?.role || null, attribution });
     };
     const deleteCheckpoints = (kind, number, repository) => {
       [...checkpoints.keys()].forEach((key) => {
@@ -205,20 +211,22 @@
         const key = `${kind}:${repository}#${number}`;
         const liveItem = items.get(key);
         if (liveItem) {
-          if (liveItem.attribution) {
-            liveItem.attribution = { role: liveItem.attribution.role, provider, model, effort };
-            checkpoints.set(key, { title: liveItem.title, phase: liveItem.phase, attribution: liveItem.attribution });
+          const role = liveItem.attribution?.role || checkpoints.get(key)?.role;
+          if (role && liveItem.state !== "error") {
+            liveItem.attribution = { role, provider, model, effort };
+            checkpoints.set(key, { title: liveItem.title, phase: liveItem.phase, role, attribution: liveItem.attribution });
           }
           return;
         }
         const checkpoint = checkpoints.get(key);
         if (!checkpoint) return;
-        const attribution = { role: checkpoint.attribution?.role || "tester", provider, model, effort };
+        const role = checkpoint.role || checkpoint.attribution?.role || "tester";
+        const attribution = { role, provider, model, effort };
         items.set(key, {
           kind, key, number, repository, title: checkpoint.title, phase: checkpoint.phase,
           state: "running", since: entry.time, attribution,
         });
-        checkpoints.set(key, { title: checkpoint.title, phase: checkpoint.phase, attribution });
+        checkpoints.set(key, { title: checkpoint.title, phase: checkpoint.phase, role, attribution });
       });
     };
 
@@ -250,7 +258,7 @@
           lastStarted = null;
         }
       } else if (/Starting a cycle over/i.test(message)) {
-        clear((item) => item.state === "running");
+        clear((item) => item.state === "running" && (!repository || item.repository === repository));
       } else if (/Starting a worker run/i.test(message)) {
         clear((item) => item.state === "running" && (!repository || item.repository === repository));
       } else if ((match = message.match(/Selected oldest unprocessed assigned issue:\s*#(\d+)\s*(.*)$/i))) {
@@ -270,11 +278,12 @@
           }
         }
       } else if ((match = message.match(/^Pinned (Claude|Codex|Grok) model\s+(.+?)\s+session\s+\S+\s+with effort\s+(.+?)\s+for this continuation\.$/i))) {
-        if (lastStarted) {
-          lastStarted.provider = match[1];
-          lastStarted.model = match[2];
-          lastStarted.effort = match[3];
-          syncAdversarialAttribution(entry, lastStarted.repository, lastStarted.number, match[1], match[2], match[3]);
+        const item = current(repository);
+        if (item) {
+          item.provider = match[1];
+          item.model = match[2];
+          item.effort = match[3];
+          syncAdversarialAttribution(entry, item.repository, item.number, match[1], match[2], match[3]);
         }
       } else if ((match = message.match(/^(Claude|Codex|Grok) is working/i))) {
         const item = current(repository);
@@ -292,6 +301,8 @@
         if (item) {
           item.attribution = { role: adversarial.role, provider: adversarial.provider,
             model: adversarial.model, effort: adversarial.effort };
+          checkpoints.set(item.key, { title: item.title, phase: item.phase,
+            role: adversarial.role, attribution: item.attribution });
         }
       } else if ((adversarial = adversarialTerminal(message))) {
         const key = `${adversarial.stage.kind}:${repository}#${adversarial.number}`;
@@ -303,6 +314,7 @@
             item.state = "error";
             item.phase = adversarial.reason;
           }
+          deleteCheckpoints(adversarial.stage.kind, adversarial.number, repository);
         } else {
           // A finished review (any verdict) is no longer active work; drop
           // its row rather than leave it looking like it is still running.
