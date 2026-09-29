@@ -120,6 +120,12 @@
   function logRows(logs, repositories, workerState) {
     const known = repositories.map((repo) => normalizeRepo(repo.name)).filter((name) => name.split("/").length === 2);
     const items = new Map();
+    // The active adversarial round/attribution, keyed like `items` but never
+    // wiped by an unexpected child exit (only by a genuine terminal verdict or
+    // the issue finishing). A crash clears `items`; the next selection/pinned
+    // line reconstructs the row from here instead of leaving it invisible
+    // until the stage happens to log another round-start line.
+    const checkpoints = new Map();
     const repoBySource = new Map();
     const lastStartedByRepository = new Map();
     let lastStarted = null;
@@ -179,6 +185,41 @@
         attribution: items.get(key)?.attribution || null,
       };
       items.set(key, item);
+      checkpoints.set(key, { title, phase, attribution: item.attribution });
+    };
+    const deleteCheckpoints = (kind, number, repository) => {
+      [...checkpoints.keys()].forEach((key) => {
+        if (!key.startsWith(`${kind}:`) || !key.endsWith(`#${number}`)) return;
+        if (repository && key !== `${kind}:${repository}#${number}`) return;
+        checkpoints.delete(key);
+      });
+    };
+    // A "Selected .../Pinned ..." provider line names only the current issue,
+    // not a stage, so it must reach whichever adversarial stage(s) are active
+    // for that issue: replace stale attribution on a live row, or — if a
+    // crash wiped the row but its checkpoint survived — reconstruct it with
+    // the checkpoint's round/phase and this line's provider/model/effort.
+    const syncAdversarialAttribution = (entry, repository, number, provider, model, effort) => {
+      if (!repository || !number) return;
+      ["adversarial", "security"].forEach((kind) => {
+        const key = `${kind}:${repository}#${number}`;
+        const liveItem = items.get(key);
+        if (liveItem) {
+          if (liveItem.attribution) {
+            liveItem.attribution = { role: liveItem.attribution.role, provider, model, effort };
+            checkpoints.set(key, { title: liveItem.title, phase: liveItem.phase, attribution: liveItem.attribution });
+          }
+          return;
+        }
+        const checkpoint = checkpoints.get(key);
+        if (!checkpoint) return;
+        const attribution = { role: checkpoint.attribution?.role || "tester", provider, model, effort };
+        items.set(key, {
+          kind, key, number, repository, title: checkpoint.title, phase: checkpoint.phase,
+          state: "running", since: entry.time, attribution,
+        });
+        checkpoints.set(key, { title: checkpoint.title, phase: checkpoint.phase, attribution });
+      });
     };
 
     (logs || []).forEach((raw) => {
@@ -224,12 +265,16 @@
           item.provider = match[1];
           item.model = match[2] || "";
           item.effort = match[3] || "";
+          if (match[2] && match[3]) {
+            syncAdversarialAttribution(entry, item.repository, item.number, match[1], match[2], match[3]);
+          }
         }
       } else if ((match = message.match(/^Pinned (Claude|Codex|Grok) model\s+(.+?)\s+session\s+\S+\s+with effort\s+(.+?)\s+for this continuation\.$/i))) {
         if (lastStarted) {
           lastStarted.provider = match[1];
           lastStarted.model = match[2];
           lastStarted.effort = match[3];
+          syncAdversarialAttribution(entry, lastStarted.repository, lastStarted.number, match[1], match[2], match[3]);
         }
       } else if ((match = message.match(/^(Claude|Codex|Grok) is working/i))) {
         const item = current(repository);
@@ -263,6 +308,7 @@
           // its row rather than leave it looking like it is still running.
           clear((item) => item.kind === adversarial.stage.kind && String(item.number) === adversarial.number
             && (!repository || item.repository === repository));
+          deleteCheckpoints(adversarial.stage.kind, adversarial.number, repository);
         }
       } else if ((match = message.match(/(?:Created issue branch|Continuing issue|Recreated interrupted issue branch).*?(?:#|issue-)(\d+)/i))) {
         const item = find(repository, match[1]);
@@ -304,6 +350,8 @@
         // event arrives.
         if (repository) {
           clear((item) => String(item.number) === match[1] && item.repository === repository);
+          deleteCheckpoints("adversarial", match[1], repository);
+          deleteCheckpoints("security", match[1], repository);
         }
       } else if (/Returned the clean local checkout/i.test(message)
         // Selecting an issue is logged before the capacity check. When every
