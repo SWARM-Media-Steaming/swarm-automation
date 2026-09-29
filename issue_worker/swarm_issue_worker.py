@@ -1267,7 +1267,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             used = [float(window["usedPercent"]) for window in windows]
         except (KeyError, TypeError, ValueError):
             return None
-        if not used:
+        # float("nan") / float("inf") succeed, so a missing window and a
+        # non-finite usedPercent must share the same unavailable path.
+        if not used or any(not math.isfinite(amount) for amount in used):
             return None
         summary = "; ".join(
             f"{key}: {100 - float(limits[key]['usedPercent']):g}%"
