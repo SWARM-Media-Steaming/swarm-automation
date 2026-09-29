@@ -402,6 +402,28 @@ def model_description(model: str) -> str:
     return next((row.description for row in _catalog_with_discovered() if row.model == wanted), "")
 
 
+def model_route_profile(agent: str, model: str, effort: str) -> tuple[int, float | None] | None:
+    """``(relative capability, estimated dollar cost)`` of one route, or None.
+
+    Read from the same catalog live routing scores (the active calibration
+    when one is applied, else the bundled catalog plus discovered models), so
+    comparing a saved route with a fresh one uses the router's own numbers.
+    """
+    calibrated = _active_calibration_catalog()
+    try:
+        catalog = calibrated if calibrated is not None else _model_router.load_model_catalog()
+    except _model_router.ModelRouterConfigError:
+        return None
+    key = str(agent).strip().lower()
+    spec = next(
+        (m for m in catalog if m.agent == key and model in (m.model, m.model_id)),
+        None,
+    )
+    if spec is None:
+        return None
+    return spec.relative_capability, _model_router.estimated_dollar_cost(spec, effort)
+
+
 def model_cost(model: str) -> int | None:
     wanted = str(model or "").strip()
     return next((row.cost for row in _catalog_with_discovered() if row.model == wanted), None)

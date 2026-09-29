@@ -100,6 +100,7 @@ from dynamic_router import (
     build_model_correction_prompt,
     build_router_prompt,
     catalog_model_names,
+    model_route_profile,
     default_provider_strengths,
     default_router_effort,
     default_router_model,
@@ -1021,6 +1022,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         self._image_failures: set[str] = set()
         self.routing: dict[str, Any] | None = None
         self.quota_resume_ready = False
+        # Set once a saved attempt has been re-evaluated this run (see
+        # ``reroute_saved_attempt``), so routing is not applied a second time.
+        self._rerouted = False
+        self._reroute_all_providers = False
+        self._reroute_note = ""
         # Remaining-usage snapshot for the chosen provider taken while selecting
         # it for a fresh run, reused by post_started_comment so the start notice
         # doesn't probe /usage a second time.
@@ -1553,6 +1559,21 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         if previous in candidates and len(candidates) > 1:
             candidates = [name for name in candidates if name != previous] + [previous]
         return candidates
+
+    def refresh_provider_usages(self) -> tuple[dict[str, ProviderUsage], dict[str, float]]:
+        """Probe every enabled provider and rank the ones with capacity."""
+        assert self.issue
+        usages = self.enabled_provider_usages()
+        remaining = {
+            name: usage.remaining_percent
+            for name, usage in usages.items()
+            if usage.usable
+        }
+        self.provider_usages = usages
+        self.provider_priority = tuple(
+            self.provider_priority_order(self.issue.previous_ai, remaining)
+        )
+        return usages, remaining
 
     def choose_handoff_provider(self, previous_choice: ProviderChoice, reason: str) -> ProviderChoice | None:
         """Pick a different enabled provider for an already-owned issue branch.
@@ -2183,12 +2204,22 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         This posts that notice once per resume, keyed on ``quota_resumed_at``
         so repeated scheduler ticks within the same resumed run do not repeat
         it, and calls out any trusted comments left while the work was paused.
+        A saved attempt whose route was changed on resume (``reroute_saved_attempt``)
+        gets the same notice, keyed on the re-route, with the change spelled out
+        — so a new tool or model taking over is never silent.
         """
         assert self.issue and self.choice
-        if not self.quota_resume_ready:
-            return
         state = self.read_state()
-        resume_token = str(state.get("quota_resumed_at") or "")
+        rerouted = state.get("rerouted_from")
+        reroute_token = (
+            f"reroute:{rerouted['at']}"
+            if isinstance(rerouted, dict) and rerouted.get("at") else ""
+        )
+        if not self.quota_resume_ready and not reroute_token:
+            return
+        resume_token = (
+            str(state.get("quota_resumed_at") or "") if self.quota_resume_ready else reroute_token
+        )
         if not resume_token or state.get("resumed_comment_token") == resume_token:
             return
         marker = self.resumed_comment_marker(resume_token)
@@ -2210,6 +2241,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 f"- Session: `{self.choice.session_id}`",
                 f"- {self.choice.name} usage remaining: {self.format_usage_snapshot(usage)}",
             ]
+            if isinstance(rerouted, dict) and rerouted.get("to"):
+                lines.append(
+                    f"- Re-routed: {rerouted.get('from')} → {rerouted.get('to')} "
+                    f"({rerouted.get('reason')})"
+                )
             if new_comments:
                 count = len(new_comments)
                 noun = "comment" if count == 1 else "comments"
@@ -2306,8 +2342,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         Pre-flight always runs for a new attempt so the grade is stored even
         when Dynamic Model Routing is off. The toggle only decides whether
         that grade may replace the provider, model, and effort already chosen
-        for this attempt. Resumed sessions keep the model they already started
-        with. A retry of an attempt that already recorded a decision reuses
+        for this attempt. A saved attempt is re-evaluated by
+        ``reroute_saved_attempt`` first, and this is then skipped. A retry of an attempt that already recorded a decision reuses
         it, but only when that decision's model is still one the current
         configuration would actually produce (see `_stored_decision_still_valid`)
         — otherwise the attempt never really got underway (a fallback pick, or
@@ -2315,6 +2351,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         The original issue text is not modified.
         """
         assert self.choice and self.issue
+        if self._rerouted:
+            return
         if self.choice.resume:
             self.routing = None
             return
@@ -2354,20 +2392,137 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         replaying a now-stale pick just because it is still on disk.
         """
         assert self.choice
-        model = str(stored.get("selected_model") or "").strip()
+        return self.model_still_offered(
+            self.choice.key, str(stored.get("selected_model") or "").strip()
+        )
+
+    def model_still_offered(self, provider_key: str, model: str) -> bool:
+        """Whether the current configuration would still offer ``model``."""
         if not model:
             return False
-        host = self.config.spec(self.choice.key)
+        host = self.config.spec(provider_key)
         if host is not None and model == host.model:
             return True
-        if any(tier.model == model for tier in self.config.routing_tiers.get(self.choice.key, ())):
+        if any(tier.model == model for tier in self.config.routing_tiers.get(provider_key, ())):
             return True
         # The router picks from the model catalog, not only from the tiers, so
         # a catalog model this configuration still offers is just as valid.
         return model in catalog_model_names(
-            (self.choice.key,),
+            (provider_key,),
             allow_usage_credit_models=self.config.allow_usage_credit_models,
         )
+
+    # A same-provider model must cost at most this fraction of the saved one
+    # before an attempt that has already done work gives up its session for it.
+    REROUTE_COST_MARGIN = 0.7
+
+    def attempt_has_work_product(self, state: dict[str, Any]) -> bool:
+        """Whether a saved attempt has edits or commits worth preserving."""
+        if self.worktree_status():
+            return True
+        branch = str(state.get("branch_name") or "")
+        base = str(state.get("base_sha") or "")
+        if not branch or not base or not self.git_ok("show-ref", "--verify", f"refs/heads/{branch}"):
+            return False
+        ahead = self.git("rev-list", "--count", f"{base}..{branch}", check=False)
+        return ahead.isdigit() and int(ahead) > 0
+
+    def reroute_verdict(
+        self, pinned: ProviderChoice, fresh: ProviderChoice, has_work: bool
+    ) -> tuple[bool, str]:
+        """Switch to ``fresh`` or keep ``pinned``, and why.
+
+        With no work product yet, any change is free, so it is taken. Once the
+        attempt has edits or commits, a session's context is worth keeping
+        unless the pinned route can no longer run, the router now wants a
+        different tool or a more capable model, or a same-tool model is
+        materially cheaper.
+        """
+        if (pinned.key, pinned.model, pinned.effort) == (fresh.key, fresh.model, fresh.effort):
+            return False, "the routing decision is unchanged"
+        if not has_work:
+            return True, "nothing has been done yet, so re-routing loses nothing"
+        if pinned.key != fresh.key:
+            return True, f"routing now prefers {fresh.name}"
+        if not self.model_still_offered(pinned.key, pinned.model):
+            return True, f"{pinned.model} is no longer offered"
+        old = model_route_profile(pinned.key, pinned.model, pinned.effort)
+        new = model_route_profile(fresh.key, fresh.model, fresh.effort)
+        if old and new:
+            if new[0] > old[0]:
+                return True, f"routing now needs a more capable model than {pinned.model}"
+            if new[0] >= old[0] and old[1] and new[1] is not None and new[1] <= old[1] * self.REROUTE_COST_MARGIN:
+                return True, (
+                    f"{fresh.model} is materially cheaper than {pinned.model} "
+                    f"(about ${new[1]:.3f} against ${old[1]:.3f})"
+                )
+        return False, "the saved session is kept because the new pick is not materially better"
+
+    def reroute_saved_attempt(self) -> None:
+        """Re-decide tool, model and effort for a saved attempt being resumed.
+
+        Runs on every restart and on quota-pause resumes, so a new model, new
+        prices or a changed calibration take effect on work already underway.
+        Routing runs afresh over every tool with capacity; ``reroute_verdict``
+        then decides whether to act on it. A change starts a new session — with
+        a handoff bundle when work already exists, so the successor continues
+        from the branch and working tree — while a kept route restores the
+        saved one untouched, session included.
+        """
+        assert self.issue and self.choice
+        if not (self.config.dynamic_model_routing and self.in_progress_file.exists()):
+            return
+        if self.config.dry_run or self.adversarial_state_present():
+            return
+        state = self.read_state()
+        if "rerouted_from" in state:
+            # A previous resume's route change has been announced; start clean.
+            state.pop("rerouted_from")
+            self.write_state(state)
+        pinned = dataclasses.replace(self.choice)
+        saved_routing = state.get("routing_decision")
+        start_usage = self.start_usage
+        has_work = self.attempt_has_work_product(state)
+        self.refresh_provider_usages()
+        self._reroute_all_providers = True
+        try:
+            self.apply_dynamic_routing()
+        finally:
+            self._reroute_all_providers = False
+        self._rerouted = True
+        fresh = self.choice
+        switch, reason = self.reroute_verdict(pinned, fresh, has_work)
+        before = f"{pinned.name} {pinned.model} ({pinned.effort})"
+        after = f"{fresh.name} {fresh.model} ({fresh.effort})"
+        if not switch:
+            self.choice = pinned
+            self.start_usage = start_usage
+            self.update_state(
+                model=pinned.model, effort=pinned.effort, routing_decision=saved_routing
+            )
+            self.routing = None if pinned.resume else (
+                saved_routing if isinstance(saved_routing, dict) else self.routing
+            )
+            if before == after:
+                log(f"Re-evaluated routing on resume: keeping {before}; {reason}.")
+            else:
+                self._reroute_note = (
+                    f"Re-evaluated on resume: kept {before} over {after}; {reason}."
+                )
+                log(self._reroute_note)
+            return
+        if fresh.key == pinned.key:
+            fresh.session_id = self.new_session_id(self.config.require_spec(fresh.key))
+        fresh.resume = False
+        if has_work:
+            self.create_handoff_bundle(pinned, fresh, f"routing re-evaluated on resume: {reason}")
+        self.update_state_for_choice(fresh)
+        self.update_state(
+            routing_decision=self.routing,
+            rerouted_from={"from": before, "to": after, "reason": reason, "at": iso_timestamp()},
+        )
+        self._reroute_note = f"Re-routed on resume: {before} → {after}; {reason}."
+        log(self._reroute_note)
 
     def ensure_bot_auth(self) -> None:
         """Fail early when the chosen provider cannot act as its GitHub App.
@@ -2402,10 +2557,12 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         Only tools with capacity this pass are offered, so a routing decision
         can always be honoured. Once a branch is already owned (an in-progress
         attempt) the tool is fixed and routing may still choose the model and
-        effort, but not a different tool.
+        effort, but not a different tool — except while a saved attempt is being
+        re-evaluated on resume (``reroute_saved_attempt``), when every tool with
+        capacity is offered.
         """
         assert self.choice
-        if self.in_progress_file.exists():
+        if self.in_progress_file.exists() and not self._reroute_all_providers:
             keys = [self.choice.key]
         else:
             keys = [name.lower() for name in self.provider_priority]
@@ -2671,6 +2828,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
 
     def record_routing_in_history(self) -> None:
         """Note whether the configured setting or dynamic routing selected the worker."""
+        if self._reroute_note and self.choice:
+            self.history.note(self._reroute_note, iso_timestamp())
         if not self.routing or not self.choice:
             return
         kind, message = routing_history_message(
@@ -6262,17 +6421,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                         self.post_quota_comment()
                         self.suspend_paused()
                         return QUOTA_PAUSED_EXIT_CODE
+            self.reroute_saved_attempt()
         else:
-            usages = self.enabled_provider_usages()
-            remaining = {
-                name: usage.remaining_percent
-                for name, usage in usages.items()
-                if usage.usable
-            }
-            self.provider_usages = usages
-            self.provider_priority = tuple(
-                self.provider_priority_order(self.issue.previous_ai, remaining)
-            )
+            usages, remaining = self.refresh_provider_usages()
             self.choice = self.choose_provider(self.issue.previous_ai, remaining)
             if not self.choice:
                 enabled = ", ".join(spec.name for spec in self.config.enabled_specs) or "no provider"

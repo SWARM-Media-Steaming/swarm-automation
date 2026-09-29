@@ -2345,6 +2345,210 @@ class WorkerTestCase(unittest.TestCase):
         self.assertFalse(self.worker.in_progress_file.exists())
         self.assertEqual(self.git("branch", "--show-current"), "ai-main")
 
+    # ----- re-routing a saved attempt when the worker comes back --------------
+
+    def _saved_attempt(self, number: int = 305, *, session_started: bool = True,
+                       dirty: bool = False, commit: bool = False) -> ProviderChoice:
+        """A Claude attempt on claude-sonnet-5/medium, saved mid-run."""
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(number, "Title", "body", [], f"https://example.invalid/{number}")
+        pinned = ProviderChoice("Claude", "claude-sonnet-5", "medium", "session-old")
+        self.worker.choice = pinned
+        self.git("switch", "-q", "-c", self.worker.expected_branch(), "ai-main")
+        self.worker.save_new_state(self.worker.issue, pinned, self.base_sha)
+        self.worker.update_state(session_started=session_started)
+        if commit:
+            (self.repo / "work.txt").write_text("done\n", encoding="utf-8")
+            self.git("add", "work.txt")
+            self.git("commit", "-q", "-m", "progress")
+        if dirty:
+            (self.repo / "tracked.txt").write_text("half-done\n", encoding="utf-8")
+        self.worker.choice = self.worker.choice_from_state(self.worker.read_state())
+        return self.worker.choice
+
+    def _router_picks(self, name: str, model: str, effort: str):
+        """Make the router return ``name``/``model``/``effort`` for this issue."""
+        def apply(excluded_models=None) -> None:
+            worker = self.worker
+            if name != worker.choice.name:
+                worker.choice = ProviderChoice(name, model, effort, session_id=f"session-{name.lower()}")
+            worker.choice.model, worker.choice.effort = model, effort
+            worker.routing = {"provider": name.lower(), "selected_model": model,
+                              "reasoning_effort": effort, "prompt_grade": "A"}
+            worker.update_state(model=model, effort=effort, routing_decision=worker.routing)
+
+        return mock.patch.object(self.worker, "apply_dynamic_routing", side_effect=apply)
+
+    def _reroute(self, name: str, model: str, effort: str, *, profiles: dict | None = None):
+        bundles: list = []
+        patches = [
+            self._router_picks(name, model, effort),
+            mock.patch.object(self.worker, "refresh_provider_usages", return_value=({}, {})),
+            mock.patch.object(self.worker, "new_session_id", side_effect=lambda spec: f"new-{spec.key}"),
+            mock.patch.object(self.worker, "create_handoff_bundle",
+                              side_effect=lambda *a: bundles.append(a)),
+            mock.patch.object(self.worker, "model_still_offered", return_value=True),
+        ]
+        if profiles is not None:
+            patches.append(mock.patch("swarm_issue_worker.model_route_profile",
+                                      side_effect=lambda agent, model, effort: profiles[(agent, model)]))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            self.worker.reroute_saved_attempt()
+        return bundles
+
+    def test_a_saved_attempt_with_no_work_is_rerouted_freely(self) -> None:
+        self._saved_attempt()
+        bundles = self._reroute("Claude", "claude-opus-5-5", "high")
+        state = self.worker.read_state()
+        self.assertEqual((state["model"], state["effort"]), ("claude-opus-5-5", "high"))
+        self.assertEqual(state["session_id"], "new-claude")
+        self.assertFalse(state["session_started"])
+        self.assertFalse(self.worker.choice.resume)
+        self.assertEqual(bundles, [], "no work exists, so no handoff bundle is needed")
+        self.assertIn("Re-routed on resume", self.worker._reroute_note)
+        self.assertTrue(self.worker._rerouted)
+
+    def test_an_unchanged_route_keeps_the_session(self) -> None:
+        self._saved_attempt(dirty=True)
+        self._reroute("Claude", "claude-sonnet-5", "medium")
+        self.assertTrue(self.worker.choice.resume)
+        self.assertEqual(self.worker.choice.session_id, "session-old")
+        self.assertEqual(self.worker.read_state()["session_id"], "session-old")
+        self.assertEqual(self.worker._reroute_note, "")
+
+    def test_a_different_provider_takes_over_with_a_handoff_bundle_once_work_exists(self) -> None:
+        self._saved_attempt(dirty=True)
+        bundles = self._reroute("Codex", "gpt-5.6-terra", "medium")
+        state = self.worker.read_state()
+        self.assertEqual((state["ai_tool"], state["model"]), ("Codex", "gpt-5.6-terra"))
+        self.assertFalse(state["session_started"])
+        self.assertEqual(len(bundles), 1)
+        self.assertEqual(bundles[0][0].name, "Claude")
+        self.assertEqual(bundles[0][1].name, "Codex")
+        self.assertIn("routing re-evaluated on resume", bundles[0][2])
+        self.assertEqual(state["rerouted_from"]["to"], "Codex gpt-5.6-terra (medium)")
+
+    def test_a_more_capable_model_replaces_the_saved_one_mid_work(self) -> None:
+        self._saved_attempt(commit=True)
+        profiles = {("claude", "claude-sonnet-5"): (3, 0.03), ("claude", "claude-opus-5"): (4, 0.2)}
+        bundles = self._reroute("Claude", "claude-opus-5", "high", profiles=profiles)
+        self.assertEqual(self.worker.read_state()["model"], "claude-opus-5")
+        self.assertEqual(len(bundles), 1, "work exists, so the successor gets a handoff bundle")
+        self.assertIn("more capable", self.worker._reroute_note)
+
+    def test_a_materially_cheaper_model_replaces_the_saved_one_mid_work(self) -> None:
+        self._saved_attempt(commit=True)
+        profiles = {("claude", "claude-sonnet-5"): (4, 0.20), ("claude", "claude-opus-5-5"): (4, 0.12)}
+        self._reroute("Claude", "claude-opus-5-5", "medium", profiles=profiles)
+        self.assertEqual(self.worker.read_state()["model"], "claude-opus-5-5")
+        self.assertIn("materially cheaper", self.worker._reroute_note)
+
+    def test_a_marginally_cheaper_model_does_not_cost_the_session(self) -> None:
+        self._saved_attempt(dirty=True)
+        profiles = {("claude", "claude-sonnet-5"): (4, 0.20), ("claude", "claude-opus-5-5"): (4, 0.19)}
+        bundles = self._reroute("Claude", "claude-opus-5-5", "medium", profiles=profiles)
+        state = self.worker.read_state()
+        self.assertEqual((state["model"], state["effort"]), ("claude-sonnet-5", "medium"))
+        self.assertEqual(state["session_id"], "session-old")
+        self.assertTrue(self.worker.choice.resume)
+        self.assertEqual(bundles, [])
+        self.assertIn("kept Claude claude-sonnet-5 (medium)", self.worker._reroute_note)
+
+    def test_a_model_that_is_no_longer_offered_is_replaced(self) -> None:
+        self._saved_attempt(dirty=True)
+        profiles = {("claude", "claude-sonnet-5"): (3, 0.03), ("claude", "claude-sonnet-5-5"): (3, 0.03)}
+        with mock.patch.object(self.worker, "model_still_offered", return_value=False):
+            with self._router_picks("Claude", "claude-sonnet-5-5", "medium"), \
+                    mock.patch.object(self.worker, "refresh_provider_usages", return_value=({}, {})), \
+                    mock.patch.object(self.worker, "new_session_id", return_value="new"), \
+                    mock.patch.object(self.worker, "create_handoff_bundle"), \
+                    mock.patch("swarm_issue_worker.model_route_profile",
+                               side_effect=lambda agent, model, effort: profiles[(agent, model)]):
+                self.worker.reroute_saved_attempt()
+        self.assertEqual(self.worker.read_state()["model"], "claude-sonnet-5-5")
+        self.assertIn("no longer offered", self.worker._reroute_note)
+
+    def test_nothing_is_rerouted_when_dynamic_routing_is_off(self) -> None:
+        self._saved_attempt()
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=False)
+        with mock.patch.object(self.worker, "apply_dynamic_routing") as routed:
+            self.worker.reroute_saved_attempt()
+        routed.assert_not_called()
+        self.assertFalse(self.worker._rerouted)
+
+    def test_a_dry_run_and_adversarial_checkpoints_are_left_alone(self) -> None:
+        self._saved_attempt()
+        self.worker.config = dataclasses.replace(self.worker.config, dry_run=True)
+        with mock.patch.object(self.worker, "apply_dynamic_routing") as routed:
+            self.worker.reroute_saved_attempt()
+        routed.assert_not_called()
+        self.worker.config = dataclasses.replace(self.worker.config, dry_run=False)
+        with mock.patch.object(self.worker, "adversarial_state_present", return_value=True), \
+                mock.patch.object(self.worker, "apply_dynamic_routing") as routed:
+            self.worker.reroute_saved_attempt()
+        routed.assert_not_called()
+
+    def test_routing_is_not_applied_a_second_time_after_a_reroute(self) -> None:
+        self._saved_attempt()
+        self._reroute("Claude", "claude-opus-5-5", "high")
+        with mock.patch.object(self.worker, "apply_dynamic_routing") as routed:
+            self.worker.maybe_apply_dynamic_routing()
+        routed.assert_not_called()
+
+    def test_every_tool_with_capacity_is_offered_while_rerouting(self) -> None:
+        self._saved_attempt()
+        self.worker.provider_priority = ("claude", "codex", "grok")
+        self.assertEqual([c.key for c in self.worker.routing_candidates()], ["claude"])
+        self.worker._reroute_all_providers = True
+        offered = [c.key for c in self.worker.routing_candidates()]
+        self.assertEqual(offered[0], "claude")
+        self.assertGreater(len(offered), 1)
+
+    def _run_until_history_starts(self, *, quota_resume: bool) -> list[str]:
+        """Drive run_selected_issue for a saved attempt up to the first thing it
+        does after routing, recording whether the saved attempt was re-routed."""
+        self._saved_attempt()
+        self.worker.quota_resume_ready = quota_resume
+        calls: list[str] = []
+
+        class Stop(Exception):
+            pass
+
+        with (
+            mock.patch.object(self.worker, "provider_capacity", return_value=0),
+            mock.patch.object(self.worker, "reroute_saved_attempt", side_effect=lambda: calls.append("reroute")),
+            mock.patch.object(self.worker, "ensure_bot_auth"),
+            mock.patch.object(self.worker, "start_execution_history", side_effect=Stop),
+        ):
+            with self.assertRaises(Stop):
+                self.worker.run_selected_issue()
+        return calls
+
+    def test_a_restarted_attempt_is_rerouted_before_it_runs(self) -> None:
+        self.assertEqual(self._run_until_history_starts(quota_resume=False), ["reroute"])
+
+    def test_a_quota_paused_attempt_is_rerouted_when_it_resumes(self) -> None:
+        self.assertEqual(self._run_until_history_starts(quota_resume=True), ["reroute"])
+
+    def test_a_fresh_issue_is_not_treated_as_a_resume(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.issue = IssueContext(400, "New", "body", [], "https://example.invalid/400")
+        self.assertFalse(self.worker.in_progress_file.exists())
+        with (
+            mock.patch.object(self.worker, "refresh_provider_usages", return_value=({}, {"Claude": 80.0})),
+            mock.patch.object(self.worker, "choose_provider",
+                              return_value=ProviderChoice("Claude", "claude-sonnet-5", "medium", "s")),
+            mock.patch.object(self.worker, "reroute_saved_attempt") as rerouted,
+            mock.patch.object(self.worker, "ensure_bot_auth"),
+            mock.patch.object(self.worker, "maybe_apply_dynamic_routing"),
+            mock.patch.object(self.worker, "start_execution_history", side_effect=RuntimeError("stop")),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.worker.run_selected_issue()
+        rerouted.assert_not_called()
+
     def test_higher_priority_issue_is_selected_before_lower_numbered_one(self) -> None:
         issues = [
             self.issue_payload(20, labels=("priority: medium",)),
@@ -5098,6 +5302,49 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(
             self.worker.read_state()["resumed_comment_token"], "2026-09-05T09:00:00-05:00"
         )
+
+    def test_a_rerouted_attempt_announces_the_change_without_a_quota_pause(self) -> None:
+        self._prime_resumed_worker()
+        self.worker.quota_resume_ready = False
+        self.worker.update_state(
+            quota_resumed_at=None,
+            rerouted_from={
+                "from": "Claude claude-sonnet-5 (medium)",
+                "to": "Codex test-model (high)",
+                "reason": "routing now prefers Codex",
+                "at": "2026-09-29T09:00:00-05:00",
+            },
+        )
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", return_value="") as github,
+        ):
+            self.worker.post_resumed_comment()
+            self.worker.post_resumed_comment()
+        github.assert_called_once()
+        body = github.call_args.args[2]
+        self.assertIn("**Codex Bot** is resuming work on this issue", body)
+        self.assertIn(
+            "- Re-routed: Claude claude-sonnet-5 (medium) → Codex test-model (high) "
+            "(routing now prefers Codex)",
+            body,
+        )
+        self.assertEqual(
+            self.worker.read_state()["resumed_comment_token"], "reroute:2026-09-29T09:00:00-05:00"
+        )
+
+    def test_a_plain_restart_with_no_route_change_posts_no_resume_comment(self) -> None:
+        self._prime_resumed_worker()
+        self.worker.quota_resume_ready = False
+        with mock.patch.object(self.worker.github, "gh", return_value="") as github:
+            self.worker.post_resumed_comment()
+        github.assert_not_called()
+
+    def test_a_reroute_clears_the_previous_resumes_announcement(self) -> None:
+        self._saved_attempt()
+        self.worker.update_state(rerouted_from={"from": "a", "to": "b", "reason": "r", "at": "t"})
+        self._reroute("Claude", "claude-sonnet-5", "medium")
+        self.assertNotIn("rerouted_from", self.worker.read_state())
 
     def test_resume_comment_calls_out_comments_left_while_paused(self) -> None:
         self._prime_resumed_worker()
