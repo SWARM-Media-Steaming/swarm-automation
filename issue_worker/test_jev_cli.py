@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 from jev_cli import (
@@ -81,8 +82,11 @@ class CliTests(unittest.TestCase):
 
     def test_successful_ask_parses_json(self) -> None:
         def runner(command, timeout, stdin):
-            self.assertIn("ask", command)
-            self.assertIn("--json", command)
+            # `jev eval -f <request>` is the CLI's request command; there is
+            # no `ask`, so a fake must reject anything else like the real one.
+            self.assertEqual(command[1], "eval")
+            self.assertIn("--file", command)
+            self.assertEqual(command[command.index("--output") + 1], "json")
             return _completed(stdout=json.dumps({
                 "answers": {"task_type": {"value": "FEATURE", "confidence": 0.88}},
                 "usage": {"input_tokens": 12},
@@ -93,6 +97,20 @@ class CliTests(unittest.TestCase):
         response = cli.ask(state={"title": "Add export"}, questions={"task_type": {"type": "choice"}})
         self.assertEqual(response.answers["task_type"]["value"], "FEATURE")
         self.assertGreaterEqual(response.latency_ms, 0)
+
+    def test_health_flags_a_cli_without_the_eval_command(self) -> None:
+        def runner(command, timeout, stdin):
+            if command[1:] == ["--version"]:
+                return _completed(stdout="jev 9.9.9\n")
+            return _completed(stderr="unrecognized subcommand 'eval'", returncode=2)
+
+        cli = JevCli(JevSettings(enabled=True, bin="/usr/bin/jev"), runner=runner)
+        cli.bin_path = "/usr/bin/jev"
+        with mock.patch("jev_cli.jev_auth_present", return_value=True):
+            health = cli.health()
+        self.assertFalse(health["reachable"])
+        self.assertEqual(health["status"], "unavailable")
+        self.assertEqual(health["error_type"], "unsupported_cli")
 
     def test_timeout_retries_then_fails(self) -> None:
         calls = {"n": 0}

@@ -94,7 +94,7 @@ class HealthAndCredentialTests(unittest.TestCase):
         """
 
         def runner(command, timeout, stdin):
-            self.assertEqual(command[1:], ["--version"])
+            self.assertIn(command[1:], (["--version"], ["eval", "--help"]))
             return SimpleNamespace(stdout="jev 0.1.0\n", stderr="", returncode=0)
 
         cli = JevCli(JevSettings(enabled=True, bin="/usr/bin/jev"), runner=runner)
@@ -150,7 +150,8 @@ class HealthAndCredentialTests(unittest.TestCase):
         captured = {}
 
         def runner(command, timeout, stdin):
-            request_path = Path(command[-1])
+            self.assertEqual(command[1], "eval")
+            request_path = Path(command[command.index("--file") + 1])
             captured["blob"] = request_path.read_text(encoding="utf-8")
             return SimpleNamespace(
                 stdout=json.dumps({"answers": {"task_type": {"value": "BUG", "confidence": 0.9}}}),

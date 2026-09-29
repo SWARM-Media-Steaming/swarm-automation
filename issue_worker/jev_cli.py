@@ -216,11 +216,28 @@ def discover_jev_bin(configured: str = "") -> str:
     return found or ""
 
 
-def jev_auth_present() -> bool:
-    """Whether a Jev/TypeSafe credential is available without reading its value."""
+def jev_auth_present(bin_path: str = "") -> bool:
+    """Whether a Jev/TypeSafe credential is available without reading its value.
+
+    ``jev auth status`` is authoritative when the executable is known: the CLI
+    keeps credentials in profile files whose location Swarm must not guess.
+    The environment/file checks are only the fallback when it cannot answer.
+    """
     for name in _JEV_KEY_ENV:
         if str(os.environ.get(name) or "").strip():
             return True
+    if bin_path:
+        try:
+            completed = subprocess.run(
+                [bin_path, "auth", "status", "--output", "json", "--no-input"],
+                capture_output=True, text=True, timeout=4, check=False,
+            )
+            if completed.returncode == 0:
+                status = json.loads(completed.stdout or "{}")
+                if isinstance(status, dict) and "authenticated" in status:
+                    return bool(status["authenticated"])
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
     home = Path.home()
     for path in (
         home / ".config" / "jev" / "config.json",
@@ -312,7 +329,7 @@ class JevCli:
     def health(self) -> dict[str, Any]:
         """Connectivity/health without exposing secrets."""
         installed = bool(self.bin_path)
-        authenticated = jev_auth_present()
+        authenticated = jev_auth_present(self.bin_path)
         version = ""
         reachable = False
         error = ""
@@ -321,6 +338,14 @@ class JevCli:
                 completed = self.runner([self.bin_path, "--version"], min(4.0, self.settings.timeout_seconds), None)
                 version = redact_cli_text((completed.stdout or completed.stderr or "").splitlines()[0] if (completed.stdout or completed.stderr) else "")
                 reachable = completed.returncode == 0
+                if reachable:
+                    # A CLI without `eval` (older/newer incompatible builds)
+                    # answers --version but fails every decision, which used
+                    # to show as "Connected".
+                    probe = self.runner([self.bin_path, "eval", "--help"], min(4.0, self.settings.timeout_seconds), None)
+                    if probe.returncode != 0:
+                        reachable = False
+                        error = "unsupported_cli"
             except subprocess.TimeoutExpired:
                 error = "timeout"
             except OSError as exc:
@@ -395,13 +420,20 @@ class JevCli:
             )
             command = [
                 self.bin_path,
-                "ask",
-                "--json",
+                "eval",
+                "--file",
+                str(request_path),
                 "--model",
                 str(request.get("model") or self.settings.model),
                 "--timeout",
-                str(timeout_ms),
-                str(request_path),
+                f"{timeout_ms}ms",
+                # Swarm owns retry/backoff (see ask()); the CLI must not
+                # silently multiply attempts on top of it.
+                "--max-retries",
+                "0",
+                "--output",
+                "json",
+                "--no-input",
             ]
             try:
                 completed = self.runner(command, timeout, None)
