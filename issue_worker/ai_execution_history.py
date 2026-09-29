@@ -1893,10 +1893,10 @@ class ExecutionHistoryRepository:
                 conditions.append(f"{column} = ?")
                 params.append(text)
         if start_date:
-            conditions.append("started_at >= ?")
+            conditions.append("substr(started_at, 1, 10) >= ?")
             params.append(sanitize_text(start_date))
         if end_date:
-            conditions.append("started_at <= ?")
+            conditions.append("substr(started_at, 1, 10) <= ?")
             params.append(sanitize_text(end_date))
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         with self.connect() as database:
