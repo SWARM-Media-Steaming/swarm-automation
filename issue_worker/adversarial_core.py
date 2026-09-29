@@ -789,6 +789,7 @@ class AdversarialStageMixin:
             "delivery_choice": delivery_choice or dataclasses.asdict(self.choice),
             "capacity_used": [self.choice.name],
             "fixer_provider": self.choice.name, "fixer_model": self.choice.model,
+            "fixer_effort": self.choice.effort,
             "round_started": iso_timestamp(), "outcome": "", "results": [],
             "tests_added": 0, "tests_modified": 0,
             "dispute": state.get(f"{stage.key}_initial_dispute", ""), "rounds": [],
@@ -1704,7 +1705,7 @@ class AdversarialStageMixin:
         return {
             "epoch_number": epoch_of(round_number),
             "round_in_epoch": round_in_epoch(round_number),
-            "fixer_effort": str(loop.get("fixer_effort") or "") if round_number else "",
+            "fixer_effort": str(loop.get("fixer_effort") or ""),
             "tester_effort": self.choice.effort,
             "escalation_reason": str((loop.get("escalation") or {}).get("reason", "")) if round_number else "",
             "patch_fingerprint": str(approach.get("patch_fingerprint", "")),
