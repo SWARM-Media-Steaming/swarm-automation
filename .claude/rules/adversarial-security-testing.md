@@ -21,10 +21,14 @@ the `minor` label from a trusted author; the worker owns VERSION.
   bootstrap, finding dedup, edit validation and delivery are shared and must
   stay shared. Anything that reads `"adversarial"` as a literal state key,
   origin or log prefix is a bug waiting for the second agent.
-- Round zero is the independent review of the normal implementation; at most
-  three counted fix/re-test rounds follow. Each tester invocation has fresh
-  context — issue, amendments, diff, changed files, repository conventions and
-  earlier recorded findings — and never the implementer's transcript.
+- Round zero is the independent review of the normal implementation; three
+  counted fix/re-test rounds make one epoch. The repository merge policy is
+  shared with UAT: strict mode renews an escalated epoch, and best effort
+  (explicit `adversarial_best_effort_merge` only) delivers after the first
+  epoch. Each tester invocation has fresh context — issue, amendments, diff,
+  changed files, repository conventions, protected tests, disputes, failed
+  approaches, and the structured no-progress summary — and never the
+  implementer's transcript.
 
 ### What decides the verdict
 
@@ -41,6 +45,9 @@ the `minor` label from a trusted author; the worker owns VERSION.
   could not execute records `FAILED` with `security_review_error` before the
   error propagates — it must never be indistinguishable from a clean pass. A
   cap-hit is also `FAILED`, distinguished by `security_outcome = "cap_hit"`.
+  A best-effort cap-hit is still `FAILED`; the execution, issue, and PR are
+  labelled **Best-effort merge with unresolved adversarial results**. Strict
+  exhaustion does not merge and does not become `AI Needs Input`.
 
 ### Scope, issues and the label
 
@@ -77,8 +84,9 @@ the `minor` label from a trusted author; the worker owns VERSION.
   `security_review_error`, `security_round_count`, `security_findings` and
   `security_filed_findings`, and widens `adversarial_rounds` to
   `(execution_id, stage, round_number)` so a UAT round 0 and a security round 0
-  of one execution are distinct rows. History is gated by
-  `ai_execution_history_enabled`.
+  of one execution are distinct rows. Migration 9 adds epoch rows and the
+  shared merge-policy, delivery, unresolved, and promotion columns, including
+  `security_epoch_count`. History is gated by `ai_execution_history_enabled`.
 - Routing reuses the existing framework. The router context names this a
   "Security / adversarial code analysis task"; do not add a second
   model-selection path.

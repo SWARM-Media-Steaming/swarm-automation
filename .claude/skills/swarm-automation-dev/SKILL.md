@@ -419,12 +419,45 @@ origin, or log prefix is a latent bug; use the stage. The rules files
 registered adversarial suites under `tests/adversarial/` import them from
 there; keep those aliases when moving code around.
 
-`MAX_ROUNDS` (currently 3) counts **fix/re-test rounds after round 0**, not
-total tester calls. A continually failing stage therefore runs
-`1 + MAX_ROUNDS` tester phases and `MAX_ROUNDS` fixer phases before
-`cap_hit` (today: 4 tests, 3 fixes). When changing the cap, update both
-counts in unit tests (`test_cap_holds_…`) and keep them aligned with
-`tests/adversarial/test_issue294_three_round_cap.py`.
+`MAX_ROUNDS` (currently 3) is one epoch: **fix/re-test rounds after round 0**,
+not total tester calls. One epoch is 1 + MAX_ROUNDS tester phases and
+MAX_ROUNDS fixer phases (today: 4 tests, 3 fixes).
+`test_cap_holds_automation_and_asks_a_trusted_author_to_adjudicate` is the
+CI gate for that count when best-effort delivery is explicitly enabled.
+What happens next is
+`RepoConfig.adversarial_best_effort_merge` (default off, never inferred;
+CLI `--adversarial-best-effort-merge`):
+
+- **strict**: persist the epoch and immediately start another. Re-run dynamic
+  routing at the boundary, raise reasoning effort (two rungs when the epoch
+  made no progress, one when it improved), and move off a provider/model pair
+  that made no progress. After two stalled epochs, pick the strongest enabled
+  model. A materially identical patch or failure is recorded, and the next
+  epoch's prompt requires a different strategy. Merge only after the configured
+  acceptance policy passes. After `STRICT_EPOCHS_PER_RUN` (3) epochs in one
+  process the worker exits 13 (`adversarial_epoch_continuing`). The scheduler
+  treats 13 as progress and resumes the same in-progress checkpoint. Do not
+  file `AI Needs Input` because findings remain.
+- **best_effort**: do not start another epoch. Deliver the latest commit,
+  labelled **Best-effort merge with unresolved adversarial results**, merge the
+  issue PR into the integration branch even when routine approval is manual,
+  and promote to the base branch only when both `auto_promote` and
+  `auto_approve` are on. The stage outcome stays `cap_hit` / `FAILED`. The
+  follow-up issue still carries the notes.
+
+History is schema 9: epoch rows, round fingerprints, merge policy, delivery,
+unresolved-at-merge, and promotion. The Feedback **Merge result** filter
+separates `verified_clean` from `best_effort`. A pre-#305 `cap_hit` with an
+empty delivery column counts as best-effort; a clean outcome with an empty
+delivery column counts as verified-clean. The first epoch's boundary logs stay
+`N of 3`; later epochs append ` in epoch N`.
+
+`tests/adversarial/test_issue294_three_round_cap.py` and the issue #278
+cap-delivery tests still expect the old always-best-effort default. #305
+defaults the toggle off, so those suites disagree with strict mode until a
+fresh adversarial tester adjudicates them. Do not edit `tests/adversarial/` to
+make strict mode look like best effort. Unit tests in `issue_worker/` that
+still want the old delivery must set `adversarial_best_effort_merge=True`.
 
 ## Per-prompt AI token usage is centralized, not per-agent
 

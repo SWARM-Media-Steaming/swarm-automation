@@ -315,6 +315,11 @@ pub struct RepoConfig {
     /// issue.
     #[serde(default)]
     pub adversarial_security_enabled: bool,
+    /// After three unresolved adversarial fix/re-test rounds, merge the latest
+    /// commit even when blocking tests or security findings remain. Off by
+    /// default: strict mode starts another escalated epoch instead.
+    #[serde(default)]
+    pub adversarial_best_effort_merge: bool,
     /// Ask the AI to update any Claude skill, agent, rule, workflow, or
     /// `CLAUDE.md` file in the repository that is relevant to the issue.
     #[serde(default)]
@@ -352,6 +357,7 @@ impl Default for RepoConfig {
             require_issue_tests: false,
             adversarial_uat_enabled: false,
             adversarial_security_enabled: false,
+            adversarial_best_effort_merge: false,
             update_claude_assets_enabled: false,
             allow_environment_only_summary: false,
             repo_dir: String::new(),
@@ -654,6 +660,8 @@ pub struct AppConfig {
     #[serde(default, skip_serializing)]
     pub adversarial_security_enabled: bool,
     #[serde(default, skip_serializing)]
+    pub adversarial_best_effort_merge: bool,
+    #[serde(default, skip_serializing)]
     pub update_claude_assets_enabled: bool,
     #[serde(default, skip_serializing)]
     pub allow_environment_only_summary: bool,
@@ -742,6 +750,7 @@ impl Default for AppConfig {
             require_issue_tests: false,
             adversarial_uat_enabled: false,
             adversarial_security_enabled: false,
+            adversarial_best_effort_merge: false,
             update_claude_assets_enabled: false,
             allow_environment_only_summary: false,
             branch_prefix: String::new(),
@@ -1133,6 +1142,7 @@ impl AppConfig {
             repo.require_issue_tests = self.require_issue_tests;
             repo.adversarial_uat_enabled = self.adversarial_uat_enabled;
             repo.adversarial_security_enabled = self.adversarial_security_enabled;
+            repo.adversarial_best_effort_merge = self.adversarial_best_effort_merge;
             repo.update_claude_assets_enabled = self.update_claude_assets_enabled;
             repo.allow_environment_only_summary = self.allow_environment_only_summary;
             // A migrated config keeps whatever prefix it already used; a fresh
@@ -1313,6 +1323,10 @@ mod tests {
         assert!(
             !repo.adversarial_security_enabled,
             "the adversarial cybersecurity review defaults off"
+        );
+        assert!(
+            !repo.adversarial_best_effort_merge,
+            "best-effort adversarial merge stays off unless explicitly enabled"
         );
         assert!(!repo.update_claude_assets_enabled);
         assert!(!repo.allow_environment_only_summary);

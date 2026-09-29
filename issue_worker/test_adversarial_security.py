@@ -323,6 +323,8 @@ class AdversarialSecurityTests(unittest.TestCase):
 
     def test_cap_hit_reports_failed_and_never_pass(self):
         self.prepare()
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True)
         self.start()
 
         def never_fix(prompt, activity=""):
@@ -330,7 +332,10 @@ class AdversarialSecurityTests(unittest.TestCase):
             (self.repo / "service.py").write_text(VULNERABLE)
             return status
 
-        with self.patches(never_fix):
+        with self.patches(never_fix), mock.patch.object(
+            self.worker, "merge_pull_request"
+        ) as merge:
+            merge.return_value = self.git("rev-parse", "HEAD")
             self.assertEqual(self.worker.run_adversarial_pipeline(), 10)
         loop = self.loop_state()
         self.assertEqual((loop["round"], loop["outcome"], loop["status"]),
@@ -340,7 +345,11 @@ class AdversarialSecurityTests(unittest.TestCase):
         self.assertEqual(row["security_review_status"], "FAILED")
         self.assertNotIn("Adversarial Cybersecurity: PASS", self.comments_posted[0])
         self.assertIn("did not reach a clean state after three", self.comments_posted[0])
+        self.assertIn("Best-effort merge with unresolved adversarial results", self.comments_posted[0])
         self.assertIn("Service token is hardcoded", self.comments_posted[0])
+        self.assertNotIn("AI Needs Input", self.comments_posted[0])
+        self.assertEqual(row["adversarial_delivery"], "best_effort")
+        self.assertEqual(row["promotion_status"], "not_configured")
 
     def test_a_review_that_cannot_execute_records_failed_rather_than_a_clean_pass(self):
         self.prepare(hardened=True)

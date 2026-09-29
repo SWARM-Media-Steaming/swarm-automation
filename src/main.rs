@@ -1119,6 +1119,12 @@ fn repo_worker_args(
             "--no-adversarial-security-enabled"
         }
         .into(),
+        if repo.adversarial_best_effort_merge {
+            "--adversarial-best-effort-merge"
+        } else {
+            "--no-adversarial-best-effort-merge"
+        }
+        .into(),
         if repo.update_claude_assets_enabled {
             "--update-claude-assets-enabled"
         } else {
@@ -1222,6 +1228,24 @@ struct AiExecutionRecord {
     security_findings: serde_json::Value,
     #[serde(default)]
     security_filed_findings: Vec<serde_json::Value>,
+    /// Issue #305. Epoch bookkeeping, the explicit merge policy, and whether
+    /// a best-effort delivery still had unresolved adversarial results.
+    #[serde(default)]
+    adversarial_epoch_count: i64,
+    #[serde(default)]
+    security_epoch_count: i64,
+    #[serde(default)]
+    adversarial_merge_policy: String,
+    #[serde(default)]
+    adversarial_delivery: String,
+    #[serde(default)]
+    adversarial_unresolved: serde_json::Value,
+    #[serde(default)]
+    promotion_status: String,
+    #[serde(default)]
+    promotion_url: String,
+    #[serde(default)]
+    adversarial_epochs: Vec<serde_json::Value>,
     execution_id: String,
     repository: String,
     issue_number: i64,
@@ -1350,6 +1374,7 @@ fn execution_history_query_args(
     offset: Option<i64>,
     search: Option<String>,
     sort: Option<String>,
+    delivery: Option<String>,
 ) -> Vec<String> {
     // `--limit` is always sent. Omitting it makes the CLI print every row.
     let mut arguments = vec![
@@ -1367,6 +1392,13 @@ fn execution_history_query_args(
             Some("rounds_asc") => "rounds_asc",
             Some("rounds_desc") => "rounds_desc",
             _ => "recent",
+        }
+        .into(),
+        "--delivery".into(),
+        match delivery.as_deref() {
+            Some("verified_clean") => "verified_clean",
+            Some("best_effort") => "best_effort",
+            _ => "all",
         }
         .into(),
     ];
@@ -1393,6 +1425,7 @@ fn get_execution_history<R: tauri::Runtime>(
     offset: Option<i64>,
     search: Option<String>,
     sort: Option<String>,
+    delivery: Option<String>,
 ) -> Result<ExecutionHistoryPage, String> {
     let config = current_config(&state)?;
     let repositories = feedback_repository_names(&config, &repo_ids)?;
@@ -1404,7 +1437,15 @@ fn get_execution_history<R: tauri::Runtime>(
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
     let (ok, raw) = run_capture_owned(
         &python,
-        &execution_history_query_args(&script, &database_path, &repositories, offset, search, sort),
+        &execution_history_query_args(
+            &script,
+            &database_path,
+            &repositories,
+            offset,
+            search,
+            sort,
+            delivery,
+        ),
     );
     if !ok {
         return Err(format!("Execution history lookup failed: {raw}"));
@@ -1563,10 +1604,11 @@ async fn get_execution_history_background(
     offset: Option<i64>,
     search: Option<String>,
     sort: Option<String>,
+    delivery: Option<String>,
 ) -> Result<ExecutionHistoryPage, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        get_execution_history(app.clone(), state, repo_ids, offset, search, sort)
+        get_execution_history(app.clone(), state, repo_ids, offset, search, sort, delivery)
     })
     .await
     .map_err(|error| format!("Execution history lookup failed: {error}"))?

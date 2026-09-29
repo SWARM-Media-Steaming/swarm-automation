@@ -67,14 +67,22 @@ gate. These suites run during the issue's own fix/re-test rounds only —
 there is no scheduler in this app to re-run them afterward, so ongoing
 regression coverage belongs in the repository's own CI/CD.
 
-After the initial assessment, up to three implementer-fix/tester-retest rounds
-run locally. Only a fresh tester can adjudicate disputed tests; the implementer
-cannot modify them. Out-of-scope findings become separate labelled, assigned
-issues. A clean pass follows normal PR delivery. A cap-hit still publishes the
-branch and PR, bypasses automatic approval/merge/promotion, and marks the issue
-**AI Needs Input** for a trusted-author adjudication. Quota pauses preserve the
-phase and remaining rounds. Pilot this setting on one repository per stack
-before enabling it broadly.
+After the initial assessment, adversarial UAT runs renewable epochs of three
+implementer-fix/tester-retest rounds. The repository setting **Allow best-effort
+adversarial merge after 3 rounds** (`adversarial_best_effort_merge`, CLI
+`--adversarial-best-effort-merge`, environment
+`SWARM_ADVERSARIAL_BEST_EFFORT_MERGE`) is off by default and is never inferred.
+Off, an exhausted epoch is persisted and another escalated epoch starts
+immediately; known blocking failures are not merged, and the worker does not
+pause as **AI Needs Input** because findings remain. On, only the first three
+rounds run, then the latest committed implementation merges into `ai-main`
+even if adversarial tests or actionable security findings are still open. That
+delivery is marked **Best-effort merge with unresolved adversarial results**.
+Promotion into `main` still requires both automatic issue-PR merging and
+automatic promotion. Only a fresh tester can adjudicate disputed tests; the
+implementer cannot modify them. Out-of-scope findings become separate labelled,
+assigned issues. Quota pauses preserve the phase, epoch, and remaining rounds.
+Pilot this setting on one repository per stack before enabling it broadly.
 
 Work Policy also includes **Adversarial cybersecurity** (off by default; CLI
 `--adversarial-security-enabled`, environment
@@ -109,8 +117,10 @@ fails the round.
 Each review ends as `PASS`, `FIXED`, `FINDINGS_CREATED`, or `FAILED`, recorded
 both on the issue and in execution history. A review that could not execute is
 `FAILED` — never a pass. Like UAT, it uses the dynamic model router (as a
-security/adversarial code-analysis task), survives quota pauses, and is capped
-at three fix/re-test rounds.
+security/adversarial code-analysis task), survives quota pauses, and follows
+the same three-round epochs and the same explicit merge policy. A best-effort
+delivery stays `FAILED` with `security_outcome = "cap_hit"` and is labelled
+**Best-effort merge with unresolved adversarial results**.
 
 Optional AI execution history can be enabled under AI Configuration. It stores the
 original issue, sanitized effective prompt, provider settings, lifecycle,
@@ -146,11 +156,17 @@ repository, split across four tabs:
   Grades, Router Activity and Execution History all link into it.
 
 The execution view also shows a sortable UAT round column, per-round provider
-pairings and disputes, and aggregate average rounds, clean-first-pass rate and
-cap-hit rate. Counts are test files and failing suites. Quota consumption is an
+pairings and disputes, and aggregate average rounds, clean-first-pass rate,
+cap-hit rate, verified-clean merges, and best-effort merges. **Merge result**
+filters history into verified-clean merges and best-effort merges. A best-effort
+card is labelled **Best-effort merge with unresolved adversarial results** and
+lists the failing suites and open findings from before and after the merge.
+Counts are test files and failing suites. Quota consumption is an
 approximate percentage-point drop from remaining-quota snapshots across used
 providers, not metered token or dollar cost. Existing history databases migrate
-automatically to schema 3 when history is enabled.
+automatically to schema 9 when history is opened. Schema 9 adds epoch rows,
+round fingerprints, the merge policy, delivery, unresolved-at-merge state, and
+promotion result.
 
 **Estimated cost** is token-equivalent model list pricing from a versioned,
 effective-dated catalog — never an invoice, and never subscription-quota

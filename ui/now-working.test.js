@@ -217,6 +217,22 @@ test("keeps adversarial UAT progress synchronized with an issue quota pause and 
   assert.equal(adversarial.title, "Fix/re-test round 3 of 6");
 });
 
+test("shows a renewed strict epoch and a best-effort delivery from boundary logs", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo],
+    logs: [
+      line("Selected oldest unprocessed assigned issue: #305 Epochs"),
+      line("Adversarial UAT for issue #305: starting strict-mode epoch 2 (3 more fix/re-test rounds; escalation: epoch_exhausted,no_progress)."),
+      line("Adversarial UAT for issue #305: starting fix/re-test round 1 of 3 in epoch 2."),
+      line("Adversarial UAT for issue #305: Best-effort merge with unresolved adversarial results — delivering abcdef123456 with 1 failing suite(s) and 1 open finding(s) after 3 fix/re-test rounds."),
+    ],
+  });
+  const adversarial = rows.find((row) => row.kind === "adversarial");
+  assert.equal(adversarial.title, "Best-effort merge with unresolved adversarial results");
+  assert.equal(adversarial.detail, "Delivering unresolved results");
+});
+
 test("drops a selected issue that never started because no provider had capacity", () => {
   const rows = deriveNowWorking({
     workerState: "running",

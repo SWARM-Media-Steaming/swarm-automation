@@ -53,6 +53,12 @@ test("round evidence shows findings open, verified fixed, and filed separately",
   assert.match(text, /Claude \/ fix → Codex \/ review/);
   assert.match(text, /2 finding\(s\) open, 1 verified fixed, 3 filed separately/);
   assert.match(text, /failing suites 2 → 0/);
+  assert.doesNotMatch(text, /^epoch /);
+  const epoch = security.roundDetail({epoch_number: 2, fixer_provider: "Grok", fixer_model: "fix",
+    tester_provider: "Codex", tester_model: "review", findings_found: 1, findings_fixed: 0,
+    findings_filed: 0, tests_added: 0, tests_modified: 0,
+    tests_failing_before: 1, tests_failing_after: 1});
+  assert.match(epoch, /^epoch 2 · Grok \/ fix/);
 });
 
 test("Overview tracks a security review as its own row beside the issue", () => {
