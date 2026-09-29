@@ -17,7 +17,7 @@ class AttributionLogTests(unittest.TestCase):
 
     def test_missing_values_are_default_not_blank(self):
         line = UAT_STAGE.attribution_log(7, {"phase": "test"}, ProviderChoice("Claude", "", ""))
-        self.assertTrue(line.endswith("tester Claude model default with effort default."))
+        self.assertTrue(line.endswith("tester Claude model <unconfigured> with effort <unconfigured>."))
 
 
 if __name__ == "__main__":

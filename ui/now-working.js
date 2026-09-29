@@ -101,7 +101,8 @@
         `^${stage.label} for issue #(\\d+): (fixer|tester) (\\S+) model (\\S+) with effort (\\S+)\\.$`, "i"));
       if (found) {
         return { stage, number: found[1], role: found[2].toLowerCase(), provider: found[3],
-          model: found[4] === "default" ? "" : found[4], effort: found[5] === "default" ? "" : found[5] };
+          model: found[4] === "<unconfigured>" ? "" : found[4],
+          effort: found[5] === "<unconfigured>" ? "" : found[5] };
       }
     }
     return null;

@@ -491,8 +491,11 @@ class AdversarialStage:
         model reasoning.
         """
         role = "fixer" if loop["phase"] == "fix" else "tester"
+        # "<unconfigured>" (not a bare word like "default") marks a missing
+        # value so it can never collide with a real model/effort name that
+        # happens to be spelled the same as the sentinel would be.
         return (f"{self.label} for issue #{issue_number}: {role} {choice.name} model "
-                f"{choice.model or 'default'} with effort {choice.effort or 'default'}.")
+                f"{choice.model or '<unconfigured>'} with effort {choice.effort or '<unconfigured>'}.")
 
     def on_round_start(self, worker, loop: dict[str, Any]) -> None:
         """Extra observability a stage wants when a round begins."""
