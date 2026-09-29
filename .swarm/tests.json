@@ -3258,6 +3258,36 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue314_round_zero_fixer_effort_blanked.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue314-round-zero-fixer-effort-blanked",
+      "name": "Round zero's history record shows the implementer's real effort instead of manufacturing 'Not recorded'",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_core.py",
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_issue314_round_zero_fixer_effort_blanked.py"
+        ]
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
