@@ -2784,6 +2784,38 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_workflow_invariants.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-workflow-invariants",
+      "name": "Issue #299: blocking findings, RAG fallback retrieval, category toggles, CLI fail-closed, pre-flight score fields",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/jev_cli.py",
+          "issue_worker/dynamic_router.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/issue299/test_jev_workflow_invariants.py",
+          "tests/adversarial/issue299/harness.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

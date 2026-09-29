@@ -135,3 +135,38 @@ test("help topics state that Jev recommends and Swarm remains the authority", ()
   assert.match(appJs, /"jev-feedback"\s*:\s*\{/);
   assert.match(appJs, /baseline is never overwritten/);
 });
+
+test("Feedback Jev filters distinguish fallback states and support analysis dimensions", () => {
+  const panel = section(indexHtml, "feedback-panel-jev");
+  const status = panel.slice(
+    panel.indexOf('id="jev-feedback-status"'),
+    panel.indexOf("</select>", panel.indexOf('id="jev-feedback-status"')) + "</select>".length,
+  );
+  for (const value of ["disabled", "unavailable", "timeout", "malformed", "authentication", "low_confidence", "fallback"]) {
+    assert.match(
+      status,
+      new RegExp(`option value="${value}"`),
+      `Jev state filter must include ${value} so users can tell a genuine score change from a missing/fallback result (AC 24)`,
+    );
+  }
+  assert.match(
+    panel,
+    /id="jev-feedback-provider"|id="jev-feedback-model"/,
+    "AC 29 requires a provider/model filter on the Jev Feedback table",
+  );
+  assert.match(
+    panel,
+    /id="jev-feedback-from"|id="jev-feedback-date"/,
+    "AC 29 requires a date-range filter on the Jev Feedback table",
+  );
+  assert.match(
+    panel,
+    /id="jev-feedback-delta"/,
+    "AC 29 requires a score-delta filter on the Jev Feedback table",
+  );
+  assert.match(
+    panel,
+    /id="jev-feedback-cost"/,
+    "AC 29 requires a cost filter on the Jev Feedback table",
+  );
+});

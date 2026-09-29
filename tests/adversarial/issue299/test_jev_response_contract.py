@@ -125,6 +125,86 @@ class NoulAnswerContractTests(unittest.TestCase):
             "must not silently become False",
         )
 
+    def test_echoed_cross_repo_true_label_is_not_silently_read_as_single_repo(self) -> None:
+        # build_jev_request offers exactly this noul true label:
+        # "true": "Cross-repository work".
+        # Unlike uat/cyber, the pre-flight path stores this as a probability
+        # score (crossRepoProbability). An offered-label answer must not be
+        # float-parsed into 0.0 — that inverts "multiple repositories are
+        # likely involved" into "they are not" at full confidence.
+        response = JevResponse(
+            answers={
+                "task_type": {"value": "ARCHITECTURE_REFACTOR", "confidence": 0.94},
+                "complexity": {"value": 0.81, "confidence": 0.9},
+                "security_risk": {"value": 0.34, "confidence": 0.9},
+                "cross_repo": {"value": "Cross-repository work", "confidence": 0.93},
+            }
+        )
+        result = interpret_jev_response(DecisionType.TASK_CLASSIFICATION.value, {}, response)
+        cross_repo = result.scores.get("crossRepoProbability")
+        self.assertIsNotNone(
+            cross_repo,
+            "a 'Cross-repository work' answer must not vanish from scores",
+        )
+        self.assertGreater(
+            cross_repo,
+            0.5,
+            "Jev answered with its own offered 'Cross-repository work' label, but "
+            f"crossRepoProbability={cross_repo!r} reads as single-repository. "
+            "Section 3 requires this signal before model selection; a silent 0.0 "
+            "hides a multi-repo task from the router and RAG-scope path.",
+        )
+
+    def test_echoed_tests_needed_label_is_not_silently_read_as_tests_unlikely(self) -> None:
+        response = JevResponse(
+            answers={
+                "task_type": {"value": "FEATURE", "confidence": 0.9},
+                "complexity": {"value": 0.5, "confidence": 0.9},
+                "security_risk": {"value": 0.2, "confidence": 0.9},
+                "testing_likely": {"value": "Tests needed", "confidence": 0.91},
+            }
+        )
+        result = interpret_jev_response(DecisionType.ISSUE_TRIAGE.value, {}, response)
+        self.assertTrue(
+            result.metadata.get("testingLikely"),
+            "an explicit 'Tests needed' answer, using this app's own offered noul "
+            "label, must not silently become False",
+        )
+
+
+class InvalidScoreContractTests(unittest.TestCase):
+    def test_unrecognized_security_risk_label_does_not_keep_high_confidence_zero_risk(self) -> None:
+        """Issue #299 §2: validate Jev responses before using them.
+
+        A string that is not a number and not one of the offered criteria
+        (none/low/moderate/high/critical) is invalid. Treating it as a
+        concrete 0.0 score, or omitting it while keeping automation-grade
+        confidence, is indistinguishable from Jev reporting no security
+        sensitivity — the same silent inversion the 'critical' label test
+        exists to prevent, for a synonym Jev may emit instead of the
+        offered token.
+        """
+        response = JevResponse(
+            answers={
+                "task_type": {"value": "SECURITY", "confidence": 0.96},
+                "complexity": {"value": 0.6, "confidence": 0.9},
+                "security_risk": {"value": "SEVERE", "confidence": 0.97},
+                "cross_repo": {"value": 0.1},
+            }
+        )
+        result = interpret_jev_response(DecisionType.ISSUE_TRIAGE.value, {}, response)
+        security_risk = result.scores.get("securityRisk")
+        mapped_high = security_risk is not None and security_risk > 0.5
+        rejected = result.confidence < 0.70
+        self.assertTrue(
+            mapped_high or rejected,
+            "unrecognized security_risk label 'SEVERE' was accepted as a "
+            f"high-confidence result (confidence={result.confidence!r}) with "
+            f"securityRisk={security_risk!r}. Invalid score fields must fail "
+            "closed (fallback / low confidence) or map conservatively to a "
+            "high-risk reading; they must not drop the security signal.",
+        )
+
 
 class CostFirstDefaultContractTests(unittest.TestCase):
     def test_route_request_defaults_to_cost_first_per_its_own_module_contract(self) -> None:
