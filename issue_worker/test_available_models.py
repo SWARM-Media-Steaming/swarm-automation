@@ -118,9 +118,9 @@ class RoutingCatalogTests(AvailableModelsTestCase):
         self.assertFalse(spec.deprecated)
 
     def test_a_discovered_model_is_not_given_a_guessed_price(self) -> None:
-        available_models.configure(CLAUDE)
+        available_models.configure({"claude": [{"value": "claude-quartz-9"}]})
         estimate = model_pricing.estimate_invocation_cost(
-            model="claude-sonnet-5-5", input_tokens=1000, output_tokens=100
+            model="claude-quartz-9", input_tokens=1000, output_tokens=100
         )
         self.assertIsNone(estimate.cost)
         self.assertNotEqual(estimate.status, model_pricing.PRICING_STATUS_PRICED)

@@ -295,9 +295,10 @@ class CacheAndReasoningSemanticsTests(unittest.TestCase):
         self.assertEqual(usage.cache_read_tokens, 1_000_000)
         self.assertEqual(usage.cache_write_tokens, 1_000_000)
         estimate = estimate_cost_detailed("claude-sonnet-5", usage, provider="claude")
-        # Sonnet: $3 fresh, $0.30 read, $3.75 write. Folding the write into
-        # the read discount would understate the premium cache-creation line.
-        self.assertAlmostEqual(estimate.cost, 3.0 + 0.3 + 3.75)
+        # Sonnet 5: $2 fresh, $0.20 read, $2.50 write (Anthropic's pricing page).
+        # Folding the write into the read discount would understate the
+        # premium cache-creation line.
+        self.assertAlmostEqual(estimate.cost, 2.0 + 0.2 + 2.5)
         reads_only = estimate_invocation_cost(
             model="claude-sonnet-5",
             provider="claude",

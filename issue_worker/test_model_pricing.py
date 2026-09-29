@@ -56,7 +56,15 @@ class ShippedCatalogTests(unittest.TestCase):
 
         routable = {entry.model for entry in dynamic_router._MODEL_CATALOG}
         priced = {model_pricing.normalize_model(entry.model) for entry in PRICING_CATALOG}
-        self.assertEqual(priced - routable, set())
+        # Priced but not in the static router catalog: the earlier releases the
+        # Claude CLI still offers (priced so a manual selection is not "Tokens
+        # only"; the router never chooses them), and the 5.5 releases, which
+        # become routable through model discovery rather than a hardcoded row.
+        selectable_but_not_routed = {
+            "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
+            "claude-sonnet-5-5", "claude-opus-5-5",
+        }
+        self.assertEqual(priced - routable - selectable_but_not_routed, set())
 
     def test_no_cached_rate_exceeds_its_own_fresh_input_rate(self) -> None:
         # A cache hit is a discount at every provider. If this ever inverted,
@@ -326,6 +334,67 @@ class CostEstimateTests(unittest.TestCase):
             )
         self.assertIsNone(estimate.cost)
         self.assertNotEqual(estimate.status, model_pricing.PRICING_STATUS_PRICED)
+
+
+class CorrectedAnthropicRatesTests(unittest.TestCase):
+    """The 2026-09-29 correction against Anthropic's pricing page."""
+
+    NEW = "2026-09-29T12:00:00+00:00"
+    OLD = "2026-09-28T23:59:59+00:00"
+
+    def rates(self, model: str, at: str) -> tuple:
+        price = resolve_price(model, provider="claude", at=at).price
+        self.assertIsNotNone(price, f"{model} unpriced at {at}")
+        return (
+            price.input_per_million,
+            price.output_per_million,
+            price.cached_input_per_million,
+            price.cache_write_per_million,
+        )
+
+    def test_current_rates_match_the_published_page(self) -> None:
+        expected = {
+            "claude-haiku-4-5": (1.0, 5.0, 0.10, 1.25),
+            "claude-sonnet-5": (2.0, 10.0, 0.20, 2.50),
+            "claude-sonnet-5-5": (2.0, 10.0, 0.20, 2.50),
+            "claude-opus-5": (5.0, 25.0, 0.50, 6.25),
+            "claude-opus-5-5": (4.0, 20.0, 0.20, 5.00),
+            "claude-fable-5": (10.0, 50.0, 1.00, 12.50),
+            "claude-fable-5-1": (10.0, 50.0, 0.25, 12.50),
+            "claude-opus-4-8": (5.0, 25.0, 0.50, 6.25),
+            "claude-sonnet-4-6": (3.0, 15.0, 0.30, 3.75),
+        }
+        for model, rates in expected.items():
+            self.assertEqual(self.rates(model, self.NEW), rates, model)
+
+    def test_the_old_rates_apply_only_before_the_cutover(self) -> None:
+        self.assertEqual(self.rates("claude-sonnet-5", self.OLD)[:2], (3.0, 15.0))
+        self.assertEqual(self.rates("claude-opus-5", self.OLD)[:2], (15.0, 75.0))
+        self.assertEqual(self.rates("claude-fable-5-1", self.OLD)[:2], (15.0, 75.0))
+        # Half-open windows: midnight itself belongs to the new rate.
+        midnight = "2026-09-29T00:00:00+00:00"
+        self.assertEqual(self.rates("claude-sonnet-5", midnight)[:2], (2.0, 10.0))
+
+    def test_a_superseded_rate_keeps_its_original_rate_id(self) -> None:
+        old = resolve_price("claude-sonnet-5", provider="claude", at=self.OLD).price
+        new = resolve_price("claude-sonnet-5", provider="claude", at=self.NEW).price
+        self.assertEqual(old.rate_id, "claude/claude-sonnet-5@2026-01-01")
+        self.assertEqual(new.rate_id, "claude/claude-sonnet-5@2026-09-29")
+
+    def test_latest_aliases_resolve_to_the_newest_release(self) -> None:
+        for alias, model in (("sonnet", "claude-sonnet-5-5"), ("opus", "claude-opus-5-5"),
+                             ("fable", "claude-fable-5-1")):
+            resolution = resolve_price(alias, provider="claude", at=self.NEW)
+            self.assertTrue(resolution.priced, alias)
+            self.assertEqual(resolution.price.model, model)
+
+    def test_new_releases_are_now_priced_not_tokens_only(self) -> None:
+        for model in ("claude-sonnet-5-5", "claude-opus-5-5"):
+            estimate = estimate_invocation_cost(
+                model=model, provider="claude", at=self.NEW,
+                input_tokens=1_000_000, output_tokens=0,
+            )
+            self.assertEqual(estimate.status, model_pricing.PRICING_STATUS_PRICED, model)
 
 
 class TimestampTests(unittest.TestCase):

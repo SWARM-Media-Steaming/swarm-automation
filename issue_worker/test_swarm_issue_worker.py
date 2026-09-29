@@ -5787,16 +5787,16 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(event["pricing_version"])
         self.assertTrue(event["pricing_source"])
         self.assertIsNotNone(event["estimated_cost"])
-        self.assertEqual(event["input_rate_per_million"], 3.0)
-        self.assertEqual(event["output_rate_per_million"], 15.0)
+        self.assertEqual(event["input_rate_per_million"], 2.0)
+        self.assertEqual(event["output_rate_per_million"], 10.0)
         # Anthropic's cache counters are additional to input_tokens and are
         # billed at two different rates, so both halves have to survive.
         self.assertEqual(event["cache_read_tokens"], 500_000)
         self.assertEqual(event["cache_write_tokens"], 200_000)
         self.assertEqual(event["cached_input_tokens"], 700_000)
-        # 1M fresh input @ $3 + 500k reads @ $0.30 + 200k writes @ $3.75
-        # + 100k output @ $15.
-        self.assertAlmostEqual(event["estimated_cost"], 3.0 + 0.15 + 0.75 + 1.5, places=6)
+        # 1M fresh input @ $2 + 500k reads @ $0.20 + 200k writes @ $2.50
+        # + 100k output @ $10 (Sonnet 5, Anthropic's pricing page).
+        self.assertAlmostEqual(event["estimated_cost"], 2.0 + 0.10 + 0.50 + 1.0, places=6)
 
     def test_an_uncatalogued_model_records_tokens_without_a_guessed_cost(self) -> None:
         self.worker.issue = IssueContext(296, "Title", "body", [], "https://example.invalid/296")

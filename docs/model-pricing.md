@@ -83,6 +83,25 @@ restates history for anything recosted later. Instead:
 
 Adding a brand-new model is just step 3 plus step 4.
 
+### Corrections
+
+A rate that was simply *wrong* is fixed the same way, not edited in place: end
+the wrong entry at the date the fix lands and append the right one. Estimates
+already stored keep the rate they were priced with, so anything recorded
+before the fix stays overstated or understated by the old error; only new
+invocations use the corrected rate. Record what was wrong and why in a comment
+next to the entries.
+
+Example: on 2026-09-29 Sonnet 5 ($3/$15), Opus 5 ($15/$75), Fable 5 and
+Fable 5.1 ($15/$75) were found to differ from Anthropic's pricing page
+(Sonnet 5 $2/$10, Opus 5 $5/$25, Fable $10/$50). The old windows end that day.
+Sonnet 5.5 ($2/$10), Opus 5.5 ($4/$20) and the earlier Opus 4.6-4.8 and
+Sonnet 4.6 releases were added at the same time.
+
+Aliases such as `sonnet` and `opus` follow the latest release, like the Claude
+CLI's own aliases, and must belong to exactly one canonical model or the name
+becomes ambiguous and unpriced.
+
 Retiring a model means giving its last entry an `effective_to`. Calls made
 before then keep their prices; calls after it become *Tokens only*.
 

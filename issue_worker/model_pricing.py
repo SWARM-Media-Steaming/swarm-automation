@@ -45,7 +45,7 @@ from typing import Any, Iterable, Sequence
 
 #: Bumped whenever ``PRICING_CATALOG`` changes in a way that can change a new
 #: estimate. Persisted with each costed invocation; never back-applied.
-PRICING_CATALOG_VERSION = "2026-09-28"
+PRICING_CATALOG_VERSION = "2026-09-29"
 
 DEFAULT_CURRENCY = "USD"
 
@@ -164,18 +164,36 @@ CACHED_INPUT_RATE_FACTOR = 0.1
 
 
 def _anthropic(
-    model: str, input_rate: float, output_rate: float, *, aliases: tuple[str, ...] = ()
+    model: str,
+    input_rate: float,
+    output_rate: float,
+    *,
+    aliases: tuple[str, ...] = (),
+    cache_read: float | None = None,
+    effective_from: str = "2026-01-01",
+    effective_to: str | None = None,
 ) -> ModelPrice:
+    """One Anthropic rate window.
+
+    Cache rates default to the published multipliers of the input rate; pass
+    ``cache_read`` for a model whose page lists a different figure (Opus 5.5
+    and Fable 5.1 do). ``effective_from``/``effective_to`` are dates; a
+    superseded rate keeps its original ``rate_id`` so stored estimates still
+    explain themselves.
+    """
     return ModelPrice(
-        rate_id=f"claude/{model}@2026-01-01",
+        rate_id=f"claude/{model}@{effective_from}",
         provider="claude",
         model=model,
         aliases=aliases,
         input_per_million=input_rate,
         output_per_million=output_rate,
-        cached_input_per_million=round(input_rate * _CACHE_READ_FACTOR, 6),
+        cached_input_per_million=(
+            cache_read if cache_read is not None else round(input_rate * _CACHE_READ_FACTOR, 6)
+        ),
         cache_write_per_million=round(input_rate * _CACHE_WRITE_FACTOR, 6),
-        effective_from="2026-01-01T00:00:00+00:00",
+        effective_from=f"{effective_from}T00:00:00+00:00",
+        effective_to=f"{effective_to}T00:00:00+00:00" if effective_to else None,
         source=_ANTHROPIC_PRICING,
     )
 
@@ -216,10 +234,31 @@ PRICING_CATALOG: tuple[ModelPrice, ...] = (
     # same model is sometimes configured under; it is an alias, not a row of
     # its own, so both spellings resolve to one rate.
     _anthropic("claude-haiku-4-5", 1.00, 5.00, aliases=("claude-haiku-4-5-20251001", "haiku")),
-    _anthropic("claude-sonnet-5", 3.00, 15.00, aliases=("sonnet",)),
-    _anthropic("claude-opus-5", 15.00, 75.00, aliases=("opus",)),
-    _anthropic("claude-fable-5", 15.00, 75.00),
-    _anthropic("claude-fable-5-1", 15.00, 75.00, aliases=("fable",)),
+    # 2026-09-29 correction. The rates below were entered before they were
+    # checked against Anthropic's pricing page and overstated Sonnet 5 (listed
+    # $2/$10), Opus 5 ($5/$25), Fable 5 and Fable 5.1 ($10/$50). Per the
+    # update rule in docs/model-pricing.md they end on the correction date and
+    # are replaced by the entries after them; estimates already stored keep the
+    # rate_id they were priced with. The "sonnet" and "opus" aliases follow the
+    # latest release, as the Claude CLI's own aliases do.
+    _anthropic("claude-sonnet-5", 3.00, 15.00, effective_to="2026-09-29"),
+    _anthropic("claude-opus-5", 15.00, 75.00, effective_to="2026-09-29"),
+    _anthropic("claude-fable-5", 15.00, 75.00, effective_to="2026-09-29"),
+    _anthropic("claude-fable-5-1", 15.00, 75.00, aliases=("fable",), effective_to="2026-09-29"),
+    _anthropic("claude-sonnet-5", 2.00, 10.00, effective_from="2026-09-29"),
+    _anthropic("claude-sonnet-5-5", 2.00, 10.00, aliases=("sonnet",)),
+    _anthropic("claude-opus-5", 5.00, 25.00, effective_from="2026-09-29"),
+    _anthropic("claude-opus-5-5", 4.00, 20.00, aliases=("opus",), cache_read=0.20),
+    _anthropic("claude-fable-5", 10.00, 50.00, effective_from="2026-09-29"),
+    _anthropic(
+        "claude-fable-5-1", 10.00, 50.00, aliases=("fable",), cache_read=0.25,
+        effective_from="2026-09-29",
+    ),
+    # Earlier releases the Claude CLI still offers, priced from the same page.
+    _anthropic("claude-opus-4-8", 5.00, 25.00),
+    _anthropic("claude-opus-4-7", 5.00, 25.00),
+    _anthropic("claude-opus-4-6", 5.00, 25.00),
+    _anthropic("claude-sonnet-4-6", 3.00, 15.00),
     # OpenAI / Codex.
     _openai("gpt-5.6-luna", 0.50, 0.05, 4.00),
     _openai("gpt-5.6-terra", 1.25, 0.125, 10.00),
