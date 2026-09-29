@@ -2733,6 +2733,36 @@
     },
     {
       "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue299",
+        "-p",
+        "test_jev_response_contract.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-299-jev-response-contract",
+      "name": "Issue #299: Jev score/noul answers fail safe on malformed input instead of silently inverting risk",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/jev_cli.py",
+          "issue_worker/model_router.py",
+          "tests/adversarial/issue299/test_jev_response_contract.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
         "node",
         "--test",
         "tests/adversarial/issue299/test_jev_surfaces.js"
