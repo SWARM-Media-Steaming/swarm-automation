@@ -286,6 +286,19 @@ pattern. The former `model_data_source`, `model_data_source_url`,
 `model_calibration_auto_activate` and `model_calibration_apply_to_routing`
 settings were removed; old config files that carry them still load.
 
+**Measured capability and latest-release upgrades.** When the Artificial
+Analysis feed is on, `fold_benchmark_rows` folds each `<model>-<effort>` row
+into its base model's `intelligence_by_effort`, and `_build_calibration` sets
+`relative_capability` from the Intelligence Index at `xhigh`
+(`model_router.CAPABILITY_BANDS`; the hand-set rank is kept as
+`catalog_capability`). The app passes the models each provider CLI reports as
+`refresh --available-models`, so only models that can actually run become
+DISCOVERED candidates. After routing, `dynamic_router.latest_release` moves a
+routed model to the newest release of its family (same provider and family,
+offered, credit-allowed, supports the effort, price no more than 5% higher, no
+clearly lower measured score); the worker applies it in
+`upgrade_to_latest_release` and records `upgraded_from` on the decision.
+
 Activation publishes the full calibration and its filtered routing models in
 one atomic `active_catalog.json` document. `load_active()` reads that document
 first; `calibration_active.json` is a compatibility/recovery copy. Status uses

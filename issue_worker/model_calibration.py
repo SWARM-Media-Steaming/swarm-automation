@@ -28,8 +28,10 @@ import re
 import tempfile
 import time
 from pathlib import Path
+from collections.abc import Collection, Mapping
 from typing import Any, Callable, Sequence
 
+import available_models as _available_models
 import model_data_sources as _sources
 import model_router as _model_router
 import model_router_yaml as _model_router_yaml
@@ -66,7 +68,13 @@ ROUTER_FIELDS = (
     "input_cost",
     "output_cost",
     "reasoning_cost",
+    "intelligence_by_effort",
 )
+#: Overlay-feed provider slugs -> the agent that runs them. Feeds cover many
+#: vendors; only these three can ever be routed to.
+PROVIDER_AGENTS = {"anthropic": "claude", "openai": "codex", "xai": "grok"}
+#: A trailing segment of a benchmark row's slug that names a reasoning effort.
+EFFORT_SUFFIXES = ("low", "medium", "high", "xhigh", "max")
 TOKEN_COST_ASSUMPTIONS = {
     "input_tokens": 4000,
     "output_tokens": 1000,
@@ -152,6 +160,53 @@ def _finite_float(value: Any) -> float | None:
     return number
 
 
+INTELLIGENCE_KEY = "artificial_analysis_intelligence_index"
+
+
+def fold_benchmark_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per real model, with its Intelligence Index by reasoning effort.
+
+    Artificial Analysis lists every effort setting as its own row
+    (``claude-opus-5-5-xhigh``). Those are the same model, so their scores are
+    folded into the base row's ``intelligence_by_effort`` rather than each
+    becoming a separate candidate. Vendors that cannot be routed to are dropped.
+    A base row is recorded as ``max`` when effort variants exist to compare it
+    with, else as ``base``.
+    """
+    usable = [r for r in rows if isinstance(r, dict) and r.get("provider") in PROVIDER_AGENTS and r.get("model")]
+    by_key = {(r["provider"], r["model"]): r for r in usable}
+
+    def split(row: dict[str, Any]) -> tuple[str, str | None]:
+        model = str(row["model"])
+        for suffix in EFFORT_SUFFIXES:
+            base = model[: -len(suffix) - 1]
+            if model.endswith(f"-{suffix}") and (row["provider"], base) in by_key:
+                return base, suffix
+        return model, None
+
+    def score(row: dict[str, Any]) -> float | None:
+        value = (row.get("evaluations") or {}).get(INTELLIGENCE_KEY)
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    folded: dict[tuple[str, str], dict[str, Any]] = {}
+    variants: dict[tuple[str, str], dict[str, float]] = {}
+    for row in usable:
+        base, effort = split(row)
+        if effort is None:
+            folded[(row["provider"], base)] = dict(row)
+        elif (value := score(row)) is not None:
+            variants.setdefault((row["provider"], base), {})[effort] = value
+    result = []
+    for key, row in folded.items():
+        scores = dict(variants.get(key, {}))
+        if (own := score(row)) is not None:
+            scores["max" if scores else "base"] = own
+        if scores:
+            row["intelligence_by_effort"] = scores
+        result.append(row)
+    return result
+
+
 def _overlay_keys(entry: dict[str, Any]) -> set[tuple[str, str]]:
     provider = str(entry.get("provider") or "").strip().lower()
     keys = set()
@@ -183,6 +238,7 @@ def _merge_observations(previous: dict[str, Any], incoming: dict[str, Any]) -> d
 def merge_overlay(
     local_entries: Sequence[dict[str, Any]], overlay_rows: Sequence[dict[str, Any]],
     *, previous: dict[str, Any] | None = None,
+    available: Mapping[str, Collection[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Apply remote pricing/benchmark patches onto the bundled catalog.
 
@@ -195,6 +251,12 @@ def merge_overlay(
     third row ties their keys together (even transitively), or if either
     resolves to the same existing catalog entry. Unmatched overlay rows become
     DISCOVERED candidates and are never made routable by this merge alone.
+
+    ``available`` maps an agent (``claude``/``codex``/``grok``) to the canonical
+    names of the models its CLI reports. When given, an unmatched row only
+    becomes a candidate if a CLI actually offers that model, so a feed listing
+    hundreds of models does not bury the handful that can run. Without it,
+    every unmatched row is kept.
     """
     merged = [dict(entry) for entry in local_entries if isinstance(entry, dict)]
     previous_models = _calibration_models(previous)
@@ -202,9 +264,12 @@ def merge_overlay(
     for entry in merged:
         prior = previous_models.get(f"{entry.get('provider')}/{entry.get('model')}", {})
         # Feeds are overlays, so an omitted or invalid observation cannot erase
-        # the last known value. Router capability/eligibility still comes from
-        # the local definition, never from a public pricing feed.
-        for field in ("input_cost", "output_cost", "reasoning_cost", "external_evaluations", "speed", "latency_seconds", "release_date"):
+        # the last known value. Eligibility (active, deprecated, efforts) still
+        # comes from the local definition, never from a public feed. Capability
+        # is the one exception: a *measured* Intelligence Index sets the 1-5
+        # rank (see ``_build_calibration``), and that change goes through the
+        # same review and regression gate as any other calibration change.
+        for field in ("input_cost", "output_cost", "reasoning_cost", "external_evaluations", "intelligence_by_effort", "speed", "latency_seconds", "release_date"):
             if prior.get(field) is not None:
                 entry[field] = prior[field]
         # A missing retirement observation is not permission to re-enable.
@@ -257,6 +322,9 @@ def merge_overlay(
             }
             if cleaned:
                 observations["external_evaluations"] = cleaned
+        scores = dict(_model_router._clean_intelligence(raw.get("intelligence_by_effort")))
+        if scores:
+            observations["intelligence_by_effort"] = scores
         release = sanitize_text(str(raw.get("release_date") or "")).strip()[:40]
         if release:
             observations["release_date"] = release
@@ -285,6 +353,7 @@ def merge_overlay(
         root = find(next(iter(keys)))
         component_keys.setdefault(root, set()).update(keys)
 
+    skipped_roots: set[tuple[str, str]] = set()
     group_key_for_root: dict[tuple[str, str], tuple[str, Any]] = {}
     group_target: dict[tuple[str, Any], dict[str, Any] | None] = {}
     group_all_keys: dict[tuple[str, Any], set[tuple[str, str]]] = {}
@@ -293,6 +362,14 @@ def merge_overlay(
         if len(targets) > 1:
             raise CalibrationValidationError("Model source contains ambiguous model aliases.")
         target = next(iter(targets.values()), None)
+        if target is None and available is not None:
+            provider_key, model_key = min(keys)
+            offered = available.get(PROVIDER_AGENTS.get(provider_key, provider_key), ())
+            if _available_models.canonical(model_key) not in {
+                _available_models.canonical(name) for name in offered
+            }:
+                skipped_roots.add(root)
+                continue
         group_key = ("catalog", id(target)) if target is not None else ("new", root)
         group_key_for_root[root] = group_key
         group_target.setdefault(group_key, target)
@@ -304,6 +381,8 @@ def merge_overlay(
     # alias, still conflict with a contradictory row for the same identity.
     combined_by_group: dict[tuple[str, Any], dict[str, Any]] = {}
     for keys, observations in parsed_rows:
+        if find(next(iter(keys))) in skipped_roots:
+            continue
         group_key = group_key_for_root[find(next(iter(keys)))]
         combined_by_group[group_key] = _merge_observations(
             combined_by_group.get(group_key, {}), observations
@@ -368,6 +447,7 @@ def _model_spec_to_dict(spec: "_model_router.ModelSpec") -> dict[str, Any]:
         "input_cost": spec.input_cost,
         "output_cost": spec.output_cost,
         "reasoning_cost": spec.reasoning_cost,
+        "intelligence_by_effort": dict(spec.intelligence_by_effort),
     }
 
 
@@ -1400,6 +1480,14 @@ class ModelCalibrationService:
         for spec in specs:
             extra = raw_by_key.get(f"{spec.provider}/{spec.model}") or {}
             entry = _calibration_model_entry(spec, extra)
+            # Measured evidence outranks the hand-set rank: the router gates and
+            # scores on ``relative_capability``, and a newer release should be
+            # ranked on what it scored, not on what its predecessor was given.
+            measured = _model_router.measured_capability(entry.get("intelligence_by_effort"))
+            if measured is not None:
+                entry["catalog_capability"] = entry["relative_capability"]
+                entry["relative_capability"] = measured
+                entry["capability_source"] = "measured"
             entry["key"] = f"{entry['provider']}/{entry['model']}"
             entry["status"] = _status_for(
                 entry, prev_by_key, approved_keys, has_previous=previous is not None
@@ -1429,15 +1517,13 @@ class ModelCalibrationService:
             _append_history(prev_by_key.get(entry["key"]), entry, now_ts)
         counts[STATUS_DISCOVERED] += len(discovered)
 
+        # Built from the final entries, not the parsed inputs, so examples and
+        # the regression check see the same (possibly measured) capability the
+        # live router will read from the published catalog.
         routable_specs = [
-            spec
-            for spec in specs
-            if any(
-                model["provider"] == spec.provider
-                and model["model"] == spec.model
-                and model["status"] in ROUTABLE_STATUSES
-                for model in models
-            )
+            _model_router._parse_model({field: model.get(field) for field in ROUTER_FIELDS})
+            for model in models
+            if model["status"] in ROUTABLE_STATUSES
         ]
         return {
             "version": _version_for(now_ts, {v for v in existing_versions if v}),
@@ -1536,6 +1622,7 @@ class ModelCalibrationService:
         source_url: str | None,
         fetch_fn: Callable[[], Any] | None,
         previous: dict[str, Any] | None = None,
+        available: Mapping[str, Collection[str]] | None = None,
     ) -> tuple[list[Any], list[dict[str, Any]], dict[str, Any]]:
         discovered: list[dict[str, Any]] = []
         if fetch_fn is not None:
@@ -1550,7 +1637,9 @@ class ModelCalibrationService:
             raise CalibrationSourceError(str(error)) from error
         if kind == "models_dev":
             overlay = list(overlay) + self._benchmark_overlay(meta)
-        merged, discovered = merge_overlay(local_entries, overlay, previous=previous)
+        merged, discovered = merge_overlay(
+            local_entries, overlay, previous=previous, available=available
+        )
         return merged, discovered, meta
 
     @staticmethod
@@ -1573,9 +1662,10 @@ class ModelCalibrationService:
                 f"Artificial Analysis benchmarks unavailable: {sanitize_text(str(error))}"
             )
             return []
-        keep = ("provider", "model", "source_id", "evaluations", "speed", "latency_seconds")
+        keep = ("provider", "model", "source_id", "evaluations", "speed", "latency_seconds",
+                "intelligence_by_effort")
         meta["benchmarks"] = "artificial_analysis"
-        return [{key: row[key] for key in keep if key in row} for row in rows]
+        return [{key: row[key] for key in keep if key in row} for row in fold_benchmark_rows(rows)]
 
     def refresh(
         self,
@@ -1591,8 +1681,12 @@ class ModelCalibrationService:
         routing_optimization: str = "cost",
         fetch_fn: Callable[[], Any] | None = None,
         now: float | None = None,
+        available_models: Mapping[str, Collection[str]] | None = None,
     ) -> dict[str, Any]:
-        """One calibration refresh shared by manual, startup, scheduled, and AI callers."""
+        """One calibration refresh shared by manual, startup, scheduled, and AI callers.
+
+        ``available_models`` (agent -> model names the provider CLIs report)
+        limits new DISCOVERED candidates to models that can actually run."""
         now_ts = now if now is not None else time.time()
         initiated_by = _normalize_initiator(initiated_by)
         try:
@@ -1617,6 +1711,7 @@ class ModelCalibrationService:
                 routing_optimization=routing_optimization,
                 fetch_fn=fetch_fn,
                 now_ts=now_ts,
+                available_models=available_models,
             )
         except (OSError, CalibrationError) as error:
             state = self.load_state()
@@ -1642,6 +1737,7 @@ class ModelCalibrationService:
         routing_optimization: str,
         fetch_fn: Callable[[], Any] | None,
         now_ts: float,
+        available_models: Mapping[str, Collection[str]] | None = None,
     ) -> dict[str, Any]:
         # External feeds are overlays of the offline catalog. Publish that
         # baseline before any network work, using the lock already held by
@@ -1683,7 +1779,8 @@ class ModelCalibrationService:
         self._set_progress(*PROGRESS_STAGES[0])
         try:
             raw_entries, discovered, source_meta = self._fetch_entries(
-                source=source, source_url=source_url, fetch_fn=fetch_fn, previous=comparison
+                source=source, source_url=source_url, fetch_fn=fetch_fn, previous=comparison,
+                available=available_models,
             )
         except CalibrationSourceError as error:
             return self._record_failure(state, attempted_at, "unavailable", error, initiated_by)
@@ -1877,6 +1974,29 @@ def _normalize_initiator(value: str) -> str:
     return text if text in ALLOWED_INITIATORS else "USER"
 
 
+def _available_from_json(raw: str) -> dict[str, list[str]] | None:
+    """Model names per agent from the app's ``--available-models`` JSON.
+
+    ``None`` (no filtering) when the value is absent or unusable; a bad value
+    must never stop a refresh."""
+    if not str(raw or "").strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    available: dict[str, list[str]] = {}
+    for agent, rows in parsed.items():
+        names = [
+            str((row.get("value") if isinstance(row, dict) else row) or "")
+            for row in (rows if isinstance(rows, list) else [])
+        ]
+        available[str(agent).strip().lower()] = [name for name in names if name]
+    return available or None
+
+
 def build_calibration_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", required=True)
@@ -1893,6 +2013,10 @@ def build_calibration_parser() -> argparse.ArgumentParser:
     refresh.add_argument("--activation-policy", default="manual", choices=["manual", "auto"])
     refresh.add_argument("--min-interval-hours", type=float, default=DEFAULT_MIN_REFRESH_INTERVAL_HOURS)
     refresh.add_argument("--routing-optimization", default="cost", choices=["best", "cost"])
+    refresh.add_argument(
+        "--available-models", default="",
+        help="JSON of the models each provider CLI reports; limits new candidates to those.",
+    )
     refresh.add_argument("--no-simulation", action="store_true")
     refresh.add_argument("--no-calibration", action="store_true")
 
@@ -1931,6 +2055,7 @@ def main(argv: list[str] | None = None) -> int:
                 initiated_by=args.initiated_by,
                 min_interval_hours=args.min_interval_hours,
                 routing_optimization=args.routing_optimization,
+                available_models=_available_from_json(args.available_models),
             )
         elif args.action == "activate":
             result = service.activate(args.version, initiated_by=args.initiated_by)

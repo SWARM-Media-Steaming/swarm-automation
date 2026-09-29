@@ -13,11 +13,11 @@ import model_data_sources as sources
 from test_model_calibration import _entry
 
 MODELS_DEV_ROWS = [
-    {"provider": "fixture", "model": "m1", "input_cost": 3.0, "output_cost": 15.0},
+    {"provider": "anthropic", "model": "m1", "input_cost": 3.0, "output_cost": 15.0},
 ]
 AA_ROWS = [
     {
-        "provider": "fixture",
+        "provider": "anthropic",
         "model": "m1",
         "source_id": "aa-1",
         # Conflicts with models.dev on purpose: prices must come from models.dev only.
@@ -44,7 +44,7 @@ class BenchmarkOverlayTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.service = calib.ModelCalibrationService(Path(tmp.name))
-        local = mock.patch.object(calib, "fetch_local_source", return_value=[_entry("m1", provider="fixture")])
+        local = mock.patch.object(calib, "fetch_local_source", return_value=[_entry("m1", provider="anthropic")])
         local.start()
         self.addCleanup(local.stop)
         self.service.ensure_bootstrap(now=1.0)

@@ -1783,6 +1783,12 @@ fn run_model_calibration<R: tauri::Runtime>(
         state_dir.to_string_lossy().into_owned(),
     ];
     full_arguments.extend(arguments);
+    if action == "refresh" {
+        // Only models a provider CLI actually reports become new candidates, so
+        // the benchmark feeds (hundreds of models) cannot bury the few that can run.
+        full_arguments.push("--available-models".into());
+        full_arguments.push(available_models_json(config, &resolve_providers(config)));
+    }
     // The optional Artificial Analysis key reaches the refresh through its
     // environment only: never an argument, never the config file, never a log.
     let key = secrets::artificial_analysis_key();

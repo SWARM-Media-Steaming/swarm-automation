@@ -424,6 +424,95 @@ def model_route_profile(agent: str, model: str, effort: str) -> tuple[int, float
     return spec.relative_capability, _model_router.estimated_dollar_cost(spec, effort)
 
 
+@dataclasses.dataclass(frozen=True)
+class ReleaseUpgrade:
+    """A newer release of the same model family, and why it is safe to use."""
+
+    model: str
+    previous: str
+    reason: str
+
+
+# A newer release may cost at most this much more per token than the one it
+# replaces. Zero would forbid a rounding difference; a real price increase is
+# a different decision than "use the latest".
+UPGRADE_PRICE_TOLERANCE = 1.05
+# A measured score this far below the older release's blocks the upgrade: the
+# default is "newer is better", and only evidence overrides it.
+UPGRADE_SCORE_MARGIN = 1.0
+
+
+def latest_release(
+    agent: str,
+    model: str,
+    effort: str,
+    *,
+    allow_usage_credit_models: bool = False,
+    excluded: Sequence[tuple[str, str]] = (),
+) -> ReleaseUpgrade | None:
+    """The newest release of ``model``'s family, when using it is a safe upgrade.
+
+    Routing may name an older release — a fallback tier table, a model the
+    router remembered — even though a newer one of the same family now exists.
+    Newer is better on the measured index for Sonnet and Opus, so this moves the
+    pick forward, with limits:
+
+    * same provider and same family only (Sonnet stays Sonnet, Opus stays Opus);
+    * the release must be active, offered by the provider CLI, allowed by the
+      usage-credit setting, support the chosen effort, and not be excluded;
+    * it must not cost meaningfully more per token than the model it replaces;
+    * a measured Intelligence Index that is clearly *lower* at the same effort
+      vetoes it.
+    """
+    key = str(agent).strip().lower()
+    family, version = _available_models.family_and_version(model)
+    if not model or not version:
+        return None
+    calibrated = _active_calibration_catalog()
+    try:
+        catalog = calibrated if calibrated is not None else _model_router.load_model_catalog()
+    except _model_router.ModelRouterConfigError:
+        return None
+    current = next((m for m in catalog if m.agent == key and model in (m.model, m.model_id)), None)
+    barred = {(str(a).lower(), str(m)) for a, m in excluded}
+    newer = [
+        spec for spec in catalog
+        if spec.agent == key and spec.active and not spec.deprecated
+        and _available_models.family_and_version(spec.model)[0] == family
+        and _available_models.family_and_version(spec.model)[1] > version
+        and effort in spec.supported_efforts
+        and (allow_usage_credit_models or not requires_usage_credits(spec.model))
+        and (key, spec.model) not in barred
+    ]
+    if not newer:
+        return None
+    best = max(newer, key=lambda spec: _available_models.family_and_version(spec.model)[1])
+
+    # Price: compare per-token prices when both are known, else the relative rank.
+    if current is not None:
+        if None not in (current.input_cost, current.output_cost, best.input_cost, best.output_cost):
+            if (best.input_cost > current.input_cost * UPGRADE_PRICE_TOLERANCE
+                    or best.output_cost > current.output_cost * UPGRADE_PRICE_TOLERANCE):
+                return None
+        elif best.relative_cost > current.relative_cost:
+            return None
+        old_scores, new_scores = dict(current.intelligence_by_effort), dict(best.intelligence_by_effort)
+        if effort in old_scores and effort in new_scores:
+            if new_scores[effort] < old_scores[effort] - UPGRADE_SCORE_MARGIN:
+                return None
+    elif None in (best.input_cost, best.output_cost):
+        return None  # nothing to compare against and no known price: do not guess
+    reason = f"the latest {' '.join(family) or agent} release, same or lower price"
+    if current is not None:
+        old_scores, new_scores = dict(current.intelligence_by_effort), dict(best.intelligence_by_effort)
+        if effort in old_scores and effort in new_scores:
+            reason = (
+                f"the latest {' '.join(family)} release, measured "
+                f"{new_scores[effort]:.1f} against {old_scores[effort]:.1f} at {effort}"
+            )
+    return ReleaseUpgrade(best.model, model, reason)
+
+
 def model_cost(model: str) -> int | None:
     wanted = str(model or "").strip()
     return next((row.cost for row in _catalog_with_discovered() if row.model == wanted), None)

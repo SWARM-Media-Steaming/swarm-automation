@@ -100,6 +100,7 @@ from dynamic_router import (
     build_model_correction_prompt,
     build_router_prompt,
     catalog_model_names,
+    latest_release,
     model_route_profile,
     default_provider_strengths,
     default_router_effort,
@@ -2610,6 +2611,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         self, excluded_models: set[tuple[str, str]] | None = None
     ) -> None:
         assert self.choice and self.issue
+        self._routing_excluded = set(excluded_models or ())
         host = self.config.require_spec(self.choice.key)
         fallback_model = self.choice.model
         fallback_effort = self.choice.effort
@@ -2817,6 +2819,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             log(override)
         self.choice.model = str(decision["selected_model"])
         self.choice.effort = str(decision["reasoning_effort"])
+        self.upgrade_to_latest_release(decision)
         decision["dynamic_model_routing"] = True
         self.routing = decision
         log(
@@ -2825,6 +2828,36 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             f"{decision['complexity']}/10, confidence "
             f"{int(round(float(decision.get('confidence') or 0) * 100))}%)."
         )
+
+    def upgrade_to_latest_release(self, decision: dict[str, Any]) -> None:
+        """Move the routed model to the newest release of its family, if safe.
+
+        The router can still name an older release (a fallback tier table, a
+        model it remembered) when a newer one of the same family exists and is
+        both better and no dearer; see ``latest_release`` for the limits. The
+        decision records the change so the explanation never describes a model
+        that was not run.
+        """
+        assert self.choice
+        upgrade = latest_release(
+            self.choice.key,
+            self.choice.model,
+            self.choice.effort,
+            allow_usage_credit_models=self.config.allow_usage_credit_models,
+            excluded=tuple(getattr(self, "_routing_excluded", ())),
+        )
+        if upgrade is None:
+            return
+        log(
+            f"Upgrading the routed model {upgrade.previous} to {upgrade.model}: {upgrade.reason}."
+        )
+        self.choice.model = upgrade.model
+        decision["selected_model"] = upgrade.model
+        decision["upgraded_from"] = upgrade.previous
+        note = (
+            f" Upgraded from {upgrade.previous} to {upgrade.model}, {upgrade.reason}."
+        )
+        decision["tier_explanation"] = str(decision.get("tier_explanation") or "").rstrip() + note
 
     def record_routing_in_history(self) -> None:
         """Note whether the configured setting or dynamic routing selected the worker."""

@@ -2549,6 +2549,47 @@ class WorkerTestCase(unittest.TestCase):
                 self.worker.run_selected_issue()
         rerouted.assert_not_called()
 
+    # ----- upgrading a routed model to the latest release of its family ----
+
+    def _upgrade_setup(self, model: str = "claude-sonnet-5") -> dict:
+        import available_models
+        available_models.configure({"claude": [{"value": v} for v in (
+            "claude-sonnet-5", "claude-sonnet-5-5", "claude-opus-5", "claude-opus-5-5")]})
+        self.addCleanup(available_models.reset)
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.choice = ProviderChoice("Claude", model, "medium", "s")
+        return {"selected_model": model, "reasoning_effort": "medium",
+                "tier_explanation": f"The router chose Claude {model}."}
+
+    def test_a_routed_older_release_is_upgraded_and_the_explanation_says_so(self) -> None:
+        decision = self._upgrade_setup()
+        self.worker.upgrade_to_latest_release(decision)
+        self.assertEqual(self.worker.choice.model, "claude-sonnet-5-5")
+        self.assertEqual(decision["selected_model"], "claude-sonnet-5-5")
+        self.assertEqual(decision["upgraded_from"], "claude-sonnet-5")
+        self.assertIn("Upgraded from claude-sonnet-5 to claude-sonnet-5-5", decision["tier_explanation"])
+
+    def test_the_newest_release_is_left_alone(self) -> None:
+        decision = self._upgrade_setup("claude-opus-5-5")
+        self.worker.upgrade_to_latest_release(decision)
+        self.assertEqual(self.worker.choice.model, "claude-opus-5-5")
+        self.assertNotIn("upgraded_from", decision)
+
+    def test_a_model_the_cli_rejected_is_never_upgraded_back_into(self) -> None:
+        decision = self._upgrade_setup()
+        self.worker._routing_excluded = {("claude", "claude-sonnet-5-5")}
+        self.worker.upgrade_to_latest_release(decision)
+        self.assertEqual(self.worker.choice.model, "claude-sonnet-5")
+
+    def test_adopting_a_routing_decision_applies_the_upgrade(self) -> None:
+        self._upgrade_setup()
+        decision = {"provider": "claude", "selected_model": "claude-opus-5", "reasoning_effort": "xhigh",
+                    "prompt_grade": "A", "complexity": 7, "confidence": 0.9, "tier_explanation": "x"}
+        with mock.patch.object(self.worker, "ensure_bot_auth"):
+            self.worker.adopt_routing_decision(decision)
+        self.assertEqual((self.worker.choice.model, self.worker.choice.effort), ("claude-opus-5-5", "xhigh"))
+        self.assertEqual(self.worker.routing["upgraded_from"], "claude-opus-5")
+
     def test_higher_priority_issue_is_selected_before_lower_numbered_one(self) -> None:
         issues = [
             self.issue_payload(20, labels=("priority: medium",)),

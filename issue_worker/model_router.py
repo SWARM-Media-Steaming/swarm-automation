@@ -165,6 +165,60 @@ class ModelSpec:
     input_cost: float | None = None
     output_cost: float | None = None
     reasoning_cost: float | None = None
+    # Measured Artificial Analysis Intelligence Index by reasoning effort, as
+    # sorted ``(effort, score)`` pairs; ``"max"`` is the provider's top-effort
+    # (base) entry. Empty when nothing was measured. ``measured_capability``
+    # turns it into the 1-5 rank the router gates and scores on.
+    intelligence_by_effort: tuple[tuple[str, float], ...] = ()
+
+
+# Capability rank from the measured Intelligence Index. The bands are fitted so
+# the models the bundled catalog already ranked keep their rank (Sonnet 5 -> 3,
+# Opus 5 -> 4, Fable 5.1 and GPT-6 Astra -> 5) while a newer release such as
+# Sonnet 5.5 or Opus 5.5 earns the rank its score deserves instead of inheriting
+# its predecessor's. Compared at "xhigh", the strongest effort the router uses
+# routinely; ``max`` takes minutes to first answer and is only a fallback.
+CAPABILITY_BANDS = ((52.0, 5), (44.0, 4), (32.0, 3), (20.0, 2))
+# "max" is a base entry known to be the top-effort run (its effort variants
+# were also measured); "base" is a base entry with no variants to compare with.
+MEASURED_EFFORT_PREFERENCE = ("xhigh", "max", "base", "high", "medium", "low")
+
+
+def _clean_intelligence(value: Any) -> tuple[tuple[str, float], ...]:
+    """Normalize ``{effort: score}`` (or pairs) into sorted, finite pairs."""
+    items = value.items() if isinstance(value, dict) else (value or ())
+    cleaned: dict[str, float] = {}
+    for item in items:
+        try:
+            effort, score = item
+            number = float(score)
+        except (TypeError, ValueError):
+            continue
+        if number == number and abs(number) != float("inf") and str(effort).strip():
+            cleaned[str(effort).strip().lower()] = number
+    return tuple(sorted(cleaned.items()))
+
+
+def measured_intelligence(value: Any) -> tuple[float, str] | None:
+    """``(score, effort)`` used to rank a model, or None when unmeasured."""
+    scores = dict(_clean_intelligence(value))
+    for effort in MEASURED_EFFORT_PREFERENCE:
+        if effort in scores:
+            return scores[effort], effort
+    return None
+
+
+def capability_rank(score: float) -> int:
+    for threshold, rank in CAPABILITY_BANDS:
+        if score >= threshold:
+            return rank
+    return 1
+
+
+def measured_capability(value: Any) -> int | None:
+    """The 1-5 capability rank implied by measured scores, if any."""
+    measured = measured_intelligence(value)
+    return None if measured is None else capability_rank(measured[0])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -343,10 +397,38 @@ def load_model_catalog(path: Path | None = None) -> tuple[ModelSpec, ...]:
     catalog: list[ModelSpec] = []
     for entry in data["models"]:
         catalog.append(_parse_model(entry))
-    return with_discovered_models(tuple(catalog))
+    return with_discovered_models(tuple(catalog), _measured_evidence(data))
 
 
-def with_discovered_models(catalog: tuple[ModelSpec, ...]) -> tuple[ModelSpec, ...]:
+def _measured_evidence(data: dict[str, Any]) -> dict[str, tuple[tuple[str, float], ...]]:
+    """Measured scores a calibration holds for models outside its routable set.
+
+    A calibrated catalog publishes only routable models, but the calibration
+    itself also records measurements for models it has not approved — including
+    a release the provider CLI just started offering. Those measurements let a
+    discovered model be ranked on evidence instead of on its predecessor.
+    """
+    calibration = data.get("calibration")
+    rows: list[Any] = []
+    if isinstance(calibration, dict):
+        rows += list(calibration.get("discovered_models") or [])
+        rows += list(calibration.get("models") or [])
+    evidence: dict[str, tuple[tuple[str, float], ...]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        scores = _clean_intelligence(row.get("intelligence_by_effort"))
+        if scores:
+            for name in (row.get("model"), row.get("model_id")):
+                if name:
+                    evidence.setdefault(_available_models.canonical(str(name)), scores)
+    return evidence
+
+
+def with_discovered_models(
+    catalog: tuple[ModelSpec, ...],
+    evidence: dict[str, tuple[tuple[str, float], ...]] | None = None,
+) -> tuple[ModelSpec, ...]:
     """Add every model the provider CLIs report that the catalog lacks.
 
     Applied to every catalog this module loads — the checked-in one and a
@@ -371,7 +453,10 @@ def with_discovered_models(catalog: tuple[ModelSpec, ...]) -> tuple[ModelSpec, .
             relative = _available_models.closest_relative(
                 found.value, ((spec.model, spec) for spec in known)
             )
-            spec = _inferred_spec(agent, found, relative, known)
+            spec = _inferred_spec(
+                agent, found, relative, known,
+                (evidence or {}).get(_available_models.canonical(found.value), ()),
+            )
             # Equal scores are decided by catalog order, so a newer release
             # goes ahead of the model it was inferred from: on a tie the
             # current release wins, never the one it replaced.
@@ -382,7 +467,7 @@ def with_discovered_models(catalog: tuple[ModelSpec, ...]) -> tuple[ModelSpec, .
     return tuple(result)
 
 
-def _inferred_spec(agent, found, relative, known) -> ModelSpec:
+def _inferred_spec(agent, found, relative, known, measured=()) -> ModelSpec:
     peer, older = relative if relative else (None, False)
     if peer is None and known:
         peer = min(known, key=lambda spec: (spec.relative_capability, spec.relative_cost))
@@ -413,18 +498,21 @@ def _inferred_spec(agent, found, relative, known) -> ModelSpec:
         supported_efforts=efforts,
         strengths=peer.strengths if peer else frozenset(),
         weaknesses=peer.weaknesses if peer else frozenset(),
-        relative_capability=peer.relative_capability if peer else 3,
+        # Measured evidence, when a calibration holds any, outranks the relative.
+        relative_capability=measured_capability(measured) or (peer.relative_capability if peer else 3),
         relative_cost=peer.relative_cost if peer else 3,
         relative_token_efficiency=peer.relative_token_efficiency if peer else 3,
         relative_latency=peer.relative_latency if peer else 3,
         benchmarks={effort: unmeasured for effort in efforts},
         benchmark_source=None,
         benchmark_date=None,
-        notes=f"Discovered from the {agent} CLI; capability and cost {basis}. "
-              f"Not benchmarked. {price_note}",
+        notes=f"Discovered from the {agent} CLI; capability and cost {basis}"
+              + ("; capability ranked from measured Intelligence Index. " if measured else ". ")
+              + f"{price_note}",
         input_cost=input_cost,
         output_cost=output_cost,
         reasoning_cost=reasoning_cost,
+        intelligence_by_effort=_clean_intelligence(measured),
     )
 
 
@@ -459,6 +547,7 @@ def _parse_model(entry: Any) -> ModelSpec:
             input_cost=_optional_float(entry.get("input_cost")),
             output_cost=_optional_float(entry.get("output_cost")),
             reasoning_cost=_optional_float(entry.get("reasoning_cost")),
+            intelligence_by_effort=_clean_intelligence(entry.get("intelligence_by_effort")),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ModelRouterConfigError(f"malformed models.yaml entry {entry!r}: {error}") from error
