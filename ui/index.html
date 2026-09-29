@@ -338,9 +338,15 @@
 
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">MODELS</p><h3>Model routing table <button class="help-dot" data-help="model-routing-table" aria-label="About the model routing table">?</button></h3></div><span id="model-calibration-model-count" class="availability">0 models</span></div>
-              <p class="panel-copy">Only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routed to. Select a heading to sort, or a row for detail and to approve a DISCOVERED model.</p>
-              <div id="model-routing-table-head" class="router-legend" role="group" aria-label="Sort the model routing table"></div>
+              <p class="panel-copy">Only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routed to. Select a column to sort (select it again to reverse), or a row for detail and to approve a DISCOVERED model.</p>
+              <div class="control-row model-table-controls">
+                <label class="execution-search">Search models<input id="model-routing-search" type="search" placeholder="Provider, model, or status" autocomplete="off" /></label>
+                <label class="model-page-size">Per page<select id="model-routing-page-size" aria-label="Models per page"><option value="10" selected>10</option><option value="25">25</option><option value="50">50</option></select></label>
+              </div>
+              <div id="model-routing-table-head" class="sort-bar" role="group" aria-label="Sort the model routing table"></div>
+              <p id="model-routing-sort-summary" class="panel-copy" aria-live="polite"></p>
               <div id="model-routing-table" class="execution-list"><p class="panel-copy">No calibrated model data yet. Select Refresh Model Data above.</p></div>
+              <nav id="model-routing-pager" class="execution-pager hidden" aria-label="Model routing table pages"><button type="button" id="model-routing-prev" class="secondary-button compact">Previous</button><span id="model-routing-page-label">Page 1 of 1</span><button type="button" id="model-routing-next" class="secondary-button compact">Next</button></nav>
             </article>
 
             <article class="panel span-two">

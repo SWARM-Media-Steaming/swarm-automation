@@ -101,6 +101,9 @@
       activating: false,
       approvingKeys: new Set(),
       sort: { column: "provider", direction: "asc" },
+      search: "",
+      page: 0,
+      pageSize: 10,
       progressTimer: null,
     },
   };
@@ -4336,6 +4339,25 @@
         state.modelCalibration.sort,
         button.dataset.sortColumn,
       );
+      state.modelCalibration.page = 0;
+      renderModelRoutingTable();
+    });
+    byId("model-routing-search")?.addEventListener("input", (event) => {
+      state.modelCalibration.search = event.target.value;
+      state.modelCalibration.page = 0;
+      renderModelRoutingTable();
+    });
+    byId("model-routing-page-size")?.addEventListener("change", (event) => {
+      state.modelCalibration.pageSize = window.SwarmModelCalibration.normalizePageSize(event.target.value);
+      state.modelCalibration.page = 0;
+      renderModelRoutingTable();
+    });
+    byId("model-routing-prev")?.addEventListener("click", () => {
+      state.modelCalibration.page = Math.max(0, (state.modelCalibration.page || 0) - 1);
+      renderModelRoutingTable();
+    });
+    byId("model-routing-next")?.addEventListener("click", () => {
+      state.modelCalibration.page = (state.modelCalibration.page || 0) + 1;
       renderModelRoutingTable();
     });
     byId("model-routing-table").addEventListener("click", (event) => {
@@ -5029,21 +5051,67 @@
       ],
     }));
     const modelCount = new Set(modelGroups.flatMap(({ models }) => models.map((model) => model.key))).size;
-    const count = byId("model-calibration-model-count");
-    if (count) count.textContent = `${modelCount} model${modelCount === 1 ? "" : "s"}`;
+    const view = state.modelCalibration;
+    const sort = view.sort;
+    const search = String(view.search || "");
 
+    // Sort each calibration's models, filter by the search, then page across
+    // the whole sequence so a proposed calibration lines up after the active one.
+    const entries = modelGroups.flatMap(({ label, calibration, models }) => {
+      const sorted = api.sortModels(api.filterModels(models, search), sort.column, sort.direction);
+      return sorted.map((model) => ({ label, calibration, model }));
+    });
+    const paged = api.paginate(entries, view.page, view.pageSize);
+    view.page = paged.page;
+
+    const count = byId("model-calibration-model-count");
+    if (count) {
+      const noun = `model${modelCount === 1 ? "" : "s"}`;
+      count.textContent = search.trim() ? `${paged.total} of ${modelCount} ${noun}` : `${modelCount} ${noun}`;
+    }
+
+    // Column headings that always show their direction: the active column is
+    // highlighted with a solid arrow, the others carry a dim two-way arrow.
     const head = byId("model-routing-table-head");
     if (head) {
       head.replaceChildren();
       api.SORTABLE_COLUMNS.forEach((column) => {
+        const active = sort.column === column;
         const button = document.createElement("button");
         button.type = "button";
-        button.className = "text-button";
         button.dataset.sortColumn = column;
-        const active = state.modelCalibration.sort.column === column;
-        button.textContent = column.replace(/_/g, " ") + (active ? (state.modelCalibration.sort.direction === "asc" ? " ▲" : " ▼") : "");
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+        const label = api.sortLabel(column);
+        const next = active ? (sort.direction === "asc" ? "desc" : "asc") : "asc";
+        button.title = `Sort by ${label}, ${api.sortDirectionWord(column, next)}`;
+        button.setAttribute("aria-label", active
+          ? `${label}, sorted ${api.sortDirectionWord(column, sort.direction)}. Select to reverse.`
+          : `Sort by ${label}`);
+        const arrow = document.createElement("span");
+        arrow.className = "sort-arrow";
+        arrow.setAttribute("aria-hidden", "true");
+        arrow.textContent = active ? (sort.direction === "asc" ? "▲" : "▼") : "↕";
+        button.append(document.createTextNode(label), arrow);
         head.appendChild(button);
       });
+    }
+    const summary = byId("model-routing-sort-summary");
+    if (summary) {
+      summary.textContent = modelCount
+        ? `${api.sortSummary(sort)}${paged.total ? ` Showing ${paged.first}–${paged.last} of ${paged.total}.` : ""}`
+        : "";
+    }
+
+    const pager = byId("model-routing-pager");
+    if (pager) {
+      pager.classList.toggle("hidden", paged.pages <= 1);
+      const pageLabel = byId("model-routing-page-label");
+      if (pageLabel) pageLabel.textContent = `Page ${paged.page + 1} of ${paged.pages}`;
+      const prev = byId("model-routing-prev");
+      const next = byId("model-routing-next");
+      if (prev) prev.disabled = paged.page <= 0;
+      if (next) next.disabled = paged.page >= paged.pages - 1;
     }
 
     const box = byId("model-routing-table");
@@ -5056,10 +5124,20 @@
       }));
       return;
     }
-    modelGroups.forEach(({ label, calibration, models }) => {
-      box.appendChild(Object.assign(document.createElement("h4"), { textContent: `${label} (${calibration.version})` }));
-      const sorted = api.sortModels(models, state.modelCalibration.sort.column, state.modelCalibration.sort.direction);
-      sorted.forEach((model) => box.appendChild(buildModelRow(model, calibration)));
+    if (!paged.total) {
+      box.appendChild(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: `No models match “${search.trim()}”.`,
+      }));
+      return;
+    }
+    let lastGroup = null;
+    paged.items.forEach(({ label, calibration, model }) => {
+      if (calibration !== lastGroup) {
+        box.appendChild(Object.assign(document.createElement("h4"), { textContent: `${label} (${calibration.version})` }));
+        lastGroup = calibration;
+      }
+      box.appendChild(buildModelRow(model, calibration));
     });
   }
 

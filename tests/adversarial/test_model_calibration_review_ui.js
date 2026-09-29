@@ -48,6 +48,8 @@ class Element {
   get className() { return [...this.classes].join(" "); }
   set textContent(value) { this._text = String(value); this.children = []; }
   get textContent() { return this._text + this.children.map((child) => typeof child === "string" ? child : child.textContent).join(" "); }
+  setAttribute(name, value) { (this.attributes ||= {})[name] = String(value); }
+  getAttribute(name) { return (this.attributes || {})[name] ?? null; }
   append(...children) { this.children.push(...children); }
   appendChild(child) { this.children.push(child); return child; }
   replaceChildren(...children) { this._text = ""; this.children = [...children]; }

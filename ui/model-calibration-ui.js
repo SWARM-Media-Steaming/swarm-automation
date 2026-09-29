@@ -295,6 +295,86 @@
       .map((entry) => entry.model);
   }
 
+  // Column headings as a person reads them, and which way "ascending" runs,
+  // so the sort bar can say "Sorted by Coding score, highest first" instead
+  // of leaving a bare arrow to be decoded.
+  const SORT_LABELS = {
+    provider: "Provider",
+    model: "Model",
+    status: "Status",
+    coding_score: "Coding score",
+    agentic_score: "Agentic score",
+    reasoning_score: "Reasoning score",
+    input_cost: "Input cost",
+    output_cost: "Output cost",
+    speed: "Speed",
+    cost_efficiency: "Cost efficiency",
+    last_updated: "Last updated",
+  };
+  const TEXT_COLUMNS = ["provider", "model", "status"];
+
+  function sortLabel(column) {
+    return SORT_LABELS[column] || String(column || "").replace(/_/g, " ");
+  }
+
+  function sortDirectionWord(column, direction) {
+    const ascending = direction !== "desc";
+    if (TEXT_COLUMNS.includes(column)) return ascending ? "A to Z" : "Z to A";
+    if (column === "last_updated") return ascending ? "oldest first" : "newest first";
+    return ascending ? "lowest first" : "highest first";
+  }
+
+  function sortSummary(sort) {
+    const current = sort || {};
+    return `Sorted by ${sortLabel(current.column)}, ${sortDirectionWord(current.column, current.direction)}.`;
+  }
+
+  // ----- Search and paging over the model table --------------------------
+
+  const MODEL_PAGE_SIZES = [10, 25, 50];
+  const DEFAULT_MODEL_PAGE_SIZE = 10;
+
+  function normalizePageSize(value) {
+    const size = Number(value);
+    return MODEL_PAGE_SIZES.includes(size) ? size : DEFAULT_MODEL_PAGE_SIZE;
+  }
+
+  // Every whitespace-separated term must appear in the model's provider,
+  // model, status, or key; matching is case-insensitive.
+  function filterModels(models, query) {
+    const list = Array.isArray(models) ? models : [];
+    const terms = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return list;
+    return list.filter((model) => {
+      const haystack = [model && model.provider, model && model.model, model && model.status, model && model.key]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return terms.every((term) => haystack.includes(term));
+    });
+  }
+
+  // One page of `items`, with the page clamped into range so a shrinking
+  // result set (a new search, a refresh) never leaves an empty page behind.
+  function paginate(items, page, pageSize) {
+    const list = Array.isArray(items) ? items : [];
+    const size = normalizePageSize(pageSize);
+    const total = list.length;
+    const pages = Math.max(1, Math.ceil(total / size));
+    const current = Math.min(Math.max(0, Math.floor(Number(page) || 0)), pages - 1);
+    const start = current * size;
+    const slice = list.slice(start, start + size);
+    return {
+      items: slice,
+      page: current,
+      pages,
+      total,
+      pageSize: size,
+      first: total ? start + 1 : 0,
+      last: start + slice.length,
+    };
+  }
+
   function toggleSort(current, column) {
     if (!SORTABLE_COLUMNS.includes(column)) return current;
     if (current.column !== column) return { column, direction: "asc" };
@@ -331,6 +411,15 @@
     ROUTING_FACTORS,
     currentStrategy,
     SORTABLE_COLUMNS,
+    SORT_LABELS,
+    MODEL_PAGE_SIZES,
+    DEFAULT_MODEL_PAGE_SIZE,
+    sortLabel,
+    sortDirectionWord,
+    sortSummary,
+    normalizePageSize,
+    filterModels,
+    paginate,
     sortModels,
     toggleSort,
     exampleRoutingDecisions,
