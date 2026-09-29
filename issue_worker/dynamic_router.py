@@ -8,11 +8,11 @@ with ``default_routing_tiers`` / ``ProviderSettings`` in ``src/config.rs``.
 The model is the router's own call, not a table lookup. It is shown the full
 cross-provider catalog (``_MODEL_CATALOG``) — every model, what it is good at,
 and what it costs relative to the others, minus anything needing usage credits
-the operator has not allowed — and the operator's ``routing_optimization``
-preference decides how to weigh those costs: ``"cost"`` asks for the least
-expensive capable model and treats a frontier model as a last resort at
-complexity 9 or 10, while ``"best"`` asks for the best fit for the task and
-ignores price.
+the operator has not allowed. Automatic routing is always cost-first after
+capability, expected-success, safety, and context-fit gates: among candidates
+that clear those floors, the lowest estimated total cost wins. A frontier
+model is a last resort at complexity 9 or 10. Saved ``"best"`` preferences
+migrate to ``"cost"``.
 
 The operator's ``routing_tiers`` table is still graded against and still shown
 as reference, and it remains the deterministic safety net: if the router names
@@ -47,7 +47,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -134,13 +134,11 @@ _DEFAULT_PROVIDER_STRENGTHS: dict[str, str] = {
     ),
 }
 
-# How the router weighs cost against capability, from the operator's
-# "Optimize routing for cost" toggle (``routing_optimization`` in config.json).
-# "cost" asks for the least expensive capable model and treats a frontier model
-# as a last resort at complexity 9 or 10; "best" asks for the best fit for the
-# work and ignores price.
+# Automatic routing is always cost-first. ``"best"`` remains accepted on
+# input so older configs and flags migrate instead of failing, then
+# normalize to ``"cost"``.
 ROUTING_OPTIMIZATIONS = ("cost", "best")
-DEFAULT_ROUTING_OPTIMIZATION = "best"
+DEFAULT_ROUTING_OPTIMIZATION = "cost"
 
 # Under cost optimization, a frontier model is allowed only at this complexity
 # or at the top of the 1–10 scale. Interpolated into the router prompt; the
@@ -307,17 +305,15 @@ def requires_usage_credits(model: str) -> bool:
 
 
 def normalize_routing_optimization(value: Any) -> str:
-    key = str(value or "").strip().lower()
-    return key if key in ROUTING_OPTIMIZATIONS else DEFAULT_ROUTING_OPTIMIZATION
+    """Always ``cost``. Legacy ``best`` and unknown values migrate here."""
+    del value
+    return DEFAULT_ROUTING_OPTIMIZATION
 
 
-def cost_consideration_enabled(value: Any) -> bool:
-    """Whether the UI Cost Consideration setting is on.
-
-    Reads ``routing_optimization`` from config (the existing 'Optimize routing
-    for cost' toggle). Never inferred from the issue prompt.
-    """
-    return normalize_routing_optimization(value) == "cost"
+def cost_consideration_enabled(value: Any = None) -> bool:
+    """Automatic routing is always cost-first after capability gates."""
+    del value
+    return True
 
 
 def model_catalog(
@@ -772,41 +768,35 @@ def optimization_prompt_lines(
     routing_optimization: str,
     catalog: Sequence[CatalogModel] = (),
 ) -> list[str]:
-    """How to weigh cost against capability, from the operator's preference."""
-    if normalize_routing_optimization(routing_optimization) == "cost":
-        floor = FRONTIER_COMPLEXITY_FLOOR
-        top = COMPLEXITY_SCALE_TOP
-        named = frontier_model_names(catalog)
-        if named:
-            frontier_line = (
-                "The frontier models in this catalog are: " + ", ".join(named) + "."
-            )
-        else:
-            frontier_line = "This catalog currently names no frontier models."
-        return [
-            "Routing preference: optimize for cost.",
-            "Start from the least expensive model in the catalog that is actually capable of this",
-            "task, and prefer it whenever one exists.",
-            "A frontier model is a last resort.",
-            frontier_line,
-            f"Frontier complexity floor: {floor}",
-            f"Complexity scale top: {top}",
-            f"Use a frontier model only when the complexity score is {floor} or {top}.",
-            "High risk may justify leaving the cheapest tier for a capable mid-tier model only.",
-            "High risk is not a license to pick a frontier model below the floor.",
-            "The operator reference tiers are the best-fit ladder under cost optimization.",
-            "Do not follow a tier that names a frontier model below the floor.",
-            "In provider_reason, name the cheaper capable model you considered and why it cannot",
-            "do this task.",
-            "Score complexity from the work itself.",
-            f"Scoring {floor} or {top} in order to unlock a frontier model is not allowed.",
-        ]
+    """How to weigh cost against capability. Automatic routing is always cost-first."""
+    del routing_optimization
+    floor = FRONTIER_COMPLEXITY_FLOOR
+    top = COMPLEXITY_SCALE_TOP
+    named = frontier_model_names(catalog)
+    if named:
+        frontier_line = (
+            "The frontier models in this catalog are: " + ", ".join(named) + "."
+        )
+    else:
+        frontier_line = "This catalog currently names no frontier models."
     return [
-        "Routing preference: optimize for the best fit, and ignore cost entirely.",
-        "Choose whichever model in the catalog genuinely suits what this work demands. This is not",
-        "'always pick the strongest model': a small, mechanical, low-risk task is better served by a",
-        "lighter, faster model, and picking an oversized one is the wrong answer even though it is",
-        "allowed. Say in provider_reason what about the task fits the model you chose.",
+        "Routing preference: optimize for cost.",
+        "Start from the least expensive model in the catalog that is actually capable of this",
+        "task, and prefer it whenever one exists.",
+        "A frontier model is a last resort.",
+        frontier_line,
+        f"Frontier complexity floor: {floor}",
+        f"Complexity scale top: {top}",
+        f"Use a frontier model only when the complexity score is {floor} or {top}.",
+        "High risk may justify leaving the cheapest tier for a capable mid-tier model only.",
+        "High risk is not a license to pick a frontier model below the floor.",
+        "The operator reference tiers are the best-fit ladder under cost optimization.",
+        "Do not follow a tier that names a frontier model below the floor.",
+        "In provider_reason, name the cheaper capable model you considered and why it cannot",
+        "do this task.",
+        "Score complexity from the work itself.",
+        f"Scoring {floor} or {top} in order to unlock a frontier model is not allowed.",
+        "Speed and provider preference must not beat a cheaper adequately capable model.",
     ]
 
 
@@ -867,8 +857,7 @@ def build_router_prompt(
     complexity tiers, so the router picks the tool as well as the model. The
     full model catalog for those tools is listed too — grounding the choice in
     the complete valid set up front is what keeps the router from naming a
-    model that does not exist — and ``routing_optimization`` decides whether it
-    is told to economize or to ignore cost entirely.
+    model that does not exist — and automatic routing is always cost-first.
     """
     if not candidates:
         raise RouterError("no AI tools are available to route to")
@@ -1178,12 +1167,9 @@ def describe_model_choice(
     optimization: str,
 ) -> str:
     """How the router's own model choice was reached, in plain words."""
+    del optimization
     model_name = display_model_name(model)
-    goal = (
-        "the least expensive model that can do the work"
-        if normalize_routing_optimization(optimization) == "cost"
-        else "the best fit for the work, regardless of cost"
-    )
+    goal = "the least expensive model that can do the work"
     named = selected_model_label(candidate, model)
     text = (
         f"Complexity {complexity}/10. The router chose {named} at "
@@ -1317,6 +1303,235 @@ def pin_configured_routing_decision(
     pinned["dynamic_model_routing"] = False
     pinned["fallback"] = False
     return pinned
+
+
+def routing_score_snapshot(
+    candidate: RouterCandidate,
+    complexity: int,
+    task_type: str,
+    risk: str,
+    *,
+    allow_usage_credit_models: bool = False,
+) -> dict[str, Any] | None:
+    """One pass of the reusable scorer for baseline/modified snapshots."""
+    try:
+        calibrated = _active_calibration_catalog()
+        catalog = calibrated if calibrated is not None else _model_router.load_model_catalog()
+        disabled = {
+            model.model
+            for model in catalog
+            if not allow_usage_credit_models and requires_usage_credits(model.model)
+        }
+        disabled |= {str(model).strip() for model in candidate.excluded_models}
+        decision = _model_router.route(
+            _model_router.RouteRequest(
+                task_type=_normalize_task_type(task_type),
+                complexity=complexity,
+                cost_consideration_enabled=True,
+                cost_sensitive=True,
+                quality_requirement="high" if str(risk).lower() == "high" else "normal",
+            ),
+            catalog=catalog,
+            availability=_model_router.RoutingAvailability(
+                enabled_agents=frozenset({candidate.key}),
+                disabled_models=frozenset(disabled),
+            ),
+        )
+        return decision.as_dict()
+    except (_model_router.ModelRouterError, _model_router.ModelRouterConfigError):
+        return None
+
+
+def blend_complexity(baseline: int, jev_complexity: float | None, confidence: float) -> int:
+    """Bounded mix of Swarm's 1–10 grade and Jev's 0–1 complexity score."""
+    try:
+        base = int(baseline)
+    except (TypeError, ValueError):
+        base = 5
+    base = min(10, max(1, base))
+    if jev_complexity is None:
+        return base
+    jev = min(10, max(1, int(round(float(jev_complexity) * 9 + 1))))
+    weight = min(1.0, max(0.0, float(confidence))) * 0.5
+    blended = int(round(base + (jev - base) * weight))
+    return min(base + 2, max(base - 2, min(10, max(1, blended))))
+
+
+def apply_jev_signals_to_decision(
+    decision: dict[str, Any],
+    jev_payload: Mapping[str, Any] | None,
+    *,
+    candidates: Sequence[RouterCandidate],
+    jev_status: str,
+    allow_usage_credit_models: bool = False,
+    apply_model_change: bool = True,
+) -> dict[str, Any]:
+    """Attach baseline/Jev/modified scores. Swarm still owns the applied pick.
+
+    ``jev_payload`` is a DecisionResult.as_dict() or None when Jev did not run.
+    Baseline values are copied from the existing Swarm decision and never
+    overwritten. Modified scores re-run the existing scorer with bounded Jev
+    inputs. When Jev is disabled or unusable, modified equals baseline.
+    """
+    updated = dict(decision)
+    provider = str(updated.get("provider") or "")
+    chosen = next((item for item in candidates if item.key == provider), candidates[0] if candidates else None)
+    complexity = updated.get("complexity")
+    try:
+        complexity_i = int(complexity) if complexity is not None else 5
+    except (TypeError, ValueError):
+        complexity_i = 5
+    task_type = str(updated.get("task_type") or "general_reasoning")
+    risk = str(updated.get("risk") or "medium")
+    baseline_snapshot = None
+    if chosen is not None:
+        baseline_snapshot = routing_score_snapshot(
+            chosen,
+            complexity_i,
+            task_type,
+            risk,
+            allow_usage_credit_models=allow_usage_credit_models,
+        )
+    baseline_native = None
+    baseline_normalized = None
+    baseline_candidates: list[dict[str, Any]] = []
+    if baseline_snapshot:
+        baseline_native = baseline_snapshot.get("native_score")
+        baseline_normalized = baseline_snapshot.get("normalized_score")
+        baseline_candidates = list(baseline_snapshot.get("candidates") or [])
+    if baseline_normalized is None:
+        try:
+            baseline_normalized = float(updated.get("confidence") or 0)
+        except (TypeError, ValueError):
+            baseline_normalized = 0.0
+    baseline_route = {
+        "provider": provider,
+        "model": str(updated.get("selected_model") or ""),
+        "effort": str(updated.get("reasoning_effort") or ""),
+        "prompt_grade": str(updated.get("prompt_grade") or ""),
+        "complexity": complexity_i if updated.get("complexity") is not None else None,
+        "task_type": task_type,
+        "risk": risk,
+        "context_requirement": str(updated.get("context_requirement") or ""),
+        "confidence": updated.get("confidence"),
+        "native_score": baseline_native,
+        "normalized_score": baseline_normalized,
+        "candidates": baseline_candidates,
+        "reason_codes": [],
+    }
+    jev_block: dict[str, Any] | None = None
+    modified_route = dict(baseline_route)
+    status = str(jev_status or "disabled")
+    if isinstance(jev_payload, Mapping) and status == "enabled":
+        scores = jev_payload.get("scores") if isinstance(jev_payload.get("scores"), dict) else {}
+        jev_block = {
+            "decision": str(jev_payload.get("decision") or ""),
+            "confidence": jev_payload.get("confidence"),
+            "scores": scores,
+            "reason_codes": list(jev_payload.get("reasonCodes") or jev_payload.get("reason_codes") or []),
+            "model": str(jev_payload.get("model") or ""),
+            "version": str(jev_payload.get("version") or ""),
+            "source": str(jev_payload.get("source") or "jev"),
+            "native_score": jev_payload.get("confidence"),
+            "normalized_score": jev_payload.get("confidence"),
+            "metadata": dict(jev_payload.get("metadata") or {}),
+        }
+        try:
+            jev_confidence = float(jev_payload.get("confidence") or 0)
+        except (TypeError, ValueError):
+            jev_confidence = 0.0
+        if jev_confidence >= 0.70 and chosen is not None:
+            jev_task = str((jev_payload.get("metadata") or {}).get("routerTaskType") or "")
+            blended_complexity = blend_complexity(
+                complexity_i, (scores or {}).get("complexity"), jev_confidence
+            )
+            blended_task = jev_task or task_type
+            security_risk = float((scores or {}).get("securityRisk") or 0)
+            blended_risk = "high" if security_risk >= 0.7 or risk == "high" else risk
+            modified_snapshot = routing_score_snapshot(
+                chosen,
+                blended_complexity,
+                blended_task,
+                blended_risk,
+                allow_usage_credit_models=allow_usage_credit_models,
+            )
+            if modified_snapshot:
+                modified_route = {
+                    "provider": str(modified_snapshot.get("agent") or provider),
+                    "model": str(modified_snapshot.get("model") or baseline_route["model"]),
+                    "effort": str(modified_snapshot.get("effort") or baseline_route["effort"]),
+                    "prompt_grade": baseline_route["prompt_grade"],
+                    "complexity": blended_complexity,
+                    "task_type": blended_task,
+                    "risk": blended_risk,
+                    "context_requirement": baseline_route["context_requirement"],
+                    "confidence": modified_snapshot.get("confidence"),
+                    "native_score": modified_snapshot.get("native_score"),
+                    "normalized_score": modified_snapshot.get("normalized_score"),
+                    "candidates": list(modified_snapshot.get("candidates") or []),
+                    "reason_codes": jev_block["reason_codes"],
+                    "estimated_cost": modified_snapshot.get("estimated_cost"),
+                }
+                if apply_model_change:
+                    updated["selected_model"] = modified_route["model"]
+                    updated["reasoning_effort"] = modified_route["effort"]
+                    updated["complexity"] = blended_complexity
+                    updated["risk"] = blended_risk
+                    if jev_task:
+                        updated["task_type"] = blended_task
+                    extra = str(updated.get("tier_explanation") or "")
+                    note = str(modified_snapshot.get("reason") or "")
+                    if note:
+                        updated["tier_explanation"] = (extra + " " + note).strip()
+                    updated["model_source"] = updated.get("model_source") or "tier"
+    elif status != "enabled":
+        jev_block = None
+
+    def _num(value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    base_norm = _num(baseline_route.get("normalized_score")) or 0.0
+    mod_norm = _num(modified_route.get("normalized_score"))
+    if mod_norm is None:
+        mod_norm = base_norm
+        modified_route["normalized_score"] = base_norm
+        modified_route["native_score"] = baseline_route.get("native_score")
+    delta_abs = round(mod_norm - base_norm, 4)
+    delta_pct = round((delta_abs / base_norm) * 100, 4) if base_norm else (0.0 if delta_abs == 0 else None)
+    routing_changed = (
+        str(modified_route.get("provider") or "") != str(baseline_route.get("provider") or "")
+        or str(modified_route.get("model") or "") != str(baseline_route.get("model") or "")
+        or str(modified_route.get("effort") or "") != str(baseline_route.get("effort") or "")
+    )
+    updated["jev"] = {
+        "status": status,
+        "baseline": baseline_route,
+        "jev": jev_block,
+        "modified": modified_route,
+        "delta": {
+            "absolute": delta_abs,
+            "percent": delta_pct,
+            "routing_changed": routing_changed,
+        },
+        "routing_before": {
+            "provider": baseline_route.get("provider"),
+            "model": baseline_route.get("model"),
+            "effort": baseline_route.get("effort"),
+        },
+        "routing_after": {
+            "provider": modified_route.get("provider"),
+            "model": modified_route.get("model"),
+            "effort": modified_route.get("effort"),
+        },
+    }
+    updated["routing_optimization"] = normalize_routing_optimization(
+        updated.get("routing_optimization")
+    )
+    updated["cost_consideration_enabled"] = True
+    return updated
 
 
 def routing_choice_was_applied(decision: dict[str, Any]) -> bool:
@@ -1504,11 +1719,9 @@ def routing_optimization_label(value: Any) -> str:
     never applied to it.
     """
     key = str(value or "").strip().lower()
-    if key == "cost":
-        return "Cheapest model that fits the work"
-    if key == "best":
-        return "Best model for the work, regardless of cost"
-    return ""
+    if not key:
+        return ""
+    return "Cheapest model that fits the work"
 
 
 def format_routing_notice(decision: dict[str, Any]) -> str:

@@ -105,10 +105,14 @@ _JOIN = (
 #: batch ``created_at`` is a persistence detail and must never be the date a
 #: report filters or buckets on.
 _ACTIVITY = "COALESCE(NULLIF(u.started_at, ''), NULLIF(u.completed_at, ''), u.created_at)"
-#: As a plain ``YYYY-MM-DD``. ``date()`` understands an ISO timestamp with an
-#: offset and normalizes it; the ``substr`` fallback keeps a row with an
-#: unparseable timestamp in its own day rather than dropping it entirely.
-_ACTIVITY_DATE = f"COALESCE(date({_ACTIVITY}), substr({_ACTIVITY}, 1, 10))"
+#: As a plain ``YYYY-MM-DD``: the calendar date written in the timestamp
+#: itself, in its own offset (``date()`` would shift it to UTC). Anything not
+#: starting with an ISO date falls back to ``date()``/``substr`` so an
+#: unparseable timestamp keeps its own day rather than being dropped.
+_ACTIVITY_DATE = (
+    f"CASE WHEN substr({_ACTIVITY}, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' "
+    f"THEN substr({_ACTIVITY}, 1, 10) ELSE COALESCE(date({_ACTIVITY}), substr({_ACTIVITY}, 1, 10)) END"
+)
 
 #: A router call is recorded before its execution row exists and is linked
 #: when the batch is persisted, so its repository/issue can come from either
@@ -136,9 +140,17 @@ _OUTCOME = "CASE WHEN u.success = 0 THEN 'failure' ELSE 'success' END"
 #: "unreported" rather than "partial". ``tokens_only`` is the specific case of
 #: complete provider totals with no matching price, which is what makes an
 #: unpriced model visible instead of looking free.
-_COVERAGE = """CASE
+#: Any provider counter (cache/reasoning included) counts as reported usage.
+_USAGE_COLUMNS = (
+    "u.total_tokens", "u.input_tokens", "u.output_tokens", "u.cached_input_tokens",
+    "u.reasoning_tokens", "u.cache_read_tokens", "u.cache_write_tokens",
+)
+_NO_TOKEN_USAGE = "(" + " AND ".join(f"{c} IS NULL" for c in _USAGE_COLUMNS) + ")"
+_HAS_TOKEN_USAGE = f"NOT {_NO_TOKEN_USAGE}"
+
+_COVERAGE = f"""CASE
     WHEN u.success = 0 THEN 'failed'
-    WHEN u.total_tokens IS NULL AND u.input_tokens IS NULL AND u.output_tokens IS NULL
+    WHEN {_NO_TOKEN_USAGE}
         THEN 'unreported'
     WHEN u.total_tokens IS NULL OR u.input_tokens IS NULL OR u.output_tokens IS NULL
         THEN 'partial'
@@ -150,9 +162,7 @@ END"""
 #: ``estimated_cost = 0.0`` from older pricing. Those zeros must not enter
 #: the estimated-cost total or the priced-invocation count — $0.00 on an
 #: unreported call is a lie. Genuine zeros keep a non-NULL token field.
-_HAS_TOKEN_USAGE = (
-    "NOT (u.total_tokens IS NULL AND u.input_tokens IS NULL AND u.output_tokens IS NULL)"
-)
+
 _PRICED_COST = f"CASE WHEN {_HAS_TOKEN_USAGE} THEN u.estimated_cost END"
 _COST_SELECT = f"SUM({_PRICED_COST}), COUNT({_PRICED_COST})"
 

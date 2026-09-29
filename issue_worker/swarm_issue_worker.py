@@ -40,7 +40,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 SCRIPT_HOME = Path(os.environ.get("SWARM_ISSUE_WORKER_SCRIPT_DIR", Path(__file__).resolve().parent)).resolve()
 if str(SCRIPT_HOME) not in sys.path:
@@ -52,7 +52,7 @@ if __name__ == "__main__":
     sys.modules["swarm_issue_worker"] = sys.modules[__name__]
 
 from github_app_auth import DEFAULT_CONFIG_PATH, GitHubAppAuth
-from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION
+from ai_execution_history import ExecutionHistoryService, ExecutionStart, PROMPT_TEMPLATE_VERSION, sanitize_text
 from token_usage import (
     DEFAULT_CURRENCY,
     AgentType,
@@ -65,7 +65,9 @@ from token_usage import (
 )
 from adversarial_core import AdversarialStage
 from adversarial_security import AdversarialSecurityMixin, SECURITY_STAGE
-from adversarial_uat import UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE
+from adversarial_uat import (
+    UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_LEGACY_NOTICE, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE,
+)
 from handoff_context import HandoffContextMixin
 from handoff_context import render_prompt_section as render_handoff_prompt_section
 from issue_images import (
@@ -87,6 +89,7 @@ from dynamic_router import (
     RouterCandidate,
     RouterError,
     RoutingTier,
+    apply_jev_signals_to_decision,
     build_model_correction_prompt,
     build_router_prompt,
     catalog_model_names,
@@ -101,6 +104,15 @@ from dynamic_router import (
     resolve_routing_decision,
     routing_history_message,
     run_provider_router,
+)
+from jev_cli import JevSettings, settings_from_mapping
+from decision_engine import (
+    CompositeDecisionEngine,
+    DecisionType,
+    engine_from_settings,
+    format_jev_markdown,
+    may_act_on,
+    swarm_policy_action,
 )
 
 
@@ -490,6 +502,7 @@ class Config:
     automatic_knowledge_generation: bool
     knowledge_context_token_limit: int
     knowledge_owner_scope_id: str
+    jev: JevSettings = dataclasses.field(default_factory=JevSettings)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
@@ -547,6 +560,26 @@ class Config:
             automatic_knowledge_generation=bool(args.automatic_knowledge_generation),
             knowledge_context_token_limit=int(args.knowledge_context_token_limit),
             knowledge_owner_scope_id=str(args.knowledge_owner_scope_id or "local"),
+            jev=settings_from_mapping(
+                {
+                    "enabled": bool(getattr(args, "jev_enabled", False)),
+                    "bin": str(getattr(args, "jev_bin", "") or ""),
+                    "model": str(getattr(args, "jev_model", "") or "jev-latest"),
+                    "timeout_seconds": float(getattr(args, "jev_timeout_seconds", 8) or 8),
+                    "max_retries": int(getattr(args, "jev_max_retries", 2) or 0),
+                    "confidence_automation": float(getattr(args, "jev_confidence_automation", 0.9)),
+                    "confidence_fallback": float(getattr(args, "jev_confidence_fallback", 0.7)),
+                    "confidence_security": float(getattr(args, "jev_confidence_security", 0.95)),
+                    "fallback": str(getattr(args, "jev_fallback", "") or "rules"),
+                    "use_preflight": bool(getattr(args, "jev_use_preflight", True)),
+                    "use_workflow": bool(getattr(args, "jev_use_workflow", True)),
+                    "use_uat": bool(getattr(args, "jev_use_uat", True)),
+                    "use_cyber": bool(getattr(args, "jev_use_cyber", True)),
+                    "use_rag": bool(getattr(args, "jev_use_rag", True)),
+                    "use_triage": bool(getattr(args, "jev_use_triage", True)),
+                    "use_completion": bool(getattr(args, "jev_use_completion", True)),
+                }
+            ),
         )
 
     def spec(self, provider: str) -> ProviderSpec | None:
@@ -999,6 +1032,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         if self.history.error:
             log(f"WARNING: AI execution history is unavailable: {self.history.error}")
         self._knowledge = None
+        self._decision_engine: CompositeDecisionEngine | None = None
 
     def adversarial_stages(self) -> list[AdversarialStage]:
         """The adversarial agents this repository runs, in pipeline order.
@@ -1774,8 +1808,22 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             if pr_state != "OPEN":
                 continue
             if CAP_HIT_PR_MARKER in str(pull_request.get("body") or ""):
-                log(f"Issue #{issue_number} has an adversarial UAT deadlock; leaving its PR for human adjudication.")
-                continue
+                # Older workers used this marker as a human-review hold. The
+                # three-round boundary is now an automatic handoff: remove
+                # the stale hold notice, then let the normal reconciliation
+                # path approve/merge the already-delivered commit.
+                body = str(pull_request.get("body") or "")
+                try:
+                    self.github.gh(
+                        ["pr", "edit", pr_url, "--repo", self.config.github_repository, "--body-file", "-"],
+                        provider,
+                        body.replace(CAP_HIT_PR_NOTICE, "")
+                        .replace(CAP_HIT_PR_LEGACY_NOTICE, "")
+                        .replace(CAP_HIT_PR_MARKER, "").strip(),
+                    )
+                    log(f"Released the legacy adversarial cap-hit hold for issue #{issue_number}; continuing automatically.")
+                except WorkerError as error:
+                    log(f"WARNING: Could not remove the legacy cap-hit PR notice for issue #{issue_number}: {error}")
             if (
                 self.config.auto_approve
                 and str(pull_request.get("reviewDecision") or "").upper() != "APPROVED"
@@ -2080,6 +2128,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             )
             if self.routing:
                 body += "\n" + format_routing_notice(self.routing) + "\n"
+            jev_report = self.render_jev_report()
+            if jev_report:
+                body += "\n" + jev_report + "\n"
             self.github.gh(
                 [
                     "issue",
@@ -2443,7 +2494,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 routing_optimization=self.config.routing_optimization,
                 dynamic_model_routing=self.config.dynamic_model_routing,
             )
+            self.routing = self.attach_jev_routing(self.routing, candidates)
         else:
+            decision = self.attach_jev_routing(decision, candidates)
             if self.config.dynamic_model_routing:
                 decision["dynamic_model_routing"] = True
                 self.adopt_routing_decision(decision)
@@ -2688,6 +2741,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             )
         self.history.update(completed, **fields)
         self.flush_token_usage_to_history()
+        self.history.finish_jev_outcomes(status)
         self.index_execution_knowledge()
 
     def knowledge_service(self):
@@ -2728,10 +2782,228 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             )
             if not pack.items:
                 return ""
+            pack = self.score_knowledge_pack(pack)
+            if not pack.items:
+                return ""
             return pack.render()
         except Exception as error:  # noqa: BLE001
             log(f"WARNING: Engineering knowledge context skipped: {error}")
             return ""
+
+    def decision_engine(self) -> CompositeDecisionEngine:
+        if self._decision_engine is None:
+            self._decision_engine = engine_from_settings(self.config.jev)
+        return self._decision_engine
+
+    def evaluate_decision(self, decision_type: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Generic DecisionEngine.evaluate(type, context) entry for the worker."""
+        payload = dict(context or {})
+        if self.issue is not None:
+            payload.setdefault("title", self.issue.title)
+            payload.setdefault("labels", list(self.issue.labels))
+            payload.setdefault("summary", str(self.issue.body or "")[:1200])
+            payload.setdefault("issue_number", self.issue.number)
+        payload.setdefault("repository", self.config.github_repository)
+        result = self.decision_engine().evaluate(decision_type, payload)
+        blocking_security = bool(payload.get("blocking_security"))
+        if result.decision_type in {
+            DecisionType.CYBER_FINDING.value,
+            DecisionType.UAT_FINDING.value,
+        }:
+            blocking_security = blocking_security or bool(payload.get("blocking"))
+        action = swarm_policy_action(
+            result,
+            settings=self.config.jev,
+            failed_tests=bool(payload.get("failed_tests")),
+            blocking_security=blocking_security,
+            uat_required=bool(self.config.adversarial_uat_enabled),
+            cyber_required=bool(self.config.adversarial_security_enabled),
+            default=str(payload.get("default_action") or result.decision),
+        )
+        result.swarm_action = action
+        result.accepted = may_act_on(result, self.config.jev) and action == result.decision
+        record = result.as_dict()
+        record["issue_number"] = payload.get("issue_number") or 0
+        record["repository"] = self.config.github_repository
+        record["execution_id"] = self.history.execution_id
+        record["jev_enabled"] = self.config.jev.enabled
+        record["created_at"] = iso_timestamp()
+        record["decision_type"] = result.decision_type
+        record["reason_codes"] = result.reason_codes
+        record["input_fingerprint"] = result.input_fingerprint
+        record["fallback_used"] = result.fallback_used
+        record["swarm_action"] = action
+        record["recommendation_accepted"] = result.accepted
+        record["latency_ms"] = result.latency_ms
+        record["estimated_cost"] = result.estimated_cost
+        record["error_type"] = result.error_type
+        self.history.record_jev_decision(record)
+        return result.as_dict()
+
+    def attach_jev_routing(self, decision: dict[str, Any], candidates: Sequence[Any]) -> dict[str, Any]:
+        """Score the issue with Jev, then combine with the existing Swarm baseline."""
+        jev_payload = None
+        status = "disabled"
+        if self.config.jev.enabled and (self.config.jev.use_preflight or self.config.jev.use_triage):
+            kind = (
+                DecisionType.ISSUE_TRIAGE.value
+                if self.config.jev.use_triage and not self.config.jev.use_preflight
+                else DecisionType.TASK_CLASSIFICATION.value
+            )
+            jev_payload = self.evaluate_decision(
+                kind,
+                {
+                    "title": self.issue.title if self.issue else "",
+                    "labels": list(self.issue.labels) if self.issue else [],
+                    "summary": str(self.issue.body or "")[:1200] if self.issue else "",
+                    "body_excerpt": str(self.issue.body or "")[:1200] if self.issue else "",
+                },
+            )
+            status = str(jev_payload.get("source") or "enabled")
+            if status == "jev":
+                status = "enabled"
+            elif status in {"disabled"}:
+                status = "disabled"
+            elif jev_payload.get("fallbackUsed") or jev_payload.get("fallback_used"):
+                if status not in {"timeout", "malformed", "authentication", "unavailable", "low_confidence"}:
+                    status = "fallback"
+        apply_change = bool(self.config.dynamic_model_routing)
+        updated = apply_jev_signals_to_decision(
+            decision,
+            jev_payload,
+            candidates=candidates,
+            jev_status=status,
+            allow_usage_credit_models=self.config.allow_usage_credit_models,
+            apply_model_change=apply_change and status == "enabled",
+        )
+        jev_block = updated.get("jev") if isinstance(updated.get("jev"), dict) else {}
+        comparison = {
+            "execution_id": self.history.execution_id,
+            "repository": self.config.github_repository,
+            "issue_number": self.issue.number if self.issue else 0,
+            "created_at": iso_timestamp(),
+            "jev_status": status,
+            "baseline": jev_block.get("baseline") or {},
+            "jev": jev_block.get("jev"),
+            "modified": jev_block.get("modified") or {},
+            "delta": jev_block.get("delta") or {},
+            "estimated_jev_cost": (jev_payload or {}).get("estimatedCost") if jev_payload else None,
+            "latency_ms": (jev_payload or {}).get("latencyMs") if jev_payload else 0,
+            "estimated_llm_calls_avoided": (jev_payload or {}).get("llmCallsAvoided") or 0,
+        }
+        if status != "enabled":
+            # Baseline-only: never imply a zero Jev score.
+            comparison["jev"] = None
+        self.history.record_jev_score_comparison(comparison)
+        return updated
+
+    def advise_adversarial_findings(self, stage: AdversarialStage, report: Mapping[str, Any]) -> None:
+        """Record Jev classifications. Existing stage rules still own the action."""
+        kind = (
+            DecisionType.CYBER_FINDING.value
+            if getattr(stage, "slug", "") == "security"
+            else DecisionType.UAT_FINDING.value
+        )
+        if not self.config.jev.enabled:
+            return
+        if kind == DecisionType.CYBER_FINDING.value and not self.config.jev.use_cyber:
+            return
+        if kind == DecisionType.UAT_FINDING.value and not self.config.jev.use_uat:
+            return
+        blocking = {id(item) for item in stage.blocking_findings(report)}
+        for finding in list(stage.blocking_findings(report)) + list(stage.findings_to_file(report)):
+            in_scope = id(finding) in blocking or bool(finding.get("in_scope", True))
+            self.classify_finding_with_jev(
+                kind=kind,
+                finding=finding if isinstance(finding, Mapping) else {"title": str(finding)},
+                in_scope=in_scope,
+                blocking=id(finding) in blocking,
+                default_action="FIX_NOW" if id(finding) in blocking else "CREATE_NEW_ISSUE",
+            )
+
+    def classify_finding_with_jev(
+        self,
+        *,
+        kind: str,
+        finding: Mapping[str, Any],
+        in_scope: bool,
+        blocking: bool,
+        default_action: str,
+    ) -> dict[str, Any]:
+        return self.evaluate_decision(
+            kind,
+            {
+                "finding": str(finding.get("title") or finding.get("summary") or finding.get("id") or "")[:800],
+                "in_scope": in_scope,
+                "blocking": blocking,
+                "blocking_security": blocking and kind == DecisionType.CYBER_FINDING.value,
+                "severity": finding.get("severity") or "",
+                "default_action": default_action,
+                "security": kind == DecisionType.CYBER_FINDING.value,
+            },
+        )
+
+    def evaluate_completion_gate(self, *, failed_tests: bool, blocking_security: bool, default: str) -> str:
+        if not self.config.jev.enabled or not self.config.jev.use_completion:
+            return default
+        result = self.evaluate_decision(
+            DecisionType.COMPLETION.value,
+            {
+                "failed_tests": failed_tests,
+                "blocking_security": blocking_security,
+                "acceptance_met": not failed_tests and not blocking_security,
+                "default_action": default,
+            },
+        )
+        action = str(result.get("swarmAction") or result.get("swarm_action") or default)
+        if failed_tests or blocking_security:
+            return default
+        return action or default
+
+    def render_jev_report(self) -> str:
+        engine = self._decision_engine
+        if engine is None or not engine.records:
+            return ""
+        return format_jev_markdown(engine.records)
+
+    def score_knowledge_pack(self, pack: Any) -> Any:
+        """Optional Jev first-pass relevance. Never discards the whole pack."""
+        if not self.config.jev.enabled or not self.config.jev.use_rag:
+            return pack
+        items = list(getattr(pack, "items", []) or [])
+        if not items:
+            return pack
+        scope = self.evaluate_decision(
+            DecisionType.RAG_SCOPE.value,
+            {"cross_repo": False, "default_action": "REPOSITORY"},
+        )
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for item in items:
+            title = str(item.get("title") or item.get("name") or item.get("object_id") or "")
+            result = self.evaluate_decision(
+                DecisionType.CONTEXT_RELEVANCE.value,
+                {"candidate": title, "chunk": sanitize_text(item.get("summary") or item.get("body") or title)[:800]},
+            )
+            scores = result.get("scores") or {}
+            relevance = float(scores.get("relevance") or 0)
+            scored.append((relevance, item))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        threshold = 0.15
+        above_threshold = [item for relevance, item in scored if relevance >= threshold]
+        # Section 9: a single low score must not permanently discard
+        # potentially critical context. Always retain at least this many
+        # ranked candidates as fallback retrieval, even when their score fell
+        # below the relevance threshold.
+        minimum_retained = min(3, len(scored))
+        if len(above_threshold) < minimum_retained:
+            keep = [item for _, item in scored[:minimum_retained]]
+        else:
+            keep = above_threshold
+        pack.items = keep
+        metadata = getattr(pack, "metadata", None)
+        if isinstance(metadata, dict):
+            metadata["jevRagScope"] = scope.get("decision")
+        return pack
 
     def knowledge_routing_signals(self) -> str:
         service = self.knowledge_service()
@@ -3088,6 +3360,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             provider, pending.get("usage_at_start"), pending.get("usage_at_completion")
         )
         ai_usage_report = pending.get("ai_usage_report") or self.render_ai_usage_report()
+        jev_report = pending.get("jev_report") or self.render_jev_report()
         return (
             f"{marker}\n{verb} by **{pending.get('ai_tool') or pending.get('ai')}**.\n\n"
             f"- Model: `{pending.get('model', 'unknown')}`\n"
@@ -3097,6 +3370,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             f"{usage_lines}\n"
             f"{pending.get('adversarial_summary', '')}"
             f"{ai_usage_report}\n"
+            f"{jev_report}"
             "<details><summary>AI completion summary</summary>\n\n"
             f"{pending.get('ai_output') or '(No captured AI output was available.)'}\n"
             "</details>\n"
@@ -5125,7 +5399,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         log(message)
         return "cleaned"
 
-    def deliver_pull_request(self, commit_sha: str, *, allow_automation: bool = True) -> tuple[str, str, str]:
+    def deliver_pull_request(
+        self, commit_sha: str, *, allow_automation: bool = True,
+        adversarial_cap_hit: bool = False,
+    ) -> tuple[str, str, str]:
         assert self.issue and self.choice
         branch = self.expected_branch()
         environment = self.provider_environment()
@@ -5205,34 +5482,39 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             log(f"Reusing existing pull request {pr_url} for issue #{self.issue.number}.")
             existing_body = str(existing[0].get("body") or "")
             if allow_automation and CAP_HIT_PR_MARKER in existing_body:
-                # Only a successful adversarial follow-up may release a failed
-                # head, and every stage that ran has to be clean — a green UAT
-                # re-run must not release a PR its security review capped out on.
-                state = self.read_state()
-                loops = [
-                    state[stage.key] for stage in ADVERSARIAL_STAGES
-                    if isinstance(state.get(stage.key), dict) and not state[stage.key].get("disabled")
-                ]
-                disabled_pipeline = (
-                    not self.adversarial_stages()
-                    and any(
-                        isinstance(state.get(stage.key), dict)
-                        and state[stage.key].get("disabled")
-                        for stage in ADVERSARIAL_STAGES
+                # A cap-hit delivery is explicitly a best-effort automatic
+                # handoff. Older callers that request a clean release still
+                # retain the historical safety gate; the pipeline opts into
+                # this branch after filing the deferred follow-up issue.
+                if not adversarial_cap_hit:
+                    state = self.read_state()
+                    loops = [
+                        state[stage.key] for stage in ADVERSARIAL_STAGES
+                        if isinstance(state.get(stage.key), dict) and not state[stage.key].get("disabled")
+                    ]
+                    disabled_pipeline = (
+                        not self.adversarial_stages()
+                        and any(
+                            isinstance(state.get(stage.key), dict)
+                            and state[stage.key].get("disabled")
+                            for stage in ADVERSARIAL_STAGES
+                        )
+                        and not loops
                     )
-                    and not loops
-                )
-                if not disabled_pipeline and (
-                    not loops
-                    or any(
-                        loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"}
-                        for loop in loops
-                    )
-                ):
-                    raise WorkerError("An adversarial cap-hit PR requires a passing UAT follow-up before automatic delivery")
+                    if not disabled_pipeline and (
+                        not loops
+                        or any(
+                            loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"}
+                            for loop in loops
+                        )
+                    ):
+                        raise WorkerError("An adversarial cap-hit PR requires a passing UAT follow-up before automatic delivery")
                 self.github.gh(
                     ["pr", "edit", pr_url, "--repo", self.config.github_repository, "--body-file", "-"],
-                    self.choice.key, existing_body.replace(CAP_HIT_PR_NOTICE, "").replace(CAP_HIT_PR_MARKER, "").strip(),
+                    self.choice.key,
+                    existing_body.replace(CAP_HIT_PR_NOTICE, "")
+                    .replace(CAP_HIT_PR_LEGACY_NOTICE, "")
+                    .replace(CAP_HIT_PR_MARKER, "").strip(),
                 )
         else:
             title = self.git("log", "-1", "--format=%s", commit_sha)
@@ -5548,12 +5830,19 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         )
         return merge_sha
 
-    def finalize_issue(self, commit_sha: str, ai_output: str, *, allow_automation: bool = True) -> None:
+    def finalize_issue(
+        self, commit_sha: str, ai_output: str, *, allow_automation: bool = True,
+        adversarial_cap_hit: bool = False,
+    ) -> None:
         assert self.issue and self.choice
         base_sha = str(self.read_state().get("base_sha") or "")
         commits = list(reversed(self.git("rev-list", f"{base_sha}..{commit_sha}").splitlines()))
         files = self.git("diff", "--name-only", base_sha, commit_sha).splitlines()
-        pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha, allow_automation=allow_automation)
+        pr_url, branch, commit_sha = self.deliver_pull_request(
+            commit_sha,
+            allow_automation=allow_automation,
+            adversarial_cap_hit=adversarial_cap_hit,
+        )
         if commit_sha not in commits:
             commits.append(commit_sha)
         self.history.note("Commit and pull request delivery completed", iso_timestamp())
@@ -5563,6 +5852,14 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             # than reported as a normal "Completed" (see issue-branch-delivery.md).
             self.finalize_needs_input(ai_output, delivery=(pr_url, branch, commit_sha))
             return
+        # Jev may assess completeness; Swarm still owns the delivery that already
+        # cleared tests and security gates. A low-confidence or incomplete signal
+        # is recorded and cannot independently reopen those gates.
+        self.evaluate_completion_gate(
+            failed_tests=False,
+            blocking_security=False,
+            default="COMPLETE",
+        )
         usage_at_start = self.read_state().get("usage_at_start")
         pending = {
             "issue_number": self.issue.number,
@@ -5585,6 +5882,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             "usage_at_start": usage_at_start,
             "usage_at_completion": self.usage_snapshot(self.choice.key),
             "ai_usage_report": self.render_ai_usage_report(),
+            "jev_report": self.render_jev_report(),
             "execution_id": self.history.execution_id,
             "commit_shas": commits,
             "files_changed": files,
@@ -6404,7 +6702,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--routing-optimization",
         choices=("cost", "best"),
         default=env_value("SWARM_ROUTING_OPTIMIZATION", DEFAULT_ROUTING_OPTIMIZATION).lower(),
-        help="Whether dynamic routing favors the cheapest capable model or the best fit for the work.",
+        help="Accepted for compatibility. Automatic routing is always cost-first; 'best' migrates to 'cost'.",
     )
     parser.add_argument(
         "--allow-usage-credit-models",
@@ -6527,6 +6825,79 @@ def build_parser() -> argparse.ArgumentParser:
         "--knowledge-owner-scope-id",
         default=env_value("SWARM_KNOWLEDGE_OWNER_SCOPE_ID", "local"),
         help="Ownership/scope identifier for knowledge objects. Default local.",
+    )
+    parser.add_argument(
+        "--jev-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_JEV_ENABLED", False),
+        help="Enable the Jev decision engine. Off preserves current Swarm behavior.",
+    )
+    parser.add_argument("--jev-bin", default=env_value("JEV_BIN", executable_default("jev")))
+    parser.add_argument("--jev-model", default=env_value("SWARM_JEV_MODEL", "jev-latest"))
+    parser.add_argument(
+        "--jev-timeout-seconds",
+        type=float,
+        default=float(env_value("SWARM_JEV_TIMEOUT_SECONDS", "8")),
+    )
+    parser.add_argument(
+        "--jev-max-retries",
+        type=int,
+        default=int(env_value("SWARM_JEV_MAX_RETRIES", "2")),
+    )
+    parser.add_argument(
+        "--jev-confidence-automation",
+        type=float,
+        default=float(env_value("SWARM_JEV_CONFIDENCE_AUTOMATION", "0.90")),
+    )
+    parser.add_argument(
+        "--jev-confidence-fallback",
+        type=float,
+        default=float(env_value("SWARM_JEV_CONFIDENCE_FALLBACK", "0.70")),
+    )
+    parser.add_argument(
+        "--jev-confidence-security",
+        type=float,
+        default=float(env_value("SWARM_JEV_CONFIDENCE_SECURITY", "0.95")),
+    )
+    parser.add_argument(
+        "--jev-fallback",
+        choices=("rules", "llm", "rules_then_llm"),
+        default=env_value("SWARM_JEV_FALLBACK", "rules"),
+    )
+    parser.add_argument(
+        "--jev-use-preflight",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_JEV_USE_PREFLIGHT", True),
+    )
+    parser.add_argument(
+        "--jev-use-workflow",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_JEV_USE_WORKFLOW", True),
+    )
+    parser.add_argument(
+        "--jev-use-uat",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_JEV_USE_UAT", True),
+    )
+    parser.add_argument(
+        "--jev-use-cyber",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_JEV_USE_CYBER", True),
+    )
+    parser.add_argument(
+        "--jev-use-rag",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_JEV_USE_RAG", True),
+    )
+    parser.add_argument(
+        "--jev-use-triage",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_JEV_USE_TRIAGE", True),
+    )
+    parser.add_argument(
+        "--jev-use-completion",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_JEV_USE_COMPLETION", True),
     )
     return parser
 

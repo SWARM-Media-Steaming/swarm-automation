@@ -50,7 +50,7 @@
 
   // Tabs inside the Feedback view. The order is the order they appear in, and
   // the first entry is what an unknown/empty tab falls back to.
-  const FEEDBACK_TABS = ["grades", "routing", "history", "usage"];
+  const FEEDBACK_TABS = ["grades", "routing", "jev", "history", "usage"];
 
   function activeTab(tab) {
     const next = String(tab || "");

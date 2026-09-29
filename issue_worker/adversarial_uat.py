@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 from adversarial_core import (  # noqa: F401  (re-exported for callers and tests)
+    CAP_HIT_PR_LEGACY_NOTICE,
     CAP_HIT_PR_MARKER,
     CAP_HIT_PR_NOTICE,
     DEFINITION,

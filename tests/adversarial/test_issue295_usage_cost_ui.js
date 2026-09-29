@@ -61,9 +61,9 @@ function usagePanel() {
 }
 
 test("Feedback has four tabs including Usage & cost, sharing the repository chips", () => {
-  assert.deepEqual(FEEDBACK_TABS, ["grades", "routing", "history", "usage"]);
+  assert.deepEqual(FEEDBACK_TABS, ["grades", "routing", "jev", "history", "usage"]);
   const tabs = [...html.matchAll(/data-feedback-tab="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(tabs, ["grades", "routing", "history", "usage"]);
+  assert.deepEqual(tabs, ["grades", "routing", "jev", "history", "usage"]);
   const tab = tagWithId(html, "feedback-tab-usage");
   assert.match(tab, /role="tab"/);
   assert.match(tab, /aria-controls="feedback-panel-usage"/);

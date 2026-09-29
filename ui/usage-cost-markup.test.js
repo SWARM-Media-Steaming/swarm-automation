@@ -30,7 +30,7 @@ function tagWithId(id) {
 test("Feedback has a fourth tab and every tab has exactly one panel", () => {
   const tabs = attributes(html, "data-feedback-tab");
   const panels = attributes(html, "data-feedback-panel");
-  assert.deepEqual(tabs, ["grades", "routing", "history", "usage"]);
+  assert.deepEqual(tabs, ["grades", "routing", "jev", "history", "usage"]);
   assert.deepEqual([...tabs].sort(), [...panels].sort());
   // The switcher in app.js must know about the same set, or a tab would
   // silently fall back to the first panel.

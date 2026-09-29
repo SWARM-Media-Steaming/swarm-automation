@@ -23,7 +23,10 @@ The application can:
   most usage remaining, and handing follow-up comments to a different agent than
   the one that did the previous pass; include/exclude each provider with a
   switch on its card. Choose **No preference** when you do not care who goes
-  first, or pick one provider to win ties when remaining usage is equal;
+  first, or pick one provider to win ties when remaining usage is equal.
+  Automatic model routing is cost-first after capability gates. Optional
+  **Jev** is a typed decision engine (not a fourth coding agent) that feeds
+  structured scores into Swarm; see `docs/jev-decision-engine.md`;
 - monitor multiple GitHub repositories in one scheduler, with an independent
   managed clone, assignee, branch policy, and bot identities for each
   repository;

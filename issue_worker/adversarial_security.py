@@ -403,11 +403,12 @@ class SecurityStage(AdversarialStage):
         return (
             "## Summary\nThe adversarial cybersecurity review did not reach a clean state after three "
             "fix/re-test rounds. Delivered as best effort: this is the last remediation attempt, not a "
-            "verified-clean security review.\n\n" + self.summary_line(loop) +
+            "verified-clean security review. The unresolved notes were filed for later work and do not "
+            "require a human response on this issue.\n\n" + self.summary_line(loop) +
             "\n## Unresolved security findings\n" + open_findings +
             ("\n\n## Failing security validation\n" + failures if failures else "") +
-            "\n\n## Still outstanding\nReview the linked pull request and adjudicate these findings "
-            "against the issue's requirements.\n"
+            "\n\n## Deferred security notes\nThe implementation commit is delivered as best effort; "
+            "the follow-up issue contains these findings for a later pass.\n"
         )
 
     def prompt(self, worker, loop: dict[str, Any], common: str) -> str:

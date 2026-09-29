@@ -172,8 +172,9 @@ validation results; raw reviewer reasoning never goes on the issue. Quota pauses
 and resumes use the existing idempotent notices and retain the current role,
 phase, round count, test definition and execution-history row.
 
-A cap-hit uses the existing AI Needs Input template with an explicit
-**adversarial-test deadlock**, the delivered PR link and failing suite evidence.
-Ask for adjudication against the spec, not credentials or environment setup.
-Do not run no-code branch cleanup for this delivered PR. Only a trusted-author
-reply starts another work-round; no per-round GitHub comments are posted.
+A cap-hit uses the normal completion comment with an explicit **best-effort
+adversarial handoff**, the delivered commit/PR link, failing suite evidence and
+the URL of a separately filed follow-up issue. It must not use the AI Needs
+Input template or ask for adjudication. Do not run no-code branch cleanup for
+this delivered PR; normal delivery settings decide whether its PR is merged.
+No per-round GitHub comments are posted.

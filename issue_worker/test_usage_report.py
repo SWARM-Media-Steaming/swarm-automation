@@ -197,6 +197,8 @@ class SummaryAndCoverageTests(UsageReportTestCase):
                 input_tokens=None,
                 output_tokens=None,
                 total_tokens=None,
+                cached_input_tokens=None,
+                cache_read_tokens=None,
                 estimated_cost=0.0,
                 pricing_status="priced",
                 started_at="2026-04-06T09:00:00+00:00",

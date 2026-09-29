@@ -38,7 +38,8 @@ class SecurityFailureRecoveryTests(LocalReviewFixture, unittest.TestCase):
         self.assertNotIn(SECURITY_ID, self.loop()["excluded_suites"])
         self.assertTrue(any(r["id"] == SECURITY_ID and r["exit_code"] != 0
                             for r in self.loop()["results"]))
-        self.assertFalse(self.deliver.call_args.kwargs["allow_automation"])
+        self.assertTrue(self.deliver.call_args.kwargs["allow_automation"])
+        self.assertTrue(self.deliver.call_args.kwargs["adversarial_cap_hit"])
 
     def test_missing_coding_executable_records_failed_review(self):
         self.prepare()

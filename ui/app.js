@@ -42,7 +42,7 @@
     promptGradesRequest: 0,
     promptGradesSearchTimer: null,
     feedbackTab: "grades",
-    // Usage & cost (Feedback's fourth tab). `filters` is the combinable
+    // Usage & cost (Feedback's fifth tab). `filters` is the combinable
     // filter set sent to the backend; `groupValue` is the aggregate row the
     // invocation list is drilled into, null when it is showing everything.
     // Filters survive moving between Feedback tabs for the session, which is
@@ -59,6 +59,18 @@
       request: 0,
       searchTimer: null,
     },
+    jevFeedback: null,
+    jevFeedbackSearch: "",
+    jevFeedbackStatus: "",
+    jevFeedbackRouting: "",
+    jevFeedbackOutcome: "",
+    jevFeedbackProvider: "",
+    jevFeedbackFrom: "",
+    jevFeedbackDelta: "",
+    jevFeedbackCost: "",
+    jevFeedbackOffset: 0,
+    jevFeedbackRequest: 0,
+    jevFeedbackSearchTimer: null,
     repositoryTab: "source",
     // Feedback owns this filter. It never follows or changes activeRepoId.
     feedbackRepoFilter: [],
@@ -143,7 +155,17 @@
     },
     "dynamic-model-routing": {
       title: "Dynamic Model Routing",
-      html: "<p><strong>OFF</strong> keeps today’s behavior: you choose the worker model and reasoning effort on each provider card.</p><p><strong>ON</strong> disables those worker selectors and shows <strong>Router model</strong> and <strong>Router effort</strong>. Before an issue is implemented, that router grades the original prompt, then picks which enabled AI tool runs it — weighing each tool’s remaining usage and a built-in summary of what it tends to be good at — and chooses the worker model and reasoning effort itself, from the full catalog of models that tool offers. The saved complexity tiers stay as your reference, and are still what runs if the router ever names a model that does not exist. The original issue text is not rewritten.</p><p>The chosen tool, why it was chosen, the grade, and the routing confidence are posted on the issue when work starts and stored with the run in AI history. A rework goes to a different tool than the previous pass unless the router is clearly confident the same one is the better choice.</p><p><strong>Optimize routing for cost</strong> (off by default) decides how the router weighs price. On, it starts from the least expensive model that can actually do the work. A frontier model is a last resort, used only when complexity is 9 or 10. High risk may justify a capable mid-tier model. Off, it picks whichever model best fits the task and ignores cost — which is not the same as always picking the most capable model.</p><p><strong>Use models requiring usage credits</strong> (off by default) controls whether a model that draws on a separate usage-credit balance, rather than the account's normal plan allowance, can ever be picked as a worker, router, or tier model — manually or by SWARM's own catalog repair. Leave it off unless you know usage credits are provisioned for the account running this app.</p>",
+      html: "<p><strong>OFF</strong> keeps today’s behavior: you choose the worker model and reasoning effort on each provider card.</p><p><strong>ON</strong> disables those worker selectors and shows <strong>Router model</strong> and <strong>Router effort</strong>. Before an issue is implemented, that router grades the original prompt, then picks which enabled AI tool runs it — weighing each tool’s remaining usage and a built-in summary of what it tends to be good at — and chooses the worker model and reasoning effort itself, from the full catalog of models that tool offers. The saved complexity tiers stay as your reference, and are still what runs if the router ever names a model that does not exist. The original issue text is not rewritten.</p><p>The chosen tool, why it was chosen, the grade, and the routing confidence are posted on the issue when work starts and stored with the run in AI history. A rework goes to a different tool than the previous pass unless the router is clearly confident the same one is the better choice.</p><p>Automatic routing is always <strong>cost-first</strong> after capability, expected-success, safety, and context-fit gates. Among models that can complete the work, Swarm picks the lowest estimated total cost. A frontier model is a last resort, used only when complexity is 9 or 10. High risk may justify a capable mid-tier model. Latency never beats a cheaper adequately capable model. Explicit manual model selections stay respected when Dynamic Model Routing is off.</p><p><strong>Use models requiring usage credits</strong> (off by default) controls whether a model that draws on a separate usage-credit balance, rather than the account's normal plan allowance, can ever be picked as a worker, router, or tier model — manually or by SWARM's own catalog repair. Leave it off unless you know usage credits are provisioned for the account running this app.</p>",
+      links: [],
+    },
+    "jev-decision-engine": {
+      title: "Jev Decision Engine",
+      html: "<p>Jev is a fast typed decision layer. It recommends bounded operational decisions; Swarm remains the orchestration and policy authority. It does not replace Claude, Codex, or Grok as implementation agents, and it does not pick the final worker model by itself.</p><p>When the global toggle is off, Swarm behaves exactly as before and Jev adds no call, cost, or latency. When it is on, Jev can classify issues, feed structured scores into Dynamic Model Routing, help with UAT and Cyber finding triage, score RAG context, and assess completion — always behind confidence thresholds and deterministic safety gates.</p><p>Low-confidence or malformed Jev output never suppresses a security finding, never marks failed tests complete, and never skips UAT or Cyber when those stages are configured.</p>",
+      links: [],
+    },
+    "jev-feedback": {
+      title: "Jev score tracking",
+      html: "<p>Every applicable execution stores three distinct scores: the original Swarm baseline, the Jev score, and the combined score after Jev signals. The baseline is never overwritten. When Jev is off, unavailable, or used as fallback, the table labels that state instead of showing a zero Jev score.</p><p>Jev success is measured first by task completion, then by lower estimated cost per successfully completed task. Failures and retries are never treated as savings.</p>",
       links: [],
     },
     "provider-include-exclude": {
@@ -252,7 +274,7 @@
     },
     "routing-algorithm": {
       title: "How Dynamic Routing works",
-      html: "<p>The router removes models that do not meet the task's minimum capability requirement, then chooses among what remains using capability, task fit, expected cost, reasoning level, and performance.</p><p><strong>Cost Aware</strong> means finding the least expensive model that is still sufficiently capable for the task — not always picking the cheapest model outright. <strong>Balanced</strong> (this app's default, \"Optimize routing for cost\" off) weighs capability and task fit without letting cost narrow the field.</p><p>The routing examples and current strategy shown here are generated from the active calibration, not hard-coded, and update the next time a refresh changes them.</p>",
+      html: "<p>The router removes models that do not meet the task's minimum capability, expected-success, safety, and context-fit requirements, then chooses the lowest estimated total cost among what remains. Latency is only a tie-breaker.</p><p><strong>Cost-first</strong> is the only automatic routing mode. It means finding the least expensive model that is still sufficiently capable for the task — not always picking the cheapest model outright, and never picking a faster model solely because it is faster.</p><p>The routing examples and current strategy shown here are generated from the active calibration, not hard-coded, and update the next time a refresh changes them.</p>",
       links: [],
     },
     "model-routing-table": {
@@ -361,6 +383,7 @@
       void refreshPromptGrades({ quiet: true });
       void refreshExecutionHistory({ quiet: true });
       void refreshUsageReport({ quiet: true });
+      void refreshJevFeedback({ quiet: true });
     }
     if (view === "ai") void refreshModelCalibration({ quiet: true });
     if (view === "knowledge") {
@@ -406,6 +429,7 @@
       input.checked = config.schedule_days.includes(input.value);
     });
     selectSchedule(config.schedule_mode, false);
+    renderJevConnection();
     bindRepositoryForm();
     byId("profile-kicker").textContent = (currentRepo()?.github_repository || "REPOSITORY").toUpperCase();
     renderSummaries();
@@ -741,11 +765,13 @@
     state.promptGradesOffset = 0;
     state.usage.groupOffset = 0;
     state.usage.detailOffset = 0;
+    state.jevFeedbackOffset = 0;
     renderFeedbackRepoFilter();
     void persistFeedbackRepoFilter().catch((error) => showToast(errorText(error), "error"));
     void refreshPromptGrades({ quiet: true });
     void refreshExecutionHistory({ quiet: true });
     void refreshUsageReport({ quiet: true });
+    void refreshJevFeedback({ quiet: true });
   }
 
   function renderRepositorySelector() {
@@ -1662,6 +1688,165 @@
     return total === 1 ? "execution" : "executions";
   }
 
+  function jevApi() {
+    return window.SwarmJevDecision || {
+      summaryCards: () => [],
+      tableRows: () => [],
+      connectionStatus: () => ({ text: "Not checked", tone: "stopped" }),
+      statusTone: () => "stopped",
+    };
+  }
+
+  function renderJevConnection() {
+    const pill = byId("jev-connection-pill");
+    if (!pill) return;
+    const tool = (state.tools || []).find((item) => item.id === "jev");
+    const info = jevApi().connectionStatus(tool);
+    pill.textContent = info.text;
+    pill.className = `status-pill ${info.tone}`;
+  }
+
+  function jevFeedbackView() {
+    return state.jevFeedback || { records: [], total: 0, offset: 0, limit: 10, summary: {} };
+  }
+
+  // Provider/model, date, delta, and cost narrow the current page client-side.
+  // The server-side query already handles status, routing, outcome, and search.
+  function jevFeedbackVisibleRecords(records) {
+    const provider = state.jevFeedbackProvider.trim().toLowerCase();
+    const from = state.jevFeedbackFrom.trim();
+    const minDelta = Number(state.jevFeedbackDelta);
+    const maxCost = Number(state.jevFeedbackCost);
+    return (Array.isArray(records) ? records : []).filter((record) => {
+      if (provider) {
+        const haystack = `${record.modifiedProvider || ""} ${record.modifiedModel || ""} ${record.baselineProvider || ""} ${record.baselineModel || ""}`.toLowerCase();
+        if (!haystack.includes(provider)) return false;
+      }
+      if (from) {
+        const created = String(record.createdAt || "").slice(0, 10);
+        if (created && created < from) return false;
+      }
+      if (state.jevFeedbackDelta.trim() !== "" && Number.isFinite(minDelta)) {
+        const delta = Math.abs(Number(record.scoreDelta) || 0);
+        if (delta < minDelta) return false;
+      }
+      if (state.jevFeedbackCost.trim() !== "" && Number.isFinite(maxCost)) {
+        const cost = record.estimatedJevCost;
+        if (cost !== null && cost !== undefined && Number(cost) > maxCost) return false;
+      }
+      return true;
+    });
+  }
+
+  function renderJevFeedback() {
+    const box = byId("jev-feedback-list");
+    if (!box) return;
+    const page = jevFeedbackView();
+    const cards = byId("jev-feedback-cards");
+    if (cards) {
+      cards.replaceChildren();
+      jevApi().summaryCards(page.summary).forEach((card) => {
+        const item = document.createElement("div");
+        item.className = "grade-average";
+        item.appendChild(Object.assign(document.createElement("span"), { textContent: card.label }));
+        item.appendChild(Object.assign(document.createElement("strong"), { textContent: card.value }));
+        item.appendChild(Object.assign(document.createElement("small"), { textContent: card.hint || "" }));
+        cards.appendChild(item);
+      });
+    }
+    const total = Number(page.total) || 0;
+    const limit = Number(page.limit) || 10;
+    const offset = Number(page.offset) || 0;
+    const count = byId("jev-feedback-count");
+    if (count) count.textContent = `${total} comparison${total === 1 ? "" : "s"}`;
+    const pager = byId("jev-feedback-pager");
+    if (pager) {
+      const pageCount = Math.max(1, Math.ceil(total / limit));
+      const pageNumber = Math.floor(offset / limit) + 1;
+      pager.classList.toggle("hidden", total <= limit);
+      const label = byId("jev-feedback-page-label");
+      if (label) label.textContent = `Page ${pageNumber} of ${pageCount}`;
+      const prev = byId("jev-feedback-prev");
+      const next = byId("jev-feedback-next");
+      if (prev) prev.disabled = offset <= 0;
+      if (next) next.disabled = offset + (page.records || []).length >= total;
+    }
+    box.replaceChildren();
+    const visible = jevFeedbackVisibleRecords(page.records);
+    const rows = jevApi().tableRows(visible);
+    const anyFilterActive = Boolean(
+      state.jevFeedbackSearch.trim() ||
+        state.jevFeedbackProvider.trim() ||
+        state.jevFeedbackFrom.trim() ||
+        state.jevFeedbackDelta.trim() ||
+        state.jevFeedbackCost.trim(),
+    );
+    if (!rows.length) {
+      box.appendChild(Object.assign(document.createElement("p"), {
+        className: "panel-copy",
+        textContent: anyFilterActive
+          ? "No Jev comparisons match this filter."
+          : "No Jev score comparisons yet. Turn on Store AI execution history, then run an issue.",
+      }));
+      return;
+    }
+    rows.forEach((row) => {
+      const item = document.createElement("article");
+      item.className = "execution-item";
+      const heading = document.createElement("div");
+      heading.className = "panel-header";
+      const title = document.createElement("h3");
+      title.textContent = row.issueNumber ? `#${row.issueNumber} ${row.issueTitle}` : row.issueTitle || row.repository;
+      heading.appendChild(title);
+      heading.appendChild(Object.assign(document.createElement("span"), {
+        className: `status-pill ${row.statusTone}`,
+        textContent: row.statusLabel,
+      }));
+      item.appendChild(heading);
+      const meta = document.createElement("p");
+      meta.className = "panel-copy";
+      meta.textContent = [
+        `Baseline ${row.baselineScore}`,
+        `Jev ${row.jevScore}`,
+        `Combined ${row.modifiedScore}`,
+        `Δ ${row.scoreDelta}`,
+        row.routingChanged ? "Routing changed" : "Routing unchanged",
+        row.selected,
+        row.outcome,
+      ].join(" · ");
+      item.appendChild(meta);
+      box.appendChild(item);
+    });
+  }
+
+  async function refreshJevFeedback({ quiet = false } = {}) {
+    const repoIds = feedbackRepoIdsForQuery();
+    const requestId = state.jevFeedbackRequest + 1;
+    state.jevFeedbackRequest = requestId;
+    if (!feedbackRepositories().length) {
+      state.jevFeedback = { records: [], total: 0, offset: 0, limit: 10, summary: {} };
+      renderJevFeedback();
+      return;
+    }
+    try {
+      const page = await invoke("get_jev_feedback_background", {
+        repoIds,
+        offset: Math.max(0, Number(state.jevFeedbackOffset) || 0),
+        search: state.jevFeedbackSearch.trim(),
+        jevStatus: state.jevFeedbackStatus,
+        provider: "",
+        outcome: state.jevFeedbackOutcome,
+        routingChanged: state.jevFeedbackRouting,
+      });
+      if (requestId !== state.jevFeedbackRequest) return;
+      state.jevFeedback = page;
+      state.jevFeedbackOffset = Number(page.offset) || 0;
+      renderJevFeedback();
+    } catch (error) {
+      if (!quiet) showToast(String(error), "error");
+    }
+  }
+
   function renderExecutionHistory() {
     const box = byId("execution-history-list");
     if (!box) return;
@@ -2470,21 +2655,24 @@
     const view = usageReportView();
     const page = view.invocations;
     const rows = Array.isArray(page.rows) ? page.rows : [];
+    // An empty-string groupValue is a real selection (e.g. "Not graded"), so
+    // test for null rather than truthiness.
+    const groupSelected = state.usage.groupValue !== null;
     const heading = byId("usage-detail-heading");
     if (heading) {
-      heading.textContent = state.usage.groupValue
-        ? `Invocations in ${state.usage.groupValue}`
+      heading.textContent = groupSelected
+        ? `Invocations in ${state.usage.groupValue || "the unlabelled group"}`
         : "Every recorded invocation";
     }
     const clear = byId("usage-clear-drilldown");
-    if (clear) clear.classList.toggle("hidden", !state.usage.groupValue);
+    if (clear) clear.classList.toggle("hidden", !groupSelected);
     if (!rows.length) {
       box.appendChild(Object.assign(document.createElement("p"), {
         className: "panel-copy",
         textContent: api.emptyStateMessage({
           hasAnyUsage: view.hasAnyUsage,
           hasAnyActivity: view.hasAnyActivity,
-          filtered: api.hasActiveFilters(usageFilters()) || Boolean(state.usage.groupValue),
+          filtered: api.hasActiveFilters(usageFilters()) || groupSelected,
         }),
       }));
       renderUsagePager("detail", page);
@@ -2853,6 +3041,7 @@
       renderTools();
       renderReadiness();
       renderAiAgents();
+      renderJevConnection();
     } catch (error) {
       if (!quiet) showToast(errorText(error), "error");
     } finally {
@@ -4517,6 +4706,74 @@
     };
     executionSearch.addEventListener("input", () => queueExecutionSearch(false));
     executionSearch.addEventListener("search", () => queueExecutionSearch(true));
+    const queueJevSearch = (immediate) => {
+      state.jevFeedbackSearch = byId("jev-feedback-search")?.value || "";
+      state.jevFeedbackOffset = 0;
+      clearTimeout(state.jevFeedbackSearchTimer);
+      if (immediate) {
+        void refreshJevFeedback({ quiet: true });
+        return;
+      }
+      state.jevFeedbackSearchTimer = setTimeout(() => {
+        state.jevFeedbackSearchTimer = null;
+        void refreshJevFeedback({ quiet: true });
+      }, 300);
+    };
+    byId("jev-feedback-search")?.addEventListener("input", () => queueJevSearch(false));
+    byId("jev-feedback-search")?.addEventListener("search", () => queueJevSearch(true));
+    byId("jev-feedback-status")?.addEventListener("change", (event) => {
+      state.jevFeedbackStatus = event.target.value;
+      state.jevFeedbackOffset = 0;
+      void refreshJevFeedback({ quiet: true });
+    });
+    byId("jev-feedback-routing")?.addEventListener("change", (event) => {
+      state.jevFeedbackRouting = event.target.value;
+      state.jevFeedbackOffset = 0;
+      void refreshJevFeedback({ quiet: true });
+    });
+    byId("jev-feedback-outcome")?.addEventListener("change", (event) => {
+      state.jevFeedbackOutcome = event.target.value;
+      state.jevFeedbackOffset = 0;
+      void refreshJevFeedback({ quiet: true });
+    });
+    byId("jev-feedback-outcome")?.addEventListener("search", (event) => {
+      state.jevFeedbackOutcome = event.target.value;
+      state.jevFeedbackOffset = 0;
+      void refreshJevFeedback({ quiet: true });
+    });
+    // Provider/model, date, delta, and cost filter the already-fetched page
+    // client-side (see jevFeedbackVisibleRecords), so these just re-render.
+    byId("jev-feedback-provider")?.addEventListener("input", (event) => {
+      state.jevFeedbackProvider = event.target.value;
+      renderJevFeedback();
+    });
+    byId("jev-feedback-from")?.addEventListener("change", (event) => {
+      state.jevFeedbackFrom = event.target.value;
+      renderJevFeedback();
+    });
+    byId("jev-feedback-delta")?.addEventListener("input", (event) => {
+      state.jevFeedbackDelta = event.target.value;
+      renderJevFeedback();
+    });
+    byId("jev-feedback-cost")?.addEventListener("input", (event) => {
+      state.jevFeedbackCost = event.target.value;
+      renderJevFeedback();
+    });
+    byId("jev-feedback-prev")?.addEventListener("click", () => {
+      const page = jevFeedbackView();
+      const limit = Number(page.limit) || 10;
+      state.jevFeedbackOffset = Math.max(0, (Number(page.offset) || 0) - limit);
+      void refreshJevFeedback();
+    });
+    byId("jev-feedback-next")?.addEventListener("click", () => {
+      const page = jevFeedbackView();
+      const limit = Number(page.limit) || 10;
+      const offset = Number(page.offset) || 0;
+      const total = Number(page.total) || 0;
+      if (offset + (page.records || []).length >= total) return;
+      state.jevFeedbackOffset = offset + limit;
+      void refreshJevFeedback();
+    });
     byId("execution-history-prev").addEventListener("click", () => {
       const page = executionHistoryView();
       const limit = Number(page.limit) || 10;

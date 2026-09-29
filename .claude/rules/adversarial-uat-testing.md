@@ -49,11 +49,12 @@ label from a trusted author; the worker owns VERSION.
   execution history so the app can surface the non-blocking follow-up to the
   user.
 - All exchanges finish before delivery. Clean passes use normal delivery;
-  cap-hit delivery explicitly disables automation and retains the PR and branch
-  while the issue waits for trusted-author adjudication in AI Needs Input.
-  Preserve the cap-hit PR body marker across scheduler runs: the PR reconciler
-  must skip that marker even if automatic approval/promotion is enabled. Only
-  a clean UAT follow-up removes the hold.
+  cap-hit delivery files the unresolved notes in a separate labelled follow-up
+  issue, then uses normal delivery settings for the committed best-effort
+  implementation. The adversarial stage remains `FAILED` with outcome
+  `cap_hit`, but the original issue does not wait for trusted-author input.
+  Older cap-hit PR markers are informational legacy state; reconciliation
+  removes the old hold notice and continues automatically.
 - State checkpoints retain the phase and cap across restarts and quota pauses.
   History is gated by `ai_execution_history_enabled`; migration 3 adds summary
   columns and per-round records to the existing database. Initial assessment

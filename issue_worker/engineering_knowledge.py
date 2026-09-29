@@ -2463,7 +2463,7 @@ class KnowledgeQueryService:
                 body=prompt[:4000],
                 labels=["Question", "knowledge"],
                 candidates=candidates,
-                routing_optimization=str(routing.get("routingOptimization") or routing.get("routing_optimization") or "best"),
+                routing_optimization=str(routing.get("routingOptimization") or routing.get("routing_optimization") or "cost"),
                 allow_usage_credit_models=bool(routing.get("allowUsageCreditModels") or routing.get("allow_usage_credit_models")),
             )
             raw = run_provider_router(
@@ -2481,7 +2481,7 @@ class KnowledgeQueryService:
                 router_provider=str(host.get("id")),
                 router_model=str(host.get("routerModel") or host.get("model") or ""),
                 router_effort=str(host.get("routerEffort") or "low"),
-                routing_optimization=str(routing.get("routingOptimization") or "best"),
+                routing_optimization=str(routing.get("routingOptimization") or "cost"),
                 allow_usage_credit_models=bool(routing.get("allowUsageCreditModels")),
             )
             selected_key = str(decision.get("provider") or host.get("id"))

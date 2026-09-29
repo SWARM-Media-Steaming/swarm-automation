@@ -318,13 +318,14 @@ class CostEstimateTests(unittest.TestCase):
         self.assertEqual(first.rate_id, again.rate_id)
         self.assertNotEqual(first.cost, today.cost)
 
-    def test_a_model_without_a_cache_rate_still_discounts_cache_hits(self) -> None:
+    def test_a_model_without_a_cache_rate_leaves_cache_hits_unpriced(self) -> None:
         with _catalog((_price(cached_input_per_million=None, cache_write_per_million=None),)):
             estimate = estimate_invocation_cost(
                 model="test-model", input_tokens=0, output_tokens=0,
                 cached_input_tokens=1_000_000,
             )
-        self.assertAlmostEqual(estimate.cost, 3.0 * model_pricing.CACHED_INPUT_RATE_FACTOR)
+        self.assertIsNone(estimate.cost)
+        self.assertNotEqual(estimate.status, model_pricing.PRICING_STATUS_PRICED)
 
 
 class TimestampTests(unittest.TestCase):

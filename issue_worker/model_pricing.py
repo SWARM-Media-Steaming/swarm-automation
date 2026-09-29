@@ -156,10 +156,10 @@ _XAI_PRICING = "https://x.ai/api"
 _CACHE_READ_FACTOR = 0.1
 _CACHE_WRITE_FACTOR = 1.25
 
-#: Fallback used only when a catalogued model gives no explicit cache-read
-#: rate: every supported provider discounts a cache hit, and charging one at
-#: the full fresh-input rate would overstate the estimate far more than this
-#: conventional 10% understates it.
+#: Conventional cache-hit discount. No longer applied by the estimator: a
+#: catalog entry with no explicit cache-read rate yields an unpriced estimate
+#: for cache-billed tokens rather than a guessed figure. Kept exported for
+#: callers that still reference it.
 CACHED_INPUT_RATE_FACTOR = 0.1
 
 
@@ -531,13 +531,17 @@ def estimate_invocation_cost(
     fresh_input = max(0, raw_input - combined) if cached_tokens_included_in_input else raw_input
 
     cached_rate = price.cached_input_per_million
-    if cached_rate is None:
-        cached_rate = price.input_per_million * CACHED_INPUT_RATE_FACTOR
     write_rate = price.cache_write_per_million
     if write_rate is None:
         # The provider does not meter cache creation separately, so those
         # tokens were already billed as ordinary input at the read rate.
         write_rate = cached_rate
+    # Never guess a cache discount: cache-billed tokens with no catalogued
+    # rate make the whole estimate Tokens only / Unpriced.
+    if (reads and cached_rate is None) or (writes and write_rate is None):
+        return _unpriced(PRICING_STATUS_NO_EFFECTIVE_PRICE)
+    cached_rate = cached_rate or 0.0
+    write_rate = write_rate or 0.0
 
     try:
         cost = (

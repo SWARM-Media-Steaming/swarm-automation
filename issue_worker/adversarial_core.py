@@ -35,7 +35,14 @@ DEFINITION = ".swarm/tests.json"
 TEST_ROOT = "tests/adversarial/"
 CAP_HIT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-cap-hit -->"
 CAP_HIT_PR_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing after three fix/re-test rounds. "
-                     "Automation is held; review the failing tests and adjudicate on the linked issue.\n\n")
+                     "The delivered commit is being released as best effort; unresolved notes are "
+                     "tracked in a follow-up issue.\n\n")
+# PRs created by workers before the automatic follow-up handoff used this
+# exact body. Keep it recognizable so reconciliation can remove the stale
+# human-blocker copy as well as the marker.
+CAP_HIT_PR_LEGACY_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still failing after three fix/re-test rounds. "
+                            "Automation is held; review the failing tests and adjudicate on the linked issue.\n\n")
+CAP_FOLLOWUP_LABEL = ("adversarial-follow-up", "FBCA04", "Adversarial findings deferred for later work")
 ADVERSARIAL_HANDOFF_MARKER = "swarm-issue-worker:adversarial-disabled-handoff"
 # A later round's fresh-context tester rediscovering an earlier round's
 # out-of-scope bug almost never reproduces the same title/body wording, so an
@@ -441,10 +448,12 @@ class AdversarialStage:
         failures = "\n".join(f"- {r['id']}: {r['output'][-2000:]}" for r in loop["results"] if r["exit_code"])
         return (
             "## Summary\nAdversarial UAT did not pass after three fix/re-test rounds. Delivered as best "
-            "effort: this is the last fix attempt, not a verified-clean pass.\n\n" +
+            "effort: this is the last fix attempt, not a verified-clean pass. The unresolved notes "
+            "were filed for later work and do not require a human response on this issue.\n\n" +
             self.summary_line(loop) + "\n" + failures +
-            "\n\n## Still failing\nThese adversarial tests were not satisfied. Automatic approval, "
-            "merging and promotion are held; review the linked PR and adjudicate the failing tests.\n"
+            "\n\n## Deferred adversarial notes\nThese tests were not satisfied within the bounded "
+            "three-round budget. The implementation commit is delivered as best effort; the "
+            "follow-up issue contains the notes for a later pass.\n"
         )
 
 
@@ -738,7 +747,10 @@ class AdversarialStageMixin:
         # --no-renames sees a moved test as a deletion plus an addition.
         paths = self.git("diff", "--no-renames", "--name-only", "-z", baseline).split("\0")
         paths += self.git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
-        return {p for p in paths if p and (not p.startswith(".swarm/") or p == DEFINITION)}
+        # Bytecode is a side effect of running tests, never a deliberate edit;
+        # a repo that committed it must not fail every tester run.
+        return {p for p in paths if p and (not p.startswith(".swarm/") or p == DEFINITION)
+                and "__pycache__" not in p.split("/") and not p.endswith(".pyc")}
 
     def reject_adversarial_edits(self, baseline: str, error: Exception) -> tuple[list[str], Path]:
         """Archive rejected tester work, then restore the guarded baseline.
@@ -1023,6 +1035,77 @@ class AdversarialStageMixin:
                 # file this same finding, deduplicated by the same marker.
                 log(f"Could not file out-of-scope {stage.log_name} finding for #{self.issue.number}: {error}")
 
+    def file_cap_followup(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
+        """File unresolved cap-hit notes without blocking the original issue.
+
+        The three-round cap is a bounded handoff, not a request for a trusted
+        user to adjudicate the original issue. The marker/search pair makes a
+        retry after `gh issue create` succeeds but its output is lost
+        idempotent.
+        """
+        from ai_execution_history import sanitize_text
+        from swarm_issue_worker import WorkerError, github_issue_url_from_output, log
+
+        existing = loop.get("cap_followup")
+        if isinstance(existing, dict) and existing.get("url"):
+            return str(existing["url"])
+
+        provider = str((loop.get("delivery_choice") or {}).get("key") or self.choice.key)
+        marker = (f"<!-- swarm-issue-worker:adversarial-cap-follow-up:issue:{self.issue.number};"
+                  f"stage:{stage.slug} -->")
+        url = ""
+        try:
+            listed = self.github.gh([
+                "issue", "list", "--repo", self.config.github_repository, "--state", "all",
+                "--search", f'"{marker}" in:body', "--json", "body,url", "--limit", "20",
+            ], provider)
+            try:
+                issues = json.loads(listed or "[]")
+            except json.JSONDecodeError:
+                issues = []
+            if isinstance(issues, list):
+                prior = next((item for item in issues
+                              if marker in str(item.get("body") or "")), None)
+                if prior:
+                    url = github_issue_url_from_output(str(prior.get("url") or ""))
+        except WorkerError as error:
+            log(f"Could not search for an existing adversarial cap follow-up for #{self.issue.number}: {error}")
+
+        if not url:
+            title = f"Address deferred {stage.label.lower()} findings from #{self.issue.number}"
+            title = title[:120]
+            notes = sanitize_text(stage.cap_hit_output(loop))
+            body = (
+                f"{marker}\n"
+                f"Follow-up work deferred from {stage.label.lower()} on issue #{self.issue.number}.\n\n"
+                f"- Original issue: {self.issue.url}\n"
+                f"- Delivered commit: `{loop.get('completion', '')}`\n"
+                f"- Round cap: `{MAX_ROUNDS}` fix/re-test rounds\n\n"
+                "## Adversarial notes\n"
+                "The original issue was delivered as best effort after the bounded review budget. "
+                "Work the notes below in a later issue; do not reopen the original delivery just "
+                "to obtain a response.\n\n"
+                f"{notes}\n"
+            )
+            labels = (CAP_FOLLOWUP_LABEL,) + tuple(
+                label for label in stage.finding_labels if label[0] != CAP_FOLLOWUP_LABEL[0]
+            )
+            try:
+                output = self.file_labelled_issue(title, body, labels, provider)
+                url = github_issue_url_from_output(output)
+            except WorkerError as error:
+                log(f"WARNING: Could not file adversarial cap follow-up for #{self.issue.number}: {error}")
+
+        loop["cap_followup"] = {
+            "marker": marker,
+            "url": url,
+            "status": "created" if url else "create_unknown",
+        }
+        self.save_stage(stage, loop)
+        if url:
+            log(f"Filed deferred {stage.log_name} notes for #{self.issue.number}: {url}")
+        return url
+
     def pause_adversarial(self) -> int:
         from swarm_issue_worker import QUOTA_PAUSED_EXIT_CODE, iso_timestamp
         # A probe can stop before Codex creates a session. A placeholder gives
@@ -1173,6 +1256,9 @@ class AdversarialStageMixin:
                 # attempt actually completes, whatever that attempt concludes.
                 loop.pop("review_error", None)
                 self.file_stage_findings(stage, loop, stage.findings_to_file(report))
+                advise = getattr(self, "advise_adversarial_findings", None)
+                if callable(advise):
+                    advise(stage, report)
                 loop.pop("retry_rejection", None)
                 loop["excluded_suites"] = sorted(candidate_excluded)
                 before = sum(r["exit_code"] != 0 for r in loop["results"])
@@ -1289,7 +1375,33 @@ class AdversarialStageMixin:
         if not finished:
             checkpoint = detached[-1][1] if detached else previous
             if not checkpoint:
-                raise RuntimeError("No adversarial stage state to deliver")
+                # A worker can reach this point after recovering an older
+                # implementation whose adversarial checkpoint was written by
+                # an earlier version, or after a checkpoint was lost while a
+                # stage setting changed. The implementation commit is still
+                # the checkout's current HEAD, so rebuild the first enabled
+                # stage from that durable boundary instead of crashing the
+                # scheduler with an uncaught RuntimeError.
+                completion = self.git("rev-parse", "HEAD")
+                state = self.read_state()
+                output = str(state.get("previous_completion_comment") or "")
+                if not output and self.ai_output_file.exists():
+                    output = self.ai_output_file.read_text(encoding="utf-8", errors="replace")
+                if not output:
+                    output = "Recovered implementation checkpoint; review the current repository state."
+                if stages:
+                    from swarm_issue_worker import log
+                    log(
+                        "Adversarial stage checkpoint was missing; rebuilding the first enabled stage "
+                        f"from current commit {completion[:12]}."
+                    )
+                    self.initialize_stage(stages[0], completion, output)
+                    return self.run_adversarial_pipeline()
+                # If every adversarial stage is disabled, no review remains to
+                # gate delivery. This is the same safe path used for a normal
+                # implementation with adversarial reviews turned off.
+                self.finalize_issue(completion, output)
+                return ISSUE_COMPLETED_EXIT_CODE
             choice_data = checkpoint.get("delivery_choice")
             self.choice = ProviderChoice(**choice_data) if choice_data else self.choice
             self.update_state_for_choice(self.choice)
@@ -1314,13 +1426,18 @@ class AdversarialStageMixin:
                        if loop.get("outcome") == "cap_hit"), None)
         if capped:
             stage, loop = capped
-            # A cap hit is not a verified-clean pass, so it must not enter the
-            # same automatic approve/merge/promote path a clean delivery does
-            # (see issue-branch-delivery.md). finalize_issue still owns the
-            # push/PR step, but with automation held it hands off to
-            # trusted-author adjudication instead of reporting a misleading
-            # "Completed".
-            self.finalize_issue(last["completion"], stage.cap_hit_output(loop), allow_automation=False)
+            followup_url = self.file_cap_followup(stage, loop)
+            output = stage.cap_hit_output(loop)
+            if followup_url:
+                output += f"\n\nFollow-up issue: {followup_url}\n"
+            # A cap hit is still recorded as FAILED in the adversarial review,
+            # but it is a bounded handoff rather than a human blocker. Deliver
+            # the last committed implementation through the normal completion
+            # path; the follow-up issue carries the unresolved notes.
+            self.finalize_issue(
+                last["completion"], output, allow_automation=True,
+                adversarial_cap_hit=True,
+            )
         else:
             self.finalize_issue(last["completion"], finished[0][1]["implementation_output"])
         return ISSUE_COMPLETED_EXIT_CODE

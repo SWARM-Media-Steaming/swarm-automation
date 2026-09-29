@@ -212,7 +212,8 @@ fn provider_scheduler_arguments_carry_dynamic_routing_settings() {
     // preference and the same credit-model filter the desktop applies.
     assert!(off
         .windows(2)
-        .any(|pair| pair[0] == "--routing-optimization" && pair[1] == "best"));
+        .any(|pair| pair[0] == "--routing-optimization" && pair[1] == "cost"));
+    assert!(off.iter().any(|arg| arg == "--no-jev-enabled"));
     assert!(off
         .iter()
         .any(|arg| arg == "--no-allow-usage-credit-models"));
@@ -254,7 +255,7 @@ fn the_cost_routing_preference_persists_to_disk_as_a_string() {
     let app = test_app.handle();
     let repo_dir = real_git_checkout();
     let mut config = valid_config(repo_dir.path());
-    assert_eq!(config.routing_optimization, "best");
+    assert_eq!(config.routing_optimization, "cost");
 
     config.routing_optimization = "cost".into();
     let saved = save_config(app.clone(), app.state(), config).expect("save_config should succeed");
@@ -1471,7 +1472,8 @@ fn repo_worker_args_carries_the_saved_routing_toggle_and_preference() {
     );
     assert!(off.contains(&"--no-dynamic-model-routing".to_string()));
     assert!(!off.contains(&"--dynamic-model-routing".to_string()));
-    assert_eq!(pair(&off, "--routing-optimization"), Some("best"));
+    assert_eq!(pair(&off, "--routing-optimization"), Some("cost"));
+    assert!(off.contains(&"--no-jev-enabled".to_string()));
 
     config.dynamic_model_routing = true;
     config.routing_optimization = "cost".into();

@@ -159,15 +159,15 @@ now genuine AI discretion bounded by operator settings:
    older comment or docstring as saying the tier table is the sole source of
    the worker model.
 
-   What governs the choice is the global `routing_optimization` setting
-   ("Optimize routing for cost" on the AI Configuration page, `"cost"` or
-   `"best"`, defaulting to `"best"`): `"cost"` tells the router to start from
-   the least expensive capable catalog model and treat a frontier model as a
-   last resort at complexity 9 or 10 (high risk may justify a capable mid-tier
-   model); `"best"` tells it to ignore cost and fit the model to the task
-   (explicitly *not* "always pick the top tier"). The prompt is the control —
-   `resolve_routing_decision` still accepts a valid catalog name at any
-   complexity.
+   Automatic routing is always cost-first after capability, expected-success,
+   safety, and context-fit gates (issue #299). Among adequately capable
+   catalog models, Swarm picks the lowest estimated total cost. A frontier
+   model is a last resort at complexity 9 or 10. High risk may justify a
+   capable mid-tier model. Latency and provider preference only break a
+   cost/capability tie. Saved `"best"` configurations migrate to `"cost"`.
+   Explicit manual model selections remain respected when Dynamic Model
+   Routing is off. The prompt is the control — `resolve_routing_decision`
+   still accepts a valid catalog name at any complexity.
 
    The complexity/risk/context scores are still graded and recorded — they are
    now inputs the router reasons over rather than a lookup key.
@@ -195,7 +195,7 @@ Since 2026-09-22, each model also carries a short built-in description of what
 it tends to be good for (`_MODEL_DESCRIPTIONS` / `model_description`, now the
 by-slug view of `_MODEL_CATALOG`) — Haiku-tier "fast, cheap, well-scoped"
 through Opus-tier "large, ambiguous, high-risk" — plus a relative `cost` rank
-comparable across providers, which is what makes "optimize for cost" a
+comparable across providers, which is what makes cost-first routing a
 cross-provider judgement rather than a per-tier one. These are shown in the
 router prompt and folded into the stored `tier_explanation`, so they show up in
 AI execution history and the routing notice posted on the issue. Unlike the
@@ -208,6 +208,28 @@ Adding a provider's tiers or strengths without a matching edit on the other
 side (Python vs. `config.rs`) is a real way to introduce drift — the router
 prompt and the saved config would disagree about that provider's defaults. The
 model catalog is the one exception: Python-only by design, see above.
+
+## Jev Decision Engine
+
+Issue #299 adds Jev as an optional typed decision layer, not a fourth
+implementation agent. Do not add `jev` to `KNOWN_PROVIDERS`. Discovery,
+timeout, retry, health, and sanitized errors live in `issue_worker/jev_cli.py`
+(CLI adapter only — no HTTP client). Typed contracts, confidence policy, and
+fallback live in `issue_worker/decision_engine.py` behind
+`DecisionEngine.evaluate(type, context)` (`JevDecisionEngine`,
+`RuleBasedDecisionEngine`, `LlmDecisionEngine`).
+
+The global `jev_enabled` toggle is off by default. When off, existing Swarm
+behavior is unchanged and Jev adds no call, cost, or latency. When on, Jev
+feeds structured scores into the existing pre-flight/router path; Swarm still
+owns the final provider/model/effort pick. Persistence is migration 7
+(`jev_decisions`, `jev_score_comparisons`): baseline Swarm scores, Jev
+scores, and modified/combined scores are stored separately. The Feedback
+"Jev scores" tab reads `--jev-feedback` from `ai_execution_history.py`.
+
+Jev must never merge code, approve a PR, suppress a failed test, skip
+configured UAT/Cyber, or close a blocking security finding. Low-confidence
+cyber results never suppress a finding.
 
 ## Model Routing Calibration
 
@@ -352,6 +374,13 @@ origin, or log prefix is a latent bug; use the stage. The rules files
 `DEFINITION`, `RESULT_MARKER`, `read_definition`, `run_suites`, …) because
 registered adversarial suites under `tests/adversarial/` import them from
 there; keep those aliases when moving code around.
+
+`MAX_ROUNDS` (currently 3) counts **fix/re-test rounds after round 0**, not
+total tester calls. A continually failing stage therefore runs
+`1 + MAX_ROUNDS` tester phases and `MAX_ROUNDS` fixer phases before
+`cap_hit` (today: 4 tests, 3 fixes). When changing the cap, update both
+counts in unit tests (`test_cap_holds_…`) and keep them aligned with
+`tests/adversarial/test_issue294_three_round_cap.py`.
 
 ## Per-prompt AI token usage is centralized, not per-agent
 
