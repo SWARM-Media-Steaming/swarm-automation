@@ -105,6 +105,10 @@ dearer and not measurably weaker. A session already started keeps its model.
 This is not a separate scoring bonus; measured capability and cost still decide
 which candidate wins.
 
+The over-qualification penalty is waived for any model that costs no more than
+the cheapest model *capable of the task*, so a newer release at its
+predecessor's price is not penalized for being stronger.
+
 ## Complexity levels
 
 `TRIVIAL`, `SIMPLE`, `STANDARD`, `COMPLEX`, `VERY_COMPLEX`, `EXTREME` — see

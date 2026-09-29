@@ -86,6 +86,20 @@ class RoutingCatalogTests(AvailableModelsTestCase):
         self.assertIn("claude-sonnet-5-5", dynamic_router.catalog_model_names(("claude",)))
         self.assertIn("claude-opus-5-5", dynamic_router.catalog_model_names(("claude",)))
 
+    def test_a_measurably_stronger_release_at_the_same_price_is_not_penalized_for_it(self) -> None:
+        available_models.configure(CLAUDE)
+        catalog = tuple(
+            dataclasses.replace(spec, relative_capability=5) if spec.model == "claude-sonnet-5-5" else spec
+            for spec in model_router.load_model_catalog()
+        )
+        peer = next(s for s in catalog if s.model == "claude-sonnet-5")
+        stronger = next(s for s in catalog if s.model == "claude-sonnet-5-5")
+        self.assertEqual(stronger.relative_cost, peer.relative_cost)
+        self.assertGreater(stronger.relative_capability, peer.relative_capability)
+        self.assertEqual(_route(catalog, 5).model, "claude-sonnet-5-5")
+        # A dearer model that is also more capable than needed still loses.
+        self.assertNotIn(_route(catalog, 5).model, ("claude-opus-5", "claude-opus-5-5"))
+
     def test_inferred_metadata_is_flagged_and_never_invents_benchmarks(self) -> None:
         available_models.configure(CLAUDE)
         spec = next(s for s in model_router.load_model_catalog() if s.model == "claude-sonnet-5-5")

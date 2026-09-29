@@ -962,7 +962,16 @@ def route(
     normalizer = _BenchmarkNormalizer(catalog)
 
     eligible = _eligible_models(catalog, availability)
-    cheapest_cost = min((model.relative_cost for model in eligible), default=None)
+    # The exemption from the over-qualification penalty is measured against the
+    # cheapest model that can do this work. Measured against the cheapest model
+    # overall (a model too weak for the task), it never applied, so a newer
+    # release at the same price as its predecessor was penalized for being
+    # more capable and lost to it.
+    capable_costs = [model.relative_cost for model in eligible
+                     if model.relative_capability >= required_capability]
+    cheapest_cost = min(
+        capable_costs or [model.relative_cost for model in eligible], default=None
+    )
     scored: list[RoutingCandidate] = []
     for model in eligible:
         for effort in model.supported_efforts:
