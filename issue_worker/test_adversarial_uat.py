@@ -143,20 +143,23 @@ class AdversarialUatTests(unittest.TestCase):
             (self.repo / "tracked.txt").write_text("broken\n")
             return status
         with self.patches(never_fix), mock.patch.object(self.worker, "approve_pull_request") as approve, mock.patch.object(self.worker, "merge_pull_request") as merge, mock.patch.object(self.worker, "auto_promote_integration_branch") as promote, mock.patch.object(self.worker, "push_ref", wraps=self.worker.push_ref) as push, mock.patch.object(self.worker, "cleanup_no_code_branch") as cleanup:
+            merge.return_value = self.git("rev-parse", "HEAD")
             self.assertEqual(self.worker.run_adversarial_delivery(), 10)
         self.assertEqual([c[0] for c in self.calls].count("fix"), 3)
         # Round 0 assessment plus one re-test after each of the three fix rounds.
         self.assertEqual([c[0] for c in self.calls].count("test"), 1 + uat.MAX_ROUNDS)
-        # A cap hit is not a verified-clean pass: the branch is pushed and the
-        # PR opened, but automation never approves, merges, or promotes it.
-        push.assert_called_once()
-        approve.assert_not_called(); merge.assert_not_called(); promote.assert_not_called(); cleanup.assert_not_called()
+        # A cap hit is not a verified-clean pass, but it is a bounded automatic
+        # handoff: the commit is pushed, approved, merged and promoted while
+        # the unresolved notes go to a separate issue.
+        self.assertGreaterEqual(push.call_count, 1)
+        approve.assert_called_once(); merge.assert_called_once(); promote.assert_called_once(); cleanup.assert_not_called()
         self.assertEqual(len(self.comments_posted), 1)
         self.assertIn("did not pass after three fix/re-test rounds", self.comments_posted[0])
-        self.assertIn("AI needs your input", self.comments_posted[0])
-        self.assertTrue(any("AI Needs Input" in args for args in self.api))
+        self.assertIn("Follow-up issue:", self.comments_posted[0])
+        self.assertNotIn("AI needs your input", self.comments_posted[0])
+        self.assertFalse(any("AI Needs Input" in args for args in self.api))
         row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
-        self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (3, "cap_hit", "awaiting_input"))
+        self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (3, "cap_hit", "completed"))
         self.assertEqual(row["pull_request_url"], "https://example.invalid/pull/181")
 
     def test_first_pass_same_provider_is_a_fresh_context_and_history_can_be_off(self):
@@ -884,14 +887,14 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertIn("black-box", plan["instructions"])
         self.assertFalse((self.repo / uat.DEFINITION).exists())
 
-    def test_future_pr_reconciliation_cannot_auto_merge_a_cap_hit(self):
+    def test_future_pr_reconciliation_releases_a_legacy_cap_hit(self):
         self.prepare(auto=True)
         payload = [{"url": "https://example.invalid/pull/181", "state": "OPEN", "headRefName": "ai/claude/issue-180",
                     "headRefOid": self.git("rev-parse", "HEAD"), "isDraft": False, "mergeable": "MERGEABLE",
                     "reviewDecision": "APPROVED", "body": uat.CAP_HIT_PR_NOTICE + "Implementation"}]
         with mock.patch.object(self.worker.github, "gh", return_value=json.dumps(payload)), mock.patch.object(self.worker, "approve_pull_request") as approve, mock.patch.object(self.worker, "merge_pull_request") as merge:
             self.worker.reconcile_issue_pull_requests()
-        approve.assert_not_called(); merge.assert_not_called()
+        approve.assert_not_called(); merge.assert_called_once()
 
     def test_reused_cap_hit_pr_is_held_before_push_and_only_clean_uat_releases_it(self):
         self.prepare()

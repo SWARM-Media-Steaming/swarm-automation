@@ -185,9 +185,10 @@ class AdversarialSecurityTests(unittest.TestCase):
         # survives on disk afterwards.
         deliver = self.worker.finalize_issue
 
-        def capture(commit_sha, ai_output, *, allow_automation=True):
+        def capture(commit_sha, ai_output, *, allow_automation=True, adversarial_cap_hit=False):
             self.delivered_state = self.worker.read_state()
-            return deliver(commit_sha, ai_output, allow_automation=allow_automation)
+            return deliver(commit_sha, ai_output, allow_automation=allow_automation,
+                           adversarial_cap_hit=adversarial_cap_hit)
 
         stack.enter_context(mock.patch.object(self.worker, "finalize_issue", side_effect=capture))
         return stack

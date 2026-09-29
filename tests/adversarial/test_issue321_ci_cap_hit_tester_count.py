@@ -5,7 +5,7 @@ The adversarial-UAT rules define round 0 as the uncounted independent
 assessment. Each counted round is one fixer phase plus one re-test. With
 MAX_ROUNDS counted repair rounds, a continually failing stage therefore
 performs (1 + MAX_ROUNDS) tester phases and MAX_ROUNDS fixer phases, then
-delivers as best effort with automation held.
+delivers as best effort with unresolved notes handed to a follow-up issue.
 
 PR #306 lowered MAX_ROUNDS from 6 to 3 and updated the fixer-count
 assertion, but left
