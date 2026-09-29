@@ -71,7 +71,8 @@ class ReviewContractTests(LocalReviewFixture, unittest.TestCase):
     def test_unresolved_security_cap_is_automatically_delivered_with_deferred_notes(self):
         self.prepare(vulnerable=True)
         self.worker.config = dataclasses.replace(self.worker.config, auto_approve=True,
-                                                 auto_merge=True, auto_promote=True)
+                                                 auto_merge=True, auto_promote=True,
+                                                 adversarial_best_effort_merge=True)
         self.start()
 
         def unresolved(prompt, activity=""):
@@ -209,6 +210,8 @@ class ReviewContractTests(LocalReviewFixture, unittest.TestCase):
 
     def test_renaming_an_unfixed_vulnerability_does_not_verify_its_remediation(self):
         self.prepare(vulnerable=True)
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True)
         self.start()
 
         def never_fix(prompt, activity=""):
@@ -230,6 +233,8 @@ class ReviewContractTests(LocalReviewFixture, unittest.TestCase):
 
     def test_a_failing_reproduction_overrides_a_reviewers_claim_of_remediation(self):
         self.prepare(vulnerable=True)
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True)
         self.start()
 
         def false_clear(prompt, activity=""):
