@@ -136,6 +136,12 @@ server-side over that filtered union rather than merging per-repo responses in
 JavaScript. GitHub backlog import is the exception: it runs once per selected
 configured repository and returns a success/failure result for each one.
 
+The GitHub completion-comment renderer `render_ai_usage_markdown` in
+`issue_worker/token_usage.py` must preserve missing token values in its totals:
+sum values that were recorded, show `—` when no row has a value for that
+metric, and keep a genuine zero as `0`. Its per-invocation table follows the
+same missing-versus-zero distinction.
+
 ## Dynamic model routing
 
 Models the operator has ruled out are listed once in

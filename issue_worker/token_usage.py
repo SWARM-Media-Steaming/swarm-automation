@@ -471,7 +471,7 @@ def render_ai_usage_markdown(events: Iterable[dict[str, Any]]) -> str:
         "| Estimated cost |",
         "|---|---|---|---|---:|---:|---:|---:|---:|---:|",
     ]
-    total_input = total_cached = total_reasoning = total_output = total_tokens = 0
+    total_input = total_cached = total_reasoning = total_output = total_tokens = None
     total_cost = 0.0
     any_cost = False
     for index, record in enumerate(records, start=1):
@@ -484,22 +484,27 @@ def render_ai_usage_markdown(events: Iterable[dict[str, Any]]) -> str:
             f"{_format_int(record.reasoning_tokens)} | {_format_int(record.output_tokens)} | "
             f"{_format_int(record.total_tokens)} | {_format_cost(record.estimated_cost)} |"
         )
-        total_input += record.input_tokens or 0
-        total_cached += record.cached_input_tokens or 0
-        total_reasoning += record.reasoning_tokens or 0
-        total_output += record.output_tokens or 0
-        total_tokens += record.total_tokens or 0
+        if record.input_tokens is not None:
+            total_input = (0 if total_input is None else total_input) + record.input_tokens
+        if record.cached_input_tokens is not None:
+            total_cached = (0 if total_cached is None else total_cached) + record.cached_input_tokens
+        if record.reasoning_tokens is not None:
+            total_reasoning = (0 if total_reasoning is None else total_reasoning) + record.reasoning_tokens
+        if record.output_tokens is not None:
+            total_output = (0 if total_output is None else total_output) + record.output_tokens
+        if record.total_tokens is not None:
+            total_tokens = (0 if total_tokens is None else total_tokens) + record.total_tokens
         if record.estimated_cost is not None:
             total_cost += record.estimated_cost
             any_cost = True
     lines.append("")
     lines.append("**AI Usage Totals**")
     lines.append("")
-    lines.append(f"Input: {total_input:,}  ")
-    lines.append(f"Cached Input: {total_cached:,}  ")
-    lines.append(f"Reasoning: {total_reasoning:,}  ")
-    lines.append(f"Output: {total_output:,}  ")
-    lines.append(f"Total Tokens: {total_tokens:,}  ")
+    lines.append(f"Input: {_format_int(total_input)}  ")
+    lines.append(f"Cached Input: {_format_int(total_cached)}  ")
+    lines.append(f"Reasoning: {_format_int(total_reasoning)}  ")
+    lines.append(f"Output: {_format_int(total_output)}  ")
+    lines.append(f"Total Tokens: {_format_int(total_tokens)}  ")
     lines.append(f"Estimated Cost: {_format_cost(total_cost) if any_cost else '—'}  ")
     lines.append(f"AI Invocations: {len(records)}")
     return "\n".join(lines) + "\n"

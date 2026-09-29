@@ -347,6 +347,40 @@ class RenderAiUsageMarkdownTests(unittest.TestCase):
         self.assertIn("Total Tokens: 350", markdown)
         self.assertIn("AI Invocations: 2", markdown)
 
+    def test_totals_preserve_missing_values_and_sum_known_values(self) -> None:
+        markdown = render_ai_usage_markdown(
+            [
+                _record(
+                    input_tokens=None,
+                    output_tokens=0,
+                    cached_input_tokens=None,
+                    reasoning_tokens=None,
+                    total_tokens=None,
+                    estimated_cost=None,
+                )
+            ]
+        )
+        totals = markdown.split("**AI Usage Totals**", 1)[1]
+        self.assertIn("Input: —", totals)
+        self.assertIn("Cached Input: —", totals)
+        self.assertIn("Reasoning: —", totals)
+        self.assertIn("Output: 0", totals)
+        self.assertIn("Total Tokens: —", totals)
+
+    def test_totals_sum_known_values_when_some_rows_are_missing(self) -> None:
+        markdown = render_ai_usage_markdown(
+            [
+                _record(input_tokens=100, cached_input_tokens=None, reasoning_tokens=None, output_tokens=10, total_tokens=110),
+                _record(input_tokens=None, cached_input_tokens=5, reasoning_tokens=2, output_tokens=None, total_tokens=None),
+            ]
+        )
+        totals = markdown.split("**AI Usage Totals**", 1)[1]
+        self.assertIn("Input: 100", totals)
+        self.assertIn("Cached Input: 5", totals)
+        self.assertIn("Reasoning: 2", totals)
+        self.assertIn("Output: 10", totals)
+        self.assertIn("Total Tokens: 110", totals)
+
 
 class FormatUsageLogLineTests(unittest.TestCase):
     def test_includes_key_fields_and_nulls_missing_usage(self) -> None:
