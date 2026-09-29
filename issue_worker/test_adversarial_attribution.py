@@ -1,6 +1,5 @@
 import unittest
 
-from adversarial_core import AdversarialStage
 from adversarial_security import SECURITY_STAGE
 from adversarial_uat import UAT_STAGE
 from swarm_issue_worker import ProviderChoice
