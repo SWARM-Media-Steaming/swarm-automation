@@ -299,6 +299,19 @@ offered, credit-allowed, supports the effort, price no more than 5% higher, no
 clearly lower measured score); the worker applies it in
 `upgrade_to_latest_release` and records `upgraded_from` on the decision.
 
+**Routing calculator ("Try the router").** AI Configuration's Dynamic Model
+Routing panel opens a dialog (`#routing-calculator-modal`, `ui/routing-calculator.js`
+plus the `calc*` functions in `app.js`) that calls the `describe_routing_calculator`
+and `simulate_routing` commands. They run `issue_worker/routing_calculator.py`,
+which calls the worker's own `dynamic_router.scored_tier`, `candidate_catalog`
+and `latest_release` over the same catalog (the active calibration via
+`SWARM_MODEL_CALIBRATION_CATALOG`, plus the CLI-reported models), so it cannot
+drift from live routing. `scored_tier` is the one shared implementation of the
+model-and-effort choice; `_scored_tier_decision` wraps it. Its inputs are the
+values the AI router produces (task type, complexity, risk) plus the tool and an
+optional suggested model; it does not model the AI router's reading of an issue
+or Jev.
+
 Activation publishes the full calibration and its filtered routing models in
 one atomic `active_catalog.json` document. `load_active()` reads that document
 first; `calibration_active.json` is a compatibility/recovery copy. Status uses

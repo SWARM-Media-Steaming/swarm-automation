@@ -817,6 +817,32 @@ def _scored_tier_decision(
     that documented per-provider override still takes effect rather than
     being silently superseded by the scoring engine's own catalog.
     """
+    model, effort, explanation, _ = scored_tier(
+        candidate,
+        complexity,
+        task_type,
+        risk,
+        routing_optimization=routing_optimization,
+        allow_usage_credit_models=allow_usage_credit_models,
+    )
+    return model, effort, explanation
+
+
+def scored_tier(
+    candidate: RouterCandidate,
+    complexity: int,
+    task_type: str,
+    risk: str,
+    *,
+    routing_optimization: str,
+    allow_usage_credit_models: bool,
+) -> tuple[str, str, str, "_model_router.RoutingDecision | None"]:
+    """``_scored_tier_decision`` plus the scoring router's full decision.
+
+    The decision (with every scored candidate) is ``None`` when the static tier
+    table decided instead. The routing calculator uses this so it shows exactly
+    what the worker would do, from the one implementation.
+    """
     calibrated = _active_calibration_catalog()
     eligible = None if calibrated is None else {
         model.model for model in calibrated
@@ -825,7 +851,7 @@ def _scored_tier_decision(
     if tuple(candidate.tiers) != tuple(default_routing_tiers().get(candidate.key, ())):
         tier = tier_for_complexity(candidate.tiers, complexity)
         if eligible is None or tier.model in eligible:
-            return tier.model, tier.effort, describe_tier(candidate, tier, complexity)
+            return tier.model, tier.effort, describe_tier(candidate, tier, complexity), None
     try:
         catalog = calibrated if calibrated is not None else _model_router.load_model_catalog()
         disabled = {
@@ -849,12 +875,12 @@ def _scored_tier_decision(
                 disabled_models=frozenset(disabled),
             ),
         )
-        return decision.model, decision.effort, describe_scored_tier(candidate, decision, complexity)
+        return decision.model, decision.effort, describe_scored_tier(candidate, decision, complexity), decision
     except (_model_router.ModelRouterError, _model_router.ModelRouterConfigError):
         tier = tier_for_complexity(candidate.tiers, complexity)
         if eligible is not None and tier.model not in eligible:
             raise RouterError(f"No eligible calibrated model for {candidate.name}.")
-        return tier.model, tier.effort, describe_tier(candidate, tier, complexity)
+        return tier.model, tier.effort, describe_tier(candidate, tier, complexity), None
 
 
 def candidate_catalog(

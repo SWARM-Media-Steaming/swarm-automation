@@ -17,7 +17,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 17] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 19] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
@@ -38,6 +38,8 @@ const REQUIRED_WORKER_RESOURCES: [&str; 17] = [
     "engineering_knowledge.py",
     "jev_cli.py",
     "decision_engine.py",
+    "available_models.py",
+    "routing_calculator.py",
 ];
 
 struct AppState {
@@ -3184,6 +3186,120 @@ fn check_repo_bot_readiness<R: tauri::Runtime>(
         .collect())
 }
 
+// ----- Routing calculator ---------------------------------------------------
+
+/// How long the provider CLIs' model lists are reused by the routing
+/// calculator. Gathering them runs each CLI, which is too slow to repeat on
+/// every keystroke of a live dialog; a minute keeps a new release visible soon.
+const CALCULATOR_MODELS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+static CALCULATOR_MODELS: Mutex<Option<(std::time::Instant, String)>> = Mutex::new(None);
+
+fn cached_available_models_json(config: &AppConfig, providers: &[ResolvedProvider]) -> String {
+    if let Ok(cache) = CALCULATOR_MODELS.lock() {
+        if let Some((taken, json)) = cache.as_ref() {
+            if taken.elapsed() < CALCULATOR_MODELS_TTL {
+                return json.clone();
+            }
+        }
+    }
+    let json = available_models_json(config, providers);
+    if let Ok(mut cache) = CALCULATOR_MODELS.lock() {
+        *cache = Some((std::time::Instant::now(), json.clone()));
+    }
+    json
+}
+
+/// Arguments for `routing_calculator.py`. The calculator runs the worker's own
+/// routing code, so it is given the same view the worker gets: the enabled AI
+/// tools, the configured tiers, the models each CLI reports, and the usage-credit
+/// setting.
+fn routing_calculator_args(
+    script: &Path,
+    action: &str,
+    config: &AppConfig,
+    available_models: &str,
+    input: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let enabled: Vec<String> = config
+        .enabled_providers()
+        .map(|provider| provider.id.clone())
+        .collect();
+    let mut arguments = vec![
+        script.to_string_lossy().into_owned(),
+        action.into(),
+        "--providers".into(),
+        enabled.join(","),
+        "--tiers".into(),
+        serde_json::to_string(&config.routing_tiers).unwrap_or_else(|_| "{}".into()),
+        "--available-models".into(),
+        available_models.into(),
+    ];
+    if config.allow_usage_credit_models {
+        arguments.push("--allow-usage-credit-models".into());
+    }
+    if let Some(input) = input {
+        arguments.push("--input".into());
+        arguments.push(input.to_string());
+    }
+    arguments
+}
+
+fn run_routing_calculator<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    action: &str,
+    input: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let script = worker_script_dir(app)?.join("routing_calculator.py");
+    let models = cached_available_models_json(config, &resolve_providers(config));
+    // The active calibration is what live routing reads, so the calculator
+    // reads the same one.
+    let environment: Vec<(String, String)> = model_calibration_active_catalog_path(config)
+        .map(|path| {
+            vec![(
+                "SWARM_MODEL_CALIBRATION_CATALOG".to_string(),
+                path.to_string_lossy().into_owned(),
+            )]
+        })
+        .unwrap_or_default();
+    let (_ok, raw) = run_capture_owned_with_env(
+        &python,
+        &routing_calculator_args(&script, action, config, &models, input),
+        &environment,
+    );
+    let value: serde_json::Value = serde_json::from_str(raw.trim())
+        .map_err(|_| format!("The routing calculator could not run: {raw}"))?;
+    match value["error"].as_str() {
+        Some(message) => Err(message.to_string()),
+        None => Ok(value),
+    }
+}
+
+#[tauri::command]
+async fn describe_routing_calculator(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = current_config(&app.state::<AppState>())?;
+        run_routing_calculator(&app, &config, "describe", None)
+    })
+    .await
+    .map_err(|error| format!("The routing calculator could not run: {error}"))?
+}
+
+#[tauri::command]
+async fn simulate_routing(
+    app: tauri::AppHandle,
+    inputs: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = current_config(&app.state::<AppState>())?;
+        run_routing_calculator(&app, &config, "simulate", Some(&inputs))
+    })
+    .await
+    .map_err(|error| format!("The routing calculator could not run: {error}"))?
+}
+
 // ----- Running build version ----------------------------------------------
 
 /// The exact version this build was published as, including a `-beta.<n>`
@@ -5114,6 +5230,8 @@ fn main() {
             refresh_model_data,
             refresh_model_data_background,
             get_model_data_key_status,
+            describe_routing_calculator,
+            simulate_routing,
             save_model_data_key,
             clear_model_data_key,
             activate_model_calibration,

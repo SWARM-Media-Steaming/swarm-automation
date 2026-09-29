@@ -91,6 +91,7 @@
       refreshing: false,
       asking: false,
     },
+    routingCalculator: { options: null, request: 0, timer: null, opener: null, payload: null },
     modelDataKeySaved: false,
     modelCalibration: {
       status: null,
@@ -4207,6 +4208,275 @@
     helpReturnFocus = null;
   }
 
+  // ----- Routing calculator ("Try the router") -----------------------------
+  // A dialog that runs the worker's own routing code (through the
+  // `simulate_routing` command) for values a person sets. Every change re-runs
+  // it after a short pause; a slower earlier answer never overwrites a newer one.
+
+  function calcEl(id) {
+    return byId(id);
+  }
+
+  function setCalcStatus(message, isError = false) {
+    const status = calcEl("calc-status");
+    status.textContent = message;
+    status.classList.toggle("hidden", !message);
+    status.dataset.tone = isError ? "error" : "";
+  }
+
+  function calcOption(value, label) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    return option;
+  }
+
+  function renderCalcControls(options) {
+    const api = window.SwarmRoutingCalculator;
+    const taskType = calcEl("calc-task-type");
+    const previous = {
+      taskType: taskType.value || api.DEFAULTS.taskType,
+      provider: calcEl("calc-provider").value,
+      effort: calcEl("calc-suggested-effort").value,
+      risk: document.querySelector('input[name="calc-risk"]:checked')?.value || api.DEFAULTS.risk,
+    };
+    taskType.replaceChildren(...options.taskTypes.map((t) => calcOption(t.value, t.label)));
+    taskType.value = options.taskTypes.some((t) => t.value === previous.taskType) ? previous.taskType : api.DEFAULTS.taskType;
+
+    const provider = calcEl("calc-provider");
+    provider.replaceChildren(
+      calcOption("", options.providers.length > 1 ? "Compare all enabled tools" : "The enabled tool"),
+      ...options.providers.map((p) => calcOption(p.key, p.name)),
+    );
+    provider.value = options.providers.some((p) => p.key === previous.provider) ? previous.provider : "";
+
+    const effort = calcEl("calc-suggested-effort");
+    effort.replaceChildren(calcOption("", "The router's own"), ...options.efforts.map((e) => calcOption(e.value, e.label)));
+    effort.value = options.efforts.some((e) => e.value === previous.effort) ? previous.effort : "";
+
+    const risk = calcEl("calc-risk");
+    risk.replaceChildren(...options.risks.map((r) => {
+      const label = document.createElement("label");
+      label.title = r.hint;
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "calc-risk";
+      input.value = r.value;
+      input.checked = r.value === previous.risk;
+      label.append(input, document.createTextNode(r.label));
+      return label;
+    }));
+    syncCalcHints();
+  }
+
+  function syncCalcHints() {
+    const options = state.routingCalculator.options;
+    if (!options) return;
+    const api = window.SwarmRoutingCalculator;
+    const complexity = api.clampComplexity(calcEl("calc-complexity").value);
+    calcEl("calc-complexity-value").textContent = String(complexity);
+    calcEl("calc-band").textContent = api.bandFor(options.complexity.bands, complexity);
+    const task = options.taskTypes.find((t) => t.value === calcEl("calc-task-type").value);
+    calcEl("calc-task-hint").textContent = task ? task.hint : "";
+    const selected = document.querySelector('input[name="calc-risk"]:checked');
+    const risk = options.risks.find((r) => r.value === (selected ? selected.value : ""));
+    calcEl("calc-risk-hint").textContent = risk ? risk.hint : "";
+    document.querySelectorAll("#calc-risk label").forEach((label) => {
+      label.classList.toggle("active", Boolean(label.querySelector("input")?.checked));
+    });
+  }
+
+  function readCalcForm() {
+    return window.SwarmRoutingCalculator.inputsFromForm({
+      taskType: calcEl("calc-task-type").value,
+      complexity: calcEl("calc-complexity").value,
+      risk: document.querySelector('input[name="calc-risk"]:checked')?.value,
+      provider: calcEl("calc-provider").value,
+      suggestedModel: calcEl("calc-suggested-model").value,
+      suggestedEffort: calcEl("calc-suggested-effort").value,
+    });
+  }
+
+  function applyCalcPreset(preset) {
+    calcEl("calc-task-type").value = preset.taskType;
+    calcEl("calc-complexity").value = String(preset.complexity);
+    document.querySelectorAll('input[name="calc-risk"]').forEach((input) => { input.checked = input.value === preset.risk; });
+    syncCalcHints();
+    runRoutingCalculator();
+  }
+
+  function renderCalcPresets() {
+    const box = calcEl("calc-presets");
+    box.replaceChildren(...window.SwarmRoutingCalculator.PRESETS.map((preset) => {
+      const control = button(preset.label, "", () => applyCalcPreset(preset));
+      control.title = `${preset.taskType.replace(/_/g, " ")}, complexity ${preset.complexity}, ${preset.risk} risk`;
+      return control;
+    }));
+  }
+
+  function scheduleRoutingCalculator() {
+    syncCalcHints();
+    window.clearTimeout(state.routingCalculator.timer);
+    state.routingCalculator.timer = window.setTimeout(runRoutingCalculator, 150);
+  }
+
+  async function runRoutingCalculator() {
+    const calculator = state.routingCalculator;
+    window.clearTimeout(calculator.timer);
+    const requestId = calculator.request + 1;
+    calculator.request = requestId;
+    if (!calculator.payload) setCalcStatus("Working it out…");
+    try {
+      const payload = await invoke("simulate_routing", { inputs: readCalcForm() });
+      if (requestId !== calculator.request) return;
+      calculator.payload = payload;
+      setCalcStatus("");
+      renderCalcResults(payload);
+    } catch (error) {
+      if (requestId !== calculator.request) return;
+      setCalcStatus(errorText(error), true);
+    }
+  }
+
+  function calcPill(text, tone) {
+    const pill = document.createElement("span");
+    pill.className = `status-pill ${tone}`;
+    pill.textContent = text;
+    return pill;
+  }
+
+  function buildCalcAlternatives(result, api) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = `Other options it scored (${result.alternatives.length})`;
+    const wrap = document.createElement("div");
+    wrap.className = "usage-table-wrap";
+    const table = document.createElement("table");
+    table.className = "usage-table";
+    const caption = document.createElement("caption");
+    caption.className = "sr-only";
+    caption.textContent = `Models scored for ${result.providerName}, best first`;
+    const head = document.createElement("tr");
+    ["Model", "Effort", "Fit score", "Likely to succeed", "Est. cost per task"].forEach((name) => {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      cell.textContent = name;
+      head.appendChild(cell);
+    });
+    table.append(caption, head);
+    result.alternatives.forEach((row, index) => {
+      const line = document.createElement("tr");
+      line.classList.toggle("chosen", row.model === result.model && row.effort === result.effort);
+      [row.modelLabel, row.effortLabel, api.score(row.score), api.percent(row.expectedSuccess), api.money(row.estimatedCost)]
+        .forEach((text) => line.appendChild(Object.assign(document.createElement("td"), { textContent: text })));
+      if (index === 0 && !line.classList.contains("chosen")) line.title = "Highest scored before any suggestion or upgrade";
+      table.appendChild(line);
+    });
+    wrap.appendChild(table);
+    details.append(summary, wrap);
+    return details;
+  }
+
+  function buildCalcResult(result, open) {
+    const api = window.SwarmRoutingCalculator;
+    const card = document.createElement("article");
+    card.className = `calc-result${result.error ? " error" : ""}`;
+    const head = document.createElement("div");
+    head.className = "calc-result-head";
+    head.appendChild(Object.assign(document.createElement("span"), { className: "calc-tool", textContent: result.providerName }));
+    if (result.error) {
+      card.append(head, Object.assign(document.createElement("p"), { className: "calc-why", textContent: result.error }));
+      return card;
+    }
+    const tone = { scored: "idle", tier: "paused", suggested: "running" }[result.source] || "idle";
+    head.appendChild(calcPill(api.sourceLabel(result.source), tone));
+    const answer = document.createElement("div");
+    answer.className = "calc-answer";
+    answer.append(document.createTextNode(result.modelLabel), calcPill(`${result.effortLabel} effort`, "running"));
+    card.append(head, answer, Object.assign(document.createElement("p"), { className: "calc-why", textContent: result.explanation }));
+    if (result.upgrade) {
+      const banner = document.createElement("div");
+      banner.className = "banner policy";
+      const strong = document.createElement("strong");
+      strong.textContent = "Upgraded";
+      banner.append(strong, document.createTextNode(
+        ` ${result.upgrade.from} → ${result.upgrade.to}: ${result.upgrade.reason}.`,
+      ));
+      card.appendChild(banner);
+    }
+    const steps = document.createElement("details");
+    steps.open = open;
+    steps.appendChild(Object.assign(document.createElement("summary"), { textContent: "How it got there" }));
+    const list = document.createElement("ol");
+    list.className = "calc-steps";
+    result.steps.forEach((step) => list.appendChild(Object.assign(document.createElement("li"), { textContent: step })));
+    steps.appendChild(list);
+    card.appendChild(steps);
+    if (result.alternatives && result.alternatives.length) card.appendChild(buildCalcAlternatives(result, api));
+    return card;
+  }
+
+  function renderCalcResults(payload) {
+    const results = payload.results || [];
+    calcEl("calc-results").replaceChildren(...results.map((result) => buildCalcResult(result, results.length === 1)));
+    calcEl("calc-copy").classList.toggle("hidden", !results.length);
+    const catalog = payload.catalog || {};
+    calcEl("calc-catalog").textContent = catalog.label ? `Using: ${catalog.label}.` : "";
+    const models = new Set();
+    results.forEach((result) => (result.alternatives || []).forEach((row) => row.model && models.add(row.model)));
+    calcEl("calc-model-options").replaceChildren(...[...models].map((model) => calcOption(model, "")));
+  }
+
+  async function openRoutingCalculator() {
+    const calculator = state.routingCalculator;
+    calculator.opener = document.activeElement;
+    calcEl("routing-calculator-modal").hidden = false;
+    calcEl("routing-calculator-close").focus();
+    setCalcStatus(calculator.options ? "" : "Loading the router…");
+    try {
+      calculator.options = await invoke("describe_routing_calculator");
+    } catch (error) {
+      setCalcStatus(errorText(error), true);
+      return;
+    }
+    if (calcEl("calc-presets").childElementCount === 0) renderCalcPresets();
+    renderCalcControls(calculator.options);
+    void runRoutingCalculator();
+  }
+
+  function closeRoutingCalculator() {
+    const calculator = state.routingCalculator;
+    calcEl("routing-calculator-modal").hidden = true;
+    window.clearTimeout(calculator.timer);
+    calculator.request += 1;
+    if (calculator.opener && calculator.opener.focus) calculator.opener.focus();
+    calculator.opener = null;
+  }
+
+  // Keep Tab inside the open dialog.
+  function trapCalcFocus(event) {
+    if (event.key !== "Tab") return;
+    const modal = calcEl("routing-calculator-modal");
+    const focusable = [...modal.querySelectorAll("button, select, input, summary, [href]")]
+      .filter((el) => !el.disabled && el.offsetParent !== null && !el.closest("[hidden]"));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+
+  async function copyCalcResult() {
+    const payload = state.routingCalculator.payload;
+    if (!payload) return;
+    try {
+      await navigator.clipboard.writeText(window.SwarmRoutingCalculator.copyText(payload));
+      showToast("Copied the routing result.", "success");
+    } catch (error) {
+      showToast("Could not copy to the clipboard.", "error");
+    }
+  }
+
   function renderHelpConcepts() {
     const box = byId("help-concepts");
     if (!box) return;
@@ -4257,12 +4527,23 @@
       if (jump) { event.preventDefault(); navigate(jump.dataset.viewJump); }
     });
     byId("help-modal-close").addEventListener("click", closeHelp);
+    byId("open-routing-calculator").addEventListener("click", () => void openRoutingCalculator());
+    byId("routing-calculator-close").addEventListener("click", closeRoutingCalculator);
+    byId("routing-calculator-modal").addEventListener("click", (event) => {
+      if (event.target === byId("routing-calculator-modal")) closeRoutingCalculator();
+    });
+    byId("calc-form").addEventListener("input", scheduleRoutingCalculator);
+    byId("calc-form").addEventListener("change", scheduleRoutingCalculator);
+    byId("calc-form").addEventListener("submit", (event) => event.preventDefault());
+    byId("calc-copy").addEventListener("click", () => void copyCalcResult());
     byId("help-modal").addEventListener("click", (event) => {
       if (event.target === byId("help-modal")) closeHelp();
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !byId("help-modal").hidden) closeHelp();
       if (event.key === "Escape" && !byId("diagnose-modal").hidden) closeDiagnoseModal();
+      if (event.key === "Escape" && !byId("routing-calculator-modal").hidden) closeRoutingCalculator();
+      if (!byId("routing-calculator-modal").hidden) trapCalcFocus(event);
       // Clickable panel headings are plain elements with role="button", not
       // real <button>s, so they need Enter/Space activation spelled out.
       const heading = event.target.closest("[data-help][role=\"button\"]");

@@ -7,8 +7,8 @@ use super::{
     parse_pr_ref, promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
     push_access_message, reconcile_integration_for_promotion, redact_secret,
     refresh_model_data_args, refresh_running_scheduler, repo_status_args, repo_worker_args,
-    request_issue_scan, require_closed_issue, run_now_request_path, save_config,
-    save_feedback_repo_filter, scheduler_arguments, usage_report_query_args,
+    request_issue_scan, require_closed_issue, routing_calculator_args, run_now_request_path,
+    save_config, save_feedback_repo_filter, scheduler_arguments, usage_report_query_args,
     validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
     ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider, UsageReportQuery,
 };
@@ -2002,4 +2002,42 @@ fn a_saved_key_is_redacted_from_refresh_output() {
     );
     assert_eq!(redact_secret(output, None), output);
     assert_eq!(redact_secret(output, Some("")), output);
+}
+
+#[test]
+fn routing_calculator_sees_what_the_worker_sees() {
+    let mut config = AppConfig {
+        allow_usage_credit_models: true,
+        ..AppConfig::default()
+    };
+    let input = serde_json::json!({"taskType": "feature", "complexity": 5});
+    let arguments = routing_calculator_args(
+        &PathBuf::from("/app/issue_worker/routing_calculator.py"),
+        "simulate",
+        &config,
+        r#"{"claude":[{"value":"claude-sonnet-5-5"}]}"#,
+        Some(&input),
+    );
+    let after = |flag: &str| {
+        arguments
+            .iter()
+            .position(|argument| argument == flag)
+            .map(|index| arguments[index + 1].as_str())
+    };
+    assert_eq!(arguments[1], "simulate");
+    assert_eq!(
+        after("--available-models"),
+        Some(r#"{"claude":[{"value":"claude-sonnet-5-5"}]}"#)
+    );
+    assert_eq!(after("--input"), Some(input.to_string().as_str()));
+    // The configured tiers and enabled tools travel too, as they do to the worker.
+    let tiers: serde_json::Value = serde_json::from_str(after("--tiers").unwrap()).unwrap();
+    assert!(tiers.get("claude").is_some());
+    assert!(!after("--providers").unwrap().is_empty());
+    assert!(arguments.contains(&"--allow-usage-credit-models".to_string()));
+
+    config.allow_usage_credit_models = false;
+    let describe = routing_calculator_args(&PathBuf::from("x.py"), "describe", &config, "{}", None);
+    assert!(!describe.contains(&"--allow-usage-credit-models".to_string()));
+    assert!(!describe.contains(&"--input".to_string()));
 }
