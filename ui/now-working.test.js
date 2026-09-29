@@ -299,3 +299,104 @@ test("clears a quota pause after a cold-restart session restore", () => {
     assert.equal(rows.find((row) => row.kind === "adversarial").state, "running");
   }
 });
+
+test("names the adversarial agent, model and effort for UAT and security rows separately", () => {
+  const rows = deriveNowWorking({
+    workerState: "running",
+    repositories: [repo],
+    logs: [
+      line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+      line("Adversarial UAT for issue #84: starting fix/re-test round 1 of 3."),
+      line("Adversarial UAT for issue #84: fixer Grok model grok-4.6 with effort medium."),
+      line("Adversarial Cybersecurity for issue #84: starting independent security review (round 0 of 3)."),
+      line("Adversarial Cybersecurity for issue #84: tester Codex model gpt-5.6 with effort high."),
+    ],
+  });
+  const uat = rows.find((row) => row.kind === "adversarial");
+  const security = rows.find((row) => row.kind === "security");
+  assert.equal(uat.detail, "Fixer · Grok · grok-4.6 · medium reasoning · Fix in progress");
+  assert.deepEqual(uat.attribution, { role: "fixer", provider: "Grok", model: "grok-4.6", effort: "medium" });
+  assert.equal(security.detail, "Tester · Codex · gpt-5.6 · high reasoning · Round 0 of 3");
+  assert.equal(rows.find((row) => row.kind === "issue").provider, "");
+});
+
+test("adversarial attribution follows provider changes, survives pauses and clears on completion", () => {
+  const base = [
+    line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+    line("Adversarial UAT for issue #84: starting fix/re-test round 1 of 3."),
+    line("Adversarial UAT for issue #84: fixer Grok model grok-4.6 with effort medium."),
+    line("Adversarial UAT for issue #84: fix applied in round 1 of 3."),
+    line("Adversarial UAT for issue #84: starting re-test for round 1 of 3."),
+    line("Adversarial UAT for issue #84: tester Claude model claude-sonnet-5 with effort high."),
+  ];
+  const at = (extra, workerState = "running") => deriveNowWorking({ workerState, repositories: [repo], logs: [...base, ...extra] })
+    .find((row) => row.kind === "adversarial");
+  assert.equal(at([]).detail, "Tester · Claude · claude-sonnet-5 · high reasoning · Re-test in progress");
+  const paused = at([line("Paused issue #84 because Claude usage is unavailable.")]);
+  assert.equal(paused.state, "paused");
+  assert.match(paused.detail, /Claude · claude-sonnet-5 · high reasoning/);
+  assert.equal(at([line("Adversarial UAT for issue #84: review completed with status PASS.")]), undefined);
+  assert.equal(at([line("Adversarial UAT for issue #84: review failed — boom")]).state, "error");
+  assert.equal(at([line("Issue worker process stopped")]), undefined);
+});
+
+test("a new tester phase does not show the previous fixer while attribution arrives", () => {
+  for (const { label, kind } of [
+    { label: "Adversarial UAT", kind: "adversarial" },
+    { label: "Adversarial Cybersecurity", kind: "security" },
+  ]) {
+    const rows = deriveNowWorking({ workerState: "running", repositories: [repo], logs: [
+      line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+      line(`${label} for issue #84: starting fix/re-test round 1 of 3.`),
+      line(`${label} for issue #84: fixer Grok model grok-4.6 with effort high.`),
+      line(`${label} for issue #84: starting re-test for round 1 of 3.`),
+    ] });
+    const stage = rows.find((row) => row.kind === kind);
+    assert.equal(stage.detail, "Re-test in progress");
+    assert.equal(stage.attribution, null);
+  }
+});
+
+test("pinned fixer attribution survives a repository-scoped restart beside another active repository", () => {
+  const repositories = [repo, { id: "site", name: "acme/site", monitorActions: false }];
+  for (const { label, kind } of [
+    { label: "Adversarial UAT", kind: "adversarial" },
+    { label: "Adversarial Cybersecurity", kind: "security" },
+  ]) {
+    const rows = deriveNowWorking({ workerState: "running", repositories, logs: [
+      labeled("acme/app", "Selected oldest unprocessed assigned issue: #84 App"),
+      labeled("acme/app", `${label} for issue #84: starting fix/re-test round 1 of 3.`),
+      labeled("acme/app", `${label} for issue #84: fixer Grok model grok-4.6 with effort high.`),
+      labeled("acme/site", "Selected oldest unprocessed assigned issue: #84 Site"),
+      labeled("acme/site", `${label} for issue #84: starting re-test for round 2 of 3.`),
+      labeled("acme/site", `${label} for issue #84: tester Codex model gpt-5.6 with effort medium.`),
+      labeled("acme/app", "acme/app: worker exited with status 1; will retry."),
+      labeled("acme/app", "Starting a cycle over 1 repository(ies)."),
+      labeled("acme/app", "Selected oldest unprocessed assigned issue: #84 App"),
+      labeled("acme/app", "Pinned Claude model claude-sonnet-5 session claude:84 with effort low for this continuation."),
+    ] });
+    const app = rows.find((row) => row.kind === kind && row.repository === "acme/app");
+    const site = rows.find((row) => row.kind === kind && row.repository === "acme/site");
+    assert.deepEqual(app.attribution, { role: "fixer", provider: "Claude", model: "claude-sonnet-5", effort: "low" });
+    assert.deepEqual(site.attribution, { role: "tester", provider: "Codex", model: "gpt-5.6", effort: "medium" });
+  }
+});
+
+test("a failed adversarial stage is not revived by a later pinned issue continuation", () => {
+  for (const { label, kind } of [
+    { label: "Adversarial UAT", kind: "adversarial" },
+    { label: "Adversarial Cybersecurity", kind: "security" },
+  ]) {
+    const rows = deriveNowWorking({ workerState: "running", repositories: [repo], logs: [
+      line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+      line(`${label} for issue #84: starting independent ${kind === "security" ? "security review" : "test run"} (round 0 of 3).`),
+      line(`${label} for issue #84: tester Grok model grok-4.6 with effort high.`),
+      line(`${label} for issue #84: review failed — reviewer unavailable`),
+      line("acme/app: worker exited with status 1; will retry."),
+      line("Starting a cycle over 1 repository(ies)."),
+      line("Selected oldest unprocessed assigned issue: #84 Reduce logs"),
+      line("Pinned Grok model grok-4.6 session grok:84 with effort high for this continuation."),
+    ] });
+    assert.equal(rows.find((row) => row.kind === kind), undefined);
+  }
+});

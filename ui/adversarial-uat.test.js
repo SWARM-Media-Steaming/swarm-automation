@@ -36,12 +36,20 @@ test("round evidence shows provider pairing, suite failures and dispute outcome"
   const text = uat.roundDetail({fixer_provider: "Claude", fixer_model: "fix", tester_provider: "Codex", tester_model: "test",
     tests_added: 2, tests_modified: 1, tests_failing_before: 3, tests_failing_after: 0, disputed: true,
     dispute_resolution: "revised against issue specification"});
-  assert.match(text, /Claude \/ fix → Codex \/ test/);
+  assert.match(text, /fixer Claude \/ fix \/ Not recorded reasoning → tester Codex \/ test \/ Not recorded reasoning/);
   assert.match(text, /failing suites 3 → 0/);
   assert.match(text, /dispute: revised against issue specification/);
   assert.doesNotMatch(text, /^epoch /);
   const epoch = uat.roundDetail({epoch_number: 2, fixer_provider: "Claude", fixer_model: "fix",
     tester_provider: "Codex", tester_model: "test", tests_added: 0, tests_modified: 0,
     tests_failing_before: 1, tests_failing_after: 1, disputed: false});
-  assert.match(epoch, /^epoch 2 · Claude \/ fix/);
+  assert.match(epoch, /^epoch 2 · fixer Claude \/ fix/);
+});
+
+test("round evidence shows recorded fixer and tester reasoning effort", () => {
+  const text = uat.roundDetail({fixer_provider: "Grok", fixer_model: "grok-4.6", fixer_effort: "medium",
+    tester_provider: "Claude", tester_model: "sonnet", tester_effort: "high", tests_added: 0, tests_modified: 0,
+    tests_failing_before: 0, tests_failing_after: 0});
+  assert.match(text, /fixer Grok \/ grok-4.6 \/ medium reasoning → tester Claude \/ sonnet \/ high reasoning/);
+  assert.doesNotMatch(text, /Not recorded/);
 });

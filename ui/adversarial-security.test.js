@@ -50,7 +50,7 @@ test("round evidence shows findings open, verified fixed, and filed separately",
     tester_provider: "Codex", tester_model: "review", findings_found: 2, findings_fixed: 1,
     findings_filed: 3, tests_added: 1, tests_modified: 0,
     tests_failing_before: 2, tests_failing_after: 0});
-  assert.match(text, /Claude \/ fix → Codex \/ review/);
+  assert.match(text, /fixer Claude \/ fix \/ Not recorded reasoning → tester Codex \/ review \/ Not recorded reasoning/);
   assert.match(text, /2 finding\(s\) open, 1 verified fixed, 3 filed separately/);
   assert.match(text, /failing suites 2 → 0/);
   assert.doesNotMatch(text, /^epoch /);
@@ -58,7 +58,7 @@ test("round evidence shows findings open, verified fixed, and filed separately",
     tester_provider: "Codex", tester_model: "review", findings_found: 1, findings_fixed: 0,
     findings_filed: 0, tests_added: 0, tests_modified: 0,
     tests_failing_before: 1, tests_failing_after: 1});
-  assert.match(epoch, /^epoch 2 · Grok \/ fix/);
+  assert.match(epoch, /^epoch 2 · fixer Grok \/ fix/);
 });
 
 test("Overview tracks a security review as its own row beside the issue", () => {
@@ -106,4 +106,12 @@ test("a quota pause on the issue pauses its security review row too", () => {
     ],
   });
   assert.equal(rows.find((row) => row.kind === "security").state, "paused");
+});
+
+test("round evidence shows recorded fixer and tester reasoning effort", () => {
+  const text = security.roundDetail({fixer_provider: "Grok", fixer_model: "grok-4.6", fixer_effort: "medium",
+    tester_provider: "Claude", tester_model: "sonnet", tester_effort: "high", tests_added: 0, tests_modified: 0,
+    tests_failing_before: 0, tests_failing_after: 0});
+  assert.match(text, /fixer Grok \/ grok-4.6 \/ medium reasoning → tester Claude \/ sonnet \/ high reasoning/);
+  assert.doesNotMatch(text, /Not recorded/);
 });

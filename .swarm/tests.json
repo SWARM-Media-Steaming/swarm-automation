@@ -3235,6 +3235,105 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue314_attribution_default_sentinel_collision.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue314-attribution-default-sentinel-collision",
+      "name": "Adversarial attribution does not collapse a real 'default'-named model/effort into an unrecorded value",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "issue_worker/adversarial_core.py",
+          "tests/adversarial/test_issue314_attribution_default_sentinel_collision.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue314_round_zero_fixer_effort_blanked.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue314-round-zero-fixer-effort-blanked",
+      "name": "Round zero's history record shows the implementer's real effort instead of manufacturing 'Not recorded'",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_core.py",
+          "issue_worker/adversarial_uat.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_issue314_round_zero_fixer_effort_blanked.py"
+        ]
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue314_quota_restart_attribution.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue314-quota-restart-attribution",
+      "name": "Issue #314: quota checkpoints and worker restarts retain and refresh UAT/security attribution",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "issue_worker/install_swarm_issue_cron.py",
+          "issue_worker/swarm_issue_worker.py",
+          "ui/now-working.js",
+          "tests/adversarial/test_issue314_quota_restart_attribution.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue314_parallel_pinned_attribution.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue314-parallel-pinned-attribution",
+      "name": "Parallel repository pinned continuations update only the matching adversarial stage",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/now-working.js",
+          "tests/adversarial/test_issue314_parallel_pinned_attribution.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1

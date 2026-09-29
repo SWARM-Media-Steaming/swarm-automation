@@ -25,9 +25,15 @@
       : "";
   }
 
+  // Configured provider / model / reasoning effort only. Rows written before
+  // effort was recorded have none and say so.
+  function agent(provider, model, effort) {
+    return `${provider} / ${model} / ${effort || "Not recorded"} reasoning`;
+  }
+
   function roundDetail(round) {
     const epoch = round.epoch_number ? `epoch ${round.epoch_number} · ` : "";
-    return `${epoch}${round.fixer_provider} / ${round.fixer_model} → ${round.tester_provider} / ${round.tester_model}; ${round.tests_added} test files added, ${round.tests_modified} modified; failing suites ${round.tests_failing_before} → ${round.tests_failing_after}${round.disputed ? `; dispute: ${round.dispute_resolution || "upheld"}` : ""}.`;
+    return `${epoch}fixer ${agent(round.fixer_provider, round.fixer_model, round.fixer_effort)} → tester ${agent(round.tester_provider, round.tester_model, round.tester_effort)}; ${round.tests_added} test files added, ${round.tests_modified} modified; failing suites ${round.tests_failing_before} → ${round.tests_failing_after}${round.disputed ? `; dispute: ${round.dispute_resolution || "upheld"}` : ""}.`;
   }
 
   return { roundCount, aggregate, capacity, roundDetail };

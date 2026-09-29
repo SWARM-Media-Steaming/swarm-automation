@@ -483,6 +483,20 @@ class AdversarialStage:
             detail = f"starting re-test for round {self.round_position(loop)}."
         return f"{self.label} for issue #{issue_number}: {detail}"
 
+    def attribution_log(self, issue_number: int, loop: dict[str, Any], choice) -> str:
+        """Who is doing this phase: role, provider, model and configured effort.
+
+        Structured boundary log the Overview replays, so the live row can name
+        the agent behind the phase. Only configured values are logged, never
+        model reasoning.
+        """
+        role = "fixer" if loop["phase"] == "fix" else "tester"
+        # "<unconfigured>" (not a bare word like "default") marks a missing
+        # value so it can never collide with a real model/effort name that
+        # happens to be spelled the same as the sentinel would be.
+        return (f"{self.label} for issue #{issue_number}: {role} {choice.name} model "
+                f"{choice.model or '<unconfigured>'} with effort {choice.effort or '<unconfigured>'}.")
+
     def on_round_start(self, worker, loop: dict[str, Any]) -> None:
         """Extra observability a stage wants when a round begins."""
 
@@ -775,6 +789,7 @@ class AdversarialStageMixin:
             "delivery_choice": delivery_choice or dataclasses.asdict(self.choice),
             "capacity_used": [self.choice.name],
             "fixer_provider": self.choice.name, "fixer_model": self.choice.model,
+            "fixer_effort": self.choice.effort,
             "round_started": iso_timestamp(), "outcome": "", "results": [],
             "tests_added": 0, "tests_modified": 0,
             "dispute": state.get(f"{stage.key}_initial_dispute", ""), "rounds": [],
@@ -1446,6 +1461,7 @@ class AdversarialStageMixin:
                     loop.update(active=True, stage_base=loop.pop("retry_stage_base", None) or self.git("rev-parse", "HEAD"), response=None)
                     self.save_stage(stage, loop)
                     log(stage.round_start_log(self.issue.number, loop))
+                    log(stage.attribution_log(self.issue.number, loop, choice))
                     stage.on_round_start(self, loop)
                 except WorkerError as error:
                     # Setup/auth/provider errors happen before any report is
@@ -1689,7 +1705,7 @@ class AdversarialStageMixin:
         return {
             "epoch_number": epoch_of(round_number),
             "round_in_epoch": round_in_epoch(round_number),
-            "fixer_effort": str(loop.get("fixer_effort") or "") if round_number else "",
+            "fixer_effort": str(loop.get("fixer_effort") or ""),
             "tester_effort": self.choice.effort,
             "escalation_reason": str((loop.get("escalation") or {}).get("reason", "")) if round_number else "",
             "patch_fingerprint": str(approach.get("patch_fingerprint", "")),
