@@ -15,6 +15,13 @@ test("history aggregates explicitly describe the work-round denominator", () => 
   assert.match(text, /1.2 average fix\/re-test rounds per work-round/);
   assert.match(text, /75% clean first pass/);
   assert.match(text, /5% cap hit \(20 work-rounds\)/);
+  assert.doesNotMatch(text, /best-effort merge/);
+  const counted = uat.aggregate({
+    loops: 4, averageRounds: 2, cleanFirstPassPercent: 50, capHitPercent: 25,
+    verifiedCleanCount: 3, bestEffortCount: 1,
+  });
+  assert.match(counted, /3 verified-clean merges/);
+  assert.match(counted, /1 best-effort merge\b/);
 });
 
 test("quota snapshots never masquerade as metered monetary or token costs", () => {
@@ -32,4 +39,9 @@ test("round evidence shows provider pairing, suite failures and dispute outcome"
   assert.match(text, /Claude \/ fix → Codex \/ test/);
   assert.match(text, /failing suites 3 → 0/);
   assert.match(text, /dispute: revised against issue specification/);
+  assert.doesNotMatch(text, /^epoch /);
+  const epoch = uat.roundDetail({epoch_number: 2, fixer_provider: "Claude", fixer_model: "fix",
+    tester_provider: "Codex", tester_model: "test", tests_added: 0, tests_modified: 0,
+    tests_failing_before: 1, tests_failing_after: 1, disputed: false});
+  assert.match(epoch, /^epoch 2 · Claude \/ fix/);
 });

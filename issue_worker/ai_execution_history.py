@@ -22,7 +22,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import usage_report
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -65,6 +65,7 @@ _JSON_COLUMNS = (
     "adversarial_filed_findings",
     "security_findings",
     "security_filed_findings",
+    "adversarial_unresolved",
 )
 
 # The AI platform that graded and routed an issue, and the one that was picked
@@ -165,6 +166,75 @@ _ADVERSARIAL_ROUND_COLUMNS = (
     "findings_fixed",
     "findings_filed",
     "severity_counts",
+    "epoch_number",
+    "round_in_epoch",
+    "fixer_effort",
+    "tester_effort",
+    "escalation_reason",
+    "patch_fingerprint",
+    "repeated_patch",
+    "failure_fingerprint",
+    "repeated_failure",
+    "progress",
+    "merge_policy",
+    "failing_suites",
+    "open_findings",
+    "usage_json",
+)
+
+# Migration 9 (issue #305). Strict mode renews three-round epochs, so a round
+# number is no longer capped at 6, and each closed epoch is its own row.
+_MIGRATION_9_EXECUTION_COLUMNS = (
+    ("adversarial_epoch_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("security_epoch_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("adversarial_merge_policy", "TEXT NOT NULL DEFAULT ''"),
+    ("adversarial_delivery", "TEXT NOT NULL DEFAULT ''"),
+    ("adversarial_unresolved", "TEXT NOT NULL DEFAULT '{}'"),
+    ("promotion_status", "TEXT NOT NULL DEFAULT ''"),
+    ("promotion_url", "TEXT NOT NULL DEFAULT ''"),
+)
+
+_MIGRATION_9_ROUND_COLUMNS = (
+    ("epoch_number", "INTEGER NOT NULL DEFAULT 1"),
+    ("round_in_epoch", "INTEGER NOT NULL DEFAULT 0"),
+    ("fixer_effort", "TEXT NOT NULL DEFAULT ''"),
+    ("tester_effort", "TEXT NOT NULL DEFAULT ''"),
+    ("escalation_reason", "TEXT NOT NULL DEFAULT ''"),
+    ("patch_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+    ("repeated_patch", "INTEGER NOT NULL DEFAULT 0"),
+    ("failure_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+    ("repeated_failure", "INTEGER NOT NULL DEFAULT 0"),
+    ("progress", "TEXT NOT NULL DEFAULT ''"),
+    ("merge_policy", "TEXT NOT NULL DEFAULT ''"),
+    ("failing_suites", "TEXT NOT NULL DEFAULT '[]'"),
+    ("open_findings", "TEXT NOT NULL DEFAULT '[]'"),
+    ("usage_json", "TEXT NOT NULL DEFAULT '{}'"),
+)
+
+# A sanity ceiling, not a product cap. Strict epochs keep counting; a corrupt
+# round number still must not land in the table.
+_MAX_ADVERSARIAL_ROUND = 10000
+
+# History filters. An execution written before the delivery column existed is
+# classified from its outcome: a clean pass was verified, and a cap hit was
+# the old always-best-effort delivery.
+_VERIFIED_CLEAN_SQL = (
+    "(adversarial_delivery = 'verified_clean' OR "
+    "(adversarial_delivery = '' AND adversarial_outcome IN ('clean_first_pass', 'resolved_after_n')))"
+)
+_BEST_EFFORT_SQL = (
+    "(adversarial_delivery = 'best_effort' OR "
+    "(adversarial_delivery = '' AND adversarial_outcome = 'cap_hit'))"
+)
+_DELIVERY_FILTERS = {
+    "verified_clean": _VERIFIED_CLEAN_SQL,
+    "best_effort": _BEST_EFFORT_SQL,
+}
+
+_ROUND_JSON_COLUMNS = ("failing_suites", "open_findings", "usage_json")
+_EPOCH_JSON_COLUMNS = (
+    "next_escalation", "fixers", "failing_suites", "findings", "disputes",
+    "patch_fingerprints", "no_progress", "usage_json",
 )
 
 # Migration 6 adds per-prompt AI token usage (issue #280). Unlike the other
@@ -558,6 +628,20 @@ class ExecutionHistoryRepository:
                         findings_fixed INTEGER NOT NULL DEFAULT 0,
                         findings_filed INTEGER NOT NULL DEFAULT 0,
                         severity_counts TEXT NOT NULL DEFAULT '{}',
+                        epoch_number INTEGER NOT NULL DEFAULT 1,
+                        round_in_epoch INTEGER NOT NULL DEFAULT 0,
+                        fixer_effort TEXT NOT NULL DEFAULT '',
+                        tester_effort TEXT NOT NULL DEFAULT '',
+                        escalation_reason TEXT NOT NULL DEFAULT '',
+                        patch_fingerprint TEXT NOT NULL DEFAULT '',
+                        repeated_patch INTEGER NOT NULL DEFAULT 0,
+                        failure_fingerprint TEXT NOT NULL DEFAULT '',
+                        repeated_failure INTEGER NOT NULL DEFAULT 0,
+                        progress TEXT NOT NULL DEFAULT '',
+                        merge_policy TEXT NOT NULL DEFAULT '',
+                        failing_suites TEXT NOT NULL DEFAULT '[]',
+                        open_findings TEXT NOT NULL DEFAULT '[]',
+                        usage_json TEXT NOT NULL DEFAULT '{}',
                         UNIQUE(execution_id, stage, round_number)
                     );
                     CREATE INDEX IF NOT EXISTS adversarial_rounds_execution_idx
@@ -812,6 +896,67 @@ class ExecutionHistoryRepository:
                     "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                     (8,),
                 )
+            if 9 not in applied and 9 not in {
+                row[0] for row in database.execute("SELECT version FROM schema_migrations")
+            }:
+                columns = {
+                    row[1] for row in database.execute("PRAGMA table_info(ai_executions)")
+                }
+                for name, definition in _MIGRATION_9_EXECUTION_COLUMNS:
+                    if name not in columns:
+                        database.execute(
+                            f"ALTER TABLE ai_executions ADD COLUMN {name} {definition}"
+                        )
+                round_table = database.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'adversarial_rounds'"
+                ).fetchone()
+                if round_table is not None:
+                    round_columns = {
+                        row[1] for row in database.execute("PRAGMA table_info(adversarial_rounds)")
+                    }
+                    for name, definition in _MIGRATION_9_ROUND_COLUMNS:
+                        if name not in round_columns:
+                            database.execute(
+                                f"ALTER TABLE adversarial_rounds ADD COLUMN {name} {definition}"
+                            )
+                database.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS adversarial_epochs (
+                        epoch_id TEXT PRIMARY KEY,
+                        execution_id TEXT NOT NULL
+                            REFERENCES ai_executions(execution_id) ON DELETE CASCADE,
+                        stage TEXT NOT NULL,
+                        epoch_number INTEGER NOT NULL,
+                        first_round INTEGER NOT NULL DEFAULT 0,
+                        last_round INTEGER NOT NULL DEFAULT 0,
+                        merge_policy TEXT NOT NULL DEFAULT '',
+                        outcome TEXT NOT NULL DEFAULT '',
+                        progress INTEGER NOT NULL DEFAULT 0,
+                        stalled_epochs INTEGER NOT NULL DEFAULT 0,
+                        escalation_reason TEXT NOT NULL DEFAULT '',
+                        next_escalation TEXT NOT NULL DEFAULT '{}',
+                        fixers TEXT NOT NULL DEFAULT '[]',
+                        failing_suites TEXT NOT NULL DEFAULT '[]',
+                        findings TEXT NOT NULL DEFAULT '[]',
+                        disputes TEXT NOT NULL DEFAULT '[]',
+                        tests_added INTEGER NOT NULL DEFAULT 0,
+                        patch_fingerprints TEXT NOT NULL DEFAULT '[]',
+                        failure_fingerprint TEXT NOT NULL DEFAULT '',
+                        no_progress TEXT NOT NULL DEFAULT '{}',
+                        started_at TEXT NOT NULL DEFAULT '',
+                        completed_at TEXT NOT NULL DEFAULT '',
+                        duration_seconds REAL,
+                        usage_json TEXT NOT NULL DEFAULT '{}',
+                        UNIQUE(execution_id, stage, epoch_number)
+                    );
+                    CREATE INDEX IF NOT EXISTS adversarial_epochs_execution_idx
+                        ON adversarial_epochs(execution_id, stage, epoch_number);
+                    """
+                )
+                database.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (9,),
+                )
 
     def create(self, start: ExecutionStart, started_at: str) -> str:
         execution_id = str(uuid.uuid4())
@@ -945,6 +1090,13 @@ class ExecutionHistoryRepository:
             "security_round_count",
             "security_findings",
             "security_filed_findings",
+            "adversarial_epoch_count",
+            "security_epoch_count",
+            "adversarial_merge_policy",
+            "adversarial_delivery",
+            "adversarial_unresolved",
+            "promotion_status",
+            "promotion_url",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -957,6 +1109,8 @@ class ExecutionHistoryRepository:
                 serialized[key] = _serialize_adversarial_filed_findings(value)
             elif key == "security_findings":
                 serialized[key] = _serialize_security_findings(value)
+            elif key == "adversarial_unresolved":
+                serialized[key] = _serialize_json(value if value else {}, empty="{}")
             elif key == "routing_decision":
                 serialized[key] = _serialize_routing(value)
             elif isinstance(value, str):
@@ -1043,19 +1197,25 @@ class ExecutionHistoryRepository:
     def record_adversarial_round(self, execution_id: str, round_values: dict[str, Any]) -> None:
         """Insert (or replace) one adversarial fix/test round of an execution.
 
-        A round is identified by ``(execution_id, round_number)`` so a retried
-        scheduler tick that re-reports the same round updates it rather than
-        appending a duplicate — the same idempotency rule the issue comments
-        follow.
+        A round is identified by ``(execution_id, stage, round_number)`` so a
+        retried scheduler tick that re-reports the same round updates it rather
+        than appending a duplicate — the same idempotency rule the issue
+        comments follow. Strict-mode epochs count past the original six rounds.
         """
+        payload = dict(round_values)
+        if "open_findings" not in payload and "findings" in payload:
+            payload["open_findings"] = payload["findings"]
+        if "usage_json" not in payload and "usage" in payload:
+            payload["usage_json"] = payload["usage"]
         values: dict[str, Any] = {}
         for column in _ADVERSARIAL_ROUND_COLUMNS:
-            value = round_values.get(column)
+            value = payload.get(column)
             if column in {"round_number", "tests_added", "tests_modified",
                           "tests_failing_before", "tests_failing_after",
-                          "findings_found", "findings_fixed", "findings_filed"}:
+                          "findings_found", "findings_fixed", "findings_filed",
+                          "epoch_number", "round_in_epoch"}:
                 values[column] = int(value or 0)
-            elif column == "disputed":
+            elif column in {"disputed", "repeated_patch", "repeated_failure"}:
                 values[column] = 1 if value else 0
             elif column == "duration_seconds":
                 values[column] = None if value is None else float(value)
@@ -1063,14 +1223,24 @@ class ExecutionHistoryRepository:
                 values[column] = sanitize_text(value) or "{}"
             elif column == "stage":
                 values[column] = sanitize_text(value) or "uat"
+            elif column in {"failing_suites", "open_findings"}:
+                values[column] = _serialize_json([] if value is None else value, empty="[]")
+            elif column == "usage_json":
+                values[column] = _serialize_json({} if value is None else value, empty="{}")
             else:
                 values[column] = sanitize_text(value)
+        if "epoch_number" not in payload:
+            number = values["round_number"]
+            values["epoch_number"] = 1 if number <= 3 else (number - 1) // 3 + 1
+        if "round_in_epoch" not in payload:
+            number = values["round_number"]
+            values["round_in_epoch"] = 0 if number <= 0 else (number - 1) % 3 + 1
         if values["stage"] not in ADVERSARIAL_STAGE_SLUGS:
             raise ValueError(f"Unknown adversarial stage: {values['stage']}")
         columns = ", ".join(("round_id", "execution_id", *_ADVERSARIAL_ROUND_COLUMNS))
         slots = ", ".join("?" for _ in range(len(_ADVERSARIAL_ROUND_COLUMNS) + 2))
-        if not 0 <= values["round_number"] <= 6:
-            raise ValueError("Adversarial round must be from 0 (assessment) through 6")
+        if not 0 <= values["round_number"] <= _MAX_ADVERSARIAL_ROUND:
+            raise ValueError("Adversarial round must be from 0 (assessment) upward")
         assignments = ", ".join(f"{column}=excluded.{column}" for column in _ADVERSARIAL_ROUND_COLUMNS)
         with self.connect() as database:
             database.execute(
@@ -1094,11 +1264,95 @@ class ExecutionHistoryRepository:
             ):
                 record = dict(row)
                 record["disputed"] = bool(record.get("disputed"))
+                record["repeated_patch"] = bool(record.get("repeated_patch"))
+                record["repeated_failure"] = bool(record.get("repeated_failure"))
+                _decode_json_fields(record, _ROUND_JSON_COLUMNS)
                 rounds.setdefault(str(record["execution_id"]), []).append(record)
         return rounds
 
+    def record_adversarial_epoch(self, execution_id: str, summary: dict[str, Any]) -> None:
+        """Insert or replace one closed adversarial epoch.
+
+        Identified by ``(execution_id, stage, epoch_number)`` so a resumed
+        scheduler tick that re-closes the same epoch updates it.
+        """
+        stage = sanitize_text(summary.get("stage")) or "uat"
+        if stage not in ADVERSARIAL_STAGE_SLUGS:
+            raise ValueError(f"Unknown adversarial stage: {stage}")
+        epoch_number = int(summary.get("epoch_number") or 0)
+        if not 1 <= epoch_number <= _MAX_ADVERSARIAL_ROUND:
+            raise ValueError("Adversarial epoch must be 1 or greater")
+        duration = summary.get("duration_seconds")
+        values = (
+            str(uuid.uuid4()),
+            execution_id,
+            stage,
+            epoch_number,
+            int(summary.get("first_round") or 0),
+            int(summary.get("last_round") or 0),
+            sanitize_text(summary.get("merge_policy")),
+            sanitize_text(summary.get("outcome")),
+            1 if summary.get("progress") else 0,
+            int(summary.get("stalled_epochs") or 0),
+            sanitize_text(summary.get("escalation_reason")),
+            _serialize_json(summary.get("next_escalation") or {}, empty="{}"),
+            _serialize_json(summary.get("fixers") or [], empty="[]"),
+            _serialize_json(summary.get("failing_suites") or [], empty="[]"),
+            _serialize_json(summary.get("findings") or [], empty="[]"),
+            _serialize_json(summary.get("disputes") or [], empty="[]"),
+            int(summary.get("tests_added") or 0),
+            _serialize_json(summary.get("patch_fingerprints") or [], empty="[]"),
+            sanitize_text(summary.get("failure_fingerprint")),
+            _serialize_json(summary.get("no_progress") or {}, empty="{}"),
+            sanitize_text(summary.get("started_at")),
+            sanitize_text(summary.get("completed_at")),
+            None if duration is None else float(duration),
+            _serialize_json(summary.get("usage") if summary.get("usage") is not None else summary.get("usage_json") or {}, empty="{}"),
+        )
+        assignments = ", ".join(
+            f"{column}=excluded.{column}" for column in (
+                "first_round", "last_round", "merge_policy", "outcome", "progress",
+                "stalled_epochs", "escalation_reason", "next_escalation", "fixers",
+                "failing_suites", "findings", "disputes", "tests_added",
+                "patch_fingerprints", "failure_fingerprint", "no_progress",
+                "started_at", "completed_at", "duration_seconds", "usage_json",
+            )
+        )
+        with self.connect() as database:
+            database.execute(
+                f"""INSERT INTO adversarial_epochs (
+                    epoch_id, execution_id, stage, epoch_number, first_round, last_round,
+                    merge_policy, outcome, progress, stalled_epochs, escalation_reason,
+                    next_escalation, fixers, failing_suites, findings, disputes, tests_added,
+                    patch_fingerprints, failure_fingerprint, no_progress, started_at,
+                    completed_at, duration_seconds, usage_json
+                ) VALUES ({", ".join("?" for _ in values)})
+                ON CONFLICT(execution_id, stage, epoch_number) DO UPDATE SET {assignments}""",
+                values,
+            )
+
+    def adversarial_epochs_for(self, execution_ids: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
+        """Every recorded epoch of the given executions, oldest epoch first."""
+        ids = [str(value) for value in execution_ids if value]
+        if not ids:
+            return {}
+        slots = ", ".join("?" for _ in ids)
+        epochs: dict[str, list[dict[str, Any]]] = {}
+        with self.connect() as database:
+            for row in database.execute(
+                f"SELECT * FROM adversarial_epochs WHERE execution_id IN ({slots}) "
+                "ORDER BY execution_id, stage DESC, epoch_number",
+                ids,
+            ):
+                record = dict(row)
+                record["progress"] = bool(record.get("progress"))
+                _decode_json_fields(record, _EPOCH_JSON_COLUMNS)
+                epochs.setdefault(str(record["execution_id"]), []).append(record)
+        return epochs
+
     def adversarial_summary(
-        self, repositories: Sequence[str] | str | None = None, *, search: str = ""
+        self, repositories: Sequence[str] | str | None = None, *, search: str = "",
+        delivery: str = "all",
     ) -> dict[str, Any]:
         """How the adversarial UAT loop is performing for the selected repositories.
 
@@ -1112,6 +1366,9 @@ class ExecutionHistoryRepository:
         conditions = ["adversarial_outcome <> ''", "adversarial_outcome <> 'disabled'"]
         if repository_clause:
             conditions.insert(0, repository_clause)
+        delivery_sql = _delivery_filter_sql(delivery)
+        if delivery_sql:
+            conditions.append(delivery_sql)
         where = " WHERE " + " AND ".join(conditions) + clause
         params = [*repository_params, *search_params]
         with self.connect() as database:
@@ -1119,7 +1376,8 @@ class ExecutionHistoryRepository:
                 "SELECT COUNT(*), AVG(adversarial_round_count), "
                 "SUM(adversarial_outcome = 'clean_first_pass'), "
                 "SUM(adversarial_outcome = 'cap_hit'), "
-                "AVG(capacity_consumed_percent) "
+                "AVG(capacity_consumed_percent), "
+                f"SUM({_VERIFIED_CLEAN_SQL}), SUM({_BEST_EFFORT_SQL}) "
                 f"FROM ai_executions{where}",
                 params,
             ).fetchone()
@@ -1131,15 +1389,10 @@ class ExecutionHistoryRepository:
             ).fetchone()
         loops = int(row[0] or 0)
         if not loops:
-            return {
-                "loops": 0,
-                "averageRounds": None,
-                "cleanFirstPassPercent": None,
-                "capHitPercent": None,
-                "averageCapacityConsumedPercent": None,
-                "testsAdded": 0,
-            }
+            return _empty_adversarial_summary()
         capacity = row[4]
+        verified = int(row[5] or 0)
+        best_effort = int(row[6] or 0)
         return {
             "loops": loops,
             "averageRounds": round(float(row[1] or 0.0), 2),
@@ -1149,10 +1402,15 @@ class ExecutionHistoryRepository:
                 None if capacity is None else round(float(capacity), 2)
             ),
             "testsAdded": int(tests[0] or 0),
+            "verifiedCleanCount": verified,
+            "bestEffortCount": best_effort,
+            "verifiedCleanPercent": round(verified * 100 / loops, 1),
+            "bestEffortPercent": round(best_effort * 100 / loops, 1),
         }
 
     def security_summary(
-        self, repositories: Sequence[str] | str | None = None, *, search: str = ""
+        self, repositories: Sequence[str] | str | None = None, *, search: str = "",
+        delivery: str = "all",
     ) -> dict[str, Any]:
         """How the adversarial cybersecurity review is performing.
 
@@ -1174,6 +1432,9 @@ class ExecutionHistoryRepository:
         conditions = ["security_review_status <> ''"]
         if repository_clause:
             conditions.insert(0, repository_clause)
+        delivery_sql = _delivery_filter_sql(delivery)
+        if delivery_sql:
+            conditions.append(delivery_sql)
         where = " WHERE " + " AND ".join(conditions) + clause
         params = [*repository_params, *search_params]
         with self.connect() as database:
@@ -1703,6 +1964,7 @@ class ExecutionHistoryRepository:
         limit: int = PAGE_SIZE,
         offset: int = 0,
         sort: str = "recent",
+        delivery: str = "all",
     ) -> tuple[list[sqlite3.Row], int, int, int]:
         """One page of executions, newest first, plus the filtered total.
 
@@ -1718,6 +1980,9 @@ class ExecutionHistoryRepository:
         repository_clause, repository_params = _repository_filter(repositories)
         clause, search_params = _search_filter(search)
         where = f" WHERE {repository_clause}" if repository_clause else " WHERE 1 = 1"
+        delivery_sql = _delivery_filter_sql(delivery)
+        if delivery_sql:
+            where += f" AND {delivery_sql}"
         params = [*repository_params, *search_params]
         with self.connect() as database:
             total = int(
@@ -1984,6 +2249,44 @@ def _serialize_adversarial_filed_findings(value: Any) -> str:
     return json.dumps(cleaned)
 
 
+def _json_sanitize(item: Any) -> Any:
+    if isinstance(item, str):
+        return sanitize_text(item)
+    if isinstance(item, dict):
+        return {str(key): _json_sanitize(entry) for key, entry in item.items()}
+    if isinstance(item, list):
+        return [_json_sanitize(entry) for entry in item]
+    if isinstance(item, (int, float, bool)) or item is None:
+        return item
+    return sanitize_text(item)
+
+
+def _serialize_json(value: Any, *, empty: str) -> str:
+    if value is None or value == "":
+        return empty
+    return json.dumps(_json_sanitize(value))
+
+
+def _decode_json_fields(record: dict[str, Any], columns: Sequence[str]) -> None:
+    for column in columns:
+        raw = record.get(column)
+        if isinstance(raw, str) and raw:
+            try:
+                record[column] = json.loads(raw)
+            except ValueError:
+                pass
+
+
+def _delivery_filter_sql(delivery: str) -> str:
+    key = str(delivery or "all").strip().lower()
+    if key in {"", "all"}:
+        return ""
+    try:
+        return _DELIVERY_FILTERS[key]
+    except KeyError as error:
+        raise ValueError(f"Unknown delivery filter: {delivery}") from error
+
+
 def _serialize_security_findings(value: Any) -> str:
     """Sanitize the structured cybersecurity review metadata.
 
@@ -2031,6 +2334,18 @@ def attach_adversarial_rounds(
     )
     for record in records:
         record["adversarial_rounds"] = rounds.get(str(record.get("execution_id") or ""), [])
+    return records
+
+
+def attach_adversarial_epochs(
+    repository: "ExecutionHistoryRepository", records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Give each record its ``adversarial_epochs`` list (possibly empty)."""
+    epochs = repository.adversarial_epochs_for(
+        [str(record.get("execution_id") or "") for record in records]
+    )
+    for record in records:
+        record["adversarial_epochs"] = epochs.get(str(record.get("execution_id") or ""), [])
     return records
 
 
@@ -2165,6 +2480,14 @@ class ExecutionHistoryService:
             except sqlite3.Error as error:
                 self.error = sanitize_text(error)
 
+    def adversarial_epoch(self, summary: dict[str, Any]) -> None:
+        """Record one closed adversarial epoch; a no-op when history is off."""
+        if self.repository and self.execution_id:
+            try:
+                self.repository.record_adversarial_epoch(self.execution_id, summary)
+            except sqlite3.Error as error:
+                self.error = sanitize_text(error)
+
     def note(self, message: str, now: str) -> None:
         if self.repository and self.execution_id:
             try:
@@ -2219,8 +2542,11 @@ class ExecutionHistoryService:
                 self.error = sanitize_text(error)
 
 
-def _page_requested(limit: int | None, offset: int, search: str) -> bool:
-    return limit is not None or offset != 0 or bool(normalize_search(search))
+def _page_requested(limit: int | None, offset: int, search: str, delivery: str = "all") -> bool:
+    return (
+        limit is not None or offset != 0 or bool(normalize_search(search))
+        or str(delivery or "all").strip().lower() not in {"", "all"}
+    )
 
 
 def _empty_adversarial_summary() -> dict[str, Any]:
@@ -2231,6 +2557,10 @@ def _empty_adversarial_summary() -> dict[str, Any]:
         "capHitPercent": None,
         "averageCapacityConsumedPercent": None,
         "testsAdded": 0,
+        "verifiedCleanCount": 0,
+        "bestEffortCount": 0,
+        "verifiedCleanPercent": None,
+        "bestEffortPercent": None,
     }
 
 
@@ -2421,6 +2751,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--sort", choices=("recent", "rounds_asc", "rounds_desc"), default="recent")
     parser.add_argument(
+        "--delivery",
+        choices=("all", "verified_clean", "best_effort"),
+        default="all",
+        help="Keep verified-clean merges or best-effort merges. Default is every execution.",
+    )
+    parser.add_argument(
         "--import-from-github",
         action="store_true",
         help="Import open/closed GitHub issues with no existing history row, then exit.",
@@ -2546,7 +2882,7 @@ def main(argv: list[str] | None = None) -> int:
 
     database_path = Path(args.db).expanduser()
     repository_names = [sanitize_text(value) for value in args.repository if value.strip()]
-    paging = _page_requested(args.limit, args.offset, args.search) or args.sort != "recent"
+    paging = _page_requested(args.limit, args.offset, args.search, args.delivery) or args.sort != "recent"
 
     if args.import_from_github:
         if len(repository_names) != 1:
@@ -2652,7 +2988,10 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(
             attach_token_usage(
                 repository,
-                attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
+                attach_adversarial_epochs(
+                    repository,
+                    attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
+                ),
             ),
             sys.stdout,
         )
@@ -2664,21 +3003,25 @@ def main(argv: list[str] | None = None) -> int:
         search=args.search,
         limit=PAGE_SIZE if args.limit is None else args.limit,
         offset=args.offset,
+        delivery=args.delivery,
     )
     json.dump(
         {
             "records": attach_token_usage(
                 repository,
-                attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
+                attach_adversarial_epochs(
+                    repository,
+                    attach_adversarial_rounds(repository, [row_to_dict(row) for row in rows]),
+                ),
             ),
             "total": total,
             "offset": offset,
             "limit": limit,
             "adversarial": repository.adversarial_summary(
-                repository_names, search=args.search
+                repository_names, search=args.search, delivery=args.delivery
             ),
             "security": repository.security_summary(
-                repository_names, search=args.search
+                repository_names, search=args.search, delivery=args.delivery
             ),
         },
         sys.stdout,

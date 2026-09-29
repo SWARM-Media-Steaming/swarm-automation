@@ -139,6 +139,12 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .automation-flow-toggle strong { color: #cbd2df; font-size: 10px; line-height: 1.4; }
 .automation-flow-toggle small { margin-top: 5px; color: var(--muted-2); font-size: 9px; line-height: 1.45; }
 .automation-flow-toggle code { color: #c5bbff; font: inherit; }
+.automation-flow-options .best-effort-toggle { grid-column: 1 / -1; }
+.best-effort-toggle .warning-copy { color: #f3d095; }
+.best-effort-toggle:has(input:checked) { border-color: rgba(240,187,98,.45); background: rgba(240,187,98,.09); }
+.execution-warning { display: inline-block; margin: 8px 0 0; border-radius: 8px; padding: 8px 10px; background: rgba(240,187,98,.09); border: 1px solid rgba(240,187,98,.28); color: #f3d095; font-size: 11px; font-weight: 750; line-height: 1.45; text-transform: none; letter-spacing: 0; }
+.execution-tally .execution-warning { margin: 0; max-width: 280px; }
+.execution-policy { display: inline-block; margin: 0; color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1.45; }
 .branch-push-access { margin-top: 16px; display: grid; gap: 10px; }
 .branch-push-access .automation-flow-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .branch-push-access .panel-copy { margin: 0; }

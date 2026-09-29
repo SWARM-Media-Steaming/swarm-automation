@@ -172,9 +172,15 @@ validation results; raw reviewer reasoning never goes on the issue. Quota pauses
 and resumes use the existing idempotent notices and retain the current role,
 phase, round count, test definition and execution-history row.
 
-A cap-hit uses the normal completion comment with an explicit **best-effort
-adversarial handoff**, the delivered commit/PR link, failing suite evidence and
-the URL of a separately filed follow-up issue. It must not use the AI Needs
-Input template or ask for adjudication. Do not run no-code branch cleanup for
-this delivered PR; normal delivery settings decide whether its PR is merged.
+A best-effort cap-hit — only when the repository explicitly allows a best-effort
+adversarial merge after 3 rounds — uses the normal completion comment with the
+label **Best-effort merge with unresolved adversarial results**, the delivered
+commit/PR link, failing suites and security findings before and after the merge,
+and the URL of a separately filed follow-up issue. It must not use the AI Needs
+Input template or ask for adjudication. Strict exhaustion does not post that
+completion comment and does not become `AI Needs Input`; the worker persists
+the epoch and starts another. Do not run no-code branch cleanup for a
+best-effort delivered PR. Best-effort merges the issue PR into the integration
+branch even when routine approval is manual; promotion to the base branch still
+requires both automatic promotion and automatic issue-PR merging.
 No per-round GitHub comments are posted.

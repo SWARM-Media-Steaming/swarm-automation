@@ -11,9 +11,12 @@
   }
 
   function aggregate(stats) {
-    return stats?.loops
-      ? `Adversarial UAT · ${stats.averageRounds} average fix/re-test rounds per work-round · ${stats.cleanFirstPassPercent}% clean first pass · ${stats.capHitPercent}% cap hit (${stats.loops} work-rounds).`
-      : "No adversarial UAT outcomes recorded yet.";
+    if (!stats?.loops) return "No adversarial UAT outcomes recorded yet.";
+    const base = `Adversarial UAT · ${stats.averageRounds} average fix/re-test rounds per work-round · ${stats.cleanFirstPassPercent}% clean first pass · ${stats.capHitPercent}% cap hit (${stats.loops} work-rounds).`;
+    if (stats.verifiedCleanCount == null && stats.bestEffortCount == null) return base;
+    const verified = stats.verifiedCleanCount ?? 0;
+    const best = stats.bestEffortCount ?? 0;
+    return `${base} ${verified} verified-clean merge${verified === 1 ? "" : "s"} · ${best} best-effort merge${best === 1 ? "" : "s"}.`;
   }
 
   function capacity(value) {
@@ -23,7 +26,8 @@
   }
 
   function roundDetail(round) {
-    return `${round.fixer_provider} / ${round.fixer_model} → ${round.tester_provider} / ${round.tester_model}; ${round.tests_added} test files added, ${round.tests_modified} modified; failing suites ${round.tests_failing_before} → ${round.tests_failing_after}${round.disputed ? `; dispute: ${round.dispute_resolution || "upheld"}` : ""}.`;
+    const epoch = round.epoch_number ? `epoch ${round.epoch_number} · ` : "";
+    return `${epoch}${round.fixer_provider} / ${round.fixer_model} → ${round.tester_provider} / ${round.tester_model}; ${round.tests_added} test files added, ${round.tests_modified} modified; failing suites ${round.tests_failing_before} → ${round.tests_failing_after}${round.disputed ? `; dispute: ${round.dispute_resolution || "upheld"}` : ""}.`;
   }
 
   return { roundCount, aggregate, capacity, roundDetail };

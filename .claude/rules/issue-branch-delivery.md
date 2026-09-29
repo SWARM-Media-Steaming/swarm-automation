@@ -16,16 +16,20 @@ pushed — cannot recur silently.
 
 For every work-round that produces a commit, in this order:
 
-0. When `adversarial_uat_enabled` is on, finish the independent assessment and
-   all local fix/re-test rounds before pushing. No intermediate round pushes
-   or PRs. A clean pass follows steps 1–3 below. A three-round deadlock also
-   pushes and opens/reuses the issue PR, files the unresolved notes in a
-   separate labelled follow-up issue, and completes through the ordinary
-   `finalize_issue` path with the cap-hit delivery override. The adversarial
-   result remains `FAILED`/`cap_hit`, but the original issue is not converted
-   into an `AI Needs Input` human blocker. Auto-approval, merging and
-   promotion follow the repository's normal settings, while the follow-up
-   issue owns the later remediation.
+0. When an adversarial stage is on, finish the current epoch's local
+   fix/re-test rounds before pushing. No intermediate round pushes or PRs.
+   A clean pass follows steps 1–3 below. With **Allow best-effort adversarial
+   merge after 3 rounds** explicitly on, exhaustion of the first epoch also
+   pushes, opens or reuses the issue PR, files the unresolved notes in a
+   separate labelled follow-up issue, and completes through `finalize_issue`
+   with the best-effort override. The issue PR merges into the integration
+   branch even when routine approval is off. Promotion to the base branch
+   runs only when both `auto_promote` and `auto_approve` are on. The result
+   remains `FAILED`/`cap_hit` and is labelled **Best-effort merge with
+   unresolved adversarial results**; it is not `AI Needs Input`. With that
+   setting off, epoch exhaustion does not push or complete: the worker starts
+   another escalated epoch, or exits 13 so the scheduler resumes the same
+   checkpoint, and known blocking failures stay unmerged.
 1. **Push** the commit to the issue's remote branch (`push_ref`,
    `expected_branch()`). Nothing past this point may run against a commit
    that has not been pushed.

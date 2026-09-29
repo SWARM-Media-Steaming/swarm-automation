@@ -12,6 +12,16 @@ the three subsequent rounds is exactly one fix plus one fresh assessment by a ne
 context. Only executable suite exit codes and a fresh agent's structured report
 decide success; an agent's self-reported pass never does.
 
+Three counted rounds make one *epoch* (issue #305). What happens when an epoch
+ends without a clean verdict is the repository's merge policy:
+
+* **strict** (default): persist the epoch, escalate (re-route, raise reasoning
+  effort, change model/provider, demand a different strategy when progress
+  stalls) and start another epoch. Known blocking failures are never merged.
+* **best_effort** (`adversarial_best_effort_merge`): stop after the first epoch
+  and deliver the latest committed implementation, marked as a best-effort
+  merge with unresolved adversarial results.
+
 `AdversarialStage` is the per-agent description (state key, owned test root,
 suite origin, prompts, report schema). `AdversarialStageMixin` is the loop, and
 is stage-agnostic: every UAT-specific string used to live in it and none does
@@ -30,7 +40,31 @@ import subprocess
 import tempfile
 from typing import Any
 
+#: Counted fix/re-test rounds in one epoch. The initial assessment (round 0)
+#: is not counted.
 MAX_ROUNDS = 3
+#: Merge policies for an epoch that ends without a clean verdict.
+MERGE_POLICY_STRICT = "strict"
+MERGE_POLICY_BEST_EFFORT = "best_effort"
+MERGE_POLICIES = (MERGE_POLICY_STRICT, MERGE_POLICY_BEST_EFFORT)
+#: How delivery is identified everywhere a human reads it: execution history,
+#: the issue comment, the PR body, logs and the desktop UI.
+BEST_EFFORT_LABEL = "Best-effort merge with unresolved adversarial results"
+DELIVERY_VERIFIED_CLEAN = "verified_clean"
+DELIVERY_BEST_EFFORT = "best_effort"
+BEST_EFFORT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-best-effort -->"
+#: Strict mode renews epochs in-process, but after this many epochs in one
+#: worker run it checkpoints and hands control back to the scheduler, which
+#: resumes the same checkpoint on its next pass. That keeps a changed
+#: repository policy, a stop request and other repositories from waiting on an
+#: issue that is still being escalated.
+STRICT_EPOCHS_PER_RUN = 3
+#: Consecutive epochs without progress before the fixer moves to the strongest
+#: model its provider offers, at that provider's maximum effort.
+STALLED_EPOCHS_BEFORE_STRONGEST = 2
+#: Reasoning effort, weakest first. Escalation climbs this ladder and is
+#: clamped to the highest effort the chosen provider's own tiers use.
+EFFORT_LADDER = ("low", "medium", "high", "xhigh", "max")
 DEFINITION = ".swarm/tests.json"
 TEST_ROOT = "tests/adversarial/"
 CAP_HIT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-cap-hit -->"
@@ -161,6 +195,84 @@ def _finding_title_is_reworded_duplicate(a: str, b: str) -> bool:
         return False
     extra_raw = extra_sequence[extra_index][1]
     return extra_raw == extra_raw.lower()
+def merge_policy_for(best_effort: bool) -> str:
+    """The repository's merge policy. Best effort is never inferred."""
+    return MERGE_POLICY_BEST_EFFORT if best_effort is True else MERGE_POLICY_STRICT
+
+
+def epoch_of(round_number: int) -> int:
+    """1-based epoch of a cumulative round number; round 0 belongs to epoch 1."""
+    return 1 if round_number <= MAX_ROUNDS else (round_number - 1) // MAX_ROUNDS + 1
+
+
+def round_in_epoch(round_number: int) -> int:
+    """Position of a counted round inside its epoch (1..MAX_ROUNDS); 0 stays 0."""
+    return 0 if round_number <= 0 else (round_number - 1) % MAX_ROUNDS + 1
+
+
+def epoch_exhausted(round_number: int) -> bool:
+    """Whether a re-test at this round is the last one of its epoch."""
+    return round_number > 0 and round_number % MAX_ROUNDS == 0
+
+
+def effort_rank(effort: str) -> int:
+    value = str(effort or "").strip().lower()
+    return EFFORT_LADDER.index(value) if value in EFFORT_LADDER else 0
+
+
+def raise_effort(effort: str, steps: int, ceiling: str = EFFORT_LADDER[-1]) -> str:
+    """`effort` raised by `steps` rungs, never above `ceiling` or below itself."""
+    top = max(effort_rank(ceiling), 0)
+    current = effort_rank(effort)
+    if current >= top:
+        return str(effort or ceiling)
+    return EFFORT_LADDER[min(top, current + max(0, steps))]
+
+
+# Counts, durations, addresses and temp paths change between otherwise
+# identical runs of the same failing test; they must not make a repeated
+# failure look new.
+_VOLATILE_OUTPUT = re.compile(
+    r"0x[0-9a-fA-F]+|/(?:private/)?(?:tmp|var/folders)/\S+|\b\d+(?:\.\d+)?(?:s|ms)?\b"
+)
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def normalize_failure_output(output: str) -> str:
+    text = _VOLATILE_OUTPUT.sub("#", str(output or "")[-4000:])
+    return " ".join(text.split())
+
+
+def failure_fingerprint(results: list[dict[str, Any]], finding_keys: list[str]) -> str:
+    """Stable identity of a round's remaining failures; "" when nothing fails."""
+    suites = sorted((str(r.get("id", "")), normalize_failure_output(r.get("output", "")))
+                    for r in results if r.get("exit_code"))
+    findings = sorted(set(finding_keys))
+    if not suites and not findings:
+        return ""
+    return _digest({"suites": suites, "findings": findings})
+
+
+def patch_fingerprint(diff: str) -> str:
+    """Identity of what a fix changed, independent of hunk offsets and order.
+
+    Only added/removed lines count, whitespace-normalized and sorted, so the
+    same edit re-applied at a different line number, or split into different
+    hunks, is still recognised as the same approach.
+    """
+    lines = []
+    for line in str(diff or "").splitlines():
+        if line.startswith(("+++", "---")) or not line.startswith(("+", "-")):
+            continue
+        body = " ".join(line[1:].split())
+        if body:
+            lines.append(line[0] + body)
+    return _digest(sorted(lines)) if lines else ""
+
+
 # Framework wiring is the only non-test code a tester may scaffold. This list
 # is deliberately explicit: adding a test framework must not grant product edits.
 FRAMEWORK_FILES = {
@@ -346,14 +458,29 @@ class AdversarialStage:
             return "running independent adversarial UAT"
         return f"re-testing after adversarial fix round {round_number}"
 
+    #: How round 0 is described in the boundary log the Overview replays.
+    assessment_log = "independent test run"
+
+    def round_position(self, loop: dict[str, Any]) -> str:
+        """`N of MAX_ROUNDS`, plus the epoch once strict mode has renewed one.
+
+        The first epoch keeps the historical wording exactly, so the Overview
+        panel and anything else parsing these boundary logs is unaffected until
+        a second epoch actually starts.
+        """
+        round_number = loop["round"]
+        epoch = epoch_of(round_number)
+        suffix = f" in epoch {epoch}" if epoch > 1 else ""
+        return f"{round_in_epoch(round_number)} of {MAX_ROUNDS}{suffix}"
+
     def round_start_log(self, issue_number: int, loop: dict[str, Any]) -> str:
         round_number, phase = loop["round"], loop["phase"]
         if phase == "fix":
-            detail = f"starting fix/re-test round {round_number} of {MAX_ROUNDS}."
+            detail = f"starting fix/re-test round {self.round_position(loop)}."
         elif round_number == 0:
-            detail = f"starting independent test run (round 0 of {MAX_ROUNDS})."
+            detail = f"starting {self.assessment_log} (round 0 of {MAX_ROUNDS})."
         else:
-            detail = f"starting re-test for round {round_number} of {MAX_ROUNDS}."
+            detail = f"starting re-test for round {self.round_position(loop)}."
         return f"{self.label} for issue #{issue_number}: {detail}"
 
     def on_round_start(self, worker, loop: dict[str, Any]) -> None:
@@ -361,7 +488,15 @@ class AdversarialStage:
 
     def fix_applied_log(self, issue_number: int, loop: dict[str, Any]) -> str:
         return (f"{self.label} for issue #{issue_number}: fix applied in round "
-                f"{loop['round']} of {MAX_ROUNDS}.")
+                f"{self.round_position(loop)}.")
+
+    def finding_key(self, finding: dict[str, Any]) -> str:
+        """How a blocking finding is recognised again in a later round."""
+        return " ".join(str(finding.get("title") or "").split()).lower()
+
+    def unresolved_findings(self, loop: dict[str, Any]) -> list[dict[str, Any]]:
+        """Blocking findings still open at the end of the stage (none for UAT)."""
+        return []
 
     def parse_report(self, output: str) -> dict[str, Any]:
         report = parse_result(self.result_marker, output)
@@ -429,17 +564,23 @@ class AdversarialStage:
     def prompt(self, worker, loop: dict[str, Any], common: str) -> str:
         raise NotImplementedError
 
-    def summary_line(self, loop: dict[str, Any]) -> str:
+    def outcome_description(self, loop: dict[str, Any]) -> str:
         outcome = loop.get("outcome")
-        if not outcome:
+        epochs = epoch_of(int(loop.get("round") or 0))
+        across = f" across {epochs} epochs" if epochs > 1 else ""
+        return {"clean_first_pass": "clean first pass",
+                "resolved_after_n": f"resolved after {loop['round']} rounds{across}",
+                "cap_hit": f"still failing after {MAX_ROUNDS} rounds — {BEST_EFFORT_LABEL.lower()}"}[outcome]
+
+    def summary_line(self, loop: dict[str, Any]) -> str:
+        if not loop.get("outcome"):
             return ""
-        description = {"clean_first_pass": "clean first pass",
-                       "resolved_after_n": f"resolved after {loop['round']} rounds",
-                       "cap_hit": f"still failing after {MAX_ROUNDS} rounds"}[outcome]
-        return f"- {self.label}: {description}, {loop['tests_added']} test files added.\n"
+        return f"- {self.label}: {self.outcome_description(loop)}, {loop['tests_added']} test files added.\n"
 
     def history_fields(self, loop: dict[str, Any]) -> dict[str, Any]:
-        return {"adversarial_round_count": loop["round"], "adversarial_outcome": loop["outcome"]}
+        return {"adversarial_round_count": loop["round"], "adversarial_outcome": loop["outcome"],
+                "adversarial_epoch_count": int(loop.get("epoch") or 1),
+                "adversarial_merge_policy": str(loop.get("merge_policy") or "")}
 
     def disabled_history_fields(self) -> dict[str, Any]:
         return {"adversarial_outcome": "disabled"}
@@ -447,8 +588,10 @@ class AdversarialStage:
     def cap_hit_output(self, loop: dict[str, Any]) -> str:
         failures = "\n".join(f"- {r['id']}: {r['output'][-2000:]}" for r in loop["results"] if r["exit_code"])
         return (
+            f"**{BEST_EFFORT_LABEL}.**\n\n"
             "## Summary\nAdversarial UAT did not pass after three fix/re-test rounds. Delivered as best "
-            "effort: this is the last fix attempt, not a verified-clean pass. The unresolved notes "
+            "effort because this repository allows a best-effort adversarial merge after 3 rounds: "
+            "this is the last fix attempt, not a verified-clean pass. The unresolved notes "
             "were filed for later work and do not require a human response on this issue.\n\n" +
             self.summary_line(loop) + "\n" + failures +
             "\n\n## Deferred adversarial notes\nThese tests were not satisfied within the bounded "
@@ -646,7 +789,18 @@ class AdversarialStageMixin:
             # and burn its rounds on a bug the earlier stage already scoped out.
             "excluded_suites": sorted(set(excluded_suites or [])),
             "findings": [], "advisory_findings": [], "fixed_findings": [], "status": "",
+            # Epoch bookkeeping (issue #305): the policy in force, every closed
+            # epoch's summary, the escalation the next fixer must honour, and
+            # the fingerprints that detect a repeated patch or failure.
+            "epoch": 1, "epoch_started": iso_timestamp(), "epochs": [],
+            "merge_policy": self.adversarial_merge_policy(),
+            "escalation": {}, "stalled_epochs": 0, "approaches": [],
+            "failure_history": [], "no_progress": {},
         })
+
+    def adversarial_merge_policy(self) -> str:
+        """`strict` unless the repository explicitly enabled best effort."""
+        return merge_policy_for(getattr(self.config, "adversarial_best_effort_merge", False))
 
     def refresh_adversarial_requirements(self) -> None:
         """Trusted comments may clarify the spec during a quota pause."""
@@ -688,6 +842,17 @@ class AdversarialStageMixin:
         alternatives = [name for name in names if name != previous]
         if previous and alternatives:
             names = alternatives
+        escalation = (loop.get("escalation") or {}) if loop["phase"] == "fix" else {}
+        if escalation.get("change_provider") and not previous:
+            # A stalled epoch hands its fixes to a provider that did not take
+            # part in it when one has capacity; those providers stay a fallback.
+            stalled = {str(provider) for provider, _model in escalation.get("avoid", [])}
+            fresh = [name for name in names if name not in stalled]
+            if fresh:
+                names = fresh
+                if choice.name != fresh[0]:
+                    spec = next(s for s in self.config.enabled_specs if s.name == fresh[0])
+                    choice = ProviderChoice(spec.name, spec.model, spec.effort, self.new_session_id(spec))
         if self.config.dynamic_model_routing:
             candidates = [RouterCandidate(
                 key=s.key, name=s.name, tiers=self.config.routing_tiers[s.key],
@@ -696,9 +861,14 @@ class AdversarialStageMixin:
             host = self.config.require_spec(choice.key)
             if candidates:
                 try:
+                    body = self.issue.body
+                    if escalation:
+                        # Routing is re-run at every strict-mode epoch boundary
+                        # with the reason the previous epoch did not converge.
+                        body += "\n\n" + self.escalation_router_note(stage, loop, escalation)
                     prompt = build_router_prompt(
                         title=f"{stage.router_task} {loop['phase']}: {self.issue.title}",
-                        body=self.issue.body, labels=self.issue.labels, candidates=candidates,
+                        body=body, labels=self.issue.labels, candidates=candidates,
                         previous_provider=previous.lower(), rework=bool(previous),
                         routing_optimization=self.config.routing_optimization,
                         allow_usage_credit_models=self.config.allow_usage_credit_models,
@@ -711,9 +881,78 @@ class AdversarialStageMixin:
                     choice = ProviderChoice(spec.name, decision["selected_model"], decision["reasoning_effort"], self.new_session_id(spec))
                 except RouterError as error:
                     self.history.warning(f"Adversarial routing used capacity fallback: {error}", iso_timestamp())
+        if escalation:
+            choice = self.escalate_stage_choice(stage, loop, choice, escalation, remaining)
         if choice.name not in loop["capacity_used"]:
             loop["capacity_used"].append(choice.name)
         return choice
+
+    def escalation_router_note(self, stage: AdversarialStage, loop: dict[str, Any],
+                               escalation: dict[str, Any]) -> str:
+        avoid = ", ".join(f"{provider}/{model}" for provider, model in escalation.get("avoid", [])) or "none"
+        return (
+            f"Escalation context: {stage.label} strict-mode epoch {escalation.get('epoch', loop.get('epoch', 1))} "
+            f"is starting because the previous epoch did not pass ({escalation.get('reason', 'epoch_exhausted')}). "
+            f"Choose a stronger fixer: reasoning effort at least {escalation.get('effort_floor') or 'the previous one'}; "
+            f"avoid repeating these provider/model pairs that made no progress: {avoid}."
+            + (" Prefer the most capable model available." if escalation.get("strongest") else "")
+        )
+
+    def escalate_stage_choice(self, stage: AdversarialStage, loop: dict[str, Any], choice,
+                              escalation: dict[str, Any], remaining: dict[str, float | None]):
+        """Apply an epoch's escalation floor to whichever fixer was chosen.
+
+        Routing (or the capacity fallback) still picks the provider; this only
+        makes sure the next epoch is materially stronger than the one that
+        stalled: effort never drops below the floor, a provider/model pair that
+        made no progress moves up its own tier ladder, and repeated stalls move
+        to the strongest model the enabled providers offer.
+        """
+        from swarm_issue_worker import ProviderChoice, log
+        from dynamic_router import COMPLEXITY_SCALE_TOP, RouterError, default_routing_tiers, model_cost, tier_for_complexity
+
+        def tiers_for(key: str) -> tuple:
+            return tuple(self.config.routing_tiers.get(key) or default_routing_tiers().get(key) or ())
+
+        def top_tier(key: str):
+            try:
+                return tier_for_complexity(tiers_for(key), COMPLEXITY_SCALE_TOP)
+            except RouterError:
+                return None
+
+        avoid = {(str(p), str(m)) for p, m in escalation.get("avoid", [])}
+        if escalation.get("strongest"):
+            options = [(spec, top_tier(spec.key)) for spec in self.config.enabled_specs if spec.name in remaining]
+            options = [(spec, tier) for spec, tier in options if tier]
+            if options:
+                spec, tier = min(options, key=lambda item: (
+                    -(model_cost(item[1].model) or 0),
+                    (item[0].name, item[1].model) in avoid,
+                    -(remaining.get(item[0].name) or 0),
+                ))
+                session = choice.session_id if spec.name == choice.name else self.new_session_id(spec)
+                choice = ProviderChoice(spec.name, tier.model, tier.effort, session)
+        spec = self.config.require_spec(choice.key)
+        model = choice.model
+        if (choice.name, model) in avoid and not escalation.get("strongest"):
+            ladder = sorted(tiers_for(spec.key), key=lambda tier: tier.min_complexity)
+            positions = [index for index, tier in enumerate(ladder) if tier.model == model]
+            start = positions[-1] + 1 if positions else 0
+            stronger = next((tier for tier in ladder[start:] if tier.model != model), None)
+            if stronger:
+                model = stronger.model
+        top = top_tier(spec.key)
+        ceiling = top.effort if top else EFFORT_LADDER[-1]
+        effort = choice.effort
+        floor = str(escalation.get("effort_floor") or "")
+        if effort_rank(floor) > effort_rank(effort):
+            effort = floor if effort_rank(floor) <= effort_rank(ceiling) else max(
+                effort, ceiling, key=effort_rank)
+        escalated = ProviderChoice(choice.name, model, effort, choice.session_id, choice.resume)
+        log(f"{stage.label} for issue #{self.issue.number}: escalating the epoch "
+            f"{loop.get('epoch', 1)} fixer to {escalated.name} {escalated.model} at {escalated.effort} "
+            f"effort ({escalation.get('reason', 'epoch_exhausted')}).")
+        return escalated
 
     def adversarial_common_prompt(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
         base = str(self.read_state()["base_sha"])
@@ -737,8 +976,65 @@ class AdversarialStageMixin:
             "Do not inspect prior agent transcripts, session logs, or completion summaries. "
             "Do not commit, push, open PRs, post comments, or file issues; the worker handles delivery. "
             "Run checks in the foreground. Do not edit VERSION.\n" + rejection_guidance +
+            self.adversarial_history_context(stage, loop) +
             "\nResulting patch:\n" + diff + "\n"
         )
+
+    def adversarial_history_context(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
+        """What earlier rounds established, for a fresh agent with no transcript.
+
+        Only worker-recorded facts: suite results, findings, disputes, the
+        protected tests, what each earlier fix touched (files and a patch
+        fingerprint) and the structured no-progress summary. Never an agent's
+        own transcript, reasoning or completion summary.
+        """
+        rounds = loop.get("rounds") or []
+        if not rounds:
+            return ""
+        protected = sorted(
+            path for path in self.git("ls-files", "-z", "--", TEST_ROOT.rstrip("/"), check=False).split("\0")
+            if path and "__pycache__" not in path.split("/")
+        )
+        failing = [str(r.get("id", "")) for r in loop.get("results", []) if r.get("exit_code")]
+        findings = [
+            {key: finding.get(key, "") for key in ("title", "severity", "confidence") if key in finding}
+            for finding in stage.unresolved_findings(loop)
+        ]
+        disputes = [str(r.get("dispute_resolution") or "").strip() for r in rounds
+                    if str(r.get("dispute_resolution") or "").strip()]
+        if str(loop.get("dispute") or "").strip():
+            disputes.append("Open dispute: " + str(loop["dispute"]).strip())
+        approaches = [
+            {key: approach.get(key) for key in (
+                "epoch", "round", "provider", "model", "effort", "files", "patch_fingerprint",
+                "repeated_patch", "failing_after")}
+            for approach in loop.get("approaches", [])
+        ]
+        lines = [
+            "",
+            "Adversarial history (worker-recorded facts; no agent transcripts or reasoning):",
+            f"- Merge policy: {loop.get('merge_policy') or self.adversarial_merge_policy()}. "
+            f"Epoch {epoch_of(loop['round'])}, cumulative round {loop['round']} "
+            f"(round {round_in_epoch(loop['round'])} of {MAX_ROUNDS} in this epoch).",
+            "- Protected adversarial tests (no fixer may change them; only a fresh tester adjudicating "
+            "a dispute may revise one): " + (", ".join(protected[:60]) or "none yet")
+            + (f" and {len(protected) - 60} more" if len(protected) > 60 else ""),
+            "- Currently failing blocking suites: " + (", ".join(failing) or "none"),
+            "- Open blocking findings: " + (json.dumps(findings) if findings else "none"),
+            "- Disputes and resolutions so far: " + (json.dumps(disputes) if disputes else "none"),
+            "- Earlier fix attempts: " + (json.dumps(approaches) if approaches else "none"),
+        ]
+        if loop.get("no_progress"):
+            lines.append("- Structured no-progress summary: " + json.dumps(loop["no_progress"], sort_keys=True))
+        escalation = loop.get("escalation") or {}
+        if loop["phase"] == "fix" and escalation.get("strategy_change"):
+            lines.append(
+                "STRATEGY CHANGE REQUIRED: the earlier fix attempts above did not make these checks pass. "
+                "Do not re-apply a materially identical patch (the worker fingerprints every fix and "
+                "records a repeat). Re-derive the root cause from the failing evidence and take a "
+                "different approach; if an expectation contradicts the issue, dispute it instead."
+            )
+        return "\n".join(lines) + "\n"
 
     def adversarial_prompt(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
         return stage.prompt(self, loop, self.adversarial_common_prompt(stage, loop))
@@ -1080,7 +1376,9 @@ class AdversarialStageMixin:
                 f"Follow-up work deferred from {stage.label.lower()} on issue #{self.issue.number}.\n\n"
                 f"- Original issue: {self.issue.url}\n"
                 f"- Delivered commit: `{loop.get('completion', '')}`\n"
-                f"- Round cap: `{MAX_ROUNDS}` fix/re-test rounds\n\n"
+                f"- Round cap: `{MAX_ROUNDS}` fix/re-test rounds\n"
+                f"- Merge policy: {BEST_EFFORT_LABEL.lower()} (the repository allows a best-effort "
+                "adversarial merge after 3 rounds)\n\n"
                 "## Adversarial notes\n"
                 "The original issue was delivered as best effort after the bounded review budget. "
                 "Work the notes below in a later issue; do not reopen the original delivery just "
@@ -1131,6 +1429,9 @@ class AdversarialStageMixin:
     def run_adversarial_stage(self, stage: AdversarialStage) -> int | None:
         """Run one stage to `done`. Returns an exit code only to stop early."""
         from swarm_issue_worker import WorkerError, iso_timestamp, log
+        # Each stage gets a fresh in-process epoch budget. UAT renewals must
+        # not consume the cybersecurity stage's renewals in the same process.
+        self.adversarial_epochs_this_run = 0
         loop = self.read_state()[stage.key]
         while loop["phase"] != "done":
             if not loop.get("active"):
@@ -1178,6 +1479,7 @@ class AdversarialStageMixin:
                                              if line.startswith(stage.dispute_marker))
                 self.validate_stage_edits(stage, loop, {})
                 loop["fixer_provider"], loop["fixer_model"] = self.choice.name, self.choice.model
+                loop["fixer_effort"] = self.choice.effort
                 import dataclasses
                 loop["delivery_choice"] = dataclasses.asdict(self.choice)
             else:
@@ -1270,6 +1572,7 @@ class AdversarialStageMixin:
                 )
                 completed = iso_timestamp()
                 blocking = stage.blocking_findings(report)
+                progress = self.round_progress(stage, loop, results, blocking)
                 round_value = {
                     "stage": stage.slug,
                     "round_number": loop["round"], "fixer_provider": loop["fixer_provider"],
@@ -1279,6 +1582,7 @@ class AdversarialStageMixin:
                     "disputed": bool(loop["dispute"] or (loop.get("amendments") and report.get("dispute_resolution"))), "dispute_resolution": report.get("dispute_resolution", ""),
                     "started_at": loop["round_started"], "completed_at": completed,
                     "duration_seconds": max(0, (dt.datetime.fromisoformat(completed) - dt.datetime.fromisoformat(loop["round_started"])).total_seconds()),
+                    **progress,
                 }
                 stage.record_round(self, loop, report, round_value, blocking, results)
                 # Do not append until the phase is durably complete; repeated
@@ -1293,16 +1597,25 @@ class AdversarialStageMixin:
                 self.git("add", "--force", "--", DEFINITION)
                 if not round_value["tests_failing_after"] and not blocking:
                     loop["outcome"] = "clean_first_pass" if loop["round"] == 0 else "resolved_after_n"
-                elif loop["round"] >= MAX_ROUNDS:
-                    loop["outcome"] = "cap_hit"
+                elif loop["round"] >= MAX_ROUNDS and epoch_exhausted(loop["round"]):
+                    # The epoch's three counted rounds are spent. The policy
+                    # is read now, not at initialization, so an operator who
+                    # changes it mid-issue gets it at the next boundary.
+                    policy = self.adversarial_merge_policy()
+                    loop["merge_policy"] = policy
+                    self.close_adversarial_epoch(stage, loop, results, blocking, policy)
+                    if policy == MERGE_POLICY_BEST_EFFORT:
+                        loop["outcome"] = "cap_hit"
             completion = self.commit_completed_work(loop["stage_base"])
             self.validate_new_commit_messages(loop["stage_base"], completion)
             loop["completion"] = completion
             if loop["phase"] == "fix":
+                self.record_fix_approach(stage, loop, completion)
                 log(stage.fix_applied_log(self.issue.number, loop))
             usage = self.provider_usage(self.choice.key)
             if usage.remaining_percent is not None:
                 loop["capacity_end"][self.choice.name] = usage.remaining_percent
+            renewed = False
             if loop["outcome"]:
                 loop["phase"] = "done"
             elif loop["phase"] == "fix":
@@ -1311,8 +1624,19 @@ class AdversarialStageMixin:
                 loop["phase"] = "fix"
                 loop["round"] += 1
                 loop["round_started"] = iso_timestamp()
+                if loop.pop("epoch_closed", False):
+                    renewed = True
+                    loop["epoch"] = epoch_of(loop["round"])
+                    loop["epoch_started"] = loop["round_started"]
+                    log(f"{stage.label} for issue #{self.issue.number}: starting strict-mode epoch "
+                        f"{loop['epoch']} ({MAX_ROUNDS} more fix/re-test rounds; escalation: "
+                        f"{(loop.get('escalation') or {}).get('reason', 'epoch_exhausted')}).")
             loop.update(active=False, response=None)
             self.save_stage(stage, loop)
+            if renewed:
+                self.adversarial_epochs_this_run = getattr(self, "adversarial_epochs_this_run", 0) + 1
+                if self.adversarial_epochs_this_run >= STRICT_EPOCHS_PER_RUN:
+                    return self.yield_adversarial_epoch(stage, loop)
         consumed = [max(0, start - loop["capacity_end"][name]) for name, start in loop["capacity_start"].items()
                     if name in loop["capacity_end"] and name in loop["capacity_used"]]
         loop["consumed_percent"] = sum(consumed) if consumed else None
@@ -1322,6 +1646,186 @@ class AdversarialStageMixin:
                             capacity_consumed_percent=self.adversarial_capacity_consumed())
         log(f"{stage.label} for issue #{self.issue.number}: review completed with status {loop['status']}.")
         return None
+
+    def round_progress(self, stage: AdversarialStage, loop: dict[str, Any],
+                       results: list[dict[str, Any]], blocking: list[dict[str, Any]]) -> dict[str, Any]:
+        """Epoch/round position, fingerprints and progress for this re-test.
+
+        A round makes progress only when fewer suites fail and fewer blocking
+        findings remain than after the previous re-test. An identical failure
+        fingerprint, or a fix whose patch fingerprint matches an earlier one,
+        is recorded so the next epoch is forced onto a different strategy.
+        """
+        failing = [str(r.get("id", "")) for r in results if r.get("exit_code")]
+        keys = [stage.finding_key(finding) for finding in blocking]
+        fingerprint = failure_fingerprint(results, keys)
+        history = loop.setdefault("failure_history", [])
+        total = len(failing) + len(blocking)
+        previous_total = loop.get("last_blocking_total")
+        round_number = loop["round"]
+        if round_number == 0:
+            progress = "resolved" if not total else "assessment"
+        elif not total:
+            progress = "resolved"
+        elif previous_total is None or total < previous_total:
+            progress = "improved"
+        elif total > previous_total:
+            progress = "regressed"
+        else:
+            progress = "no_progress"
+        repeated_failure = bool(fingerprint) and fingerprint in history
+        approach = next((a for a in reversed(loop.get("approaches", []))
+                         if a.get("round") == round_number), {}) if round_number else {}
+        if fingerprint:
+            history.append(fingerprint)
+            del history[:-30]
+        loop["last_blocking_total"] = total
+        if round_number == 0:
+            loop["epoch_start_total"] = total
+            loop["epoch_start_fingerprint"] = fingerprint
+        if approach:
+            approach["failing_after"] = total
+        policy = loop.get("merge_policy") or self.adversarial_merge_policy()
+        return {
+            "epoch_number": epoch_of(round_number),
+            "round_in_epoch": round_in_epoch(round_number),
+            "fixer_effort": str(loop.get("fixer_effort") or "") if round_number else "",
+            "tester_effort": self.choice.effort,
+            "escalation_reason": str((loop.get("escalation") or {}).get("reason", "")) if round_number else "",
+            "patch_fingerprint": str(approach.get("patch_fingerprint", "")),
+            "repeated_patch": bool(approach.get("repeated_patch")),
+            "failure_fingerprint": fingerprint,
+            "repeated_failure": repeated_failure,
+            "progress": progress,
+            "merge_policy": policy,
+            "failing_suites": failing,
+            "findings": [str(finding.get("title") or stage.finding_key(finding))[:200] for finding in blocking],
+            "usage": dict(loop.get("capacity_end") or {}),
+        }
+
+    def record_fix_approach(self, stage: AdversarialStage, loop: dict[str, Any], completion: str) -> None:
+        """Fingerprint what this fix changed so a repeat is detectable."""
+        from swarm_issue_worker import log
+        exclude = f":(exclude){TEST_ROOT.rstrip('/')}"
+        base = loop["stage_base"]
+        diff = self.git("diff", "--no-ext-diff", base, completion, "--", ".", exclude, check=False)
+        files = [path for path in self.git("diff", "--name-only", base, completion, "--", ".", exclude,
+                                           check=False).splitlines() if path]
+        fingerprint = patch_fingerprint(diff)
+        approaches = loop.setdefault("approaches", [])
+        approaches[:] = [a for a in approaches if a.get("round") != loop["round"]]
+        earlier = {a.get("patch_fingerprint") for a in approaches if a.get("patch_fingerprint")}
+        repeated = bool(fingerprint) and fingerprint in earlier
+        approaches.append({
+            "epoch": epoch_of(loop["round"]), "round": loop["round"],
+            "provider": self.choice.name, "model": self.choice.model, "effort": self.choice.effort,
+            "files": files[:25], "patch_fingerprint": fingerprint, "repeated_patch": repeated,
+            "empty": not fingerprint,
+        })
+        del approaches[:-30]
+        if repeated:
+            log(f"{stage.label} for issue #{self.issue.number}: the round {loop['round']} fix is materially "
+                f"identical to an earlier failed attempt (patch {fingerprint}).")
+
+    def close_adversarial_epoch(self, stage: AdversarialStage, loop: dict[str, Any],
+                                results: list[dict[str, Any]], blocking: list[dict[str, Any]],
+                                policy: str) -> dict[str, Any]:
+        """Persist an exhausted epoch and, in strict mode, plan the next one."""
+        from swarm_issue_worker import iso_timestamp, log
+        epoch = epoch_of(loop["round"])
+        first_round = (epoch - 1) * MAX_ROUNDS + 1
+        failing = [str(r.get("id", "")) for r in results if r.get("exit_code")]
+        end_total = len(failing) + len(blocking)
+        start_total = loop.get("epoch_start_total")
+        progress = start_total is not None and end_total < int(start_total)
+        approaches = [a for a in loop.get("approaches", []) if a.get("epoch") == epoch]
+        repeated_patches = sorted({a["patch_fingerprint"] for a in approaches
+                                   if a.get("repeated_patch") and a.get("patch_fingerprint")})
+        empty_fixes = sum(1 for a in approaches if a.get("empty"))
+        end_fingerprint = (loop.get("failure_history") or [""])[-1] if end_total else ""
+        identical_failures = bool(end_fingerprint) and end_fingerprint == loop.get("epoch_start_fingerprint")
+        stalled = 0 if progress else int(loop.get("stalled_epochs") or 0) + 1
+        reasons = ["epoch_exhausted"]
+        if not progress:
+            reasons.append("no_progress")
+        if repeated_patches:
+            reasons.append("repeated_patch")
+        if empty_fixes:
+            reasons.append("empty_fix")
+        if identical_failures:
+            reasons.append("identical_failures")
+        if stalled >= STALLED_EPOCHS_BEFORE_STRONGEST:
+            reasons.append("repeated_no_progress")
+        last_effort = next((a.get("effort") for a in reversed(approaches) if a.get("effort")), "") or "medium"
+        # Escalate faster when nothing improved: two effort rungs instead of one.
+        escalation = {
+            "epoch": epoch + 1,
+            "reason": ",".join(reasons),
+            "effort_floor": raise_effort(last_effort, 1 if progress else 2),
+            "change_provider": not progress,
+            "avoid": [] if progress else sorted({(a["provider"], a["model"]) for a in approaches}),
+            "strongest": stalled >= STALLED_EPOCHS_BEFORE_STRONGEST,
+            "strategy_change": (not progress) or bool(repeated_patches) or identical_failures or bool(empty_fixes),
+        }
+        findings = [str(finding.get("title") or stage.finding_key(finding))[:200] for finding in blocking]
+        no_progress = {
+            "epoch": epoch, "rounds": [first_round, loop["round"]], "progress": progress,
+            "blocking_at_epoch_start": start_total, "blocking_at_epoch_end": end_total,
+            "stalled_epochs": stalled, "failing_suites": failing, "open_findings": findings[:20],
+            "repeated_patch_fingerprints": repeated_patches, "empty_fixes": empty_fixes,
+            "identical_failures": identical_failures,
+            "failed_approaches": [
+                {key: a.get(key) for key in ("round", "provider", "model", "effort", "files", "patch_fingerprint")}
+                for a in approaches
+            ],
+        }
+        completed = iso_timestamp()
+        started = str(loop.get("epoch_started") or loop.get("round_started") or completed)
+        try:
+            duration = max(0.0, (dt.datetime.fromisoformat(completed) - dt.datetime.fromisoformat(started)).total_seconds())
+        except ValueError:
+            duration = None
+        disputes = [str(r.get("dispute_resolution") or "") for r in loop.get("rounds", [])
+                    if epoch_of(int(r.get("round_number") or 0)) == epoch and r.get("dispute_resolution")]
+        summary = {
+            "stage": stage.slug, "epoch_number": epoch, "first_round": first_round, "last_round": loop["round"],
+            "merge_policy": policy,
+            "outcome": "best_effort" if policy == MERGE_POLICY_BEST_EFFORT else "exhausted",
+            "progress": progress, "stalled_epochs": stalled,
+            "escalation_reason": str((loop.get("escalation") or {}).get("reason", "")),
+            "next_escalation": escalation if policy == MERGE_POLICY_STRICT else {},
+            "fixers": [{key: a.get(key) for key in ("round", "provider", "model", "effort")} for a in approaches],
+            "failing_suites": failing, "findings": findings, "disputes": disputes,
+            "tests_added": sum(int(r.get("tests_added") or 0) for r in loop.get("rounds", [])
+                               if epoch_of(int(r.get("round_number") or 0)) == epoch),
+            "patch_fingerprints": [a.get("patch_fingerprint", "") for a in approaches],
+            "failure_fingerprint": end_fingerprint, "no_progress": no_progress,
+            "started_at": started, "completed_at": completed, "duration_seconds": duration,
+            "usage": dict(loop.get("capacity_end") or {}),
+        }
+        epochs = [e for e in loop.get("epochs", []) if e.get("epoch_number") != epoch]
+        loop["epochs"] = epochs + [summary]
+        self.history.adversarial_epoch(summary)
+        if policy == MERGE_POLICY_BEST_EFFORT:
+            log(f"{stage.label} for issue #{self.issue.number}: epoch {epoch} ended without a clean verdict "
+                f"({len(failing)} failing suite(s), {len(blocking)} open finding(s)); best-effort policy "
+                "delivers the latest committed implementation.")
+            return summary
+        loop.update(escalation=escalation, stalled_epochs=stalled, no_progress=no_progress, epoch_closed=True,
+                    epoch_start_total=end_total, epoch_start_fingerprint=end_fingerprint)
+        log(f"{stage.label} for issue #{self.issue.number}: epoch {epoch} ended without a clean verdict "
+            f"({len(failing)} failing suite(s), {len(blocking)} open finding(s), "
+            f"{'progress' if progress else 'no progress'}); strict policy does not merge known failures.")
+        return summary
+
+    def yield_adversarial_epoch(self, stage: AdversarialStage, loop: dict[str, Any]) -> int:
+        """Checkpoint a renewed strict epoch and hand control to the scheduler."""
+        from swarm_issue_worker import ADVERSARIAL_EPOCH_YIELD_EXIT_CODE, iso_timestamp, log
+        self.history.update(iso_timestamp(), final_status="adversarial_epoch_continuing",
+                            **stage.history_fields({**loop, "outcome": ""}))
+        log(f"{stage.label} for issue #{self.issue.number}: {STRICT_EPOCHS_PER_RUN} strict-mode epochs ran in "
+            f"this worker run; epoch {loop.get('epoch')} is checkpointed and resumes on the scheduler's next pass.")
+        return ADVERSARIAL_EPOCH_YIELD_EXIT_CODE
 
     def adversarial_capacity_consumed(self) -> float | None:
         state = self.read_state()
@@ -1417,27 +1921,96 @@ class AdversarialStageMixin:
         # stage ever got a turn to resume and commit its own work.
         if self.worktree_status():
             raise WorkerError("Adversarial delivery has uncommitted changes")
+        policy = self.adversarial_merge_policy()
+        capped_stages = [(stage, loop) for stage, loop in finished if loop.get("outcome") == "cap_hit"]
+        if capped_stages and policy == MERGE_POLICY_STRICT:
+            # A checkpoint can carry a cap hit from a worker version (or a
+            # policy) that delivered best effort. Strict mode never merges
+            # known blocking failures, so the stage resumes in a new epoch.
+            self.reopen_capped_stages(stages, capped_stages)
+            return self.run_adversarial_pipeline()
         last = finished[-1][1]
         self.choice = ProviderChoice(**last["delivery_choice"])
         self.update_state_for_choice(self.choice)
+        from swarm_issue_worker import iso_timestamp, log
+        epochs = max(int(loop.get("epoch") or 1) for _stage, loop in finished)
         # A deadlock in any stage owns the completion summary; the first one
         # reached is the one a reader needs to act on.
-        capped = next(((stage, loop) for stage, loop in finished
-                       if loop.get("outcome") == "cap_hit"), None)
+        capped = capped_stages[0] if capped_stages else None
         if capped:
             stage, loop = capped
+            unresolved = self.adversarial_unresolved(finished)
+            self.update_state(adversarial_best_effort={"policy": policy, "unresolved": unresolved})
+            self.history.update(
+                iso_timestamp(), adversarial_merge_policy=policy, adversarial_delivery=DELIVERY_BEST_EFFORT,
+                adversarial_unresolved={"before_merge": unresolved},
+            )
+            log(f"{stage.label} for issue #{self.issue.number}: {BEST_EFFORT_LABEL} — delivering "
+                f"{str(last['completion'])[:12]} with {len(unresolved['suites'])} failing suite(s) and "
+                f"{len(unresolved['findings'])} open finding(s) after {MAX_ROUNDS} fix/re-test rounds.")
             followup_url = self.file_cap_followup(stage, loop)
             output = stage.cap_hit_output(loop)
             if followup_url:
                 output += f"\n\nFollow-up issue: {followup_url}\n"
             # A cap hit is still recorded as FAILED in the adversarial review,
-            # but it is a bounded handoff rather than a human blocker. Deliver
-            # the last committed implementation through the normal completion
-            # path; the follow-up issue carries the unresolved notes.
+            # but with the best-effort policy it is a bounded handoff rather
+            # than a human blocker: the latest committed implementation merges
+            # into the integration branch (and on to the base branch when
+            # promotion is configured); the follow-up issue carries the notes.
             self.finalize_issue(
                 last["completion"], output, allow_automation=True,
                 adversarial_cap_hit=True,
             )
         else:
+            self.history.update(iso_timestamp(), adversarial_merge_policy=policy,
+                                adversarial_delivery=DELIVERY_VERIFIED_CLEAN)
+            if epochs > 1:
+                log(f"Adversarial review for issue #{self.issue.number}: verified clean after {epochs} "
+                    "strict-mode epochs.")
             self.finalize_issue(last["completion"], finished[0][1]["implementation_output"])
         return ISSUE_COMPLETED_EXIT_CODE
+
+    def adversarial_unresolved(self, finished: list[tuple[AdversarialStage, dict[str, Any]]]) -> dict[str, Any]:
+        """Failing suites and open actionable findings at delivery time."""
+        suites: list[dict[str, Any]] = []
+        findings: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for stage, loop in finished:
+            for result in loop.get("results", []):
+                if result.get("exit_code") and str(result.get("id")) not in seen:
+                    seen.add(str(result.get("id")))
+                    suites.append({"stage": stage.slug, "id": str(result.get("id", "")),
+                                   "exit_code": result.get("exit_code")})
+            for finding in stage.unresolved_findings(loop):
+                findings.append({"stage": stage.slug, "title": str(finding.get("title", "")),
+                                 "severity": str(finding.get("severity", "")),
+                                 "confidence": str(finding.get("confidence", ""))})
+        return {"suites": suites, "findings": findings}
+
+    def reopen_capped_stages(self, stages: list[AdversarialStage],
+                             capped: list[tuple[AdversarialStage, dict[str, Any]]]) -> None:
+        from swarm_issue_worker import iso_timestamp, log
+        first = min(stages.index(stage) for stage, _loop in capped)
+        for stage, loop in capped:
+            if not epoch_exhausted(int(loop.get("round") or 0)):
+                # A pre-#305 cap (six rounds) can end mid-epoch; the next round
+                # still belongs to a fresh escalated epoch.
+                loop["round"] = epoch_of(int(loop.get("round") or 0)) * MAX_ROUNDS
+            loop.setdefault("epochs", [])
+            loop["merge_policy"] = MERGE_POLICY_STRICT
+            self.close_adversarial_epoch(stage, loop, loop.get("results", []),
+                                         stage.unresolved_findings(loop), MERGE_POLICY_STRICT)
+            loop.pop("epoch_closed", None)
+            loop["round"] += 1
+            loop.update(phase="fix", outcome="", status="", active=False, response=None,
+                        epoch=epoch_of(loop["round"]), round_started=iso_timestamp(),
+                        epoch_started=iso_timestamp())
+            self.save_stage(stage, loop)
+            log(f"{stage.label} for issue #{self.issue.number}: strict policy does not merge unresolved "
+                f"adversarial results; resuming in epoch {loop['epoch']}.")
+        # Later stages reviewed a commit that is about to change: reassess.
+        for stage in stages[first + 1:]:
+            loop = self.read_stage(stage)
+            if isinstance(loop, dict) and loop.get("phase") == "done" and loop.get("outcome") != "cap_hit":
+                loop.update(phase="test", outcome="", active=False, response=None)
+                self.save_stage(stage, loop)

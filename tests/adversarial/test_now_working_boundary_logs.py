@@ -206,13 +206,32 @@ class NowWorkingBoundaryLogTests(unittest.TestCase):
 
     def test_cap_hit_logs_the_third_and_final_counted_round(self) -> None:
         self.prepare(fixed=False)
+        # Issue #305: the exhausted epoch this test drives only completes
+        # delivery (status 10) when the repository explicitly opts into
+        # best-effort merging. Left at the strict default, the same three
+        # rounds instead renew a fresh escalated epoch (status 13) rather
+        # than logging a completed fix — see
+        # tests/adversarial/test_issue305_strict_epoch_boundary.py. This test
+        # is about the round/max boundary-log wording (issue #213), not the
+        # merge policy, so it opts in explicitly to keep exercising the same
+        # three-rounds-then-delivered scenario it always has.
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True
+        )
 
         def never_fix(prompt, activity=""):
             status = self.role(prompt)
             (self.repo / "tracked.txt").write_text("broken\n")
             return status
 
-        status, output = self.captured_delivery(never_fix)
+        # A best-effort cap-hit merges the issue PR into the integration
+        # branch even though this fixture leaves routine approval
+        # (`auto_approve`) off, so the merge itself has to be faked here too.
+        with mock.patch.object(self.worker, "approve_pull_request"), mock.patch.object(
+            self.worker, "merge_pull_request"
+        ) as merge:
+            merge.return_value = self.git("rev-parse", "HEAD")
+            status, output = self.captured_delivery(never_fix)
         self.assertEqual(status, 10)
         for round_number in range(1, uat.MAX_ROUNDS + 1):
             self.assert_log(

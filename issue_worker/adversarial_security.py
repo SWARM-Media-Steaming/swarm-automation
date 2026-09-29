@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from adversarial_core import MAX_ROUNDS, AdversarialStage, AdversarialStageMixin
+from adversarial_core import BEST_EFFORT_LABEL, MAX_ROUNDS, AdversarialStage, AdversarialStageMixin  # noqa: F401
 
 RESULT_MARKER = "SWARM_SECURITY_RESULT:"
 TEST_ROOT = "tests/adversarial/security/"
@@ -188,15 +188,7 @@ class SecurityStage(AdversarialStage):
             return "running independent adversarial security review"
         return f"re-verifying after adversarial security fix round {round_number}"
 
-    def round_start_log(self, issue_number: int, loop: dict[str, Any]) -> str:
-        round_number, phase = loop["round"], loop["phase"]
-        if phase == "fix":
-            detail = f"starting fix/re-test round {round_number} of {MAX_ROUNDS}."
-        elif round_number == 0:
-            detail = f"starting independent security review (round 0 of {MAX_ROUNDS})."
-        else:
-            detail = f"starting re-test for round {round_number} of {MAX_ROUNDS}."
-        return f"{self.label} for issue #{issue_number}: {detail}"
+    assessment_log = "independent security review"
 
     def on_round_start(self, worker, loop: dict[str, Any]) -> None:
         from swarm_issue_worker import log
@@ -216,6 +208,12 @@ class SecurityStage(AdversarialStage):
         if not isinstance(report.get("summary", ""), str) or not str(report.get("summary") or "").strip():
             raise ValueError("Security review summary must be a non-empty string")
         return report
+
+    def finding_key(self, finding: dict[str, Any]) -> str:
+        return finding_identity(finding)
+
+    def unresolved_findings(self, loop: dict[str, Any]) -> list[dict[str, Any]]:
+        return list(loop.get("open_findings", []))
 
     def blocking_findings(self, report: dict[str, Any]) -> list[dict[str, Any]]:
         return [finding for finding in report.get("in_scope", [])
@@ -311,6 +309,8 @@ class SecurityStage(AdversarialStage):
             # writes its own outcome.
             "security_review_error": loop.get("review_error", ""),
             "security_findings": self.findings_metadata(loop),
+            "security_epoch_count": int(loop.get("epoch") or 1),
+            "adversarial_merge_policy": str(loop.get("merge_policy") or ""),
         }
 
     def disabled_history_fields(self) -> dict[str, Any]:
@@ -348,6 +348,8 @@ class SecurityStage(AdversarialStage):
             return ""
         metadata = self.findings_metadata(loop)
         counts = metadata["severity"]
+        if loop.get("outcome") == "cap_hit":
+            status += f" ({BEST_EFFORT_LABEL.lower()})"
         line = (
             f"- {self.label}: {status} — {metadata['inScopeDiscovered']} in-scope finding(s), "
             f"{metadata['inScopeFixed']} fixed, {metadata['issuesCreated']} follow-up issue(s) filed; "
@@ -401,8 +403,10 @@ class SecurityStage(AdversarialStage):
         ) or "- (no findings were reported in the final round)"
         failures = "\n".join(f"- {r['id']}: {r['output'][-2000:]}" for r in loop["results"] if r["exit_code"])
         return (
+            f"**{BEST_EFFORT_LABEL}.**\n\n"
             "## Summary\nThe adversarial cybersecurity review did not reach a clean state after three "
-            "fix/re-test rounds. Delivered as best effort: this is the last remediation attempt, not a "
+            "fix/re-test rounds. Delivered as best effort because this repository allows a best-effort "
+            "adversarial merge after 3 rounds: this is the last remediation attempt, not a "
             "verified-clean security review. The unresolved notes were filed for later work and do not "
             "require a human response on this issue.\n\n" + self.summary_line(loop) +
             "\n## Unresolved security findings\n" + open_findings +
