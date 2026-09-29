@@ -69,11 +69,14 @@ test("every data-repo-config setting lives inside the Repository page, and none 
 test("every data-config setting lives outside the Repository page", () => {
   const insideRepoAppConfig = appConfigKeys(repositorySection);
   assert.equal(insideRepoAppConfig.length, 0, `data-config found inside Repository: ${insideRepoAppConfig.join(", ")}`);
-  // The app-wide settings relocated out of Advanced must exist somewhere else.
+  // Settings that were relocated out of Advanced and later removed as fixed
+  // behavior must not exist anywhere: history is always on, feedback upload
+  // and in-app updates are gone, and CLI paths are always auto-detected.
   for (const key of ["auto_update", "ai_execution_history_enabled", "prompt_feedback_upload_enabled"]) {
-    assert.ok(outsideRepository.includes(`data-config="${key}"`), `data-config="${key}" must exist outside Repository`);
+    assert.ok(!outsideRepository.includes(`data-config="${key}"`), `data-config="${key}" is no longer a setting`);
+    assert.ok(!repositorySection.includes(`data-config="${key}"`), `data-config="${key}" is no longer a setting`);
   }
-  assert.match(outsideRepository, /data-provider-bin="claude"/, "provider CLI overrides must exist outside Repository");
+  assert.doesNotMatch(outsideRepository, /data-provider-bin=/, "provider CLI overrides were removed");
   assert.doesNotMatch(repositorySection, /data-provider-bin=/, "provider CLI overrides must not live on the Repository page");
 });
 

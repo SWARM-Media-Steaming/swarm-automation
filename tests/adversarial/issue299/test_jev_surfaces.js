@@ -26,29 +26,25 @@ function section(html, id) {
   return html.slice(Math.max(0, start - 200), start + 4000);
 }
 
-test("AI Configuration exposes a global Jev enable toggle and decision uses", () => {
-  const panel = section(indexHtml, "jev-decision-panel");
-  assert.match(panel, /data-config="jev_enabled"/);
-  assert.match(panel, /Enable Jev Decision Engine/);
-  for (const flag of [
-    "jev_use_preflight",
-    "jev_use_workflow",
-    "jev_use_uat",
-    "jev_use_cyber",
-    "jev_use_rag",
-    "jev_use_triage",
-    "jev_use_completion",
+test("AI Configuration has one Jev toggle, inside Dynamic Model Routing, and no per-use switches", () => {
+  const aiView = indexHtml.slice(indexHtml.indexOf('id="view-ai"'));
+  const view = aiView.slice(0, aiView.indexOf("<section"));
+  const routing = view.slice(view.indexOf("dynamic-routing-panel"), view.indexOf('id="provider-cards"'));
+  assert.match(routing, /data-config="jev_enabled"/);
+  assert.match(routing, /Enable Jev Decision Engine/);
+  assert.match(routing, /data-config="allow_usage_credit_models"/);
+  assert.match(routing, /id="jev-connection-pill"/);
+  // Every decision use is always on, and tuning knobs and the CLI path are gone.
+  for (const key of [
+    "jev_use_preflight", "jev_use_workflow", "jev_use_uat", "jev_use_cyber",
+    "jev_use_rag", "jev_use_triage", "jev_use_completion",
+    "jev_confidence_automation", "jev_confidence_fallback", "jev_confidence_security",
+    "jev_timeout_seconds", "jev_max_retries", "jev_fallback", "jev_model", "jev_bin",
   ]) {
-    assert.match(panel, new RegExp(`data-config="${flag}"`));
+    assert.ok(!indexHtml.includes(`data-config="${key}"`), `${key} is not a UI setting`);
   }
-  assert.match(panel, /data-config="jev_confidence_automation"/);
-  assert.match(panel, /data-config="jev_confidence_fallback"/);
-  assert.match(panel, /data-config="jev_confidence_security"/);
-  assert.match(panel, /data-config="jev_timeout_seconds"/);
-  assert.match(panel, /data-config="jev_max_retries"/);
-  assert.match(panel, /data-config="jev_fallback"/);
-  assert.match(panel, /id="jev-connection-pill"/);
-  assert.match(indexHtml, /data-config="jev_bin"/);
+  assert.ok(!indexHtml.includes("Typed operational decisions"));
+  assert.equal((view.match(/data-config="jev_/g) || []).length, 1, "the enable toggle is the only Jev control");
 });
 
 test("Optimize routing for cost is not a user-facing AI Configuration control", () => {

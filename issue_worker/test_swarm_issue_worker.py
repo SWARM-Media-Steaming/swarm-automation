@@ -710,14 +710,14 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn("Engineering Knowledge Context", prompt)
         self.assertIn("Kafka", prompt)
 
-    def test_execution_history_configuration_is_independent(self) -> None:
-        args = build_parser().parse_args(
-            self._worker_argv(auto=False)
-            + ["--ai-execution-history-enabled", "--no-prompt-feedback-upload-enabled"]
-        )
-        config = Config.from_args(args)
-        self.assertTrue(config.ai_execution_history_enabled)
-        self.assertFalse(config.prompt_feedback_upload_enabled)
+    def test_execution_history_is_always_on_and_cannot_be_disabled(self) -> None:
+        args = build_parser().parse_args(self._worker_argv(auto=False))
+        self.assertTrue(Config.from_args(args).ai_execution_history_enabled)
+        # There is no switch to turn it off, and feedback upload is gone.
+        for flag in ("--no-ai-execution-history-enabled", "--ai-execution-history-enabled",
+                     "--prompt-feedback-upload-enabled"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                build_parser().parse_args(self._worker_argv(auto=False) + [flag])
 
     def test_execution_history_stores_exact_effective_prompt_and_lifecycle(self) -> None:
         database_path = self.state / "history.sqlite3"
@@ -5651,7 +5651,7 @@ class WorkerTestCase(unittest.TestCase):
     def test_orphan_reconciliation_prefers_execution_history_over_comments(self) -> None:
         database_path = self.root / "history.sqlite3"
         worker = self.no_code_worker(
-            **{"--ai-execution-history-enabled": None, "--execution-history-db": database_path}
+            **{"--execution-history-db": database_path}
         )
         repository = ExecutionHistoryRepository(database_path)
         branch = "ai/claude/issue-157"
@@ -5686,7 +5686,7 @@ class WorkerTestCase(unittest.TestCase):
     def test_orphan_reconciliation_keeps_a_branch_whose_history_is_still_running(self) -> None:
         database_path = self.root / "running.sqlite3"
         worker = self.no_code_worker(
-            **{"--ai-execution-history-enabled": None, "--execution-history-db": database_path}
+            **{"--execution-history-db": database_path}
         )
         repository = ExecutionHistoryRepository(database_path)
         branch = "ai/claude/issue-158"

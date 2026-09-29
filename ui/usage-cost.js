@@ -258,7 +258,7 @@
   // reported usage, and the current filters simply match nothing.
   function emptyStateMessage({ hasAnyUsage, hasAnyActivity, filtered } = {}) {
     if (!hasAnyUsage && !hasAnyActivity) {
-      return "No AI activity recorded yet. Turn on “Store AI execution history” in AI Configuration, then run an issue.";
+      return "No AI activity recorded yet. Run an issue and it appears here.";
     }
     if (!hasAnyUsage) {
       return "Usage unavailable for these repositories. Per-invocation telemetry is recorded for runs made locally after #280 — imported and older executions have no usage to show, and GitHub comments are never scraped to fill them in.";

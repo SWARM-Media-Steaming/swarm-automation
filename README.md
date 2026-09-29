@@ -161,9 +161,9 @@ cover is reported as *Tokens only* rather than given a guessed price, and a
 value the provider never reported renders as unavailable rather than as zero.
 See [docs/model-pricing.md](docs/model-pricing.md) for how to update a rate.
 
-It is read-only and empty until "Store AI execution history" has recorded at
-least one execution; grades and router activity also need Dynamic Model Routing
-turned on. Usage & cost covers locally recorded runs only — imported or older
+It is read-only and empty until an execution has been recorded (execution
+history is always on); grades and router activity also need Dynamic Model
+Routing turned on. Usage & cost covers locally recorded runs only — imported or older
 executions show as *usage unavailable*, and GitHub comments are never scraped
 to backfill them.
 
@@ -299,7 +299,7 @@ The packaged application includes the vendored Python issue-worker
 implementation, so a selected repository does not need to contain any
 automation scripts of its own.
 
-## Releases and self-update
+## Releases
 
 Every push to `main` and `ai-main` runs `.github/workflows/ci.yml`'s `test`
 job (Rust, Python, and frontend suites). GitHub Actions no longer builds or
@@ -313,16 +313,9 @@ one to the patch (`0.1.1` → `0.1.2` → …; a promotion merge counts once). A
 minor bump happens when a trusted author labels an issue `minor`; a major is a
 deliberate human commit. See `.claude/rules/versioning.md`.
 
-The app can still update itself in place from a previously published feed —
-the control is under **AI Configuration → Software update** with three modes:
-
-- **Don't check** — stay put until you update by hand.
-- **Notify me** (default) — a banner appears; you choose when to install.
-- **Install automatically on quit** — downloaded in the background, applied on
-  the next quit.
-
-**Check now** works in any mode. Updates install in place and restart the app;
-configuration and running issue workers are untouched.
+The app no longer checks for or installs updates itself: the in-app updater,
+its settings panel and its update banner were removed while distribution moves
+to the web. Install a new build by hand.
 
 macOS builds are signed with a **self-signed** certificate (no Apple Developer
 ID, not notarized). Its only job is a stable designated requirement so an

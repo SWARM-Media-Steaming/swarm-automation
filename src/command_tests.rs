@@ -2,9 +2,9 @@ use super::{
     automation_log_path, bot_app_slugs_from_config, decide_bot_push_access, describe_refresh,
     detect_tools, execution_history_query_args, feedback_repository_names, get_config,
     get_execution_history, get_prompt_grades, get_usage_report, grant_apps_request,
-    inspect_repository, issue_branch_pr_is_visible, knowledge_routing_payload,
-    knowledge_settings_payload, mark_permission_primed, needs_promotion, parse_pr_ref,
-    promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
+    inspect_repository, issue_branch_pr_is_visible, jev_scheduler_arguments,
+    knowledge_routing_payload, knowledge_settings_payload, mark_permission_primed, needs_promotion,
+    parse_pr_ref, promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
     push_access_message, reconcile_integration_for_promotion, redact_secret,
     refresh_model_data_args, refresh_running_scheduler, repo_status_args, repo_worker_args,
     request_issue_scan, require_closed_issue, run_now_request_path, save_config,
@@ -1379,12 +1379,8 @@ fn repo_worker_args_carries_each_adversarial_stage_independently() {
 }
 
 #[test]
-fn repo_worker_args_carries_independent_history_settings() {
-    let mut config = AppConfig {
-        ai_execution_history_enabled: true,
-        prompt_feedback_upload_enabled: false,
-        ..AppConfig::default()
-    };
+fn history_is_always_on_and_has_no_worker_toggle() {
+    let mut config = AppConfig::default();
     let repo = repo("octocat/example");
     config.repositories.push(repo.clone());
     let args = repo_worker_args(
@@ -1394,15 +1390,38 @@ fn repo_worker_args_carries_independent_history_settings() {
         &PathBuf::from("/usr/bin/git"),
         &PathBuf::from("/usr/bin/gh"),
     );
-    assert!(args.contains(&"--ai-execution-history-enabled".to_string()));
-    assert!(args.contains(&"--no-prompt-feedback-upload-enabled".to_string()));
+    // The worker records execution history unconditionally now, so the app
+    // sends neither an enable nor a disable flag, and no feedback-upload flag.
+    assert!(!args
+        .iter()
+        .any(|arg| arg.contains("ai-execution-history-enabled")));
+    assert!(!args
+        .iter()
+        .any(|arg| arg.contains("prompt-feedback-upload")));
     assert_eq!(
         pair(&args, "--application-version"),
         Some(env!("CARGO_PKG_VERSION"))
     );
-    assert!(pair(&args, "--execution-history-db")
-        .expect("history database path")
-        .ends_with("swarm-automation.sqlite3"));
+}
+
+#[test]
+fn every_jev_decision_use_is_always_enabled() {
+    let args = jev_scheduler_arguments(&AppConfig::default());
+    for flag in [
+        "--jev-use-preflight",
+        "--jev-use-workflow",
+        "--jev-use-uat",
+        "--jev-use-cyber",
+        "--jev-use-rag",
+        "--jev-use-triage",
+        "--jev-use-completion",
+    ] {
+        assert!(args.contains(&flag.to_string()), "{flag} missing");
+        assert!(
+            !args.contains(&flag.replace("--", "--no-")),
+            "{flag} disabled"
+        );
+    }
 }
 
 #[test]

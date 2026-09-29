@@ -17,10 +17,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_auto_update() -> String {
-    "notify".into()
-}
-
 /// Human label for a provider id (`"claude"` -> `"Claude"`).
 pub fn provider_label(id: &str) -> &'static str {
     match id {
@@ -542,15 +538,13 @@ pub struct AppConfig {
     /// repositories have ready issues, but AI credits are spent faster too.
     /// Off by default.
     pub parallel_repo_workers: bool,
-    /// Persist a sanitized lifecycle record for each AI issue execution.
-    pub ai_execution_history_enabled: bool,
+    // AI execution history is always recorded (sanitized, local) and prompt
+    // feedback upload no longer exists; both former settings are ignored when
+    // an older config still carries them.
     /// Repository ids selected in the Feedback page. Empty means all
     /// repositories, which keeps old configs global by default.
     #[serde(default)]
     pub feedback_repo_filter: Vec<String>,
-    /// Allow a future review-platform uploader to transmit eligible records.
-    /// Local persistence remains controlled independently above.
-    pub prompt_feedback_upload_enabled: bool,
 
     /// Engineering Knowledge Platform (issue #291). On by default so Ask SWARM
     /// and automatic agent context can use the existing execution-history
@@ -603,29 +597,14 @@ pub struct AppConfig {
     pub jev_confidence_security: f64,
     #[serde(default = "default_jev_fallback")]
     pub jev_fallback: String,
-    #[serde(default = "default_true")]
-    pub jev_use_preflight: bool,
-    #[serde(default = "default_true")]
-    pub jev_use_workflow: bool,
-    #[serde(default = "default_true")]
-    pub jev_use_uat: bool,
-    #[serde(default = "default_true")]
-    pub jev_use_cyber: bool,
-    #[serde(default = "default_true")]
-    pub jev_use_rag: bool,
-    #[serde(default = "default_true")]
-    pub jev_use_triage: bool,
-    #[serde(default = "default_true")]
-    pub jev_use_completion: bool,
+    // Every Jev decision use (pre-flight, workflow, UAT and cyber findings,
+    // RAG scope, triage, completion) is always on when Jev is enabled; the
+    // former per-use `jev_use_*` settings were removed and old configs that
+    // carry them still load, ignored.
     pub schedule_mode: String,
     pub schedule_time: String,
     pub schedule_days: Vec<String>,
     pub poll_interval_seconds: u64,
-    /// How the app applies new releases from GitHub: `"off"` (never check),
-    /// `"notify"` (check and surface a banner; the user installs), or `"auto"`
-    /// (download and install on the next quit). Defaults to `"notify"`.
-    #[serde(default = "default_auto_update")]
-    pub auto_update: String,
     pub worker_state_dir: String,
     pub gh_bin: String,
     pub python_bin: String,
@@ -712,9 +691,7 @@ impl Default for AppConfig {
             model_data_min_refresh_interval_hours: default_model_data_min_refresh_interval_hours(),
             minimum_remaining_percent: 10,
             parallel_repo_workers: false,
-            ai_execution_history_enabled: false,
             feedback_repo_filter: Vec::new(),
-            prompt_feedback_upload_enabled: false,
             engineering_knowledge_enabled: true,
             automatic_knowledge_generation: false,
             generate_repository_summaries: true,
@@ -734,13 +711,6 @@ impl Default for AppConfig {
             jev_confidence_fallback: default_jev_confidence_fallback(),
             jev_confidence_security: default_jev_confidence_security(),
             jev_fallback: default_jev_fallback(),
-            jev_use_preflight: true,
-            jev_use_workflow: true,
-            jev_use_uat: true,
-            jev_use_cyber: true,
-            jev_use_rag: true,
-            jev_use_triage: true,
-            jev_use_completion: true,
             schedule_mode: "continuous".into(),
             schedule_time: "09:00".into(),
             schedule_days: vec!["mon", "tue", "wed", "thu", "fri"]
@@ -748,7 +718,6 @@ impl Default for AppConfig {
                 .map(str::to_string)
                 .collect(),
             poll_interval_seconds: 600,
-            auto_update: default_auto_update(),
             worker_state_dir: home
                 .join(".local/state/swarm-issue-worker")
                 .to_string_lossy()
@@ -817,9 +786,6 @@ impl AppConfig {
             "continuous" | "daily" | "weekdays" | "custom" | "manual"
         ) {
             return Err("Unknown issue-worker schedule mode.".into());
-        }
-        if !matches!(self.auto_update.as_str(), "notify" | "auto") {
-            return Err("Unknown software-update mode.".into());
         }
         validate_time(&self.schedule_time)?;
         if self.schedule_mode == "custom" && self.schedule_days.is_empty() {
@@ -985,11 +951,6 @@ impl AppConfig {
         let mut seen_feedback_ids = HashSet::new();
         self.feedback_repo_filter
             .retain(|id| repository_ids.contains(id) && seen_feedback_ids.insert(id.clone()));
-        // "off" was removed: every config that had it silently becomes
-        // "notify" rather than failing validation on load.
-        if self.auto_update.trim().is_empty() || self.auto_update == "off" {
-            self.auto_update = default_auto_update();
-        }
     }
 
     fn normalize_providers(&mut self) {
@@ -1468,29 +1429,22 @@ mod tests {
     }
 
     #[test]
-    fn auto_update_defaults_to_notify_and_rejects_unknown_modes() {
-        // A config file written before the field existed.
-        let older: AppConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(older.auto_update, "notify");
-
-        let mut config = config_with_one_repo();
-        for mode in ["notify", "auto"] {
-            config.auto_update = mode.into();
-            assert!(config.validate().is_ok(), "{mode} should be accepted");
-        }
-        for rejected in ["off", "sometimes"] {
-            config.auto_update = rejected.into();
-            assert!(config
-                .validate()
-                .unwrap_err()
-                .contains("software-update mode"));
-        }
-
-        for stale in ["", "off"] {
-            config.auto_update = stale.into();
-            config.normalize();
-            assert_eq!(config.auto_update, "notify");
-        }
+    fn removed_settings_in_older_configs_are_ignored() {
+        // Written before these settings were made fixed behavior or removed.
+        let older: AppConfig = serde_json::from_str(
+            r#"{"auto_update":"auto","ai_execution_history_enabled":false,
+                "prompt_feedback_upload_enabled":true,"jev_use_uat":false,
+                "jev_use_completion":false}"#,
+        )
+        .unwrap();
+        assert!(serde_json::to_string(&older)
+            .unwrap()
+            .find("auto_update")
+            .is_none());
+        assert!(serde_json::to_string(&older)
+            .unwrap()
+            .find("jev_use_uat")
+            .is_none());
     }
 
     #[test]

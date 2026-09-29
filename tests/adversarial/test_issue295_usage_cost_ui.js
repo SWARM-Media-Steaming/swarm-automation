@@ -160,7 +160,7 @@ test("missing values render as unavailable; zero stays zero; priced coverage is 
 test("empty states distinguish no telemetry, usage unavailable, and no matches", () => {
   assert.match(
     emptyStateMessage({ hasAnyUsage: false, hasAnyActivity: false, filtered: false }),
-    /Store AI execution history/,
+    /No AI activity recorded yet\. Run an issue/,
   );
   const unavailable = emptyStateMessage({ hasAnyUsage: false, hasAnyActivity: true, filtered: false });
   assert.match(unavailable, /Usage unavailable/);

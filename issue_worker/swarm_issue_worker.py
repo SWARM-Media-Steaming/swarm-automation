@@ -495,8 +495,9 @@ class Config:
     integration_branch: str
     remote_name: str
     github_host: str
+    # Always true for a real run (see ``from_args``); the field exists so
+    # tests can build a worker without history.
     ai_execution_history_enabled: bool
-    prompt_feedback_upload_enabled: bool
     application_version: str
     execution_history_db: Path
     engineering_knowledge_enabled: bool
@@ -559,8 +560,9 @@ class Config:
             integration_branch=args.integration_branch,
             remote_name=args.remote_name,
             github_host=args.github_host,
-            ai_execution_history_enabled=args.ai_execution_history_enabled,
-            prompt_feedback_upload_enabled=args.prompt_feedback_upload_enabled,
+            # Execution history is a first-class, always-on record; there is
+            # no flag or environment variable to turn it off.
+            ai_execution_history_enabled=True,
             application_version=args.application_version,
             execution_history_db=history_db,
             engineering_knowledge_enabled=bool(args.engineering_knowledge_enabled),
@@ -6817,16 +6819,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--remote-name", default=env_value("SWARM_GIT_REMOTE", "origin"))
     parser.add_argument("--github-host", default=env_value("SWARM_GITHUB_HOST", "github.com"))
-    parser.add_argument(
-        "--ai-execution-history-enabled",
-        action=argparse.BooleanOptionalAction,
-        default=env_bool("SWARM_AI_EXECUTION_HISTORY_ENABLED", False),
-    )
-    parser.add_argument(
-        "--prompt-feedback-upload-enabled",
-        action=argparse.BooleanOptionalAction,
-        default=env_bool("SWARM_PROMPT_FEEDBACK_UPLOAD_ENABLED", False),
-    )
     parser.add_argument(
         "--application-version",
         default=env_value("SWARM_APPLICATION_VERSION", "development"),

@@ -81,7 +81,6 @@
     // repoId -> last BranchPushAccess from branch_push_access.
     branchPushAccess: {},
     botReadinessPoll: null,
-    pendingUpdate: null,
     // Dynamic Routing Calibration (Guides page). `status` is the last
     // get_model_calibration_status response; `lastResult` is the last manual
     // refresh_model_data response (cleared on navigation away is unnecessary,
@@ -176,11 +175,6 @@
       html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set that provider’s own minimum quota reserve. Changing one card does not change the others. A reserve of 0% accepts any positive remaining quota, but never an exhausted account.</p><p><strong>Dynamic Model Routing</strong> grades the original issue, picks which enabled provider handles it, and chooses that provider’s worker model and reasoning effort from the models it offers. The card’s router model performs the grading; to tell the providers apart it uses each one’s remaining usage and a built-in summary of what it tends to be good at. Turn routing off to choose the provider order and the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
       links: [],
     },
-    "software-update": {
-      title: "Software updates",
-      html: "<p>New versions are published automatically after each change passes tests. Updates install in place and restart the app — your configuration is untouched.</p><ul><li><strong>Notify me</strong> — a banner appears when a new version is available; you choose when to install.</li><li><strong>Automatically</strong> — a detected update waits until the issue worker is idle on its own (never stopped just to make room), then downloads, installs, and restarts.</li></ul><p><strong>Check now</strong> works in either mode and also lists the 3 most recent release builds and 3 most recent beta builds so you can pick a specific version — anything older than what's installed is shown for context but can't be selected.</p>",
-      links: [],
-    },
     "bot-identities": {
       title: "GitHub App bot identities",
       html: "<p>Each AI provider gets its own GitHub identity, making it clear which one wrote, reviewed, or merged work. This also lets one provider approve another's pull request, which GitHub blocks when the author and approver are the same account.</p><p>The checklist shows, per provider, whether its bot app is <strong>created</strong> and <strong>installed on this repository's GitHub account</strong>. A provider that is not ready has a button that opens the exact GitHub page to fix it.</p><ul><li><strong>Set up GitHub Apps</strong> — creates any missing bot apps (a one-time browser approval).</li><li><strong>Re-check</strong> — asks GitHub again after you finish an install.</li><li><strong>Verify sign-in</strong> — confirms each app can mint a working token.</li></ul><p>On every install screen choose <strong>All repositories</strong>. Then adding another repo in the same GitHub account needs no further setup.</p>",
@@ -252,7 +246,7 @@
     },
     "execution-history": {
       title: "Execution history",
-      html: "<p>Every AI issue execution across all repositories by default, newest first. The repository chips above the tabs independently filter all three reports; the repository dropdown in the header does not affect Feedback. The list loads ten at a time from the local database. Each row shows its repository, AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates over the filtered repositories.</p><p>This view only reads what <strong>Store AI execution history</strong> already saved locally (see AI Configuration). It never changes issue processing, and nothing is uploaded unless <strong>Allow prompt feedback upload</strong> is also on and an uploader is configured.</p><p><strong>Import from GitHub</strong> scans every repository checked in the Feedback filter and adds a placeholder \"Imported\" entry for any issue with no execution history yet. It reports success or failure for each repository and never overwrites or duplicates a real execution.</p>",
+      html: "<p>Every AI issue execution across all repositories by default, newest first. The repository chips above the tabs independently filter all three reports; the repository dropdown in the header does not affect Feedback. The list loads ten at a time from the local database. Each row shows its repository, AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates over the filtered repositories.</p><p>Execution history is always recorded locally, sanitized. This view only reads it: it never changes issue processing, and nothing is uploaded.</p><p><strong>Import from GitHub</strong> scans every repository checked in the Feedback filter and adds a placeholder \"Imported\" entry for any issue with no execution history yet. It reports success or failure for each repository and never overwrites or duplicates a real execution.</p>",
       links: [],
     },
     "prompt-grades": {
@@ -263,11 +257,6 @@
     "router-activity": {
       title: "Router activity",
       html: "<p>When <strong>Dynamic Model Routing</strong> is on, one AI platform runs a pre-flight pass over a new issue: it grades the issue, scores its complexity, and picks which AI tool actually does the work. This panel keeps one card per grading platform, then breaks that platform down by the models it used and the tools it picked.</p><p>Read the model section as grading activity and the picked-platform section as router bias. For example, if Claude graded twelve issues using Opus eight times, the Opus model shows <strong>67%</strong>. If Claude handed nine of those issues to Claude, the picked-platform bar shows <strong>75%</strong>.</p><p>Select a platform to filter every prompt grade by who <strong>graded</strong> it. Select a grading model to narrow that platform further; selecting the same model again returns to the whole platform. The matrix always retains every platform and model in the current search so another can be chosen directly.</p><p>Historical platform or model details that were never recorded remain visible as <strong>Not recorded</strong> or <strong>Model not recorded</strong> and cannot be selected.</p>",
-      links: [],
-    },
-    "provider-bins": {
-      title: "AI program locations",
-      html: "<p>The app normally finds Claude, Codex, and Grok automatically. Enter a full program path only when an installed provider is not detected or when you want to use a specific copy.</p>",
       links: [],
     },
     "model-calibration": {
@@ -412,10 +401,6 @@
 
   function bindConfig(config) {
     renderProviderCards(config);
-    providerList(config).forEach((provider) => {
-      const input = document.querySelector(`[data-provider-bin="${provider.id}"]`);
-      if (input) input.value = provider.bin;
-    });
     ensureRepository(config);
     restoreFeedbackRepoFilter(config);
     renderRepositorySelector();
@@ -1126,7 +1111,8 @@
       effort: card.querySelector(".provider-effort").value,
       router_model: card.querySelector(".provider-router-model")?.value.trim() || "",
       router_effort: card.querySelector(".provider-router-effort")?.value || "",
-      bin: document.querySelector(`[data-provider-bin="${card.dataset.provider}"]`)?.value.trim() || "",
+      // CLI paths are always auto-detected; a previously saved override is cleared.
+      bin: "",
       minimum_remaining_percent: Number(card.querySelector(".provider-minimum-quota")?.value ?? 10),
     }));
   }
@@ -1769,7 +1755,7 @@
         className: "panel-copy",
         textContent: anyFilterActive
           ? "No Jev comparisons match this filter."
-          : "No Jev score comparisons yet. Turn on Store AI execution history, then run an issue.",
+          : "No Jev score comparisons yet. Run an issue and they appear here.",
       }));
       return;
     }
@@ -1875,7 +1861,7 @@
         className: "panel-copy",
         textContent: searching
           ? "No executions match this search."
-          : "No AI executions recorded yet. Turn on “Store AI execution history” in AI Configuration, then run an issue.",
+          : "No AI executions recorded yet. Run an issue and it appears here.",
       }));
       return;
     }
@@ -2099,7 +2085,7 @@
         className: "panel-copy",
         textContent: state.promptGradesSearch.trim()
           ? "No graded prompts match this search."
-          : "No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.",
+          : "No graded prompts yet. Turn on Dynamic Model Routing, then run an issue.",
       }));
       return;
     }
@@ -2306,7 +2292,7 @@
         className: "panel-copy",
         textContent: filtering
           ? "No graded prompts match this filter."
-          : "No graded prompts yet. Turn on Dynamic Model Routing and Store AI execution history, then run an issue.",
+          : "No graded prompts yet. Turn on Dynamic Model Routing, then run an issue.",
       }));
       return;
     }
@@ -3942,12 +3928,11 @@
     }, { progress: "Verifying bot sign-in…" });
   }
 
-  // ----- Software update ---------------------------------------------------
+  // ----- Running build version ---------------------------------------------
 
   async function refreshAppVersion() {
     try {
       const version = window.SwarmVersion.formatBuildVersion(await invoke("app_version"));
-      byId("update-version-pill").textContent = version || "v0.0.0";
       const label = byId("app-version-label");
       label.textContent = version;
       if (version) {
@@ -3958,102 +3943,6 @@
         label.removeAttribute("aria-label");
       }
     } catch (_) { /* unavailable outside a Tauri window */ }
-  }
-
-  function renderUpdateDetail(summary) {
-    const detail = byId("update-detail");
-    detail.replaceChildren();
-    if (!summary) return;
-    const row = document.createElement("div");
-    row.className = "verification-result";
-    row.textContent = summary.notes ? summary.notes.trim().split("\n")[0] : `Version ${summary.version} is ready to install.`;
-    detail.appendChild(row);
-    detail.appendChild(button("Install & restart", "primary-button compact", applyUpdate));
-  }
-
-  // Only the newest release and newest beta (`directInstall`) can be
-  // installed from here today — see install_update_candidate's doc comment
-  // on the Rust side. The rest of the 3+3 list is shown for context so a
-  // version pick is never silently hidden, just explained.
-  function renderUpdateCandidates(candidates) {
-    const container = byId("update-candidates");
-    container.replaceChildren();
-    if (!candidates || !candidates.length) {
-      container.classList.add("hidden");
-      return;
-    }
-    container.classList.remove("hidden");
-    const heading = document.createElement("p");
-    heading.className = "panel-copy";
-    heading.textContent = "Check Now: 3 most recent release builds and 3 most recent beta builds.";
-    container.appendChild(heading);
-    candidates.forEach((candidate) => {
-      const row = document.createElement("div");
-      row.className = "workspace-row";
-      const label = document.createElement("div");
-      const title = document.createElement("strong");
-      title.textContent = `${candidate.version} · ${candidate.channel === "beta" ? "Beta" : "Release"}`;
-      label.appendChild(title);
-      const meta = document.createElement("small");
-      const published = candidate.publishedAt ? new Date(candidate.publishedAt).toLocaleDateString() : "";
-      let reason = "";
-      if (!candidate.installable) {
-        reason = "Older than the installed version — downgrading isn't supported yet.";
-      } else if (!candidate.directInstall) {
-        reason = "Context only — only the newest release and newest beta install directly today.";
-      }
-      meta.textContent = [published, reason].filter(Boolean).join(" — ");
-      label.appendChild(meta);
-      row.appendChild(label);
-      const actions = document.createElement("div");
-      actions.className = "control-row";
-      const canInstall = candidate.installable && candidate.directInstall;
-      const install = button(canInstall ? "Install" : "Not available", "secondary-button compact", () => installUpdateCandidate(candidate));
-      install.disabled = !canInstall;
-      actions.appendChild(install);
-      row.appendChild(actions);
-      container.appendChild(row);
-    });
-  }
-
-  async function checkForUpdate({ quiet = false } = {}) {
-    await withBusy("check-update", async () => {
-      byId("update-status").textContent = "Checking for updates…";
-      const [summary, candidates] = await Promise.all([
-        invoke("check_for_update"),
-        invoke("list_update_candidates").catch(() => []),
-      ]);
-      state.pendingUpdate = summary;
-      if (summary) {
-        byId("update-status").textContent = `Version ${summary.version} is available (you have ${summary.currentVersion}).`;
-        renderUpdateDetail(summary);
-        showUpdateBanner(summary);
-      } else {
-        byId("update-status").textContent = "You're on the latest version.";
-        renderUpdateDetail(null);
-        if (!quiet) showToast("SWARM Automation is up to date.", "success");
-      }
-      renderUpdateCandidates(candidates);
-    }, { progress: "Checking for updates…" });
-  }
-
-  async function applyUpdate() {
-    await withBusy("apply-update", async () => {
-      await invoke("install_update"); // the process restarts on success
-    }, { progress: "Downloading update… the app will restart when it's ready." });
-  }
-
-  async function installUpdateCandidate(candidate) {
-    await withBusy("apply-update", async () => {
-      await invoke("install_update_candidate", { tag: candidate.tag, channel: candidate.channel }); // restarts on success
-    }, { progress: `Downloading ${candidate.version}… the app will restart when it's ready.` });
-  }
-
-  function showUpdateBanner(summary) {
-    if (!summary) return;
-    state.pendingUpdate = summary;
-    byId("update-banner-text").textContent = `SWARM Automation ${summary.version} is available.`;
-    byId("update-banner").classList.remove("hidden");
   }
 
   function addRepository() {
@@ -4380,7 +4269,7 @@
       }
     });
     byId("schedule-mode-select").addEventListener("change", (event) => selectSchedule(event.target.value));
-    document.querySelectorAll("[data-config], [data-repo-config], [data-provider-bin], #days-field input").forEach((input) => {
+    document.querySelectorAll("[data-config], [data-repo-config], #days-field input").forEach((input) => {
       input.addEventListener("input", () => { setDirty(); renderSummaries(); });
       input.addEventListener("change", () => {
         setDirty();
@@ -4835,9 +4724,6 @@
       renderRepositorySelector();
       setDirty();
     });
-    byId("check-update").addEventListener("click", () => checkForUpdate());
-    byId("update-banner-install").addEventListener("click", applyUpdate);
-    byId("update-banner-later").addEventListener("click", () => byId("update-banner").classList.add("hidden"));
     byId("setup-bots").addEventListener("click", setupBots);
     byId("recheck-bots").addEventListener("click", recheckBots);
     byId("verify-bots").addEventListener("click", verifyBots);
@@ -5409,7 +5295,6 @@
         }
         renderLogs();
       });
-      await listen("update-available", (event) => showUpdateBanner(event.payload));
       await listen("system-permission-primed", (event) => showToast(event.payload));
       await listen("model-calibration-refreshed", (event) => onModelCalibrationRefreshed(event.payload));
       void refreshAppVersion();
