@@ -1937,6 +1937,48 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(usage.status, 1)
         self.assertEqual(usage.remaining_percent, 0)
 
+    def test_codex_non_finite_used_percent_is_unavailable(self) -> None:
+        args = build_parser().parse_args(
+            self._worker_argv(auto=False)
+            + ["--minimum-remaining-percent", "0", "--codex-minimum-remaining-percent", "0"]
+        )
+        self.worker = Worker(Config.from_args(args))
+        finite_partner = 20.0
+        for malformed in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(malformed=malformed):
+                self.assertIsNone(
+                    self.worker.codex_usage_from_limits(
+                        {
+                            "primary": {"usedPercent": malformed},
+                            "secondary": {"usedPercent": finite_partner},
+                        }
+                    )
+                )
+                self.assertIsNone(
+                    self.worker.codex_usage_from_limits(
+                        {
+                            "primary": {"usedPercent": finite_partner},
+                            "secondary": {"usedPercent": malformed},
+                        }
+                    )
+                )
+
+        nan_limits = subprocess.CompletedProcess(
+            ["codex-rate-limits"],
+            0,
+            stdout=json.dumps(
+                {
+                    "primary": {"usedPercent": float("nan")},
+                    "secondary": {"usedPercent": 20.0},
+                },
+                allow_nan=True,
+            ),
+            stderr="",
+        )
+        usage, _, _ = self.codex_usage_with([nan_limits, nan_limits])
+        self.assertEqual(usage.status, 2)
+        self.assertIsNone(usage.remaining_percent)
+
     def test_check_usage_prints_only_json_and_only_enabled_providers(self) -> None:
         # claude/codex/grok-bin are unset in _worker_argv, so each probe hits
         # its own real `log(...)` call ("was not found in PATH") on the way to

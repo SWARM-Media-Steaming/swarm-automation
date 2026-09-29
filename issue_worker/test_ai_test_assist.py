@@ -53,6 +53,17 @@ class CapacityTestCase(unittest.TestCase):
                 result = assist.codex_capacity("codex", 0, "python3", scripts)
         self.assertFalse(result["available"])
 
+    def test_codex_capacity_rejects_non_finite_used_percent(self) -> None:
+        limits = {"primary": {"usedPercent": float("nan")}, "secondary": {"usedPercent": 20.0}}
+        with tempfile.TemporaryDirectory() as scripts:
+            (Path(scripts) / "codex_rate_limits.py").write_text("# helper\n", encoding="utf-8")
+            with mock.patch.object(assist, "command_available", return_value=True), mock.patch.object(
+                assist, "_run", return_value=(0, json.dumps(limits, allow_nan=True))
+            ):
+                result = assist.codex_capacity("codex", 0, "python3", scripts)
+        self.assertFalse(result["available"])
+        self.assertIn("invalid", result["detail"])
+
     def test_grok_capacity_requires_sign_in(self) -> None:
         with mock.patch.object(assist, "command_available", return_value=True), mock.patch.dict(
             "os.environ", {"HOME": "/nonexistent-home"}, clear=False

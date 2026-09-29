@@ -60,6 +60,13 @@ that provider unavailable for the current scheduling pass, so a healthy
 enabled provider can still receive the issue. Keep that isolation when
 adding provider-selection callers or changing quota probes.
 
+Quota window percentages must be finite. `codex_usage_from_limits` (and the
+mirrored `ai_test_assist.codex_capacity` parser) treat a non-finite
+`usedPercent` on any active window as invalid, the same as a missing window:
+the probe degrades to unavailable rather than reporting a usable NaN remaining
+percentage. `float("nan")` and `float("inf")` do not raise, so this is an
+explicit `math.isfinite` check — not something `float()` validation catches.
+
 Related, still-accurate mechanics:
 
 - `tauri.conf.json`'s `bundle.resources` entry (`"issue_worker/*.py":
