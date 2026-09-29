@@ -26,6 +26,7 @@
     executionHistory: null,
     executionHistorySearch: "",
     executionHistorySort: "recent",
+    executionHistoryDelivery: "all",
     executionHistoryOffset: 0,
     executionHistoryRequest: 0,
     executionHistorySearchTimer: null,
@@ -192,7 +193,7 @@
     },
     "auto-approve-merge": {
       title: "Approve & merge automatically",
-      html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention.</p><p><strong>Automatically merge <code>ai-main</code> into <code>main</code></strong> is off by default. When on, the worker also opens (or reuses) the <code>ai-main</code> → <code>main</code> pull request after issue PRs land, has another provider’s bot approve it, and merges it — so everything the app has finished lands on <code>main</code> immediately. It needs issue PR merging on, and a promotion with conflicts stays open for a person to resolve. Leave it off to keep <code>main</code> a human decision.</p><p><strong>Allow bots to merge</strong> updates the human-owned branch’s existing push allow list so the worker’s GitHub Apps can perform that merge. People already on the list stay on it. If the branch does not restrict who can push, the button stays off.</p>",
+      html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention.</p><p><strong>Automatically merge <code>ai-main</code> into <code>main</code></strong> is off by default. When on, the worker also opens (or reuses) the <code>ai-main</code> → <code>main</code> pull request after issue PRs land, has another provider’s bot approve it, and merges it — so everything the app has finished lands on <code>main</code> immediately. It needs issue PR merging on, and a promotion with conflicts stays open for a person to resolve. Leave it off to keep <code>main</code> a human decision.</p><p><strong>Allow best-effort adversarial merge after 3 rounds</strong> is off by default. Off, adversarial UAT and cybersecurity keep starting a fresh three-round epoch, with a stronger model and effort when progress stalls, and they merge only after the acceptance policy passes. On, the first three rounds merge the latest commit into <code>ai-main</code> even if adversarial tests or security findings are still open. Promotion to <code>main</code> still needs both automatic promotion and issue PR merging. Enabling it may merge code with unresolved adversarial tests or actionable security findings. It is never inferred.</p><p><strong>Allow bots to merge</strong> updates the human-owned branch’s existing push allow list so the worker’s GitHub Apps can perform that merge. People already on the list stay on it. If the branch does not restrict who can push, the button stays off.</p>",
       links: [],
     },
     "ci-monitoring": {
@@ -237,7 +238,7 @@
     },
     "work-policy": {
       title: "Issue instructions",
-      html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and up to six fix/re-test rounds. A deadlock publishes the PR for human review with automatic merging disabled.</li><li><strong>Adversarial cybersecurity</strong> — after the implementation (and after Adversarial UAT when that is on too), a fresh security engineer attacks the change. Vulnerabilities it introduced are fixed and re-verified inside the issue; legitimate findings elsewhere become their own <code>adversarial-security</code> issues instead of widening this one. A review that could not run is reported as failed, never as a pass.</li><li><strong>Update Claude assets</strong> — asks the AI to update any Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository that the issue makes relevant.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
+      html: "<p>These switches control issue implementation and verification.</p><ul><li><strong>Require issue tests</strong> — asks for UAT and integration test coverage with the change.</li><li><strong>Adversarial UAT</strong> — replaces the same-session instruction with independent tests and renewable three-round epochs. Blocking failures stay unmerged until they pass. Best-effort delivery after three rounds is a separate switch on Pull request automation and is off unless you turn it on.</li><li><strong>Adversarial cybersecurity</strong> — after the implementation (and after Adversarial UAT when that is on too), a fresh security engineer attacks the change. Vulnerabilities it introduced are fixed and re-verified inside the issue; legitimate findings elsewhere become their own <code>adversarial-security</code> issues instead of widening this one. A review that could not run is reported as failed, never as a pass.</li><li><strong>Update Claude assets</strong> — asks the AI to update any Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository that the issue makes relevant.</li><li><strong>Allow environment-only summary</strong> — lets the AI explain a non-code problem without changing files.</li></ul><p>These issue policies start off and apply only to this repository.</p>",
       links: [],
     },
     "usage-cost": {
@@ -246,7 +247,7 @@
     },
     "execution-history": {
       title: "Execution history",
-      html: "<p>Every AI issue execution across all repositories by default, newest first. The repository chips above the tabs independently filter all three reports; the repository dropdown in the header does not affect Feedback. The list loads ten at a time from the local database. Each row shows its repository, AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. The aggregate reports average fix/re-test rounds and clean-first-pass/cap-hit rates over the filtered repositories.</p><p>Execution history is always recorded locally, sanitized. This view only reads it: it never changes issue processing, and nothing is uploaded.</p><p><strong>Import from GitHub</strong> scans every repository checked in the Feedback filter and adds a placeholder \"Imported\" entry for any issue with no execution history yet. It reports success or failure for each repository and never overwrites or duplicates a real execution.</p>",
+      html: "<p>Every AI issue execution across all repositories by default, newest first. The repository chips above the tabs independently filter all three reports; the repository dropdown in the header does not affect Feedback. The list loads ten at a time from the local database. Each row shows its repository, AI tool, model, effort and UAT round count. Sort by UAT rounds across all pages. <strong>Merge result</strong> separates verified-clean merges from best-effort merges that still had unresolved adversarial tests or security findings. The aggregate reports average fix/re-test rounds, clean-first-pass and cap-hit rates, and those two merge counts over the filtered repositories.</p><p>A best-effort card is labelled <strong>Best-effort merge with unresolved adversarial results</strong> and lists the failing suites and open findings from before and after the merge. Execution history is always recorded locally, sanitized. This view only reads it: it never changes issue processing, and nothing is uploaded.</p><p><strong>Import from GitHub</strong> scans every repository checked in the Feedback filter and adds a placeholder \"Imported\" entry for any issue with no execution history yet. It reports success or failure for each repository and never overwrites or duplicates a real execution.</p>",
       links: [],
     },
     "prompt-grades": {
@@ -664,6 +665,7 @@
       require_issue_tests: false,
       adversarial_uat_enabled: false,
       adversarial_security_enabled: false,
+      adversarial_best_effort_merge: false,
       update_claude_assets_enabled: false,
       allow_environment_only_summary: false,
       repo_dir: "",
@@ -1371,6 +1373,7 @@
     completed: { label: "Completed", cls: "passed" },
     environment_only: { label: "Environment only", cls: "passed" },
     quota_paused: { label: "Quota paused", cls: "waiting-for-input" },
+    adversarial_epoch_continuing: { label: "Strict epoch continuing", cls: "running" },
     failed: { label: "Failed", cls: "failed" },
     imported: { label: "Imported", cls: "" },
   };
@@ -1448,6 +1451,12 @@
     return badge;
   }
 
+  function appendAdversarialDelivery(body, record, addSummaryParagraph) {
+    const api = window.SwarmAdversarialDelivery;
+    if (!api) return;
+    for (const [label, text] of api.paragraphs(record || {})) addSummaryParagraph(label, text);
+  }
+
   function buildExecutionRecordItem(record) {
     const item = document.createElement("details");
     item.className = "execution-record";
@@ -1502,6 +1511,15 @@
     badge.className = `suite-state ${statusMeta.cls}`.trim();
     badge.textContent = statusMeta.label;
     tally.appendChild(badge);
+    const deliveryChip = window.SwarmAdversarialDelivery
+      ? window.SwarmAdversarialDelivery.summaryChip(record)
+      : null;
+    if (deliveryChip) {
+      const warning = document.createElement("span");
+      warning.className = deliveryChip.warning ? "execution-warning" : "execution-policy";
+      warning.textContent = deliveryChip.text;
+      tally.appendChild(warning);
+    }
     summary.append(head, tagging, tally);
     item.appendChild(summary);
 
@@ -1530,6 +1548,7 @@
     addSummaryParagraph("Changes made", record.changesSummary);
     addSummaryParagraph("Adversarial UAT", record.adversarialOutcome?.replaceAll("_", " "));
     addSummaryParagraph("Adversarial cybersecurity", window.SwarmAdversarialSecurity.findingsSummary(record));
+    appendAdversarialDelivery(body, record, addSummaryParagraph);
     const securityFindings = record.securityFiledFindings || [];
     if (securityFindings.length) {
       addSummaryParagraph("Out-of-scope security findings", `${securityFindings.length} separately filed issue${securityFindings.length === 1 ? "" : "s"}.`);
@@ -1857,11 +1876,14 @@
       if (next) next.disabled = offset + records.length >= total;
     }
     if (!records.length) {
+      const filteringDelivery = (state.executionHistoryDelivery || "all") !== "all";
       box.appendChild(Object.assign(document.createElement("p"), {
         className: "panel-copy",
         textContent: searching
           ? "No executions match this search."
-          : "No AI executions recorded yet. Run an issue and it appears here.",
+          : filteringDelivery
+            ? "No executions match this merge filter."
+            : "No AI executions recorded yet. Run an issue and it appears here.",
       }));
       return;
     }
@@ -1887,6 +1909,7 @@
         offset,
         search,
         sort: state.executionHistorySort,
+        delivery: state.executionHistoryDelivery || "all",
       });
       if (requestId !== state.executionHistoryRequest || filterSignature !== feedbackRepoFilterSignature()) return;
       state.executionHistory = page;
@@ -4017,6 +4040,15 @@
         ? `${commits} · PR #${promotion.integrationPrNumber} open`
         : commits;
       row.append(name, actions, meta);
+      const repositories = state.config && Array.isArray(state.config.repositories) ? state.config.repositories : [];
+      const repo = repositories.find((entry) => entry.id === promotion.repoId);
+      if (repo && window.SwarmAdversarialDelivery) {
+        const enabled = Boolean(repo.adversarial_best_effort_merge);
+        const policy = document.createElement("span");
+        policy.className = enabled ? "execution-warning" : "execution-policy";
+        policy.textContent = window.SwarmAdversarialDelivery.repositoryPolicy(enabled);
+        row.appendChild(policy);
+      }
       if (promotion.error) {
         const alert = document.createElement("span");
         alert.className = "branch-alert";
@@ -4605,6 +4637,11 @@
     byId("import-execution-history").addEventListener("click", () => importExecutionHistory());
     byId("execution-history-sort").addEventListener("change", (event) => {
       state.executionHistorySort = event.target.value;
+      state.executionHistoryOffset = 0;
+      void refreshExecutionHistory();
+    });
+    byId("execution-history-delivery").addEventListener("change", (event) => {
+      state.executionHistoryDelivery = event.target.value || "all";
       state.executionHistoryOffset = 0;
       void refreshExecutionHistory();
     });

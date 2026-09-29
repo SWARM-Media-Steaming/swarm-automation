@@ -69,7 +69,9 @@ from token_usage import (
     normalize_usage,
     render_ai_usage_markdown,
 )
-from adversarial_core import AdversarialStage
+from adversarial_core import (
+    BEST_EFFORT_LABEL, BEST_EFFORT_PR_MARKER, DELIVERY_BEST_EFFORT, AdversarialStage,
+)
 from adversarial_security import AdversarialSecurityMixin, SECURITY_STAGE
 from adversarial_uat import (
     UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_LEGACY_NOTICE, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE,
@@ -126,6 +128,9 @@ from decision_engine import (
 ISSUE_COMPLETED_EXIT_CODE = 10
 QUOTA_PAUSED_EXIT_CODE = 11
 PROVIDER_UNAVAILABLE_EXIT_CODE = 12
+# A strict-mode adversarial stage renewed its epochs STRICT_EPOCHS_PER_RUN
+# times in this run; its checkpoint resumes on the scheduler's next pass.
+ADVERSARIAL_EPOCH_YIELD_EXIT_CODE = 13
 CODEX_QUOTA_TIMEOUTS_SECONDS = (30, 60)
 CODEX_QUOTA_CACHE_MAX_AGE_SECONDS = 15 * 60
 CODEX_QUOTA_CACHE_FILE = "codex-rate-limits-cache.json"
@@ -511,6 +516,10 @@ class Config:
     knowledge_context_token_limit: int
     knowledge_owner_scope_id: str
     jev: JevSettings = dataclasses.field(default_factory=JevSettings)
+    # Issue #305: after three fix/re-test rounds an unresolved adversarial
+    # stage delivers the latest commit as a best-effort merge instead of
+    # renewing strict-mode epochs. Explicit opt-in only; never inferred.
+    adversarial_best_effort_merge: bool = False
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
@@ -559,6 +568,7 @@ class Config:
             require_issue_tests=args.require_issue_tests,
             adversarial_uat_enabled=args.adversarial_uat_enabled,
             adversarial_security_enabled=args.adversarial_security_enabled,
+            adversarial_best_effort_merge=args.adversarial_best_effort_merge is True,
             update_claude_assets_enabled=args.update_claude_assets_enabled,
             allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
@@ -3514,11 +3524,92 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             f"- Commit: `{commit_sha}` — {pending['commit_message']}\n"
             f"{usage_lines}\n"
             f"{pending.get('adversarial_summary', '')}"
+            f"{self.render_adversarial_policy(pending.get('adversarial_policy'))}"
             f"{ai_usage_report}\n"
             f"{jev_report}"
             "<details><summary>AI completion summary</summary>\n\n"
             f"{pending.get('ai_output') or '(No captured AI output was available.)'}\n"
             "</details>\n"
+        )
+
+    def adversarial_policy_report(self, best_effort: bool, delivered_sha: str) -> dict[str, Any] | None:
+        """The merge policy a delivered adversarial work-round ran under.
+
+        For a best-effort delivery this also records what was unresolved
+        before the merge and what remains after it, in execution history as
+        well as the completion comment.
+        """
+        if not self.in_progress_file.exists():
+            return None
+        state = self.read_state()
+        ran = [stage for stage in ADVERSARIAL_STAGES
+               if isinstance(state.get(stage.key), dict) and not state[stage.key].get("disabled")]
+        if not ran:
+            return None
+        policy = self.adversarial_merge_policy()
+        if not best_effort:
+            epochs = max(int(state[stage.key].get("epoch") or 1) for stage in ran)
+            return {"policy": policy, "delivery": "verified_clean", "epochs": epochs}
+        record = state.get("adversarial_best_effort") or {}
+        unresolved = record.get("unresolved") or {"suites": [], "findings": []}
+        promotion = getattr(self, "last_promotion", {}) or {}
+        merged = bool(promotion.get("merged_sha"))
+        after_merge = {
+            "merged": merged,
+            "integration_branch": self.config.integration_branch,
+            "merged_sha": delivered_sha if merged else "",
+            "promotion": promotion.get("status") or "not_merged",
+            "promotion_url": promotion.get("url", ""),
+            "base_branch": self.config.base_branch,
+            "suites": unresolved.get("suites", []),
+            "findings": unresolved.get("findings", []),
+        }
+        self.history.update(
+            iso_timestamp(), adversarial_unresolved={"before_merge": unresolved, "after_merge": after_merge},
+        )
+        log(f"{BEST_EFFORT_LABEL} for issue #{self.issue.number}: "
+            + (f"merged into {self.config.integration_branch} as {delivered_sha[:12]}; "
+               if merged else "pull request left open; ")
+            + f"promotion to {self.config.base_branch}: {after_merge['promotion']}; "
+            f"{len(after_merge['suites'])} failing suite(s) and {len(after_merge['findings'])} open "
+            "finding(s) remain unresolved.")
+        return {"policy": policy, "delivery": DELIVERY_BEST_EFFORT, "before_merge": unresolved,
+                "after_merge": after_merge}
+
+    @staticmethod
+    def render_adversarial_policy(report: dict[str, Any] | None) -> str:
+        if not report:
+            return ""
+        if report.get("delivery") != DELIVERY_BEST_EFFORT:
+            epochs = int(report.get("epochs") or 1)
+            detail = f" after {epochs} strict-mode epochs" if epochs > 1 else ""
+            policy = "best effort allowed" if report.get("policy") == "best_effort" else "strict"
+            return f"- Adversarial merge policy: {policy} — verified clean before merge{detail}.\n"
+
+        def describe(unresolved: dict[str, Any]) -> str:
+            suites = [f"`{item.get('id')}`" for item in unresolved.get("suites", [])]
+            findings = [str(item.get("title") or "") for item in unresolved.get("findings", [])]
+            return (f"{len(suites)} failing suite(s)" + (f" ({', '.join(suites)})" if suites else "")
+                    + f", {len(findings)} open finding(s)"
+                    + (f" ({'; '.join(findings)})" if findings else ""))
+
+        after = report.get("after_merge") or {}
+        promotion = {
+            "promoted": f"promoted to `{after.get('base_branch')}`"
+                        + (f" → {after['promotion_url']}" if after.get("promotion_url") else ""),
+            "not_promoted": f"promotion to `{after.get('base_branch')}` did not complete; it is retried "
+                            "on the next run",
+            "not_configured": f"promotion to `{after.get('base_branch')}` is not configured",
+        }.get(str(after.get("promotion")), "not merged")
+        merged = (f"merged into `{after.get('integration_branch')}` as `{after.get('merged_sha')}`"
+                  if after.get("merged") else "pull request left open")
+        return (
+            f"- Adversarial merge policy: **{BEST_EFFORT_LABEL}** — this repository allows a best-effort "
+            "adversarial merge after 3 rounds.\n"
+            f"- Delivery: {merged}; {promotion}.\n"
+            f"- Unresolved before merge: {describe(report.get('before_merge') or {})}.\n"
+            f"- Unresolved after merge: {describe(after)} — the merged commit is the one the final round "
+            "tested, so these remain open and are tracked in the follow-up issue.\n"
         )
 
     def post_pending_comment(self, pending: dict[str, Any]) -> dict[str, Any]:
@@ -5661,6 +5752,13 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                     .replace(CAP_HIT_PR_LEGACY_NOTICE, "")
                     .replace(CAP_HIT_PR_MARKER, "").strip(),
                 )
+            if adversarial_cap_hit and BEST_EFFORT_PR_MARKER not in existing_body:
+                self.github.gh(
+                    ["pr", "edit", pr_url, "--repo", self.config.github_repository, "--body-file", "-"],
+                    self.choice.key,
+                    self.best_effort_pr_notice() + existing_body.replace(CAP_HIT_PR_NOTICE, "")
+                    .replace(CAP_HIT_PR_LEGACY_NOTICE, "").replace(CAP_HIT_PR_MARKER, "").strip(),
+                )
         else:
             title = self.git("log", "-1", "--format=%s", commit_sha)
             body = (
@@ -5669,6 +5767,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             )
             if not allow_automation:
                 body = CAP_HIT_PR_NOTICE + body
+            elif adversarial_cap_hit:
+                body = self.best_effort_pr_notice() + body
             output = self.github.gh(
                 [
                     "pr",
@@ -5689,15 +5789,46 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             ).strip()
             pr_url = output.splitlines()[-1]
         delivered_sha = commit_sha
-        if allow_automation and self.config.auto_approve:
+        # The best-effort adversarial policy is an explicit repository opt-in
+        # to merge into the integration branch after three unresolved rounds
+        # (issue #305), so it merges even when routine PR approval is manual.
+        # Promotion to the base branch still follows `auto_promote`.
+        if allow_automation and (self.config.auto_approve or adversarial_cap_hit):
             self.approve_pull_request(pr_url)
             delivered_sha = self.merge_pull_request(
                 pr_url, commit_sha, self.choice.key, self.issue.number
             )
             self.delete_remote_issue_branch(branch, self.choice.key)
             self.return_to_integration_branch(branch)
-            self.auto_promote_integration_branch(self.choice.key)
+            promoted = self.auto_promote_integration_branch(self.choice.key)
+            configured = bool(self.config.auto_promote and self.config.auto_approve)
+            self.last_promotion = {
+                "status": ("promoted" if promoted else "not_promoted") if configured else "not_configured",
+                "url": promoted if isinstance(promoted, str) else "",
+                "merged_sha": delivered_sha,
+            }
+            self.history.update(iso_timestamp(), promotion_status=self.last_promotion["status"],
+                                promotion_url=self.last_promotion["url"])
         return pr_url, branch, delivered_sha
+
+    def best_effort_pr_notice(self) -> str:
+        """The prominent PR banner for a best-effort adversarial delivery."""
+        record = self.read_state().get("adversarial_best_effort") if self.in_progress_file.exists() else None
+        unresolved = (record or {}).get("unresolved") or {"suites": [], "findings": []}
+        lines = [
+            BEST_EFFORT_PR_MARKER,
+            f"> [!WARNING]\n> **{BEST_EFFORT_LABEL}.** This repository allows a best-effort adversarial "
+            "merge after 3 rounds; this pull request merges the latest committed implementation even though "
+            "the adversarial results below were still unresolved.",
+            "",
+            "Unresolved before merge:",
+        ]
+        lines += [f"- Failing suite `{item.get('id')}` ({item.get('stage')})" for item in unresolved.get("suites", [])]
+        lines += [f"- {item.get('severity') or 'Open'} finding: {item.get('title')} ({item.get('stage')})"
+                  for item in unresolved.get("findings", [])]
+        if not unresolved.get("suites") and not unresolved.get("findings"):
+            lines.append("- (no failing suite or open finding was recorded)")
+        return "\n".join(lines) + "\n\n"
 
     def default_provider(self) -> str | None:
         """The preferred enabled provider (else the first enabled one), used for
@@ -5983,11 +6114,13 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         base_sha = str(self.read_state().get("base_sha") or "")
         commits = list(reversed(self.git("rev-list", f"{base_sha}..{commit_sha}").splitlines()))
         files = self.git("diff", "--name-only", base_sha, commit_sha).splitlines()
+        self.last_promotion = {}
         pr_url, branch, commit_sha = self.deliver_pull_request(
             commit_sha,
             allow_automation=allow_automation,
             adversarial_cap_hit=adversarial_cap_hit,
         )
+        adversarial_policy = self.adversarial_policy_report(adversarial_cap_hit, commit_sha)
         if commit_sha not in commits:
             commits.append(commit_sha)
         self.history.note("Commit and pull request delivery completed", iso_timestamp())
@@ -6024,6 +6157,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             "pull_request_url": pr_url,
             "branch_name": branch,
             "adversarial_summary": self.adversarial_summary_line(),
+            "adversarial_policy": adversarial_policy,
             "usage_at_start": usage_at_start,
             "usage_at_completion": self.usage_snapshot(self.choice.key),
             "ai_usage_report": self.render_ai_usage_report(),
@@ -6918,6 +7052,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--adversarial-security-enabled",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_ADVERSARIAL_SECURITY_ENABLED", False),
+    )
+    parser.add_argument(
+        "--adversarial-best-effort-merge",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_ADVERSARIAL_BEST_EFFORT_MERGE", False),
+        help="After three unresolved adversarial fix/re-test rounds, merge the latest commit as best "
+             "effort instead of starting another escalated strict-mode epoch. Off by default.",
     )
     parser.add_argument(
         "--update-claude-assets-enabled",

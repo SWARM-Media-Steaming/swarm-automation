@@ -593,18 +593,21 @@ fn execution_history_lookup_is_safe_before_any_execution_exists() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(history.records.is_empty());
     assert_eq!(history.total, 0);
     assert_eq!(history.offset, 0);
     assert_eq!(history.limit, 10);
-    let global = get_execution_history(app.clone(), app.state(), vec![], None, None, None).unwrap();
+    let global =
+        get_execution_history(app.clone(), app.state(), vec![], None, None, None, None).unwrap();
     assert!(global.records.is_empty());
     let multiple = get_execution_history(
         app.clone(),
         app.state(),
         vec!["octocat__example".into(), "octocat__other".into()],
+        None,
         None,
         None,
         None,
@@ -908,6 +911,7 @@ fn execution_history_query_always_requests_one_page() {
         Some(-4),
         Some("  Widget  ".into()),
         Some("rounds_desc".into()),
+        Some("best_effort".into()),
     );
     let value_after = |flag: &str| {
         args.iter()
@@ -919,11 +923,13 @@ fn execution_history_query_always_requests_one_page() {
     assert_eq!(value_after("--offset"), Some("0"));
     assert_eq!(value_after("--search"), Some("Widget"));
     assert_eq!(value_after("--repository"), Some("octocat/example"));
+    assert_eq!(value_after("--delivery"), Some("best_effort"));
 
     let unfiltered = execution_history_query_args(
         Path::new("ai_execution_history.py"),
         Path::new("history.sqlite3"),
         &[],
+        None,
         None,
         None,
         None,
@@ -934,6 +940,9 @@ fn execution_history_query_always_requests_one_page() {
     assert!(unfiltered
         .windows(2)
         .any(|pair| pair[0] == "--search" && pair[1].is_empty()));
+    assert!(unfiltered
+        .windows(2)
+        .any(|pair| pair[0] == "--delivery" && pair[1] == "all"));
     assert!(!unfiltered.iter().any(|argument| argument == "--repository"));
 }
 
@@ -962,6 +971,7 @@ fn feedback_repository_ids_resolve_to_deduplicated_cli_filters() {
         None,
         None,
         None,
+        Some("verified_clean".into()),
     );
     let filters: Vec<_> = arguments
         .windows(2)
@@ -1376,6 +1386,14 @@ fn repo_worker_args_carries_each_adversarial_stage_independently() {
     let neither = args_for(&repo("octocat/example"));
     assert!(neither.contains(&"--no-adversarial-uat-enabled".to_string()));
     assert!(neither.contains(&"--no-adversarial-security-enabled".to_string()));
+    assert!(neither.contains(&"--no-adversarial-best-effort-merge".to_string()));
+
+    let best_effort = args_for(&RepoConfig {
+        adversarial_best_effort_merge: true,
+        ..repo("octocat/example")
+    });
+    assert!(best_effort.contains(&"--adversarial-best-effort-merge".to_string()));
+    assert!(!best_effort.contains(&"--no-adversarial-best-effort-merge".to_string()));
 }
 
 #[test]

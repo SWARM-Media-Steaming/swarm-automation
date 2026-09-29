@@ -41,10 +41,11 @@
       const head = message.match(new RegExp(`^${stage.label} for issue #(\\d+): (.+)\\.$`, "i"));
       if (!head) continue;
       const [, number, detail] = head;
+      const epochSuffix = "(?: in epoch (\\d+))?";
       const rounds = [
-        [/^starting fix\/re-test round (\d+) of (\d+)$/i, "Fix in progress"],
-        [/^starting re-test for round (\d+) of (\d+)$/i, "Re-test in progress"],
-        [/^fix applied in round (\d+) of (\d+)$/i, "Fix applied; re-test pending"],
+        [new RegExp(`^starting fix\\/re-test round (\\d+) of (\\d+)${epochSuffix}$`, "i"), "Fix in progress"],
+        [new RegExp(`^starting re-test for round (\\d+) of (\\d+)${epochSuffix}$`, "i"), "Re-test in progress"],
+        [new RegExp(`^fix applied in round (\\d+) of (\\d+)${epochSuffix}$`, "i"), "Fix applied; re-test pending"],
       ];
       const assessment = detail.match(
         new RegExp(`^starting ${stage.zero} \\(round (\\d+) of (\\d+)\\)$`, "i"),
@@ -53,11 +54,22 @@
         return { stage, number, round: assessment[1], maximum: assessment[2],
           title: stage.zeroTitle, phase: `Round ${assessment[1]} of ${assessment[2]}` };
       }
+      const epochStart = detail.match(/^starting strict-mode epoch (\d+)/i);
+      if (epochStart) {
+        return { stage, number, round: epochStart[1], maximum: "",
+          title: `Strict-mode epoch ${epochStart[1]}`, phase: "Escalated epoch starting" };
+      }
+      if (/^Best-effort merge with unresolved adversarial results/i.test(detail)) {
+        return { stage, number, round: "", maximum: "",
+          title: "Best-effort merge with unresolved adversarial results",
+          phase: "Delivering unresolved results" };
+      }
       for (const [pattern, phase] of rounds) {
         const found = detail.match(pattern);
         if (found) {
+          const epoch = found[3] ? ` in epoch ${found[3]}` : "";
           return { stage, number, round: found[1], maximum: found[2],
-            title: `Fix/re-test round ${found[1]} of ${found[2]}`, phase };
+            title: `Fix/re-test round ${found[1]} of ${found[2]}${epoch}`, phase };
         }
       }
       return null;

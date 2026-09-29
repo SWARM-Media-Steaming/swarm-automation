@@ -27,6 +27,14 @@ from typing import Sequence, TextIO
 ISSUE_COMPLETED_EXIT_CODE = 10
 QUOTA_PAUSED_EXIT_CODE = 11
 PROVIDER_UNAVAILABLE_EXIT_CODE = 12
+# A strict adversarial epoch was checkpointed. The same in-progress issue
+# resumes on the next pass; this is progress, not a failed worker.
+ADVERSARIAL_EPOCH_YIELD_EXIT_CODE = 13
+PROGRESS_EXIT_CODES = (
+    ISSUE_COMPLETED_EXIT_CODE,
+    QUOTA_PAUSED_EXIT_CODE,
+    ADVERSARIAL_EPOCH_YIELD_EXIT_CODE,
+)
 BEGIN_MARKER = "# BEGIN SWARM ISSUE WORKER"
 END_MARKER = "# END SWARM ISSUE WORKER"
 WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -648,7 +656,7 @@ class Runner:
             return None
         status = self.run_worker(repo, prefix)
         self.prune_cargo_target(repo)
-        if status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE):
+        if status in PROGRESS_EXIT_CODES:
             if (
                 self.parallel_repos
                 and not self.args.once
@@ -679,8 +687,7 @@ class Runner:
         if len(real) == 1:
             return real[0]
         expected = (
-            ISSUE_COMPLETED_EXIT_CODE,
-            QUOTA_PAUSED_EXIT_CODE,
+            *PROGRESS_EXIT_CODES,
             PROVIDER_UNAVAILABLE_EXIT_CODE,
         )
         errors = [status for status in real if status != 0 and status not in expected]
@@ -744,7 +751,7 @@ class Runner:
                     status = self.work_repo(state.repo)
                     if (
                         self.args.schedule_mode == "continuous"
-                        and status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE)
+                        and status in PROGRESS_EXIT_CODES
                     ):
                         continue
                     break
@@ -939,18 +946,14 @@ class Runner:
                     continue
 
                 statuses = self.run_cycle()
-                progressed = any(
-                    status in (ISSUE_COMPLETED_EXIT_CODE, QUOTA_PAUSED_EXIT_CODE)
-                    for status in statuses
-                )
+                progressed = any(status in PROGRESS_EXIT_CODES for status in statuses)
                 queued = any(status == PROVIDER_UNAVAILABLE_EXIT_CODE for status in statuses)
                 errored = any(
                     status
                     not in (
                         None,
                         0,
-                        ISSUE_COMPLETED_EXIT_CODE,
-                        QUOTA_PAUSED_EXIT_CODE,
+                        *PROGRESS_EXIT_CODES,
                         PROVIDER_UNAVAILABLE_EXIT_CODE,
                     )
                     for status in statuses

@@ -13,7 +13,17 @@ label from a trusted author; the worker owns VERSION.
   and cybersecurity reviews the result.
 - Round zero is the independent assessment of the normal implementation.
   One counted round is one implementer fix plus one adversarial re-test.
-  At most three counted rounds follow the assessment; clean-first-pass is zero.
+  At most three counted rounds follow the assessment inside one epoch.
+  Three counted rounds are one epoch; clean-first-pass is zero counted rounds.
+  `adversarial_best_effort_merge` (default off, never inferred) chooses what
+  an exhausted epoch does. Off, persist the epoch and immediately start another
+  escalated epoch: re-run dynamic routing, raise reasoning effort, and change
+  model/provider or strategy when progress stalls. Merge only after the
+  acceptance policy passes. On, stop after the first epoch and deliver the
+  latest commit as **Best-effort merge with unresolved adversarial results**.
+  That delivery merges into the integration branch and promotes to the base
+  branch only when both automatic promotion and automatic issue-PR merging are
+  on. It must not become `AI Needs Input` solely because findings remain.
 - Each tester invocation has fresh context containing the issue/spec, current
   diff, trusted issue amendments and repository conventions, never the implementer's transcript or
   reasoning. Quota resume may continue the same unfinished phase. Provider
@@ -48,24 +58,31 @@ label from a trusted author; the worker owns VERSION.
   filed and deduplicated findings; keep each filed issue's title and URL in
   execution history so the app can surface the non-blocking follow-up to the
   user.
-- All exchanges finish before delivery. Clean passes use normal delivery;
-  cap-hit delivery files the unresolved notes in a separate labelled follow-up
-  issue, then uses normal delivery settings for the committed best-effort
-  implementation. The adversarial stage remains `FAILED` with outcome
-  `cap_hit`, but the original issue does not wait for trusted-author input.
-  Older cap-hit PR markers are informational legacy state; reconciliation
-  removes the old hold notice and continues automatically.
-- State checkpoints retain the phase and cap across restarts and quota pauses.
-  History is gated by `ai_execution_history_enabled`; migration 3 adds summary
-  columns and per-round records to the existing database. Initial assessment
-  is child round zero. Counts use test files changed and suites failing, since
-  cross-language runners do not share a portable test-case count protocol.
+- All exchanges in the current epoch finish before delivery. A clean pass uses
+  normal delivery. With best effort explicitly enabled, exhaustion of the first
+  epoch files the unresolved notes in a separate labelled follow-up issue, then
+  delivers the latest commit. The stage remains `FAILED` with outcome
+  `cap_hit`, labelled **Best-effort merge with unresolved adversarial results**,
+  and the original issue does not wait for trusted-author input. Strict mode
+  does not deliver on exhaustion. Older cap-hit PR markers still block
+  automatic release until every stage outcome is `clean_first_pass` or
+  `resolved_after_n`; a best-effort delivery opts in with its own PR notice.
+- State checkpoints retain the phase, epoch, and round across restarts and
+  quota pauses. After three strict epochs in one process the worker exits 13
+  and the scheduler resumes the same checkpoint; that exit is progress, not a
+  failure and not `AI Needs Input`. History is gated by
+  `ai_execution_history_enabled`. Migration 3 adds summary columns and
+  per-round records; migration 9 adds epoch rows, fingerprints, merge policy,
+  delivery, unresolved-at-merge state, and promotion result. Initial assessment
+  is child round zero. The first epoch's boundary logs stay `N of 3`; a later
+  epoch appends ` in epoch N`. Counts use test files changed and suites failing,
+  since cross-language runners do not share a portable test-case count protocol.
   Capacity consumed is an approximate percentage-point drop across used
   providers' remaining-quota snapshots, never token/dollar cost.
 - Emit the stable `Adversarial UAT for issue #...` boundary logs when an
-  independent test, a fix/re-test round, a completed fix, or its re-test
-  begins. The Overview panel replays these logs to show live progress, so
-  preserve their issue number and round/max values when changing the loop.
+  independent test, a fix/re-test round, a completed fix, its re-test, a
+  strict-mode epoch, or a best-effort delivery begins. The Overview panel
+  replays these logs, so preserve their issue number and round/max values.
 
 Pilot on one repository before enabling across the fleet. Inspect the first
 framework scaffold for each stack, particularly Rust/Tauri and Gradle/JUnit.

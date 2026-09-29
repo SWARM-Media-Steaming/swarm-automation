@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 import ai_test_assist
+import adversarial_core
 import adversarial_uat as uat
 import adversarial_security as security
 import test_swarm_issue_worker as fixtures
@@ -51,6 +52,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.worker.initialize_adversarial(self.git("rev-parse", "HEAD"), "## Summary\nSECRET implementer reasoning\n## Changes\nImplementation")
         self.calls = []
         self.api = []
+        self.pr_bodies = []
         self.comments_posted = []
 
     def gh(self, args, provider=None, body=None):
@@ -58,6 +60,7 @@ class AdversarialUatTests(unittest.TestCase):
         if args[:2] in (["pr", "list"], ["issue", "list"]):
             return "[]"
         if args[:2] == ["pr", "create"]:
+            self.pr_bodies.append(body or "")
             return "https://example.invalid/pull/181"
         if args[:2] == ["issue", "create"]:
             return "https://example.invalid/issues/182"
@@ -143,12 +146,15 @@ class AdversarialUatTests(unittest.TestCase):
 
     def test_cap_holds_automation_and_asks_a_trusted_author_to_adjudicate(self):
         self.prepare(auto=True)
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True)
         def never_fix(prompt, activity=""):
             status = self.role(prompt)
             (self.repo / "tracked.txt").write_text("broken\n")
             return status
         with self.patches(never_fix), mock.patch.object(self.worker, "approve_pull_request") as approve, mock.patch.object(self.worker, "merge_pull_request") as merge, mock.patch.object(self.worker, "auto_promote_integration_branch") as promote, mock.patch.object(self.worker, "push_ref", wraps=self.worker.push_ref) as push, mock.patch.object(self.worker, "cleanup_no_code_branch") as cleanup:
             merge.return_value = self.git("rev-parse", "HEAD")
+            promote.return_value = "https://example.invalid/pull/900"
             self.assertEqual(self.worker.run_adversarial_delivery(), 10)
         self.assertEqual([c[0] for c in self.calls].count("fix"), 3)
         # Round 0 assessment plus one re-test after each of the three fix rounds.
@@ -160,12 +166,153 @@ class AdversarialUatTests(unittest.TestCase):
         approve.assert_called_once(); merge.assert_called_once(); promote.assert_called_once(); cleanup.assert_not_called()
         self.assertEqual(len(self.comments_posted), 1)
         self.assertIn("did not pass after three fix/re-test rounds", self.comments_posted[0])
+        self.assertIn("Best-effort merge with unresolved adversarial results", self.comments_posted[0])
+        self.assertIn("Unresolved before merge", self.comments_posted[0])
+        self.assertIn("Unresolved after merge", self.comments_posted[0])
         self.assertIn("Follow-up issue:", self.comments_posted[0])
         self.assertNotIn("AI needs your input", self.comments_posted[0])
         self.assertFalse(any("AI Needs Input" in args for args in self.api))
         row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
         self.assertEqual((row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]), (3, "cap_hit", "completed"))
+        self.assertEqual(row["adversarial_delivery"], "best_effort")
+        self.assertEqual(row["adversarial_merge_policy"], "best_effort")
+        self.assertEqual(row["adversarial_epoch_count"], 1)
+        self.assertEqual(row["promotion_status"], "promoted")
+        self.assertEqual(row["promotion_url"], "https://example.invalid/pull/900")
+        unresolved = json.loads(row["adversarial_unresolved"])
+        self.assertTrue(unresolved["before_merge"]["suites"])
+        self.assertEqual(unresolved["after_merge"]["integration_branch"], "ai-main")
+        self.assertTrue(unresolved["after_merge"]["merged"])
+        self.assertEqual(unresolved["after_merge"]["promotion"], "promoted")
         self.assertEqual(row["pull_request_url"], "https://example.invalid/pull/181")
+        self.assertEqual(len(self.pr_bodies), 1)
+        self.assertIn("Best-effort merge with unresolved adversarial results", self.pr_bodies[0])
+        self.assertIn("adversarial-180", self.pr_bodies[0])
+
+    def test_strict_epoch_exhaustion_starts_another_epoch_instead_of_merging(self):
+        self.prepare(auto=True)
+        self.assertFalse(self.worker.config.adversarial_best_effort_merge)
+
+        def never_fix(prompt, activity=""):
+            status = self.role(prompt)
+            (self.repo / "tracked.txt").write_text("broken\n")
+            return status
+
+        with mock.patch("adversarial_core.STRICT_EPOCHS_PER_RUN", 1), self.patches(never_fix), \
+                mock.patch.object(self.worker, "approve_pull_request") as approve, \
+                mock.patch.object(self.worker, "merge_pull_request") as merge, \
+                mock.patch.object(self.worker, "auto_promote_integration_branch") as promote:
+            self.assertEqual(self.worker.run_adversarial_delivery(), 13)
+        approve.assert_not_called()
+        merge.assert_not_called()
+        promote.assert_not_called()
+        self.assertEqual(self.pr_bodies, [])
+        self.assertEqual(self.comments_posted, [])
+        self.assertFalse(any("AI Needs Input" in str(args) for args in self.api))
+        self.assertTrue(self.worker.in_progress_file.exists())
+        loop = self.worker.read_state()["adversarial"]
+        self.assertEqual(loop["phase"], "fix")
+        self.assertEqual(loop["round"], 4)
+        self.assertEqual(loop["epoch"], 2)
+        self.assertEqual(loop["outcome"], "")
+        self.assertEqual(loop["merge_policy"], "strict")
+        row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
+        self.assertEqual(row["final_status"], "adversarial_epoch_continuing")
+        self.assertNotEqual(row["adversarial_outcome"], "cap_hit")
+        self.assertEqual(row["adversarial_merge_policy"], "strict")
+        self.assertNotEqual(row["adversarial_delivery"], "best_effort")
+        epochs = self.worker.history.repository.adversarial_epochs_for([row["execution_id"]])[row["execution_id"]]
+        self.assertEqual(len(epochs), 1)
+        self.assertEqual(epochs[0]["epoch_number"], 1)
+        self.assertEqual(epochs[0]["outcome"], "exhausted")
+        self.assertEqual(epochs[0]["merge_policy"], "strict")
+        self.assertTrue(epochs[0]["next_escalation"].get("reason"))
+
+    def test_best_effort_merges_issue_pr_when_routine_approval_is_off(self):
+        self.prepare(auto=False)
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True, auto_promote=True, auto_approve=False)
+
+        def never_fix(prompt, activity=""):
+            status = self.role(prompt)
+            (self.repo / "tracked.txt").write_text("broken\n")
+            return status
+
+        with self.patches(never_fix), mock.patch.object(self.worker, "merge_pull_request") as merge, \
+                mock.patch.object(self.worker, "approve_pull_request") as approve:
+            merge.return_value = self.git("rev-parse", "HEAD")
+            self.assertEqual(self.worker.run_adversarial_delivery(), 10)
+        approve.assert_called_once()
+        merge.assert_called_once()
+        self.assertFalse(any(
+            list(args[:2]) == ["pr", "create"] and self.worker.config.base_branch in args
+            for args in self.api
+        ))
+        self.assertTrue(any(
+            list(args[:2]) == ["pr", "create"] and self.worker.config.integration_branch in args
+            for args in self.api
+        ))
+        self.assertIn("Best-effort merge with unresolved adversarial results", self.comments_posted[0])
+        self.assertNotIn("AI Needs Input", self.comments_posted[0])
+        row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
+        self.assertEqual(row["adversarial_delivery"], "best_effort")
+        self.assertEqual(row["promotion_status"], "not_configured")
+        self.assertEqual(row["final_status"], "completed")
+
+    def test_fresh_epoch_prompt_carries_prior_failures_and_requires_a_new_strategy(self):
+        self.prepare()
+        directory = self.repo / "tests/adversarial"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "test_issue.py").write_text("print('protected')\n")
+        self.git("add", "tests/adversarial/test_issue.py")
+        self.git("commit", "-qm", "[claude] Add protected test (#180)")
+        loop = self.worker.read_state()["adversarial"]
+        loop.update(
+            round=4, phase="fix", epoch=2, merge_policy="strict",
+            results=[{"id": "adversarial-180", "exit_code": 1, "output": "nope"}],
+            rounds=[{"round_number": 3, "dispute_resolution": "upheld the specification"}],
+            approaches=[{
+                "epoch": 1, "round": 3, "provider": "Claude", "model": "m", "effort": "high",
+                "files": ["app.py"], "patch_fingerprint": "abc123", "repeated_patch": True,
+                "failing_after": 1,
+            }],
+            no_progress={"epoch": 1, "identical_failures": True, "stalled_epochs": 2},
+            escalation={"strategy_change": True, "reason": "repeated_patch,identical_failures"},
+        )
+        text = self.worker.adversarial_history_context(uat.UAT_STAGE, loop)
+        self.assertIn("STRATEGY CHANGE REQUIRED", text)
+        self.assertIn("tests/adversarial/test_issue.py", text)
+        self.assertIn("adversarial-180", text)
+        self.assertIn("abc123", text)
+        self.assertIn("upheld the specification", text)
+        self.assertIn("identical_failures", text)
+        self.assertIn("strict", text)
+
+    def test_epoch_boundary_reruns_routing_and_raises_effort(self):
+        self.prepare()
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        loop = self.worker.read_state()["adversarial"]
+        loop.update(
+            phase="fix", round=4, epoch=2, fixer_provider="Claude",
+            escalation={
+                "epoch": 2, "reason": "epoch_exhausted,no_progress", "effort_floor": "xhigh",
+                "change_provider": True, "avoid": [["Claude", "fixer-model"]], "strongest": False,
+                "strategy_change": True,
+            },
+        )
+        decision = {"provider": "codex", "selected_model": "gpt-5.4", "reasoning_effort": "low"}
+        with mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 80)), \
+                mock.patch.object(self.worker, "resolve_router_response", return_value=decision) as routed, \
+                mock.patch.object(self.worker, "run_router", return_value="ok"):
+            choice = self.worker.choose_stage_provider(uat.UAT_STAGE, loop)
+        self.assertIsNotNone(choice)
+        routed.assert_called_once()
+        self.assertIn("Escalation context", routed.call_args.kwargs["prompt"])
+        self.assertIn("no_progress", routed.call_args.kwargs["prompt"])
+        from dynamic_router import COMPLEXITY_SCALE_TOP, tier_for_complexity
+        top = tier_for_complexity(self.worker.config.routing_tiers[choice.key], COMPLEXITY_SCALE_TOP)
+        floor = min(adversarial_core.effort_rank("xhigh"), adversarial_core.effort_rank(top.effort))
+        self.assertGreaterEqual(adversarial_core.effort_rank(choice.effort), floor)
 
     def test_first_pass_same_provider_is_a_fresh_context_and_history_can_be_off(self):
         self.prepare(fixed=True, history=False)
@@ -719,6 +866,9 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(row["adversarial_outcome"], "")
         self.assertIsNone(row["capacity_consumed_percent"])
         self.assertEqual(row["adversarial_filed_findings"], "[]")
+        self.assertEqual(row["adversarial_delivery"], "")
+        self.assertEqual(row["adversarial_merge_policy"], "")
+        self.assertEqual(row["adversarial_epoch_count"], 0)
         self.assertEqual(upgraded.adversarial_summary(self.worker.config.github_repository)["loops"], 0)
 
     def test_preflight_grade_is_recorded_when_routing_is_off(self):
