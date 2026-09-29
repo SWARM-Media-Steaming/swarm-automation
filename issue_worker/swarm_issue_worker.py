@@ -189,10 +189,44 @@ PRIORITY_LABEL_RE = re.compile(
     r"^(?:priority\s*[:/_-]?\s*)?(urgent|high|medium|low)$|^p([0-3])$"
 )
 _PN_RANKS: tuple[str, ...] = ("urgent", "high", "medium", "low")
+PROJECT_PRIORITY_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issueOrPullRequest(number: $number) {
+      ... on Issue {
+        projectItems(first: 100) {
+          nodes {
+            project { title number }
+            fieldValues(first: 100) {
+              nodes {
+                ... on ProjectV2ItemFieldSingleSelectValue {
+                  name
+                  field {
+                    ... on ProjectV2SingleSelectField { name }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
 
 
-def priority_rank(labels: Iterable[str]) -> int:
-    """Return the strongest priority rank named by an issue's labels."""
+def priority_rank(labels: Iterable[str], project_priority: Any = None) -> int:
+    """Return Project Priority first, then the strongest priority label.
+
+    Project v2 priority is passed separately because GitHub's issue REST
+    payload contains labels but not project field values. The optional value
+    keeps this helper backward-compatible for callers that only have labels.
+    """
+    project_match = PRIORITY_LABEL_RE.match(str(project_priority or "").strip().lower())
+    if project_match:
+        word = project_match.group(1) or _PN_RANKS[int(project_match.group(2))]
+        return PRIORITY_RANKS[word]
     best = DEFAULT_PRIORITY_RANK
     for label in labels:
         match = PRIORITY_LABEL_RE.match(str(label).strip().lower())
@@ -1048,6 +1082,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         # provider that has no capacity this pass.
         self.provider_usages: dict[str, ProviderUsage] = {}
         self.provider_priority: tuple[str, ...] = ()
+        # Project v2 priority is fetched once per issue during queue selection.
+        # None is cached too, so a missing field or a token without
+        # read:project permission does not cause repeated GraphQL calls.
+        self._project_priorities: dict[int, str | None] = {}
+        self._project_priority_warning_logged = False
         # Raw provider CLI output (JSON/JSONL) of the most recent AI
         # invocation, set by each `_run_<provider>` method regardless of exit
         # status so a failed call's usage can still be recorded (issue #280).
@@ -3340,6 +3379,75 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             key=lambda issue: int(issue["number"]),
         )
 
+    def project_priority(self, issue: Mapping[str, Any]) -> str | None:
+        """Read an attached GitHub Project v2 ``Priority`` field.
+
+        Project fields are not included in the issue REST payload. This uses
+        the operator's normal ``gh`` authentication, just like the issue
+        queue request, and deliberately falls back to labels when the account
+        lacks ``read:project`` or the issue is not on a project. If an issue is
+        on multiple projects, the strongest matching Priority value wins.
+        """
+        try:
+            number = int(issue["number"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if number in self._project_priorities:
+            return self._project_priorities[number]
+        try:
+            owner, name = self.config.github_repository.split("/", 1)
+            output = self.github.gh(
+                [
+                    "api", "graphql",
+                    "-f", f"query={PROJECT_PRIORITY_QUERY}",
+                    "-f", f"owner={owner}",
+                    "-f", f"name={name}",
+                    "-F", f"number={number}",
+                ]
+            )
+            payload = json.loads(output or "{}")
+            nodes = (
+                payload.get("data", {})
+                .get("repository", {})
+                .get("issueOrPullRequest", {})
+                .get("projectItems", {})
+                .get("nodes", [])
+            )
+            matches: list[tuple[int, str]] = []
+            for item in nodes if isinstance(nodes, list) else []:
+                fields = item.get("fieldValues", {}).get("nodes", []) if isinstance(item, dict) else []
+                for field_value in fields if isinstance(fields, list) else []:
+                    if not isinstance(field_value, dict):
+                        continue
+                    field = field_value.get("field")
+                    field_name = field.get("name") if isinstance(field, dict) else ""
+                    value = field_value.get("name")
+                    if str(field_name or "").strip().lower() != "priority":
+                        continue
+                    if not isinstance(value, str):
+                        continue
+                    rank = priority_rank((), value)
+                    if rank < DEFAULT_PRIORITY_RANK:
+                        matches.append((rank, value.strip()))
+            priority = min(matches, default=(DEFAULT_PRIORITY_RANK, ""), key=lambda pair: pair[0])[1] or None
+        except (WorkerError, json.JSONDecodeError, TypeError, ValueError, AttributeError) as error:
+            priority = None
+            if not self._project_priority_warning_logged:
+                log(
+                    "WARNING: GitHub Project Priority is unavailable; falling back to issue labels: "
+                    f"{sanitize_text(error)}"
+                )
+                self._project_priority_warning_logged = True
+        self._project_priorities[number] = priority
+        return priority
+
+    def issue_priority_rank(self, issue: Mapping[str, Any]) -> int:
+        """Rank an issue from Project Priority, falling back to labels."""
+        project_priority = self.project_priority(issue)
+        if project_priority is not None:
+            return priority_rank((), project_priority)
+        return priority_rank(issue_labels(dict(issue)))
+
     def record_completed_from_comments(self, issue_number: int, comments: list[dict[str, Any]]) -> bool:
         waiting = extract_needs_input_metadata(comments, self.completion_authors)
         answered = extract_question_answer_metadata(comments, self.completion_authors)
@@ -3564,7 +3672,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             # number so ties stay in the historical first-opened order.
             _, work_type, remote, metadata = min(
                 ready,
-                key=lambda item: (priority_rank(issue_labels(item[2])), item[0]),
+                key=lambda item: (self.issue_priority_rank(item[2]), item[0]),
             )
             if work_type == "initial":
                 return IssueContext(

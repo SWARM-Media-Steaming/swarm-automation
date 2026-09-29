@@ -2222,6 +2222,67 @@ class WorkerTestCase(unittest.TestCase):
         # Strongest label wins when several are present.
         self.assertEqual(priority_rank(["low", "priority: high", "medium"]), 1)
 
+    def test_project_priority_overrides_labels(self) -> None:
+        issue = self.issue_payload(337, labels=("low",))
+        project_response = {
+            "data": {
+                "repository": {
+                    "issueOrPullRequest": {
+                        "projectItems": {
+                            "nodes": [{
+                                "fieldValues": {
+                                    "nodes": [{"name": "High", "field": {"name": "Priority"}}]
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        }
+        with mock.patch.object(self.worker.github, "gh", return_value=json.dumps(project_response)):
+            self.assertEqual(self.worker.issue_priority_rank(issue), 1)
+        self.assertEqual(self.worker._project_priorities[337], "High")
+
+    def test_project_priority_falls_back_to_labels_when_unavailable(self) -> None:
+        issue = self.issue_payload(337, labels=("priority: medium",))
+        with mock.patch.object(
+            self.worker.github, "gh", side_effect=WorkerError("read:project permission required")
+        ):
+            self.assertEqual(self.worker.issue_priority_rank(issue), 2)
+
+    def test_project_priority_changes_issue_selection(self) -> None:
+        issues = [
+            self.issue_payload(20),
+            self.issue_payload(90),
+        ]
+        project_response = {
+            "data": {
+                "repository": {
+                    "issueOrPullRequest": {
+                        "projectItems": {
+                            "nodes": [{
+                                "fieldValues": {
+                                    "nodes": [{"name": "Medium", "field": {"name": "Priority"}}]
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        }
+        def project_for_issue(arguments, provider=None, input_text=None):
+            del provider, input_text
+            return json.dumps(project_response if arguments[-1] == "number=90" else {"data": {}})
+
+        with (
+            mock.patch.object(self.worker, "assigned_issues", return_value=issues),
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", side_effect=project_for_issue),
+        ):
+            selected = self.worker.select_issue()
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.number, 90)
+
     # ----- a saved attempt whose issue the person closed or unassigned ------
 
     def _start_attempt(self, number: int, *, dirty: bool = False, commit: bool = False) -> str:

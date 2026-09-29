@@ -16,8 +16,11 @@ The application can:
 - start, pause, resume, and stop the issue worker and its entire process tree;
 - run issue pickup continuously, daily, on weekdays, on selected days, or only
   when **Run now** is clicked, working assigned issues highest-priority first
-  (an `urgent`/`high`/`medium`/`low` label, with or without a `priority:`
-  prefix; no label counts as low) and breaking ties by lowest issue number;
+  (the GitHub Project v2 `Priority` field first, then an `urgent`/`high`/`medium`/
+  `low` label with or without a `priority:` prefix; no value counts as low) and
+  breaking ties by lowest issue number. Project-field lookup needs the GitHub
+  account used by `gh` to have `read:project`; if it is unavailable, labels
+  remain the fallback;
 - drive up to three AI coding agents — **Claude Code**, **Codex CLI**, and
   **Grok Build** — giving each new issue to whichever included provider has the
   most usage remaining, and handing follow-up comments to a different agent than
