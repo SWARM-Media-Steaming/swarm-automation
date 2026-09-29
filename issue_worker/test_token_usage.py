@@ -49,6 +49,31 @@ class ClaudeUsageTests(unittest.TestCase):
         self.assertIsNone(usage.reasoning_tokens)
         self.assertEqual(usage.total_tokens, 190)
 
+    def test_provider_total_tokens_is_kept_rather_than_recomputed(self) -> None:
+        raw = _claude_stream(
+            {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_creation_input_tokens": 10,
+                "cache_read_input_tokens": 50,
+                "total_tokens": 999,
+            }
+        )
+        usage = normalize_claude_usage(raw)
+        assert usage is not None
+        self.assertEqual(usage.total_tokens, 999)
+        self.assertEqual(usage.cached_input_tokens, 60)
+        self.assertEqual(usage.cache_read_tokens, 50)
+        self.assertEqual(usage.cache_write_tokens, 10)
+
+    def test_a_total_only_usage_object_is_still_recorded(self) -> None:
+        raw = _claude_stream({"total_tokens": 5_000})
+        usage = normalize_claude_usage(raw)
+        assert usage is not None
+        self.assertEqual(usage.total_tokens, 5_000)
+        self.assertIsNone(usage.input_tokens)
+        self.assertIsNone(usage.output_tokens)
+
     def test_missing_cache_fields_default_to_none_not_zero(self) -> None:
         raw = _claude_stream({"input_tokens": 10, "output_tokens": 5})
         usage = normalize_claude_usage(raw)

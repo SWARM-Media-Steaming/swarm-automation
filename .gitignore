@@ -3,3 +3,5 @@ gen/
 node_modules/
 Cargo.lock.orig
 .DS_Store
+__pycache__/
+*.pyc

@@ -148,6 +148,29 @@ fn command_output(program: &Path, arguments: &[&str]) -> (bool, String) {
     }
 }
 
+fn jev_credential_present() -> bool {
+    std::env::var_os("JEV_API_KEY").is_some()
+        || std::env::var_os("TYPESAFE_API_KEY").is_some()
+        || std::env::var_os("TYPESAFE_KEY").is_some()
+        || std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| {
+                home.join(".config/jev/config.json").is_file()
+                    || home.join(".jev/auth.json").is_file()
+                    || home.join(".typesafe/credentials").is_file()
+            })
+            .unwrap_or(false)
+}
+
+fn jev_authenticated(program: &Path) -> bool {
+    // `jev auth status` is authoritative because Jev may keep credentials in
+    // a file/keychain location that the desktop app cannot safely infer. Keep
+    // the older environment/file probe as a compatibility fallback for CLI
+    // versions that predate the auth-status command.
+    let (ready, _) = command_output(program, &["auth", "status"]);
+    ready || jev_credential_present()
+}
+
 fn version(program: &Path, arguments: &[&str]) -> String {
     command_output(program, arguments)
         .1
@@ -878,17 +901,7 @@ pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
                 tool.status = "Ready to install".into();
             }
             "jev" if tool.installed => {
-                let logged_in = std::env::var_os("JEV_API_KEY").is_some()
-                    || std::env::var_os("TYPESAFE_API_KEY").is_some()
-                    || std::env::var_os("TYPESAFE_KEY").is_some()
-                    || std::env::var_os("HOME")
-                        .map(PathBuf::from)
-                        .map(|home| {
-                            home.join(".config/jev/config.json").is_file()
-                                || home.join(".jev/auth.json").is_file()
-                                || home.join(".typesafe/credentials").is_file()
-                        })
-                        .unwrap_or(false);
+                let logged_in = jev_authenticated(Path::new(&tool.path));
                 tool.authenticated = Some(logged_in);
                 tool.models = vec![ModelInfo {
                     value: if config.jev_model.trim().is_empty() {
@@ -940,6 +953,27 @@ pub fn install_spec(provider: &str) -> Result<(PathBuf, Vec<String>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn jev_auth_status_is_used_when_credentials_are_not_in_known_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("create Jev fixture directory");
+        let executable = directory.path().join("jev");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\n[ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]\n",
+        )
+        .expect("write Jev fixture");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("read Jev fixture permissions")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("make Jev fixture executable");
+
+        assert!(jev_authenticated(&executable));
+    }
 
     #[test]
     fn parses_codex_catalog_model_specific_efforts() {

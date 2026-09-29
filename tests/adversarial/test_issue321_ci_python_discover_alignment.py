@@ -16,7 +16,7 @@ cap-hit shape:
 
 A continually failing stage therefore performs (1 + MAX_ROUNDS) tester
 phases and MAX_ROUNDS fixer phases, then delivers as best effort with
-automation held. After PR #306 set MAX_ROUNDS to 3, that is 4 tester
+the unresolved notes handed to a follow-up issue. After PR #306 set MAX_ROUNDS to 3, that is 4 tester
 phases — not the leftover 7 that belonged to MAX_ROUNDS=6.
 
 These tests replay the CI collector, refuse a skip/disable/gut of that

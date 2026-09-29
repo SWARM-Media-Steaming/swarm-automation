@@ -1267,6 +1267,15 @@ struct AiExecutionRecord {
     /// Dynamic-routing record for this attempt. Null when routing was off.
     #[serde(default)]
     routing_decision: serde_json::Value,
+    /// Per-prompt usage headline for this execution (issue #295). Null — not
+    /// a row of zeroes — when no telemetry exists, so an imported or pre-#280
+    /// execution renders as "usage unavailable" rather than as free.
+    #[serde(default)]
+    token_usage_summary: serde_json::Value,
+    /// This execution's individual invocation records, for the card's
+    /// expandable usage detail.
+    #[serde(default)]
+    token_usage: Vec<serde_json::Value>,
 }
 
 /// Feedback never asks the history CLI for more than this many rows.
@@ -2177,6 +2186,232 @@ async fn get_prompt_grades_background(
     })
     .await
     .map_err(|error| format!("Prompt grades lookup failed: {error}"))?
+}
+
+/// Filters for one Usage & cost page, passed as a single command argument.
+/// Every field is optional and combinable; the Python CLI normalizes and
+/// ignores anything it does not recognize, so the desktop never has to know
+/// which values are currently valid.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageReportQuery {
+    #[serde(default)]
+    group_by: Option<String>,
+    #[serde(default)]
+    sort: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    group_offset: Option<i64>,
+    #[serde(default)]
+    detail_offset: Option<i64>,
+    #[serde(default)]
+    group_value: Option<String>,
+    #[serde(default)]
+    start_date: Option<String>,
+    #[serde(default)]
+    end_date: Option<String>,
+    #[serde(default)]
+    issue_number: Option<String>,
+    #[serde(default)]
+    grade: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    agent_type: Option<String>,
+    #[serde(default)]
+    prompt_type: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default)]
+    coverage: Option<String>,
+    #[serde(default)]
+    execution_id: Option<String>,
+    #[serde(default)]
+    search: Option<String>,
+}
+
+/// One Usage & cost report (see `ai_execution_history.py --usage`).
+///
+/// Deliberately a pass-through of already-camelCase JSON rather than a deep
+/// Rust mirror of every aggregate column: this command is a read-only query,
+/// the shape is owned by `usage_report.py`, and duplicating a dozen nullable
+/// token columns here would just be a second place for "missing" to
+/// accidentally become zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageReport {
+    #[serde(default)]
+    summary: serde_json::Value,
+    #[serde(default)]
+    coverage: serde_json::Value,
+    #[serde(default)]
+    group_by: String,
+    #[serde(default)]
+    sort: String,
+    #[serde(default)]
+    direction: String,
+    #[serde(default)]
+    groups: serde_json::Value,
+    #[serde(default)]
+    invocations: serde_json::Value,
+    #[serde(default)]
+    facets: serde_json::Value,
+    #[serde(default)]
+    filters: serde_json::Value,
+    /// True when this repository selection has any recorded usage at all,
+    /// and when it has any execution at all. The pair is what lets the view
+    /// tell "telemetry has never been recorded here" from "these filters
+    /// match nothing" from "these runs never reported usage".
+    #[serde(default)]
+    has_any_usage: bool,
+    #[serde(default)]
+    has_any_activity: bool,
+    #[serde(default)]
+    executions_without_usage: i64,
+}
+
+/// Trim and cap one usage filter before it reaches the process argv.
+fn usage_filter_arg(value: Option<String>, limit: usize) -> String {
+    value
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(limit)
+        .collect()
+}
+
+/// Same, for the four arguments Python declares as argparse *choices*: an
+/// empty string is not one of them, so an unset filter has to fall back to
+/// the same default Python would have applied rather than failing the run.
+fn usage_choice_arg(value: Option<String>, limit: usize, fallback: &str) -> String {
+    let trimmed = usage_filter_arg(value, limit);
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn usage_report_query_args(
+    script: &Path,
+    database: &Path,
+    repositories: &[String],
+    query: UsageReportQuery,
+) -> Vec<String> {
+    let mut arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--db".into(),
+        database.to_string_lossy().into_owned(),
+        "--usage".into(),
+        "--group-by".into(),
+        usage_choice_arg(query.group_by, 20, "issue"),
+        "--usage-sort".into(),
+        usage_choice_arg(query.sort, 20, "cost"),
+        "--usage-direction".into(),
+        usage_choice_arg(query.direction, 4, "desc"),
+        "--outcome".into(),
+        usage_choice_arg(query.outcome, 10, "all"),
+        "--group-offset".into(),
+        query.group_offset.unwrap_or(0).max(0).to_string(),
+        "--detail-offset".into(),
+        query.detail_offset.unwrap_or(0).max(0).to_string(),
+        "--start-date".into(),
+        usage_filter_arg(query.start_date, 10),
+        "--end-date".into(),
+        usage_filter_arg(query.end_date, 10),
+        "--issue-number".into(),
+        usage_filter_arg(query.issue_number, 12),
+        "--grade".into(),
+        usage_filter_arg(query.grade, 8),
+        "--provider".into(),
+        usage_filter_arg(query.provider, 60),
+        "--model".into(),
+        usage_filter_arg(query.model, 120),
+        "--effort".into(),
+        usage_filter_arg(query.effort, 40),
+        "--agent-type".into(),
+        usage_filter_arg(query.agent_type, 60),
+        "--prompt-type".into(),
+        usage_filter_arg(query.prompt_type, 60),
+        "--coverage".into(),
+        usage_filter_arg(query.coverage, 20),
+        "--execution-id".into(),
+        usage_filter_arg(query.execution_id, 64),
+        "--search".into(),
+        normalize_execution_history_search(query.search),
+    ];
+    // Only sent when a row is actually selected: absent means "every
+    // invocation in the current filter", which is a different query from
+    // "invocations whose group value is the empty string".
+    if let Some(value) = query.group_value {
+        arguments.push("--group-value".into());
+        arguments.push(value.chars().take(200).collect());
+    }
+    append_repository_args(&mut arguments, repositories);
+    arguments
+}
+
+fn empty_usage_report(group_by: &str) -> UsageReport {
+    UsageReport {
+        summary: serde_json::Value::Null,
+        coverage: serde_json::Value::Null,
+        group_by: group_by.to_string(),
+        sort: "cost".into(),
+        direction: "desc".into(),
+        groups: serde_json::Value::Null,
+        invocations: serde_json::Value::Null,
+        facets: serde_json::Value::Null,
+        filters: serde_json::Value::Null,
+        has_any_usage: false,
+        has_any_activity: false,
+        executions_without_usage: 0,
+    }
+}
+
+#[tauri::command]
+fn get_usage_report<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    repo_ids: Vec<String>,
+    query: UsageReportQuery,
+) -> Result<UsageReport, String> {
+    let config = current_config(&state)?;
+    let repositories = feedback_repository_names(&config, &repo_ids)?;
+    let database_path = execution_history_db_path(&config);
+    let group_by = query.group_by.clone().unwrap_or_else(|| "issue".into());
+    if !database_path.is_file() {
+        return Ok(empty_usage_report(&group_by));
+    }
+    let script = worker_script_dir(&app)?.join("ai_execution_history.py");
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let (ok, raw) = run_capture_owned(
+        &python,
+        &usage_report_query_args(&script, &database_path, &repositories, query),
+    );
+    if !ok {
+        return Err(format!("Usage lookup failed: {raw}"));
+    }
+    serde_json::from_str(raw.trim())
+        .map_err(|error| format!("Usage response could not be parsed: {error}"))
+}
+
+#[tauri::command]
+async fn get_usage_report_background(
+    app: tauri::AppHandle,
+    repo_ids: Vec<String>,
+    query: UsageReportQuery,
+) -> Result<UsageReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_usage_report(app.clone(), state, repo_ids, query)
+    })
+    .await
+    .map_err(|error| format!("Usage lookup failed: {error}"))?
 }
 
 /// Summary of `ai_execution_history.py --import-from-github`: every open and
@@ -5038,6 +5273,8 @@ fn main() {
             analyze_model_calibration_update_background,
             get_prompt_grades,
             get_prompt_grades_background,
+            get_usage_report,
+            get_usage_report_background,
             import_execution_history,
             import_execution_history_background,
             get_knowledge_status,

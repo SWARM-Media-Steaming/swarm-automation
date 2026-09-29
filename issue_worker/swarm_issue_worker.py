@@ -58,14 +58,16 @@ from token_usage import (
     AgentType,
     PromptType,
     UsageRecord,
-    estimate_cost,
+    estimate_cost_detailed,
     format_usage_log_line,
     normalize_usage,
     render_ai_usage_markdown,
 )
 from adversarial_core import AdversarialStage
 from adversarial_security import AdversarialSecurityMixin, SECURITY_STAGE
-from adversarial_uat import UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE
+from adversarial_uat import (
+    UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_LEGACY_NOTICE, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE,
+)
 from handoff_context import HandoffContextMixin
 from handoff_context import render_prompt_section as render_handoff_prompt_section
 from issue_images import (
@@ -1806,8 +1808,22 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             if pr_state != "OPEN":
                 continue
             if CAP_HIT_PR_MARKER in str(pull_request.get("body") or ""):
-                log(f"Issue #{issue_number} has an adversarial UAT deadlock; leaving its PR for human adjudication.")
-                continue
+                # Older workers used this marker as a human-review hold. The
+                # three-round boundary is now an automatic handoff: remove
+                # the stale hold notice, then let the normal reconciliation
+                # path approve/merge the already-delivered commit.
+                body = str(pull_request.get("body") or "")
+                try:
+                    self.github.gh(
+                        ["pr", "edit", pr_url, "--repo", self.config.github_repository, "--body-file", "-"],
+                        provider,
+                        body.replace(CAP_HIT_PR_NOTICE, "")
+                        .replace(CAP_HIT_PR_LEGACY_NOTICE, "")
+                        .replace(CAP_HIT_PR_MARKER, "").strip(),
+                    )
+                    log(f"Released the legacy adversarial cap-hit hold for issue #{issue_number}; continuing automatically.")
+                except WorkerError as error:
+                    log(f"WARNING: Could not remove the legacy cap-hit PR notice for issue #{issue_number}: {error}")
             if (
                 self.config.auto_approve
                 and str(pull_request.get("reviewDecision") or "").upper() != "APPROVED"
@@ -4097,7 +4113,15 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         affect whether the underlying AI work is considered to have
         succeeded (item 15/17)."""
         try:
-            cost = estimate_cost(model, usage) if usage is not None else None
+            # Priced against the catalog entry effective at this call's own
+            # start time, not at read time, and stored with the rate it used
+            # so the estimate stays reproducible after the catalog moves on
+            # (issue #295). A model the catalog does not cover comes back
+            # unpriced; the token counts are recorded either way.
+            estimate = estimate_cost_detailed(
+                model, usage, provider=provider_key, at=started_at
+            )
+            cost = estimate.cost
             completed_at = iso_timestamp()
             duration_ms: int | None
             try:
@@ -4127,8 +4151,18 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 reasoning_tokens=usage.reasoning_tokens if usage else None,
                 cached_input_tokens=usage.cached_input_tokens if usage else None,
                 total_tokens=usage.total_tokens if usage else None,
+                cache_read_tokens=usage.cache_read_tokens if usage else None,
+                cache_write_tokens=usage.cache_write_tokens if usage else None,
                 estimated_cost=cost,
-                currency=DEFAULT_CURRENCY,
+                currency=estimate.currency or DEFAULT_CURRENCY,
+                pricing_status=estimate.status,
+                pricing_version=estimate.catalog_version,
+                pricing_rate_id=estimate.rate_id,
+                pricing_source=estimate.source,
+                input_rate_per_million=estimate.input_rate_per_million,
+                cached_input_rate_per_million=estimate.cached_input_rate_per_million,
+                cache_write_rate_per_million=estimate.cache_write_rate_per_million,
+                output_rate_per_million=estimate.output_rate_per_million,
                 started_at=started_at,
                 completed_at=completed_at,
                 duration_ms=duration_ms,
@@ -5365,7 +5399,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         log(message)
         return "cleaned"
 
-    def deliver_pull_request(self, commit_sha: str, *, allow_automation: bool = True) -> tuple[str, str, str]:
+    def deliver_pull_request(
+        self, commit_sha: str, *, allow_automation: bool = True,
+        adversarial_cap_hit: bool = False,
+    ) -> tuple[str, str, str]:
         assert self.issue and self.choice
         branch = self.expected_branch()
         environment = self.provider_environment()
@@ -5445,34 +5482,39 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             log(f"Reusing existing pull request {pr_url} for issue #{self.issue.number}.")
             existing_body = str(existing[0].get("body") or "")
             if allow_automation and CAP_HIT_PR_MARKER in existing_body:
-                # Only a successful adversarial follow-up may release a failed
-                # head, and every stage that ran has to be clean — a green UAT
-                # re-run must not release a PR its security review capped out on.
-                state = self.read_state()
-                loops = [
-                    state[stage.key] for stage in ADVERSARIAL_STAGES
-                    if isinstance(state.get(stage.key), dict) and not state[stage.key].get("disabled")
-                ]
-                disabled_pipeline = (
-                    not self.adversarial_stages()
-                    and any(
-                        isinstance(state.get(stage.key), dict)
-                        and state[stage.key].get("disabled")
-                        for stage in ADVERSARIAL_STAGES
+                # A cap-hit delivery is explicitly a best-effort automatic
+                # handoff. Older callers that request a clean release still
+                # retain the historical safety gate; the pipeline opts into
+                # this branch after filing the deferred follow-up issue.
+                if not adversarial_cap_hit:
+                    state = self.read_state()
+                    loops = [
+                        state[stage.key] for stage in ADVERSARIAL_STAGES
+                        if isinstance(state.get(stage.key), dict) and not state[stage.key].get("disabled")
+                    ]
+                    disabled_pipeline = (
+                        not self.adversarial_stages()
+                        and any(
+                            isinstance(state.get(stage.key), dict)
+                            and state[stage.key].get("disabled")
+                            for stage in ADVERSARIAL_STAGES
+                        )
+                        and not loops
                     )
-                    and not loops
-                )
-                if not disabled_pipeline and (
-                    not loops
-                    or any(
-                        loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"}
-                        for loop in loops
-                    )
-                ):
-                    raise WorkerError("An adversarial cap-hit PR requires a passing UAT follow-up before automatic delivery")
+                    if not disabled_pipeline and (
+                        not loops
+                        or any(
+                            loop.get("outcome") not in {"clean_first_pass", "resolved_after_n"}
+                            for loop in loops
+                        )
+                    ):
+                        raise WorkerError("An adversarial cap-hit PR requires a passing UAT follow-up before automatic delivery")
                 self.github.gh(
                     ["pr", "edit", pr_url, "--repo", self.config.github_repository, "--body-file", "-"],
-                    self.choice.key, existing_body.replace(CAP_HIT_PR_NOTICE, "").replace(CAP_HIT_PR_MARKER, "").strip(),
+                    self.choice.key,
+                    existing_body.replace(CAP_HIT_PR_NOTICE, "")
+                    .replace(CAP_HIT_PR_LEGACY_NOTICE, "")
+                    .replace(CAP_HIT_PR_MARKER, "").strip(),
                 )
         else:
             title = self.git("log", "-1", "--format=%s", commit_sha)
@@ -5788,12 +5830,19 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         )
         return merge_sha
 
-    def finalize_issue(self, commit_sha: str, ai_output: str, *, allow_automation: bool = True) -> None:
+    def finalize_issue(
+        self, commit_sha: str, ai_output: str, *, allow_automation: bool = True,
+        adversarial_cap_hit: bool = False,
+    ) -> None:
         assert self.issue and self.choice
         base_sha = str(self.read_state().get("base_sha") or "")
         commits = list(reversed(self.git("rev-list", f"{base_sha}..{commit_sha}").splitlines()))
         files = self.git("diff", "--name-only", base_sha, commit_sha).splitlines()
-        pr_url, branch, commit_sha = self.deliver_pull_request(commit_sha, allow_automation=allow_automation)
+        pr_url, branch, commit_sha = self.deliver_pull_request(
+            commit_sha,
+            allow_automation=allow_automation,
+            adversarial_cap_hit=adversarial_cap_hit,
+        )
         if commit_sha not in commits:
             commits.append(commit_sha)
         self.history.note("Commit and pull request delivery completed", iso_timestamp())

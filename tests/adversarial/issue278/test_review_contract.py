@@ -1,9 +1,10 @@
 """Issue #278 acceptance: verified verdicts, recovery, scope, and observability.
 
-These expectations come from AC 3/4, 6/7, 8-13, 15 and 17, not the current
-implementation. In particular, missing analysis is not a clean review, a
-renamed finding is not a remediation, and a failed reproduction cannot be
-described as a verified fix. All attacks target disposable local fixtures.
+These expectations come from AC 3/4, 6/7, 8-13, 15 and 17. In particular,
+missing analysis is not a clean review, a renamed finding is not a remediation,
+and a failed reproduction cannot be described as a verified fix. A cap hit is
+still FAILED evidence, but it is delivered automatically with deferred notes
+for a later issue. All attacks target disposable local fixtures.
 """
 import dataclasses
 import json
@@ -67,7 +68,7 @@ class ReviewContractTests(LocalReviewFixture, unittest.TestCase):
             self.assertIn(self.worker.issue.body, call.args[1])
         self.assertEqual(self.loop()["status"], "FIXED")
 
-    def test_unresolved_security_cap_does_not_enter_successful_automatic_delivery(self):
+    def test_unresolved_security_cap_is_automatically_delivered_with_deferred_notes(self):
         self.prepare(vulnerable=True)
         self.worker.config = dataclasses.replace(self.worker.config, auto_approve=True,
                                                  auto_merge=True, auto_promote=True)
@@ -80,12 +81,15 @@ class ReviewContractTests(LocalReviewFixture, unittest.TestCase):
 
         normal_finalizer = self.worker.finalize_issue
 
-        def delivery(commit_sha, *, allow_automation=True):
-            self.assertFalse(allow_automation,
-                             "Unresolved exploitable findings must not enable automatic merge/promotion")
+        def delivery(commit_sha, *, allow_automation=True, adversarial_cap_hit=False):
+            self.assertTrue(allow_automation,
+                            "Cap-hit deliveries use the configured automatic merge/promotion path")
+            self.assertTrue(adversarial_cap_hit,
+                            "Cap-hit delivery must be explicitly marked as a deferred handoff")
             return "https://example.invalid/pull/902", "ai/claude/issue-278", commit_sha
 
         with self.patches(unresolved), mock.patch.object(self.worker, "deliver_pull_request", side_effect=delivery), \
+                mock.patch.object(self.worker, "comments", return_value=[]), \
                 mock.patch.object(self.worker, "finalize_needs_input"):
             self.deliver.side_effect = normal_finalizer
             self.worker.run_adversarial_pipeline()

@@ -3,7 +3,7 @@
 The issue defines round zero as the independent assessment.  A continually
 failing acceptance test must therefore get exactly three counted repair rounds
 (and four tester invocations total), then be delivered as best effort with
-automation held.  This runs the durable UAT pipeline against a local checkout:
+the unresolved notes handed to a follow-up issue.  This runs the durable UAT pipeline against a local checkout:
 providers and GitHub are the only fakes, while each registered acceptance suite
 is a real subprocess.
 """
@@ -105,11 +105,13 @@ class ThreeRoundCapTests(unittest.TestCase):
             return "[]"
         if args[:2] == ["pr", "create"]:
             return "https://example.invalid/pull/294"
+        if args[:2] == ["issue", "create"]:
+            return "https://example.invalid/issues/295"
         if args[:2] == ["issue", "comment"]:
             self.comments.append(body)
         return ""
 
-    def test_persistent_failure_has_three_repairs_then_best_effort_hold(self) -> None:
+    def test_persistent_failure_has_three_repairs_then_best_effort_followup(self) -> None:
         self.prepare()
         with (
             mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 80)),
@@ -123,6 +125,7 @@ class ThreeRoundCapTests(unittest.TestCase):
             mock.patch.object(self.worker, "auto_promote_integration_branch") as promote,
             contextlib.redirect_stdout(io.StringIO()) as stdout,
         ):
+            merge.return_value = self.git("rev-parse", "HEAD")
             self.assertEqual(self.worker.run_adversarial_delivery(), 10)
 
         self.assertEqual(adversarial_core.MAX_ROUNDS, 3)
@@ -131,19 +134,20 @@ class ThreeRoundCapTests(unittest.TestCase):
             self.calls,
             [("test", 0), ("fix", 1), ("test", 1), ("fix", 2), ("test", 2), ("fix", 3), ("test", 3)],
         )
-        approve.assert_not_called()
-        merge.assert_not_called()
-        promote.assert_not_called()
+        approve.assert_called_once()
+        merge.assert_called_once()
+        promote.assert_called_once()
         self.assertEqual(len(self.comments), 1)
         self.assertIn("did not pass after three fix/re-test rounds", self.comments[0])
-        self.assertIn("AI needs your input", self.comments[0])
+        self.assertIn("Follow-up issue: https://example.invalid/issues/295", self.comments[0])
+        self.assertNotIn("AI needs your input", self.comments[0])
         self.assertIn("starting fix/re-test round 3 of 3.", stdout.getvalue())
         self.assertNotIn("starting fix/re-test round 4", stdout.getvalue())
 
         row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
         self.assertEqual(
             (row["adversarial_round_count"], row["adversarial_outcome"], row["final_status"]),
-            (3, "cap_hit", "awaiting_input"),
+            (3, "cap_hit", "completed"),
         )
 
 
