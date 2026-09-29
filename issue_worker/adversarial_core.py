@@ -1253,6 +1253,9 @@ class AdversarialStageMixin:
                 # attempt actually completes, whatever that attempt concludes.
                 loop.pop("review_error", None)
                 self.file_stage_findings(stage, loop, stage.findings_to_file(report))
+                advise = getattr(self, "advise_adversarial_findings", None)
+                if callable(advise):
+                    advise(stage, report)
                 loop.pop("retry_rejection", None)
                 loop["excluded_suites"] = sorted(candidate_excluded)
                 before = sum(r["exit_code"] != 0 for r in loop["results"])

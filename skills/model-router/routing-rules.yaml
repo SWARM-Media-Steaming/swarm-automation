@@ -77,8 +77,8 @@ task_type_groups:
     benchmark_emphasis: {deep_swe: 1.0, terminal_bench: 1.0, swe_atlas_qna: 1.0}
     extra_weights: {}
 
-# Two weight sets selected by the UI Cost Consideration setting
-# (`routing_optimization` in config.json → RouteRequest.cost_consideration_enabled).
+# Two weight sets selected by RouteRequest.cost_consideration_enabled.
+# Automatic Swarm/Jev routing always uses the cost-on set (issue #299).
 # Percentages of the positive side of the score. cost_efficiency (estimated
 # dollar cost) and token_efficiency are independent: a cheaper API price does
 # not imply fewer tokens. Higher relative_* / measured-efficiency scores

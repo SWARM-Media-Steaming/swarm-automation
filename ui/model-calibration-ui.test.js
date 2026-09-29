@@ -75,7 +75,7 @@ test("status fields cover every plain-language item the issue calls for", () => 
   );
   const byLabel = Object.fromEntries(fields.map((field) => [field.label, field.value]));
   assert.equal(byLabel["Dynamic routing"], "Enabled");
-  assert.equal(byLabel["Cost-aware routing"], "Enabled");
+  assert.equal(byLabel["Cost-first routing"], "Enabled");
   assert.equal(byLabel["Active calibration"], "2026-01-01-001");
   assert.equal(byLabel["Active models"], "12");
   assert.equal(byLabel["Discovered models"], "2");
@@ -272,15 +272,15 @@ test("routing impact lines show the before/after model and effort", () => {
   assert.equal(lines[0].detail, "gpt-5.6-luna (medium) → gpt-6-astra (high)");
 });
 
-test("current strategy reports Cost Aware only when the calibration says so", () => {
+test("current strategy always reports Cost Aware for automatic routing", () => {
   const costAware = currentStrategy({ routing_mode: "cost_aware", weights: { cost_efficiency: "high" } });
   assert.equal(costAware.mode, "Cost Aware");
   assert.equal(costAware.costOptimizationEnabled, true);
 
-  const balanced = currentStrategy({ routing_mode: "quality", weights: {} });
-  assert.equal(balanced.mode, "Balanced");
-  assert.equal(balanced.costOptimizationEnabled, false);
-  assert.ok(balanced.factors.some((factor) => factor.name === "Capability" && factor.level === "high"));
+  const stillCost = currentStrategy({ routing_mode: "quality", weights: {} });
+  assert.equal(stillCost.mode, "Cost Aware");
+  assert.equal(stillCost.costOptimizationEnabled, true);
+  assert.ok(stillCost.factors.some((factor) => factor.name === "Capability" && factor.level === "high"));
 });
 
 test("sorting models is stable and tolerates an unknown column", () => {

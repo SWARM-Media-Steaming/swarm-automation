@@ -484,25 +484,29 @@ def _status_for(
 
 
 def _weights_summary(routing_optimization: str) -> dict[str, str]:
-    cost_on = routing_optimization == "cost"
+    """Automatic routing is always cost-first after capability gates."""
+    _ = routing_optimization
     return {
         "capability": "high",
         "task_fit": "high",
-        "cost_efficiency": "high" if cost_on else "medium",
+        "cost_efficiency": "high",
         "performance": "medium",
         "reliability": "medium",
     }
 
 
 def routing_mode_label(routing_optimization: str) -> str:
-    return "cost_aware" if routing_optimization == "cost" else "quality"
+    """Saved ``best``/``quality`` labels migrate to cost-aware automatic routing."""
+    _ = routing_optimization
+    return "cost_aware"
 
 
 def recalculate_routing(
     specs: Sequence["_model_router.ModelSpec"], *, routing_optimization: str
 ) -> dict[str, dict[str, Any]]:
     """Example routing decisions, computed with the real scoring engine."""
-    cost_on = routing_optimization == "cost"
+    cost_on = True
+    _ = routing_optimization
     try:
         rules = _model_router.load_routing_rules()
     except _model_router.ModelRouterConfigError:
@@ -1453,7 +1457,7 @@ class ModelCalibrationService:
             "regression_ok": True,
         }
 
-    def ensure_bootstrap(self, *, routing_optimization: str = "best", now: float | None = None) -> dict[str, Any]:
+    def ensure_bootstrap(self, *, routing_optimization: str = "cost", now: float | None = None) -> dict[str, Any]:
         """Load the last known-good calibration, or seed it from the bundled catalog."""
         active = self._load_published_active()
         if active:
@@ -1558,7 +1562,7 @@ class ModelCalibrationService:
         activation_policy: str = "manual",
         initiated_by: str = "USER",
         min_interval_hours: float = DEFAULT_MIN_REFRESH_INTERVAL_HOURS,
-        routing_optimization: str = "best",
+        routing_optimization: str = "cost",
         fetch_fn: Callable[[], Any] | None = None,
         now: float | None = None,
     ) -> dict[str, Any]:
@@ -1779,7 +1783,7 @@ class ModelCalibrationService:
         pending = proposed if proposed and state.get("proposed_version") == proposed.get("version") else None
         return explain_update(self.load_active(), pending, (pending or {}).get("diff") or state.get("last_diff"))
 
-    def status_report(self, *, routing_optimization: str = "best") -> dict[str, Any]:
+    def status_report(self, *, routing_optimization: str = "cost") -> dict[str, Any]:
         try:
             self.ensure_bootstrap(routing_optimization=routing_optimization)
         except (CalibrationError, OSError):
@@ -1850,7 +1854,7 @@ def build_calibration_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="action", required=True)
 
     status = sub.add_parser("status", help="Print the current calibration status as JSON.")
-    status.add_argument("--routing-optimization", default="best", choices=["best", "cost"])
+    status.add_argument("--routing-optimization", default="cost", choices=["best", "cost"])
 
     refresh = sub.add_parser("refresh", help="Run one calibration refresh.")
     refresh.add_argument("--force", action="store_true")
@@ -1859,7 +1863,7 @@ def build_calibration_parser() -> argparse.ArgumentParser:
     refresh.add_argument("--source-url", default=None)
     refresh.add_argument("--activation-policy", default="manual", choices=["manual", "auto"])
     refresh.add_argument("--min-interval-hours", type=float, default=DEFAULT_MIN_REFRESH_INTERVAL_HOURS)
-    refresh.add_argument("--routing-optimization", default="best", choices=["best", "cost"])
+    refresh.add_argument("--routing-optimization", default="cost", choices=["best", "cost"])
     refresh.add_argument("--no-simulation", action="store_true")
     refresh.add_argument("--no-calibration", action="store_true")
 

@@ -2,11 +2,13 @@
 
 A reusable, provider-agnostic component that chooses a
 provider/model/reasoning-effort combination reasonably expected to complete a
-given task. When Cost Consideration is on, it prefers the least expensive,
-least token-intensive combination that still clears a minimum success bar —
-never simply the strongest model, and never a cheaper model that is not
-expected to succeed. When Cost Consideration is off, dollar cost and token
-consumption have no weight. It does not decide *what* a task is; that classification
+given task. Automatic routing is always cost-first after capability,
+expected-success, safety, and context-fit gates: it prefers the least
+expensive combination that still clears a minimum success bar — never simply
+the strongest model, never a cheaper model that is not expected to succeed,
+and never a faster model solely because it is faster. Isolated scoring tests
+may still pass `cost_consideration_enabled=False` to exercise the non-cost
+weight set. It does not decide *what* a task is; that classification
 (complexity, task type) is produced elsewhere (today, the existing pre-flight
 AI grading call in `issue_worker/dynamic_router.py`). This router answers the
 second question: given that classification and which providers/models/efforts
@@ -124,9 +126,8 @@ score =
 ```
 
 Weights live in `routing-rules.yaml`'s `weights` as two sets, selected by
-`RouteRequest.cost_consideration_enabled` (the UI "Optimize routing for cost"
-toggle, passed through as `routing_optimization` — never inferred from the
-prompt):
+`RouteRequest.cost_consideration_enabled` (always on for automatic Swarm/Jev
+routing after issue #299; never inferred from the prompt):
 
 - `cost_consideration_off` — expected success, task fit, coding, context, and
   latency. `cost_efficiency` and `token_efficiency` are 0.
@@ -178,7 +179,7 @@ efforts, unknown models, and cost-consideration weight sets / thresholds
 (issue #198). Run with `python3 -m unittest test_model_router
 test_model_router_yaml` from `issue_worker/` (not pytest — see
 `test_swarm_issue_worker.py`'s module docstring for why). End-to-end wiring
-from the UI `routing_optimization` toggle is covered in
+from automatic cost-first routing is covered in
 `test_dynamic_router.py`, `test_swarm_issue_worker.py`, and
 `test_adversarial_uat.py`.
 
