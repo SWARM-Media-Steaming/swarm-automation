@@ -58,6 +58,7 @@ from issue_images import (
     grok_prompt_json,
     inlined_images,
 )
+import available_models as _available_models
 import model_router as _model_router
 
 
@@ -294,8 +295,49 @@ _MODEL_CATALOG: tuple[CatalogModel, ...] = (
 # Kept as the by-slug view of the catalog above: the description shown next to a
 # tier, folded into ``tier_explanation``, and read back by anything holding only
 # a model name.
-_MODEL_DESCRIPTIONS: dict[str, str] = {entry.model: entry.description for entry in _MODEL_CATALOG}
-_MODEL_COSTS: dict[str, int] = {entry.model: entry.cost for entry in _MODEL_CATALOG}
+
+
+def _catalog_with_discovered() -> tuple[CatalogModel, ...]:
+    """The checked-in catalog plus every model the provider CLIs report.
+
+    A discovered model borrows its cost rank and frontier flag from the closest
+    catalogued release of the same family and says so in its description.
+    Releases the catalog has already moved past are left out of the routing
+    list (they remain visible to the decision engine through
+    ``available_models``), so an older model can never win a cost tie against
+    the current one.
+    """
+    rows = list(_MODEL_CATALOG)
+    for agent in _available_models.agents():
+        known = [row for row in rows if row.provider == agent]
+        names = {_available_models.canonical(row.model) for row in known}
+        for found in _available_models.discovered(agent):
+            if _available_models.canonical(found.value) in names:
+                continue
+            names.add(_available_models.canonical(found.value))
+            relative = _available_models.closest_relative(
+                found.value, ((row.model, row) for row in known)
+            )
+            peer, older = relative if relative else (None, False)
+            if older:
+                continue
+            fallback = min(known, key=lambda row: row.cost, default=None) if peer is None else None
+            label = _available_models.display_label(found)
+            basis = (
+                f"cost and capability inferred from {peer.model}" if peer
+                else "no catalogued relative, so the provider's lightest model's cost is assumed"
+            )
+            row = CatalogModel(
+                agent,
+                found.value,
+                peer.cost if peer else (fallback.cost if fallback else 3),
+                f"{label}, discovered from the {agent} CLI ({basis}); not yet benchmarked.",
+                frontier=bool(peer and peer.frontier),
+            )
+            # Same tie rule as model_router: a newer release precedes its peer.
+            rows.insert(rows.index(peer) if peer in rows else len(rows), row)
+            known.append(row)
+    return tuple(rows)
 
 
 def requires_usage_credits(model: str) -> bool:
@@ -331,13 +373,13 @@ def model_catalog(
     keys = [str(key).strip().lower() for key in providers if str(key).strip()]
     if not keys:
         seen: list[str] = []
-        for entry in _MODEL_CATALOG:
+        for entry in _catalog_with_discovered():
             if entry.provider not in seen:
                 seen.append(entry.provider)
         keys = seen
     catalog: list[CatalogModel] = []
     for key in keys:
-        rows = [entry for entry in _MODEL_CATALOG if entry.provider == key]
+        rows = [entry for entry in _catalog_with_discovered() if entry.provider == key]
         if not allow_usage_credit_models:
             rows = [entry for entry in rows if not entry.requires_usage_credits]
         catalog.extend(sorted(rows, key=lambda entry: (entry.cost, entry.model)))
@@ -356,11 +398,13 @@ def catalog_model_names(
 
 
 def model_description(model: str) -> str:
-    return _MODEL_DESCRIPTIONS.get(str(model or "").strip(), "")
+    wanted = str(model or "").strip()
+    return next((row.description for row in _catalog_with_discovered() if row.model == wanted), "")
 
 
 def model_cost(model: str) -> int | None:
-    return _MODEL_COSTS.get(str(model or "").strip())
+    wanted = str(model or "").strip()
+    return next((row.cost for row in _catalog_with_discovered() if row.model == wanted), None)
 
 
 # A rework is deliberately sent to a different AI tool than the one that

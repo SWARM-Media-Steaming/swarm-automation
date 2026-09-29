@@ -639,6 +639,18 @@ fn provider_models(
     (models, detected)
 }
 
+/// The models a provider CLI itself reports, for the worker's router and
+/// decision engine. Empty when the CLI is missing or reports nothing: the
+/// checked-in fallback list is deliberately not passed off as discovery.
+pub fn reported_models(id: &str, program: &Path, allow_credit_models: bool) -> Vec<ModelInfo> {
+    let (models, detected) = provider_models(id, Some(program), allow_credit_models);
+    if detected {
+        models
+    } else {
+        Vec::new()
+    }
+}
+
 /// Brand prefixes that carry no meaning on their own when matching a saved
 /// model name against a catalog entry.
 const MODEL_BRANDS: &[&str] = &["claude", "gpt", "grok"];
@@ -1336,5 +1348,30 @@ mod tests {
             config.provider("grok").unwrap().router_model,
             "grok-private-preview"
         );
+    }
+    #[test]
+    fn reported_models_ignores_the_fallback_catalog_and_serializes_for_the_worker() {
+        // A CLI that cannot be run reports nothing: the checked-in fallback
+        // list must not be passed to the worker as if it were discovery.
+        assert!(reported_models("codex", Path::new("/nonexistent/codex"), false).is_empty());
+
+        let model = ModelInfo {
+            value: "claude-sonnet-5-5".into(),
+            label: "Sonnet 5.5".into(),
+            efforts: vec!["low".into(), "high".into()],
+            default_effort: "low".into(),
+            requires_usage_credits: false,
+        };
+        let value = serde_json::to_value(&model).unwrap();
+        // These are the keys `issue_worker/available_models.py` reads.
+        for key in [
+            "value",
+            "label",
+            "efforts",
+            "defaultEffort",
+            "requiresUsageCredits",
+        ] {
+            assert!(value.get(key).is_some(), "missing {key}");
+        }
     }
 }

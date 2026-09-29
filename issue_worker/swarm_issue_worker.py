@@ -83,6 +83,7 @@ from issue_images import (
     grok_prompt_json,
     inlined_images,
 )
+import available_models
 from dynamic_router import (
     DEFAULT_ROUTING_OPTIMIZATION,
     InvalidRouterModel,
@@ -512,6 +513,12 @@ class Config:
             Path(args.execution_history_db).expanduser().resolve()
             if args.execution_history_db
             else state_dir / "swarm-automation.sqlite3"
+        )
+        # The provider CLIs' own model lists, passed by the desktop app. Held
+        # process-wide so both routers and the decision engine see them.
+        available_models.configure(
+            getattr(args, "available_models", ""),
+            allow_usage_credit_models=bool(args.allow_usage_credit_models),
         )
         return cls(
             script_dir=script_dir,
@@ -6715,6 +6722,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--routing-tiers",
         default=env_value("SWARM_ROUTING_TIERS", ""),
         help="JSON object of per-provider complexity tiers. Empty uses the built-in table.",
+    )
+    parser.add_argument(
+        "--available-models",
+        default=env_value("SWARM_AVAILABLE_MODELS", ""),
+        help=(
+            "JSON object of the models each provider CLI reports, keyed by provider id. "
+            "Empty uses only the checked-in catalogs."
+        ),
     )
     parser.add_argument(
         "--routing-optimization",

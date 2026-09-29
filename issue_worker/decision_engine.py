@@ -21,6 +21,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import available_models as _available_models
 from ai_execution_history import sanitize_text
 from jev_cli import (
     DEFAULT_JEV_MODEL,
@@ -642,6 +643,50 @@ class JevDecisionEngine:
         return result
 
 
+MAX_JEV_MODELS = 60
+
+
+def routable_models_for_jev() -> dict[str, list[dict[str, Any]]]:
+    """Every model the router could run, per agent, as the decision engine sees it.
+
+    Built from the live catalog — the models each provider CLI reports merged
+    with what the checked-in catalogs know — so nothing here is a hand-kept
+    list. ``status`` says whether the numbers are catalogued or inferred from
+    a relative, and a release the catalog has moved past is ``superseded``.
+    Returns ``{}`` when the catalog cannot be loaded: Jev then simply answers
+    without a model question.
+    """
+    try:
+        import model_router
+        from dynamic_router import requires_usage_credits
+
+        catalog = model_router.load_model_catalog()
+    except Exception:  # noqa: BLE001 - a broken catalog must never block a decision
+        return {}
+    allow_credit = _available_models.allow_usage_credit_models()
+    models: dict[str, list[dict[str, Any]]] = {}
+    total = 0
+    for spec in catalog:
+        if not spec.active or (not allow_credit and requires_usage_credits(spec.model)):
+            continue
+        if total >= MAX_JEV_MODELS:
+            break
+        total += 1
+        models.setdefault(spec.agent, []).append(
+            {
+                "model": spec.model,
+                "capability": spec.relative_capability,
+                "cost": spec.relative_cost,
+                "efforts": list(spec.supported_efforts),
+                "status": (
+                    "superseded" if spec.deprecated
+                    else "inferred" if spec.notes.startswith("Discovered") else "catalogued"
+                ),
+            }
+        )
+    return models
+
+
 def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Typed questions for one decision type. State is structured, not a prompt dump."""
     state = {
@@ -669,6 +714,9 @@ def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, 
         },
     }
     if kind in {DecisionType.TASK_CLASSIFICATION.value, DecisionType.ISSUE_TRIAGE.value}:
+        routable = routable_models_for_jev()
+        if routable:
+            state["availableModels"] = routable
         questions = {
             "task_type": {
                 "type": "choice",
@@ -743,6 +791,24 @@ def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, 
                 "criteria": ["low", "moderate", "high", "very_high"],
             },
         }
+        options = {
+            f"{agent}/{item['model']}": (
+                f"{agent} {item['model']}: capability {item['capability']}, "
+                f"cost {item['cost']} ({item['status']})"
+            )
+            for agent, items in routable.items()
+            for item in items
+            if item["status"] != "superseded"
+        }
+        if options:
+            questions["recommended_model"] = {
+                "type": "choice",
+                "instructions": (
+                    "Which available model is the least expensive one that can do this "
+                    "work well? Capability and cost are relative (1 lowest, 5 highest)."
+                ),
+                "criteria": options,
+            }
         return state, questions
     if kind == DecisionType.RAG_SCOPE.value:
         return state, {
@@ -817,6 +883,22 @@ def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, 
     }
 
 
+def _recommended_model(answer: Any) -> str:
+    """Jev's model pick as ``agent/model``, only if that model is really routable.
+
+    Advisory: Swarm's router still owns the applied model. An answer naming a
+    model outside the live catalog is dropped rather than trusted.
+    """
+    picked = str(answer_choice(answer) or "").strip()
+    if not picked:
+        return ""
+    agent, _, model = picked.partition("/")
+    for item in routable_models_for_jev().get(agent, ()):
+        if item["model"] == model and item["status"] != "superseded":
+            return picked
+    return ""
+
+
 def interpret_jev_response(kind: str, context: Mapping[str, Any], response: JevResponse) -> DecisionResult:
     answers = response.answers
     if kind in {DecisionType.TASK_CLASSIFICATION.value, DecisionType.ISSUE_TRIAGE.value}:
@@ -854,6 +936,7 @@ def interpret_jev_response(kind: str, context: Mapping[str, Any], response: JevR
                 "cyberRecommended": cyber,
                 "testingLikely": testing,
                 "routerTaskType": TASK_CLASS_TO_ROUTER.get(task, "general_reasoning"),
+                "recommendedModel": _recommended_model(answers.get("recommended_model")),
             },
         )
     if kind == DecisionType.RAG_SCOPE.value:

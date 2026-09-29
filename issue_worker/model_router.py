@@ -46,6 +46,7 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
+import available_models as _available_models
 from model_router_yaml import YamlError
 from model_router_yaml import load as load_yaml
 
@@ -341,7 +342,74 @@ def load_model_catalog(path: Path | None = None) -> tuple[ModelSpec, ...]:
     catalog: list[ModelSpec] = []
     for entry in data["models"]:
         catalog.append(_parse_model(entry))
-    return tuple(catalog)
+    return with_discovered_models(tuple(catalog))
+
+
+def with_discovered_models(catalog: tuple[ModelSpec, ...]) -> tuple[ModelSpec, ...]:
+    """Add every model the provider CLIs report that the catalog lacks.
+
+    Applied to every catalog this module loads — the checked-in one and a
+    calibrated one alike — so a newly released model is routable without a
+    code change. Its numbers are inferred from the closest catalogued release
+    of the same family (see ``available_models``); benchmarks stay null and
+    ``HEURISTIC`` because nothing was measured. A model with no relative
+    borrows the provider's lightest model's numbers, so it is never trusted
+    with harder work than the weakest known model. A release the catalog has
+    already moved past is added as deprecated, superseded by its relative, so
+    it is visible but never chosen ahead of the current one.
+    """
+    result = list(catalog)
+    for agent in _available_models.agents():
+        known = [spec for spec in catalog if spec.agent == agent]
+        names = {_available_models.canonical(name) for spec in known
+                 for name in (spec.model, spec.model_id or "")}
+        for found in _available_models.discovered(agent):
+            if _available_models.canonical(found.value) in names:
+                continue
+            names.add(_available_models.canonical(found.value))
+            relative = _available_models.closest_relative(
+                found.value, ((spec.model, spec) for spec in known)
+            )
+            spec = _inferred_spec(agent, found, relative, known)
+            # Equal scores are decided by catalog order, so a newer release
+            # goes ahead of the model it was inferred from: on a tie the
+            # current release wins, never the one it replaced.
+            peer = relative[0] if relative and not relative[1] else None
+            position = result.index(peer) if peer in result else len(result)
+            result.insert(position, spec)
+            known.append(spec)
+    return tuple(result)
+
+
+def _inferred_spec(agent, found, relative, known) -> ModelSpec:
+    peer, older = relative if relative else (None, False)
+    if peer is None and known:
+        peer = min(known, key=lambda spec: (spec.relative_capability, spec.relative_cost))
+    efforts = tuple(found.efforts) or (peer.supported_efforts if peer else ("low", "medium", "high"))
+    unmeasured = BenchmarkEntry(None, None, None, None, None, None, None, "HEURISTIC")
+    basis = f"inferred from {peer.model}" if peer else "assumed from defaults (no catalogued relative)"
+    return ModelSpec(
+        provider=peer.provider if peer else agent,
+        agent=agent,
+        model=found.value,
+        model_id=found.value,
+        active=True,
+        recommended=False,
+        deprecated=older,
+        superseded_by=peer.model if older and peer else None,
+        supported_efforts=efforts,
+        strengths=peer.strengths if peer else frozenset(),
+        weaknesses=peer.weaknesses if peer else frozenset(),
+        relative_capability=peer.relative_capability if peer else 3,
+        relative_cost=peer.relative_cost if peer else 3,
+        relative_token_efficiency=peer.relative_token_efficiency if peer else 3,
+        relative_latency=peer.relative_latency if peer else 3,
+        benchmarks={effort: unmeasured for effort in efforts},
+        benchmark_source=None,
+        benchmark_date=None,
+        notes=f"Discovered from the {agent} CLI; capability and cost {basis}. "
+              "Not benchmarked and unpriced until a price is catalogued.",
+    )
 
 
 def _parse_model(entry: Any) -> ModelSpec:

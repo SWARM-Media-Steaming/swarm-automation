@@ -1,9 +1,14 @@
 # Cross-provider model catalog for the SWARM dynamic model router.
 #
 # One entry per (provider, model). `model` is the exact slug the app already
-# invokes providers with — these must stay in sync with the slugs in
-# issue_worker/dynamic_router.py's _MODEL_CATALOG and src/config.rs's
-# default_routing_tiers(); a model missing here cannot be routed to.
+# invokes providers with. This file holds what is *known* about a model; which
+# models *exist* comes from the provider CLIs at runtime (the desktop app passes
+# them as --available-models, see issue_worker/available_models.py). A model the
+# CLIs report but this file lacks (e.g. a new release) is routable immediately
+# with capability/cost inferred from its closest same-family entry, flagged
+# "Discovered", benchmarks null, price unset. Add a real entry here to replace
+# the inference. Keep the slugs in sync with dynamic_router.py's _MODEL_CATALOG
+# and src/config.rs's default_routing_tiers() for the models you do catalogue.
 #
 # Scales (all 1-5, comparable across providers):
 #   relative_capability       1 = lightest, 5 = frontier/deepest reasoning

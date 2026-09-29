@@ -779,6 +779,10 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
         "--routing-tiers".into(),
         serde_json::to_string(&config.routing_tiers).unwrap_or_else(|_| "{}".into()),
     ]);
+    arguments.extend([
+        "--available-models".into(),
+        available_models_json(config, providers),
+    ]);
     arguments.extend(["--routing-optimization".into(), "cost".into()]);
     // The router names the worker model itself, so it needs the same
     // credit-model filter the desktop applies to every other model list.
@@ -792,6 +796,32 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
     );
     arguments.extend(jev_scheduler_arguments(config));
     arguments
+}
+
+/// Every model each installed provider CLI reports, keyed by provider id, for
+/// the worker's routers and Jev. Pulled from the CLIs on each scheduler start
+/// so a newly released model (for example `claude-sonnet-5-5`) is routable
+/// without a code change. A provider whose CLI reports nothing is omitted, and
+/// the worker then uses its checked-in catalog for that provider.
+fn available_models_json(config: &AppConfig, providers: &[ResolvedProvider]) -> String {
+    let mut models = serde_json::Map::new();
+    for provider in providers {
+        if !provider.enabled || provider.bin.as_os_str().is_empty() {
+            continue;
+        }
+        let reported = tools::reported_models(
+            &provider.id,
+            &provider.bin,
+            config.allow_usage_credit_models,
+        );
+        if reported.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::to_value(&reported) {
+            models.insert(provider.id.clone(), value);
+        }
+    }
+    serde_json::Value::Object(models).to_string()
 }
 
 fn jev_scheduler_arguments(config: &AppConfig) -> Vec<String> {
