@@ -2459,6 +2459,40 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 )
         return False, "the saved session is kept because the new pick is not materially better"
 
+    def upgrade_resumed_choice(self) -> None:
+        """Move a saved attempt's model to the latest release of its family.
+
+        A hand-off (the pinned tool has no usage left) starts the replacement on
+        its *configured* model, and an attempt holding an adversarial checkpoint
+        is not re-routed — so neither passes through routing, where the upgrade
+        normally happens. A session that has not started yet has no context tied
+        to its model, so it is safe to start it on the newest release instead.
+        A started session keeps its model: its thinking blocks belong to it.
+        """
+        assert self.choice
+        if not (self.config.dynamic_model_routing and self.in_progress_file.exists()):
+            return
+        if self.config.dry_run or self.choice.resume:
+            return
+        upgrade = latest_release(
+            self.choice.key,
+            self.choice.model,
+            self.choice.effort,
+            allow_usage_credit_models=self.config.allow_usage_credit_models,
+        )
+        if upgrade is None:
+            return
+        log(f"Upgrading {self.choice.name}'s model {upgrade.previous} to {upgrade.model}: {upgrade.reason}.")
+        self.choice.model = upgrade.model
+        changes: dict[str, Any] = {"model": upgrade.model}
+        stored = self.read_state().get("routing_decision")
+        if isinstance(stored, dict) and stored.get("provider") == self.choice.key:
+            stored = dict(stored, selected_model=upgrade.model, upgraded_from=upgrade.previous)
+            changes["routing_decision"] = stored
+            if self.routing is not None:
+                self.routing = stored
+        self.update_state(**changes)
+
     def reroute_saved_attempt(self) -> None:
         """Re-decide tool, model and effort for a saved attempt being resumed.
 
@@ -6455,6 +6489,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                         self.suspend_paused()
                         return QUOTA_PAUSED_EXIT_CODE
             self.reroute_saved_attempt()
+            self.upgrade_resumed_choice()
         else:
             usages, remaining = self.refresh_provider_usages()
             self.choice = self.choose_provider(self.issue.previous_ai, remaining)

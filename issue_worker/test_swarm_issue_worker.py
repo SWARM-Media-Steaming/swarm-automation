@@ -2526,6 +2526,63 @@ class WorkerTestCase(unittest.TestCase):
                 self.worker.run_selected_issue()
         return calls
 
+    def _resume_with_models(self, *, session_started: bool, dynamic: bool = True,
+                            adversarial: bool = True) -> dict:
+        """Run a saved Claude/sonnet-5 attempt up to its first real step."""
+        import available_models
+        available_models.configure({"claude": [{"value": v} for v in (
+            "claude-sonnet-5", "claude-sonnet-5-5", "claude-opus-5", "claude-opus-5-5")]})
+        self.addCleanup(available_models.reset)
+        self._saved_attempt(session_started=session_started)
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=dynamic)
+        if adversarial:
+            self.worker.update_state(adversarial={"epoch": 1})
+        self.worker.update_state(routing_decision={
+            "provider": "claude", "selected_model": "claude-sonnet-5", "reasoning_effort": "medium"})
+        self.worker.choice = self.worker.choice_from_state(self.worker.read_state())
+
+        class Stop(Exception):
+            pass
+
+        with (
+            mock.patch.object(self.worker, "provider_capacity", return_value=0),
+            mock.patch.object(self.worker, "ensure_bot_auth"),
+            mock.patch.object(self.worker, "start_execution_history", side_effect=Stop),
+        ):
+            with self.assertRaises(Stop):
+                self.worker.run_selected_issue()
+        return self.worker.read_state()
+
+    def test_a_handed_off_attempt_with_an_adversarial_checkpoint_starts_on_the_latest_release(self) -> None:
+        # Regression: the hand-off gives the replacement its configured model and
+        # an adversarial checkpoint skips re-routing, so nothing upgraded it.
+        state = self._resume_with_models(session_started=False)
+        self.assertEqual(state["model"], "claude-sonnet-5-5")
+        self.assertEqual(self.worker.choice.model, "claude-sonnet-5-5")
+        self.assertEqual(state["routing_decision"]["upgraded_from"], "claude-sonnet-5")
+        self.assertEqual(state["routing_decision"]["selected_model"], "claude-sonnet-5-5")
+
+    def test_a_started_session_keeps_its_model(self) -> None:
+        state = self._resume_with_models(session_started=True)
+        self.assertEqual(state["model"], "claude-sonnet-5")
+        self.assertTrue(self.worker.choice.resume)
+
+    def test_a_manually_chosen_model_is_left_alone_when_routing_is_off(self) -> None:
+        state = self._resume_with_models(session_started=False, dynamic=False)
+        self.assertEqual(state["model"], "claude-sonnet-5")
+
+    def test_the_upgrade_does_not_touch_a_routing_record_for_another_tool(self) -> None:
+        import available_models
+        available_models.configure({"claude": [{"value": "claude-sonnet-5"}, {"value": "claude-sonnet-5-5"}]})
+        self.addCleanup(available_models.reset)
+        self._saved_attempt(session_started=False)
+        self.worker.update_state(routing_decision={"provider": "grok", "selected_model": "grok-4.7"})
+        self.worker.choice = self.worker.choice_from_state(self.worker.read_state())
+        self.worker.upgrade_resumed_choice()
+        state = self.worker.read_state()
+        self.assertEqual(state["model"], "claude-sonnet-5-5")
+        self.assertEqual(state["routing_decision"], {"provider": "grok", "selected_model": "grok-4.7"})
+
     def test_a_restarted_attempt_is_rerouted_before_it_runs(self) -> None:
         self.assertEqual(self._run_until_history_starts(quota_resume=False), ["reroute"])
 
