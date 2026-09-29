@@ -114,7 +114,8 @@ class SecurityEvidenceLifecycleTests(EvidenceFixture, unittest.TestCase):
         with self.patches(role):
             self.worker.run_adversarial_pipeline()
         self.assertEqual(self.loop()["status"], "FAILED")
-        self.assertFalse(self.deliver.call_args.kwargs["allow_automation"])
+        self.assertTrue(self.deliver.call_args.kwargs["allow_automation"])
+        self.assertTrue(self.deliver.call_args.kwargs["adversarial_cap_hit"])
         metadata = self.metadata()
         self.assertEqual(metadata["inScopeFixed"], 1,
                          "The read exploit is fixed even while the deletion exploit in that file remains")
