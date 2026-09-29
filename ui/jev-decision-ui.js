@@ -65,7 +65,9 @@
     const fallback = info.fallbackRate;
     const cost = info.jevCost;
     const retries = info.outcomes && typeof info.outcomes === "object"
-      ? Number(info.outcomes.retry || info.outcomes.retried || 0)
+      ? Object.entries(info.outcomes)
+        .filter(([outcome]) => /^(retry|retried|needs_retry|failed|failure|error)$/i.test(outcome))
+        .reduce((total, [, count]) => total + (Number(count) || 0), 0)
       : 0;
     return [
       {

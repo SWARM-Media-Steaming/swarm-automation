@@ -1710,32 +1710,11 @@
     return state.jevFeedback || { records: [], total: 0, offset: 0, limit: 10, summary: {} };
   }
 
-  // Provider/model, date, delta, and cost narrow the current page client-side.
-  // The server-side query already handles status, routing, outcome, and search.
+  // Every Jev filter (status, routing, outcome, search, provider/model, date,
+  // delta, cost) runs in the server-side query, so it sees all pages of
+  // history rather than only the ten rows currently loaded.
   function jevFeedbackVisibleRecords(records) {
-    const provider = state.jevFeedbackProvider.trim().toLowerCase();
-    const from = state.jevFeedbackFrom.trim();
-    const minDelta = Number(state.jevFeedbackDelta);
-    const maxCost = Number(state.jevFeedbackCost);
-    return (Array.isArray(records) ? records : []).filter((record) => {
-      if (provider) {
-        const haystack = `${record.modifiedProvider || ""} ${record.modifiedModel || ""} ${record.baselineProvider || ""} ${record.baselineModel || ""}`.toLowerCase();
-        if (!haystack.includes(provider)) return false;
-      }
-      if (from) {
-        const created = String(record.createdAt || "").slice(0, 10);
-        if (created && created < from) return false;
-      }
-      if (state.jevFeedbackDelta.trim() !== "" && Number.isFinite(minDelta)) {
-        const delta = Math.abs(Number(record.scoreDelta) || 0);
-        if (delta < minDelta) return false;
-      }
-      if (state.jevFeedbackCost.trim() !== "" && Number.isFinite(maxCost)) {
-        const cost = record.estimatedJevCost;
-        if (cost !== null && cost !== undefined && Number(cost) > maxCost) return false;
-      }
-      return true;
-    });
+    return Array.isArray(records) ? records : [];
   }
 
   function renderJevFeedback() {
@@ -1834,9 +1813,12 @@
         offset: Math.max(0, Number(state.jevFeedbackOffset) || 0),
         search: state.jevFeedbackSearch.trim(),
         jevStatus: state.jevFeedbackStatus,
-        provider: "",
+        provider: state.jevFeedbackProvider.trim(),
         outcome: state.jevFeedbackOutcome,
         routingChanged: state.jevFeedbackRouting,
+        createdAfter: state.jevFeedbackFrom.trim(),
+        minDelta: state.jevFeedbackDelta.trim(),
+        maxCost: state.jevFeedbackCost.trim(),
       });
       if (requestId !== state.jevFeedbackRequest) return;
       state.jevFeedback = page;
@@ -4741,23 +4723,27 @@
       state.jevFeedbackOffset = 0;
       void refreshJevFeedback({ quiet: true });
     });
-    // Provider/model, date, delta, and cost filter the already-fetched page
-    // client-side (see jevFeedbackVisibleRecords), so these just re-render.
+    // Provider/model, date, delta, and cost are query parameters too; typing
+    // is debounced with the same timer the search box uses.
+    const refreshJevFilters = (key, value) => {
+      state[key] = value;
+      state.jevFeedbackOffset = 0;
+      window.clearTimeout(state.jevFeedbackSearchTimer);
+      state.jevFeedbackSearchTimer = window.setTimeout(() => {
+        void refreshJevFeedback({ quiet: true });
+      }, 250);
+    };
     byId("jev-feedback-provider")?.addEventListener("input", (event) => {
-      state.jevFeedbackProvider = event.target.value;
-      renderJevFeedback();
+      refreshJevFilters("jevFeedbackProvider", event.target.value);
     });
     byId("jev-feedback-from")?.addEventListener("change", (event) => {
-      state.jevFeedbackFrom = event.target.value;
-      renderJevFeedback();
+      refreshJevFilters("jevFeedbackFrom", event.target.value);
     });
     byId("jev-feedback-delta")?.addEventListener("input", (event) => {
-      state.jevFeedbackDelta = event.target.value;
-      renderJevFeedback();
+      refreshJevFilters("jevFeedbackDelta", event.target.value);
     });
     byId("jev-feedback-cost")?.addEventListener("input", (event) => {
-      state.jevFeedbackCost = event.target.value;
-      renderJevFeedback();
+      refreshJevFilters("jevFeedbackCost", event.target.value);
     });
     byId("jev-feedback-prev")?.addEventListener("click", () => {
       const page = jevFeedbackView();

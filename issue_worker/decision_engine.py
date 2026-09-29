@@ -1235,6 +1235,10 @@ def swarm_policy_action(
         # Low-confidence cyber results never suppress a finding.
         return str(default or WorkflowAction.FIX_NOW.value)
     if not actionable:
+        # An empty default must never turn "not actionable" into Jev's own
+        # irreversible recommendation: completion falls back to human review.
+        if not default and kind == DecisionType.COMPLETION.value:
+            return CompletionVerdict.NEEDS_HUMAN_REVIEW.value
         return str(default or recommended)
     return recommended
 

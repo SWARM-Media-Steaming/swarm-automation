@@ -372,6 +372,17 @@ def _search_filter(search: str) -> tuple[str, list[str]]:
     return f" AND ({' OR '.join(clauses)})", params
 
 
+def _optional_number(value: Any) -> float | None:
+    """A finite number from a filter field, or None when blank/invalid."""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
 def _repository_filter(repositories: Sequence[str] | str | None) -> tuple[str, list[str]]:
     """Optional SQL predicate for one or more repositories.
 
@@ -1417,10 +1428,20 @@ class ExecutionHistoryRepository:
         provider: str = "",
         outcome: str = "",
         routing_changed: str = "",
+        created_after: str = "",
+        min_delta: float | str | None = None,
+        max_cost: float | str | None = None,
         limit: int = PAGE_SIZE,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Filterable Jev score comparisons joined to execution outcomes."""
+        """Filterable Jev score comparisons joined to execution outcomes.
+
+        ``provider`` matches as a substring of any provider/model name;
+        ``created_after``
+        (``YYYY-MM-DD``, inclusive), ``min_delta`` (absolute score change) and
+        ``max_cost`` (Jev cost; rows with no recorded cost are kept) run in SQL
+        so they see every page of history, not just the current one.
+        """
         limit = clamp_page_size(limit)
         offset = clamp_offset(offset)
         repository_clause, repository_params = _repository_filter(repositories)
@@ -1447,10 +1468,15 @@ class ExecutionHistoryRepository:
         if status in {"enabled", "disabled", "unavailable", "timeout", "malformed", "authentication", "low_confidence", "fallback"}:
             conditions.append("c.jev_status = ?")
             params.append(status)
-        provider_key = normalize_provider_key(provider)
-        if provider_key:
-            conditions.append("LOWER(COALESCE(c.modified_provider, e.ai_provider, '')) = ?")
-            params.append(provider_key)
+        provider_match = normalize_search(provider).lower()
+        if provider_match:
+            escaped = provider_match.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append(
+                "LOWER(COALESCE(c.modified_provider, '') || ' ' || COALESCE(c.modified_model, '') || ' ' "
+                "|| COALESCE(c.baseline_provider, '') || ' ' || COALESCE(c.baseline_model, '') || ' ' "
+                "|| COALESCE(e.ai_provider, '')) LIKE ? ESCAPE '\\'"
+            )
+            params.append(f"%{escaped}%")
         outcome_key = sanitize_text(outcome)
         if outcome_key:
             conditions.append("COALESCE(e.final_status, c.workflow_outcome) = ?")
@@ -1459,6 +1485,18 @@ class ExecutionHistoryRepository:
             conditions.append("c.routing_changed = 1")
         elif str(routing_changed).strip().lower() in {"0", "false", "no"}:
             conditions.append("c.routing_changed = 0")
+        after = str(created_after or "").strip()[:10]
+        if after:
+            conditions.append("substr(c.created_at, 1, 10) >= ?")
+            params.append(after)
+        minimum_delta = _optional_number(min_delta)
+        if minimum_delta is not None:
+            conditions.append("ABS(COALESCE(c.score_delta_absolute, 0)) >= ?")
+            params.append(minimum_delta)
+        maximum_cost = _optional_number(max_cost)
+        if maximum_cost is not None:
+            conditions.append("(c.estimated_jev_cost IS NULL OR c.estimated_jev_cost <= ?)")
+            params.append(maximum_cost)
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         join = (
             "FROM jev_score_comparisons c "
@@ -2489,6 +2527,9 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="With --jev-feedback, filter to routing changes (true/false).",
     )
+    parser.add_argument("--jev-from", default="", help="With --jev-feedback, earliest date (YYYY-MM-DD).")
+    parser.add_argument("--jev-min-delta", default="", help="With --jev-feedback, minimum absolute score change.")
+    parser.add_argument("--jev-max-cost", default="", help="With --jev-feedback, maximum Jev cost.")
     args = parser.parse_args(argv)
 
     if args.validate_pricing:
@@ -2565,6 +2606,9 @@ def main(argv: list[str] | None = None) -> int:
                 provider=args.jev_provider,
                 outcome=args.jev_outcome,
                 routing_changed=args.jev_routing_changed,
+                created_after=args.jev_from,
+                min_delta=args.jev_min_delta,
+                max_cost=args.jev_max_cost,
                 limit=PAGE_SIZE if args.limit is None else args.limit,
                 offset=args.offset,
             ),

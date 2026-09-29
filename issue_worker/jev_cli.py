@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -320,8 +321,6 @@ class JevCli:
                 completed = self.runner([self.bin_path, "--version"], min(4.0, self.settings.timeout_seconds), None)
                 version = redact_cli_text((completed.stdout or completed.stderr or "").splitlines()[0] if (completed.stdout or completed.stderr) else "")
                 reachable = completed.returncode == 0
-                if not authenticated and completed.returncode == 0:
-                    authenticated = True
             except subprocess.TimeoutExpired:
                 error = "timeout"
             except OSError as exc:
@@ -428,7 +427,12 @@ def _looks_like_auth_failure(detail: str, returncode: int) -> bool:
     text = detail.lower()
     if returncode in {401, 403}:
         return True
-    return any(token in text for token in ("unauthorized", "api key", "authentication", "not logged in", "sign in"))
+    # "API-KEY" / "API_KEY" / "apikey" are the same failure as "api key".
+    spaced = re.sub(r"[-_]+", " ", text)
+    return any(
+        token in spaced
+        for token in ("unauthorized", "api key", "apikey", "authentication", "not logged in", "sign in")
+    )
 
 
 def parse_jev_stdout(stdout: str, *, model: str = "") -> JevResponse:

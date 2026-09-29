@@ -1407,6 +1407,9 @@ fn jev_feedback_query_args(
     provider: Option<String>,
     outcome: Option<String>,
     routing_changed: Option<String>,
+    created_after: Option<String>,
+    min_delta: Option<String>,
+    max_cost: Option<String>,
 ) -> Vec<String> {
     let mut arguments = vec![
         script.to_string_lossy().into_owned(),
@@ -1427,6 +1430,12 @@ fn jev_feedback_query_args(
         outcome.unwrap_or_default(),
         "--jev-routing-changed".into(),
         routing_changed.unwrap_or_default(),
+        "--jev-from".into(),
+        created_after.unwrap_or_default(),
+        "--jev-min-delta".into(),
+        min_delta.unwrap_or_default(),
+        "--jev-max-cost".into(),
+        max_cost.unwrap_or_default(),
     ];
     append_repository_args(&mut arguments, repositories);
     arguments
@@ -1444,6 +1453,9 @@ fn get_jev_feedback<R: tauri::Runtime>(
     provider: Option<String>,
     outcome: Option<String>,
     routing_changed: Option<String>,
+    created_after: Option<String>,
+    min_delta: Option<String>,
+    max_cost: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let config = current_config(&state)?;
     let repositories = feedback_repository_names(&config, &repo_ids)?;
@@ -1479,6 +1491,9 @@ fn get_jev_feedback<R: tauri::Runtime>(
             provider,
             outcome,
             routing_changed,
+            created_after,
+            min_delta,
+            max_cost,
         ),
     );
     if !ok {
@@ -1499,6 +1514,9 @@ async fn get_jev_feedback_background(
     provider: Option<String>,
     outcome: Option<String>,
     routing_changed: Option<String>,
+    created_after: Option<String>,
+    min_delta: Option<String>,
+    max_cost: Option<String>,
 ) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -1512,6 +1530,9 @@ async fn get_jev_feedback_background(
             provider,
             outcome,
             routing_changed,
+            created_after,
+            min_delta,
+            max_cost,
         )
     })
     .await

@@ -2818,7 +2818,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             blocking_security=blocking_security,
             uat_required=bool(self.config.adversarial_uat_enabled),
             cyber_required=bool(self.config.adversarial_security_enabled),
-            default=str(payload.get("default_action") or result.decision),
+            default=str(payload.get("default_action") or ""),
         )
         result.swarm_action = action
         result.accepted = may_act_on(result, self.config.jev) and action == result.decision
@@ -2966,6 +2966,15 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             return ""
         return format_jev_markdown(engine.records)
 
+    @staticmethod
+    def _is_security_context(item: dict[str, Any]) -> bool:
+        text = " ".join(
+            str(item.get(key) or "") for key in ("title", "name", "summary", "body")
+        ).lower()
+        return any(term in text for term in (
+            "security", "vulnerab", "incident", "cve-", "exploit", "credential leak", "breach",
+        ))
+
     def score_knowledge_pack(self, pack: Any) -> Any:
         """Optional Jev first-pass relevance. Never discards the whole pack."""
         if not self.config.jev.enabled or not self.config.jev.use_rag:
@@ -2999,6 +3008,13 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             keep = [item for _, item in scored[:minimum_retained]]
         else:
             keep = above_threshold
+        # A low score never discards security-relevant history (incidents,
+        # vulnerabilities) even when three other chunks already qualify.
+        kept_ids = {id(item) for item in keep}
+        keep += [
+            item for _, item in scored
+            if id(item) not in kept_ids and self._is_security_context(item)
+        ]
         pack.items = keep
         metadata = getattr(pack, "metadata", None)
         if isinstance(metadata, dict):
