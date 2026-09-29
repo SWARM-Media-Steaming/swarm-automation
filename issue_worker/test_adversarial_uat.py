@@ -314,6 +314,27 @@ class AdversarialUatTests(unittest.TestCase):
         floor = min(adversarial_core.effort_rank("xhigh"), adversarial_core.effort_rank(top.effort))
         self.assertGreaterEqual(adversarial_core.effort_rank(choice.effort), floor)
 
+    def test_a_new_tester_starts_on_the_latest_release_of_its_family(self):
+        from dynamic_router import ReleaseUpgrade
+        self.prepare()
+        older = ProviderChoice("Claude", "claude-sonnet-5", "medium", "new-session")
+        upgrade = ReleaseUpgrade(previous="claude-sonnet-5", model="claude-sonnet-5-5", reason="newer, same price")
+        with mock.patch("dynamic_router.latest_release", return_value=upgrade) as latest:
+            choice = self.worker.upgrade_stage_choice(uat.UAT_STAGE, older)
+        latest.assert_called_once()
+        self.assertEqual((choice.model, choice.effort, choice.session_id), ("claude-sonnet-5-5", "medium", "new-session"))
+        self.assertFalse(choice.resume)
+
+    def test_a_started_session_keeps_its_model_and_no_upgrade_keeps_the_choice(self):
+        self.prepare()
+        resumed = ProviderChoice("Claude", "claude-sonnet-5", "high", "session", True)
+        with mock.patch("dynamic_router.latest_release") as latest:
+            self.assertEqual(self.worker.upgrade_stage_choice(uat.UAT_STAGE, resumed), resumed)
+        latest.assert_not_called()
+        fresh = ProviderChoice("Claude", "claude-sonnet-5", "high", "session")
+        with mock.patch("dynamic_router.latest_release", return_value=None):
+            self.assertEqual(self.worker.upgrade_stage_choice(uat.UAT_STAGE, fresh), fresh)
+
     def test_first_pass_same_provider_is_a_fresh_context_and_history_can_be_off(self):
         self.prepare(fixed=True, history=False)
         self.worker.config = dataclasses.replace(self.worker.config, providers=tuple(dataclasses.replace(s, enabled=s.key == "claude") for s in self.worker.config.providers))

@@ -37,7 +37,7 @@ import model_router as _model_router
 import model_router_yaml as _model_router_yaml
 from ai_execution_history import sanitize_text
 
-ALGORITHM_VERSION = "1.0"
+ALGORITHM_VERSION = "1.1"
 DEFAULT_MIN_REFRESH_INTERVAL_HOURS = 6.0
 FAILED_RETRY_BACKOFF_HOURS = 0.25
 MAX_ERROR_LENGTH = 2000
@@ -1601,6 +1601,11 @@ class ModelCalibrationService:
                     "reason": "retry_backoff",
                 }
         last_success = state.get("last_successful_at")
+        # Data built by an older algorithm (before per-effort scores were folded
+        # into one row per model) cannot rank a new release, so the interval
+        # does not hold back the rebuild.
+        if last_success and state.get("refreshed_algorithm_version") != ALGORITHM_VERSION:
+            return None
         if last_success:
             try:
                 elapsed_hours = (now_ts - _parse_iso(last_success)) / 3600.0
@@ -1817,6 +1822,7 @@ class ModelCalibrationService:
 
         state["last_attempted_at"] = attempted_at
         state["last_successful_at"] = attempted_at
+        state["refreshed_algorithm_version"] = ALGORITHM_VERSION
         state["last_source_status"] = source_meta.get("status")
         state["last_error"] = None
         state["last_diff"] = diff

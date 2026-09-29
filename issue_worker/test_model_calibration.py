@@ -95,6 +95,22 @@ class ModelCalibrationServiceTests(unittest.TestCase):
         )
         self.assertEqual(second["status"], "skipped_interval")
 
+    def test_data_from_an_older_algorithm_is_rebuilt_inside_the_interval(self) -> None:
+        base = 1_000_000.0
+        self.service.refresh(fetch_fn=lambda: [_entry("m1")], now=base, min_interval_hours=6)
+        state = self.service.load_state()
+        self.assertEqual(state["refreshed_algorithm_version"], calib.ALGORITHM_VERSION)
+        state["refreshed_algorithm_version"] = "1.0"
+        self.service.save_state(state)
+        rebuilt = self.service.refresh(
+            fetch_fn=lambda: [_entry("m1")], now=base + 60, min_interval_hours=6
+        )
+        self.assertNotEqual(rebuilt["status"], "skipped_interval")
+        again = self.service.refresh(
+            fetch_fn=lambda: [_entry("m1")], now=base + 120, min_interval_hours=6
+        )
+        self.assertEqual(again["status"], "skipped_interval")
+
     def test_manual_refresh_bypasses_the_interval_with_force(self) -> None:
         base = 1_000_000.0
         self.service.refresh(fetch_fn=lambda: [_entry("m1")], now=base, min_interval_hours=6)

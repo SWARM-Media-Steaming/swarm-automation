@@ -881,11 +881,35 @@ class AdversarialStageMixin:
                     choice = ProviderChoice(spec.name, decision["selected_model"], decision["reasoning_effort"], self.new_session_id(spec))
                 except RouterError as error:
                     self.history.warning(f"Adversarial routing used capacity fallback: {error}", iso_timestamp())
+        choice = self.upgrade_stage_choice(stage, choice)
         if escalation:
             choice = self.escalate_stage_choice(stage, loop, choice, escalation, remaining)
         if choice.name not in loop["capacity_used"]:
             loop["capacity_used"].append(choice.name)
         return choice
+
+    def upgrade_stage_choice(self, stage: AdversarialStage, choice):
+        """Start a new tester or fixer on the newest release of its family.
+
+        The primary run gets this from ``upgrade_to_latest_release``; without
+        it here a stage that fell back to a tier table or the configured model
+        stays on the release routing remembered. A session that already
+        started keeps its model, since its thinking blocks belong to it.
+        """
+        from swarm_issue_worker import ProviderChoice, log
+        from dynamic_router import latest_release
+
+        if choice.resume or self.config.dry_run:
+            return choice
+        upgrade = latest_release(
+            choice.key, choice.model, choice.effort,
+            allow_usage_credit_models=self.config.allow_usage_credit_models,
+        )
+        if upgrade is None:
+            return choice
+        log(f"{stage.label} for issue #{self.issue.number}: upgrading {upgrade.previous} to "
+            f"{upgrade.model}: {upgrade.reason}.")
+        return ProviderChoice(choice.name, upgrade.model, choice.effort, choice.session_id, choice.resume)
 
     def escalation_router_note(self, stage: AdversarialStage, loop: dict[str, Any],
                                escalation: dict[str, Any]) -> str:

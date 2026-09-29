@@ -92,6 +92,19 @@ inputs affect requests outside the simulation sample. Calibration version IDs
 are never recycled after history pruning or rollback, and refresh summaries
 retain their originating version independently of which version is active.
 
+Refresh cadence: the app re-checks at least hourly, and the service refreshes
+once `model_data_min_refresh_interval_hours` has passed since the last success.
+Data built by an older `ALGORITHM_VERSION` (before per-effort Intelligence Index
+scores were folded into one row per model) is rebuilt regardless of the
+interval, because it cannot rank a new release.
+
+Every fresh adversarial tester or fixer session, like the primary run, passes
+through `latest_release`: a model routed from a fallback tier table or the
+configured default moves to the newest release of its family when that is no
+dearer and not measurably weaker. A session already started keeps its model.
+This is not a separate scoring bonus; measured capability and cost still decide
+which candidate wins.
+
 ## Complexity levels
 
 `TRIVIAL`, `SIMPLE`, `STANDARD`, `COMPLEX`, `VERY_COMPLEX`, `EXTREME` — see

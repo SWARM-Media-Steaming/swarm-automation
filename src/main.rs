@@ -2127,10 +2127,11 @@ fn spawn_startup_model_calibration_refresh(app: &tauri::AppHandle) {
     if !current_or_default_config(app).model_data_refresh_on_startup {
         return;
     }
-    // Once at startup, then again every `model_data_min_refresh_interval_hours`
-    // (6 by default) for as long as the app runs, so a long-lived app does not
-    // route on stale prices. Each pass re-reads the config, and the refresh
-    // itself skips work that is not yet due, so an early wake-up is harmless.
+    // Once at startup, then re-checked at least hourly for as long as the app
+    // runs; the refresh itself only does work once
+    // `model_data_min_refresh_interval_hours` (6 by default) has passed since
+    // the last success, so a long-lived app does not route on stale prices and
+    // an early wake-up is harmless. Each pass re-reads the config.
     let handle = app.clone();
     std::thread::Builder::new()
         .name("model-data-refresh".into())
@@ -2150,8 +2151,12 @@ fn spawn_startup_model_calibration_refresh(app: &tauri::AppHandle) {
                     }
                 }
                 initiator = "SCHEDULED";
+                // Wake at most hourly and let the service decide whether a
+                // refresh is due. Sleeping a full interval after a skipped
+                // attempt drifted the next check far past the last success
+                // (a launch 5 hours after one skipped, then slept 6 more).
                 std::thread::sleep(std::time::Duration::from_secs_f64(
-                    (config.model_data_min_refresh_interval_hours.max(1.0)) * 3600.0,
+                    config.model_data_min_refresh_interval_hours.clamp(0.0, 1.0).max(0.25) * 3600.0,
                 ));
             }
         })
