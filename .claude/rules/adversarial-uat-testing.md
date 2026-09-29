@@ -83,6 +83,10 @@ label from a trusted author; the worker owns VERSION.
   independent test, a fix/re-test round, a completed fix, its re-test, a
   strict-mode epoch, or a best-effort delivery begins. The Overview panel
   replays these logs, so preserve their issue number and round/max values.
+  Each phase also logs `Adversarial UAT for issue #...: fixer|tester <Provider> model
+  <model> with effort <effort>.` (`AdversarialStage.attribution_log`, shared by both
+  agents) so the Overview names the agent; history rounds show fixer/tester effort,
+  `Not recorded` for legacy rows. Never log reasoning text.
 
 Pilot on one repository before enabling across the fleet. Inspect the first
 framework scaffold for each stack, particularly Rust/Tauri and Gradle/JUnit.

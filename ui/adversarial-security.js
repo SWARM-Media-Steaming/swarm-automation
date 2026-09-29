@@ -49,9 +49,15 @@
       : "No adversarial cybersecurity reviews recorded yet.";
   }
 
+  // Configured provider / model / reasoning effort only. Rows written before
+  // effort was recorded have none and say so.
+  function agent(provider, model, effort) {
+    return `${provider} / ${model} / ${effort || "Not recorded"} reasoning`;
+  }
+
   function roundDetail(round) {
     const epoch = round.epoch_number ? `epoch ${round.epoch_number} · ` : "";
-    return `${epoch}${round.fixer_provider} / ${round.fixer_model} → ${round.tester_provider} / ${round.tester_model}; `
+    return `${epoch}fixer ${agent(round.fixer_provider, round.fixer_model, round.fixer_effort)} → tester ${agent(round.tester_provider, round.tester_model, round.tester_effort)}; `
       + `${round.findings_found || 0} finding(s) open, ${round.findings_fixed || 0} verified fixed, `
       + `${round.findings_filed || 0} filed separately; ${round.tests_added} security test files added, `
       + `${round.tests_modified} modified; failing suites ${round.tests_failing_before} → ${round.tests_failing_after}.`;
