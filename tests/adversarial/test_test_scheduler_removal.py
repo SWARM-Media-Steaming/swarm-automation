@@ -87,14 +87,29 @@ class TestSchedulerBackendRemovalTests(unittest.TestCase):
         self.assertNotIn("test scheduling", description)
 
     def test_scheduler_only_keyring_dependency_is_removed(self) -> None:
+        # keyring once existed only for scheduler test inputs and left with
+        # that subsystem. It is now used again, for one unrelated purpose: the
+        # optional Artificial Analysis API key in the macOS Keychain
+        # (src/secrets.rs). The scheduler must still not depend on it.
         cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         dependency_block = cargo.split("[dependencies]", 1)[1].split(
-            "[build-dependencies]", 1
-        )[0]
+            "[target.", 1
+        )[0].split("[build-dependencies]", 1)[0]
         self.assertNotRegex(
             dependency_block,
             r"(?m)^keyring\s*=",
-            "keyring was used only for scheduler test inputs and should leave with that subsystem",
+            "keyring must not return as a general dependency; it is macOS-only and "
+            "confined to src/secrets.rs",
+        )
+        users = sorted(
+            path.name
+            for path in SRC.glob("*.rs")
+            if "keyring::" in path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            users,
+            ["secrets.rs"],
+            "only the Keychain credential store may use keyring, never scheduler code",
         )
 
     def test_adversarial_uat_remains_wired_through_repo_configuration(self) -> None:

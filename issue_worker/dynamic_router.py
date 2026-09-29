@@ -664,9 +664,8 @@ def describe_scored_tier(
 def active_calibration_catalog_path() -> Path | None:
     """Optional override catalog from an activated Model Routing Calibration.
 
-    ``SWARM_MODEL_CALIBRATION_CATALOG`` is set by the desktop app (only when
-    the operator has turned on "Apply calibrated model data to live routing")
-    to the ``active_catalog.json`` a calibration was promoted to (see
+    ``SWARM_MODEL_CALIBRATION_CATALOG`` is set by the desktop app (whenever a
+    calibration has been activated) to the ``active_catalog.json`` a calibration was promoted to (see
     ``model_calibration.py``'s ``ModelCalibrationService.activate``). Unset,
     missing, or unreadable, this returns ``None`` and every caller falls back
     to the bundled ``models.yaml`` exactly as before this existed — activating

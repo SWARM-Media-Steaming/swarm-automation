@@ -142,10 +142,6 @@ fn default_model_data_min_refresh_interval_hours() -> f64 {
     6.0
 }
 
-fn default_model_data_source() -> String {
-    "local".into()
-}
-
 fn default_knowledge_context_token_limit() -> u32 {
     2500
 }
@@ -529,27 +525,13 @@ pub struct AppConfig {
     /// to a non-negative, sub-two-week range on normalize.
     #[serde(default = "default_model_data_min_refresh_interval_hours")]
     pub model_data_min_refresh_interval_hours: f64,
-    /// Where a refresh fetches model/pricing/benchmark data from: `"local"`
-    /// (only the bundled catalog, no network -- the default), `"models_dev"`,
-    /// `"artificial_analysis"` (needs `ARTIFICIAL_ANALYSIS_API_KEY` set in the
-    /// environment), or `"json"` (a configured HTTPS URL).
-    #[serde(default = "default_model_data_source")]
-    pub model_data_source: String,
-    /// HTTPS URL used only when [`Self::model_data_source`] is `"json"`.
-    #[serde(default)]
-    pub model_data_source_url: String,
-    /// Off by default: a refresh that finds a meaningful, regression-free
-    /// change is left as a *proposed* calibration awaiting manual review
-    /// instead of automatically becoming the active one.
-    #[serde(default)]
-    pub model_calibration_auto_activate: bool,
-    /// Off by default: feed the active Model Routing Calibration's catalog
-    /// into live Dynamic Model Routing decisions (an override the issue
-    /// worker reads via `SWARM_MODEL_CALIBRATION_CATALOG`) instead of only
-    /// the bundled `skills/model-router/models.yaml`.
-    #[serde(default)]
-    pub model_calibration_apply_to_routing: bool,
-
+    // Model data comes from fixed sources (models.dev, plus Artificial
+    // Analysis benchmarks when an API key is saved in the Keychain), and a
+    // clean refresh is always activated and applied to live routing. The
+    // former `model_data_source`, `model_data_source_url`,
+    // `model_calibration_auto_activate` and `model_calibration_apply_to_routing`
+    // settings are gone; older config files that still carry them load fine
+    // and the values are ignored.
     /// Legacy shared usage reserve. Copied onto each provider that has not set
     /// its own value. Kept in memory as a fallback; no longer written once
     /// per-provider floors exist.
@@ -728,10 +710,6 @@ impl Default for AppConfig {
             allow_usage_credit_models: false,
             model_data_refresh_on_startup: true,
             model_data_min_refresh_interval_hours: default_model_data_min_refresh_interval_hours(),
-            model_data_source: default_model_data_source(),
-            model_data_source_url: String::new(),
-            model_calibration_auto_activate: false,
-            model_calibration_apply_to_routing: false,
             minimum_remaining_percent: 10,
             parallel_repo_workers: false,
             ai_execution_history_enabled: false,
@@ -1104,12 +1082,6 @@ impl AppConfig {
     /// this setting only ever changes when a refresh runs, never something
     /// that should block "Save configuration".
     fn normalize_model_calibration(&mut self) {
-        if !matches!(
-            self.model_data_source.trim(),
-            "local" | "models_dev" | "artificial_analysis" | "json"
-        ) {
-            self.model_data_source = default_model_data_source();
-        }
         if !self.model_data_min_refresh_interval_hours.is_finite()
             || self.model_data_min_refresh_interval_hours < 0.0
         {
@@ -1608,27 +1580,20 @@ mod tests {
         let mut config = config_with_one_repo();
         config.normalize();
         assert!(config.model_data_refresh_on_startup);
-        assert_eq!(config.model_data_source, "local");
         assert_eq!(config.model_data_min_refresh_interval_hours, 6.0);
-        assert!(!config.model_calibration_auto_activate);
-        assert!(!config.model_calibration_apply_to_routing);
 
-        config.model_data_source = "artificial_analysis".into();
         config.model_data_min_refresh_interval_hours = 1.0;
         let encoded = serde_json::to_string(&config).unwrap();
         let mut decoded: AppConfig = serde_json::from_str(&encoded).unwrap();
         decoded.normalize();
-        assert_eq!(decoded.model_data_source, "artificial_analysis");
         assert_eq!(decoded.model_data_min_refresh_interval_hours, 1.0);
         assert!(decoded.validate().is_ok());
 
-        // An unknown source or an out-of-range interval (hand-edited config,
-        // or a config written before this setting existed) self-heals
-        // rather than blocking "Save configuration".
-        decoded.model_data_source = "carrier-pigeon".into();
+        // An out-of-range interval (hand-edited config, or a config written
+        // before this setting existed) self-heals rather than blocking
+        // "Save configuration".
         decoded.model_data_min_refresh_interval_hours = -5.0;
         decoded.normalize();
-        assert_eq!(decoded.model_data_source, "local");
         assert_eq!(decoded.model_data_min_refresh_interval_hours, 6.0);
 
         decoded.model_data_min_refresh_interval_hours = 10_000.0;
@@ -1639,7 +1604,14 @@ mod tests {
             serde_json::from_str(r#"{"dynamic_model_routing": true}"#).unwrap();
         older.normalize();
         assert!(older.model_data_refresh_on_startup);
-        assert_eq!(older.model_data_source, "local");
+
+        // Settings removed in favor of fixed behavior are ignored, not errors.
+        let legacy: AppConfig = serde_json::from_str(
+            r#"{"model_data_source":"local","model_data_source_url":"https://x.example",
+                "model_calibration_auto_activate":false,"model_calibration_apply_to_routing":false}"#,
+        )
+        .unwrap();
+        assert!(legacy.model_data_refresh_on_startup);
     }
 
     #[test]

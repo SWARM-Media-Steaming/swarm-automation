@@ -91,6 +91,7 @@
       refreshing: false,
       asking: false,
     },
+    modelDataKeySaved: false,
     modelCalibration: {
       status: null,
       lastResult: null,
@@ -269,7 +270,7 @@
     },
     "model-calibration": {
       title: "Dynamic Routing Calibration",
-      html: "<p>Dynamic Model Routing scores models using a local catalog of pricing and benchmark data. This panel refreshes and validates that data, shows whether it is current, and never silently replaces what is already active.</p><p><strong>Refresh Model Data</strong> fetches from the configured source, validates and normalizes it, compares it against the active calibration, recalculates routing metrics, and runs a routing simulation. A refresh that finds a meaningful, regression-free change is left as a <em>proposed</em> calibration awaiting review, unless <strong>Automatically activate clean refreshes</strong> is on.</p><p>The app also refreshes on startup (configurable below), always after the last known-good calibration is already loaded and usable — startup never waits on or depends on the external source.</p><p>Discovering a new model never makes it available for routing by itself; only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are ever chosen.</p>",
+      html: "<p>Dynamic Model Routing scores models using a local catalog of pricing and benchmark data. This panel refreshes and validates that data, shows whether it is current, and never silently replaces what is already active.</p><p><strong>Refresh Model Data</strong> fetches from models.dev (plus Artificial Analysis benchmarks when a key is saved), validates and normalizes it, compares it against the active calibration, recalculates routing metrics, and runs a routing simulation. A refresh that finds a meaningful, regression-free change is applied to routing automatically; only a change that would make routing worse is held as a <em>proposed</em> calibration awaiting your review.</p><p>The app also refreshes on startup and every few hours (configurable below), always after the last known-good calibration is already loaded and usable — startup never waits on or depends on the external source.</p><p>Discovering a new model never makes it available for routing by itself; only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are ever chosen.</p>",
       links: [],
     },
     "routing-algorithm": {
@@ -283,9 +284,9 @@
       links: [],
     },
     "model-data-refresh-settings": {
-      title: "Model data source & schedule",
-      html: "<p><strong>Local</strong> only re-reads the bundled catalog — no network access, always available offline. <strong>models.dev</strong> and <strong>Artificial Analysis</strong> are public pricing/benchmark sources; Artificial Analysis needs <code>ARTIFICIAL_ANALYSIS_API_KEY</code> set in the app's environment. <strong>Custom JSON URL</strong> reads a configured HTTPS endpoint.</p><p>The minimum refresh interval protects the configured source from being queried on every restart during development; the manual <strong>Refresh Model Data</strong> button always bypasses it.</p><p><strong>Apply calibrated model data to live routing</strong> is off by default: turning it on feeds the active calibration's catalog into the issue worker's own routing decisions instead of only the bundled catalog.</p>",
-      links: [],
+      title: "Model data schedule & benchmarks",
+      html: "<p>Model prices and lifecycle come from <strong>models.dev</strong>, a public source that needs no account. The app refreshes it when it starts and again every few hours while it runs. A refresh that finds a meaningful change with no routing regressions is applied to live routing automatically; one that would make routing worse is held back for review, and a failed refresh keeps the last good data. Every refresh result, including failures, is written to <strong>Info &amp; Debug</strong> under <em>Model data</em>.</p><p><strong>Benchmarks</strong> (coding scores, speed and latency) come from <strong>Artificial Analysis</strong> and are optional. Paste a free API key to include them; without one, routing works from prices and its built-in capability ranks. The key is stored in the macOS Keychain, and Artificial Analysis asks that its data be attributed to artificialanalysis.ai.</p><p>The minimum interval keeps the source from being queried on every restart; the manual <strong>Refresh Model Data</strong> button always bypasses it.</p>",
+      links: [{ label: "Artificial Analysis", url: "https://artificialanalysis.ai/" }],
     },
     "engineering-knowledge": {
       title: "What is SWARM Engineering Knowledge?",
@@ -385,7 +386,10 @@
       void refreshUsageReport({ quiet: true });
       void refreshJevFeedback({ quiet: true });
     }
-    if (view === "ai") void refreshModelCalibration({ quiet: true });
+    if (view === "ai") {
+      void refreshModelCalibration({ quiet: true });
+      void refreshModelDataKeyStatus();
+    }
     if (view === "knowledge") {
       renderKnowledgeScope();
       void refreshKnowledgeStatus({ quiet: true });
@@ -4406,6 +4410,14 @@
       }
     });
     byId("active-repo-select").addEventListener("change", () => renderKnowledgeScope());
+    byId("model-data-key-save")?.addEventListener("click", () => void saveModelDataKey());
+    byId("model-data-key-clear")?.addEventListener("click", () => void clearModelDataKey());
+    byId("model-data-key")?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void saveModelDataKey();
+      }
+    });
     byId("model-calibration-activate").addEventListener("click", () => void activateProposedCalibration());
     byId("model-calibration-analyze").addEventListener("click", () => void analyzeModelCalibrationUpdate());
     byId("model-routing-table-head").addEventListener("click", (event) => {
@@ -5219,6 +5231,65 @@
     renderModelCalibrationExamples();
     renderModelCalibrationButtons();
     renderModelCalibrationAnalysis();
+  }
+
+  // The Artificial Analysis key lives in the macOS Keychain; the page only
+  // ever learns whether one is saved, never its value.
+  async function refreshModelDataKeyStatus() {
+    try {
+      state.modelDataKeySaved = Boolean(await invoke("get_model_data_key_status"));
+    } catch (error) {
+      state.modelDataKeySaved = false;
+    }
+    renderModelDataKey();
+  }
+
+  function renderModelDataKey() {
+    const saved = state.modelDataKeySaved;
+    const status = byId("model-data-key-status");
+    if (status) {
+      status.textContent = saved
+        ? "Key saved in the macOS Keychain. Refreshes include benchmark data."
+        : "No key saved. Refreshes use models.dev prices only.";
+    }
+    const clear = byId("model-data-key-clear");
+    if (clear) clear.classList.toggle("hidden", !saved);
+    const input = byId("model-data-key");
+    if (input) {
+      input.placeholder = saved
+        ? "Key saved. Paste a new one to replace it"
+        : "Paste a key to add benchmark data";
+    }
+  }
+
+  async function saveModelDataKey() {
+    const input = byId("model-data-key");
+    const value = input ? input.value.trim() : "";
+    if (!value) {
+      showToast("Enter an API key to save.", "error");
+      return;
+    }
+    try {
+      await invoke("save_model_data_key", { key: value });
+      input.value = "";
+      state.modelDataKeySaved = true;
+      renderModelDataKey();
+      showToast("API key saved to the Keychain. Refreshing model data…");
+      await refreshModelData();
+    } catch (error) {
+      showToast(errorText(error), "error");
+    }
+  }
+
+  async function clearModelDataKey() {
+    try {
+      await invoke("clear_model_data_key");
+      state.modelDataKeySaved = false;
+      renderModelDataKey();
+      showToast("API key removed. Refreshes will use models.dev prices only.");
+    } catch (error) {
+      showToast(errorText(error), "error");
+    }
   }
 
   async function refreshModelCalibration({ quiet = true } = {}) {

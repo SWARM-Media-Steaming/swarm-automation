@@ -237,16 +237,22 @@
             </article>
 
             <article class="panel span-two">
-              <div class="panel-header"><div><p class="eyebrow">REFRESH SETTINGS</p><h3>Model data source &amp; schedule <span class="opt">optional</span> <button class="help-dot" data-help="model-data-refresh-settings" aria-label="About refresh settings">?</button></h3></div></div>
+              <div class="panel-header"><div><p class="eyebrow">REFRESH SETTINGS</p><h3>Model data schedule &amp; benchmarks <span class="opt">optional</span> <button class="help-dot" data-help="model-data-refresh-settings" aria-label="About refresh settings">?</button></h3></div></div>
               <div class="stacked-form">
-                <label class="toggle policy-toggle"><input type="checkbox" data-config="model_data_refresh_on_startup" /><span></span><div><strong>Refresh model data on startup</strong><small>Runs asynchronously once the app is already usable. The last known-good calibration always loads first, whether or not this refresh succeeds.</small></div></label>
-                <div class="form-grid three">
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="model_data_refresh_on_startup" /><span></span><div><strong>Refresh model data on startup and every few hours</strong><small>Runs in the background once the app is already usable. The last known-good calibration always loads first, whether or not a refresh succeeds. A clean refresh is applied to routing automatically.</small></div></label>
+                <div class="form-grid">
                   <label>Minimum hours between refreshes<input type="number" min="0" max="336" step="0.5" data-config="model_data_min_refresh_interval_hours" /></label>
-                  <label>Model data source<select data-config="model_data_source"><option value="local">Bundled catalog only (offline)</option><option value="models_dev">models.dev</option><option value="artificial_analysis">Artificial Analysis</option><option value="json">Custom JSON URL</option></select></label>
-                  <label>Custom source URL<input type="text" placeholder="https://…" data-config="model_data_source_url" /></label>
+                  <div class="secret-field">
+                    <label for="model-data-key">Artificial Analysis API key <span class="opt">optional</span></label>
+                    <input id="model-data-key" type="password" autocomplete="off" spellcheck="false" aria-describedby="model-data-key-status" placeholder="Paste a key to add benchmark data" />
+                    <div class="control-row">
+                      <button id="model-data-key-save" type="button" class="secondary-button compact">Save key</button>
+                      <button id="model-data-key-clear" type="button" class="text-button compact hidden">Remove key</button>
+                    </div>
+                    <small id="model-data-key-status" class="panel-copy" aria-live="polite"></small>
+                    <small class="panel-copy">Benchmark data by <button type="button" class="text-button compact" data-external="https://artificialanalysis.ai/">Artificial Analysis</button>. Prices always come from models.dev. The key is stored in the macOS Keychain, never in the config file.</small>
+                  </div>
                 </div>
-                <label class="toggle policy-toggle"><input type="checkbox" data-config="model_calibration_auto_activate" /><span></span><div><strong>Automatically activate clean refreshes</strong><small>Off by default. A refresh that finds a meaningful, regression-free change becomes active immediately instead of waiting in review.</small></div></label>
-                <label class="toggle policy-toggle"><input type="checkbox" data-config="model_calibration_apply_to_routing" /><span></span><div><strong>Apply calibrated model data to live routing</strong><small>Off by default. When on, the issue worker's Dynamic Model Routing reads the active calibration's catalog instead of only the bundled models.yaml.</small></div></label>
               </div>
             </article>
           </div>

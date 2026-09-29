@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 MODELS_DEV_URL = "https://models.dev/api.json"
 ARTIFICIAL_ANALYSIS_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
 MAX_SOURCE_BYTES = 12_000_000
+ARTIFICIAL_ANALYSIS_KEY_ENV = "ARTIFICIAL_ANALYSIS_API_KEY"
 ALLOWED_KINDS = ("models_dev", "artificial_analysis", "json")
 
 
@@ -100,9 +101,9 @@ def fetch_source(kind: str, url: str = "") -> tuple[list[dict], dict]:
     if kind not in ALLOWED_KINDS:
         raise SourceError("Unknown model data source.")
     target = {"models_dev": MODELS_DEV_URL, "artificial_analysis": ARTIFICIAL_ANALYSIS_URL}.get(kind, url)
-    api_key = os.environ.get("ARTIFICIAL_ANALYSIS_API_KEY") if kind == "artificial_analysis" else None
+    api_key = os.environ.get(ARTIFICIAL_ANALYSIS_KEY_ENV) if kind == "artificial_analysis" else None
     if kind == "artificial_analysis" and not api_key:
-        raise SourceError("Set ARTIFICIAL_ANALYSIS_API_KEY in the application environment to use this source.")
+        raise SourceError("No Artificial Analysis API key is configured.")
     if kind == "json" and not target:
         raise SourceError("A JSON model source needs an HTTPS URL.")
     payload, digest = fetch_json(target, api_key=api_key)

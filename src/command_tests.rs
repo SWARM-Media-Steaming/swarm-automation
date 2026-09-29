@@ -1,12 +1,13 @@
 use super::{
-    automation_log_path, bot_app_slugs_from_config, decide_bot_push_access, detect_tools,
-    execution_history_query_args, feedback_repository_names, get_config, get_execution_history,
-    get_prompt_grades, get_usage_report, grant_apps_request, inspect_repository,
-    issue_branch_pr_is_visible, knowledge_routing_payload, knowledge_settings_payload,
-    mark_permission_primed, needs_promotion, parse_pr_ref, promotion_approval_args,
-    prompt_grades_query_args, provider_scheduler_arguments, push_access_message,
-    reconcile_integration_for_promotion, refresh_running_scheduler, repo_status_args,
-    repo_worker_args, request_issue_scan, require_closed_issue, run_now_request_path, save_config,
+    automation_log_path, bot_app_slugs_from_config, decide_bot_push_access, describe_refresh,
+    detect_tools, execution_history_query_args, feedback_repository_names, get_config,
+    get_execution_history, get_prompt_grades, get_usage_report, grant_apps_request,
+    inspect_repository, issue_branch_pr_is_visible, knowledge_routing_payload,
+    knowledge_settings_payload, mark_permission_primed, needs_promotion, parse_pr_ref,
+    promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
+    push_access_message, reconcile_integration_for_promotion, redact_secret,
+    refresh_model_data_args, refresh_running_scheduler, repo_status_args, repo_worker_args,
+    request_issue_scan, require_closed_issue, run_now_request_path, save_config,
     save_feedback_repo_filter, scheduler_arguments, usage_report_query_args,
     validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
     ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider, UsageReportQuery,
@@ -1916,4 +1917,70 @@ fn save_config_rejects_a_preferred_provider_that_is_not_enabled() {
     let error = save_config(app.clone(), app.state(), config)
         .expect_err("preferred provider must be one of the enabled ones");
     assert!(error.contains("preferred provider"), "got: {error}");
+}
+
+#[test]
+fn model_data_refresh_uses_fixed_sources_and_always_activates_clean_refreshes() {
+    let config = AppConfig::default();
+    let arguments = refresh_model_data_args(&config, "STARTUP", false);
+    let after = |flag: &str| {
+        arguments
+            .iter()
+            .position(|argument| argument == flag)
+            .map(|index| arguments[index + 1].as_str())
+    };
+    assert_eq!(after("--source"), Some("models_dev"));
+    assert_eq!(after("--activation-policy"), Some("auto"));
+    assert_eq!(after("--initiated-by"), Some("STARTUP"));
+    assert!(!arguments.iter().any(|argument| argument == "--source-url"));
+    assert!(!arguments.iter().any(|argument| argument == "--force"));
+    assert!(refresh_model_data_args(&config, "USER", true)
+        .iter()
+        .any(|argument| argument == "--force"));
+}
+
+#[test]
+fn model_data_refresh_outcomes_are_described_for_info_and_debug() {
+    let failed = describe_refresh(&serde_json::json!({
+        "status": "failed",
+        "source_status": "unavailable",
+        "error": "Could not read model source: check connectivity."
+    }));
+    assert_eq!(failed[0].0, "stderr");
+    assert!(failed[0].1.contains("failed (unavailable)"));
+    assert!(failed[0].1.contains("last good calibration stays active"));
+
+    let activated = describe_refresh(&serde_json::json!({
+        "status": "changed", "activated": true, "models_checked": 12,
+        "calibration_version": "v9"
+    }));
+    assert_eq!(activated[0].0, "stdout");
+    assert!(activated[0].1.contains("12 models checked"));
+    assert!(activated[0].1.contains("activated and applied to routing"));
+
+    let held = describe_refresh(&serde_json::json!({
+        "status": "changed", "activated": false, "models_checked": 12,
+        "calibration_version": "v9"
+    }));
+    assert_eq!(held[0].0, "stderr");
+    assert!(held[0].1.contains("needs review"));
+
+    let warned = describe_refresh(&serde_json::json!({
+        "status": "no_change", "models_checked": 5,
+        "source_warnings": ["Artificial Analysis benchmarks unavailable: bad key"]
+    }));
+    assert_eq!(warned.len(), 2);
+    assert_eq!(warned[1].0, "stderr");
+    assert!(warned[1].1.starts_with("WARNING: Artificial Analysis"));
+}
+
+#[test]
+fn a_saved_key_is_redacted_from_refresh_output() {
+    let output = "request failed for key aa-secret-123 at host";
+    assert_eq!(
+        redact_secret(output, Some("aa-secret-123")),
+        "request failed for key [redacted] at host"
+    );
+    assert_eq!(redact_secret(output, None), output);
+    assert_eq!(redact_secret(output, Some("")), output);
 }

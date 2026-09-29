@@ -1,5 +1,6 @@
 mod config;
 mod processes;
+mod secrets;
 mod tools;
 
 use config::{AppConfig, RepoConfig, CONFIG_FILE};
@@ -626,13 +627,13 @@ fn start_issue_worker(
             script_dir.to_string_lossy().into_owned(),
         ),
     ];
-    if config.model_calibration_apply_to_routing {
-        if let Some(catalog) = model_calibration_active_catalog_path(&config) {
-            environment.push((
-                "SWARM_MODEL_CALIBRATION_CATALOG".into(),
-                catalog.to_string_lossy().into_owned(),
-            ));
-        }
+    // Live routing always reads the active calibration when one exists;
+    // otherwise the worker falls back to the bundled `models.yaml`.
+    if let Some(catalog) = model_calibration_active_catalog_path(&config) {
+        environment.push((
+            "SWARM_MODEL_CALIBRATION_CATALOG".into(),
+            catalog.to_string_lossy().into_owned(),
+        ));
     }
     state.processes.spawn(
         &app,
@@ -1022,8 +1023,7 @@ fn model_calibration_state_dir(config: &AppConfig) -> PathBuf {
 
 /// The `active_catalog.json` override a calibration is promoted to
 /// (`ModelCalibrationService.activate`), if one exists. Only ever read by
-/// `start_issue_worker` when the operator has turned on "Apply calibrated
-/// model data to live routing" (`model_calibration_apply_to_routing`).
+/// `start_issue_worker`, which hands it to the worker as the routing catalog.
 fn model_calibration_active_catalog_path(config: &AppConfig) -> Option<PathBuf> {
     let path = model_calibration_state_dir(config).join("active_catalog.json");
     path.is_file().then_some(path)
@@ -1791,18 +1791,112 @@ fn run_model_calibration<R: tauri::Runtime>(
     let python = tools::configured_or_detected(&config.python_bin, "python3")?;
     let script = calibration_script(app)?;
     let state_dir = model_calibration_state_dir(config);
+    let action = arguments.first().cloned().unwrap_or_default();
     let mut full_arguments = vec![
         script.to_string_lossy().into_owned(),
         "--state-dir".into(),
         state_dir.to_string_lossy().into_owned(),
     ];
     full_arguments.extend(arguments);
-    let (ok, raw) = run_capture_owned(&python, &full_arguments);
-    if !ok {
-        return Err(format!("{failure_context}: {raw}"));
+    // The optional Artificial Analysis key reaches the refresh through its
+    // environment only: never an argument, never the config file, never a log.
+    let key = secrets::artificial_analysis_key();
+    let environment: Vec<(String, String)> = key
+        .iter()
+        .map(|key| (secrets::ARTIFICIAL_ANALYSIS_ENV.to_string(), key.clone()))
+        .collect();
+    let (ok, raw) = run_capture_owned_with_env(&python, &full_arguments, &environment);
+    let raw = redact_secret(&raw, key.as_deref());
+    let outcome = if ok {
+        serde_json::from_str(raw.trim())
+            .map_err(|error| format!("{failure_context}: response could not be parsed: {error}"))
+    } else {
+        Err(format!("{failure_context}: {raw}"))
+    };
+    log_model_data_outcome(app, &action, &outcome);
+    outcome
+}
+
+fn redact_secret(text: &str, secret: Option<&str>) -> String {
+    match secret {
+        Some(secret) if !secret.is_empty() => text.replace(secret, "[redacted]"),
+        _ => text.to_string(),
     }
-    serde_json::from_str(raw.trim())
-        .map_err(|error| format!("{failure_context}: response could not be parsed: {error}"))
+}
+
+/// What Info & Debug should say about one model-data refresh result. Pure so
+/// it can be tested: `(stream, line)` pairs, `stderr` for anything wrong.
+fn describe_refresh(result: &serde_json::Value) -> Vec<(&'static str, String)> {
+    let text = |key: &str| result[key].as_str().unwrap_or_default().to_string();
+    let checked = result["models_checked"].as_u64().unwrap_or(0);
+    let mut lines = Vec::new();
+    match result["status"].as_str().unwrap_or_default() {
+        "failed" => lines.push((
+            "stderr",
+            format!(
+                "Model data refresh failed ({}): {} The last good calibration stays active.",
+                text("source_status"),
+                text("error")
+            ),
+        )),
+        "changed" if result["activated"].as_bool().unwrap_or(false) => lines.push((
+            "stdout",
+            format!(
+                "Model data refresh: {checked} models checked; calibration {} activated and applied to routing.",
+                text("calibration_version")
+            ),
+        )),
+        "changed" => lines.push((
+            "stderr",
+            format!(
+                "Model data refresh: {checked} models checked; calibration {} needs review (regressions found), so routing is unchanged.",
+                text("calibration_version")
+            ),
+        )),
+        "no_change" => lines.push((
+            "stdout",
+            format!("Model data refresh: {checked} models checked, no meaningful change."),
+        )),
+        "skipped_interval" => lines.push((
+            "stdout",
+            "Model data refresh skipped: refreshed recently.".to_string(),
+        )),
+        "already_running" => lines.push((
+            "stdout",
+            "Model data refresh skipped: another refresh is already running.".to_string(),
+        )),
+        other => lines.push(("stdout", format!("Model data refresh finished ({other})."))),
+    }
+    if let Some(warnings) = result["source_warnings"].as_array() {
+        for warning in warnings.iter().filter_map(|warning| warning.as_str()) {
+            lines.push(("stderr", format!("WARNING: {warning}")));
+        }
+    }
+    lines
+}
+
+/// Everything a model-data refresh does or fails to do goes to Info & Debug
+/// under "Model data", so a source outage or bad key is never silent.
+fn log_model_data_outcome<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    action: &str,
+    outcome: &Result<serde_json::Value, String>,
+) {
+    let Ok(log_path) = automation_log_path(app) else {
+        return;
+    };
+    let emit = |stream: &str, line: &str| {
+        processes::emit_log(app, &log_path, "Model data", stream, line);
+    };
+    match outcome {
+        Err(error) => emit("stderr", error),
+        Ok(result) if action == "refresh" => {
+            for (stream, line) in describe_refresh(result) {
+                emit(stream, &line);
+            }
+        }
+        Ok(_) => {}
+    }
 }
 
 #[tauri::command]
@@ -1836,27 +1930,23 @@ async fn get_model_calibration_status_background(
 }
 
 fn refresh_model_data_args(config: &AppConfig, initiated_by: &str, force: bool) -> Vec<String> {
+    // The source is fixed: models.dev for prices and lifecycle, plus
+    // Artificial Analysis benchmarks when a key is saved (the key travels in
+    // the environment, see `run_model_calibration`). A clean refresh is always
+    // activated; one that regresses stays a proposal for review.
     let mut arguments = vec![
         "refresh".into(),
         "--initiated-by".into(),
         initiated_by.into(),
         "--source".into(),
-        config.model_data_source.clone(),
+        "models_dev".into(),
         "--min-interval-hours".into(),
         config.model_data_min_refresh_interval_hours.to_string(),
         "--routing-optimization".into(),
         config.routing_optimization.clone(),
         "--activation-policy".into(),
-        if config.model_calibration_auto_activate {
-            "auto".into()
-        } else {
-            "manual".into()
-        },
+        "auto".into(),
     ];
-    if !config.model_data_source_url.trim().is_empty() {
-        arguments.push("--source-url".into());
-        arguments.push(config.model_data_source_url.clone());
-    }
     if force {
         arguments.push("--force".into());
     }
@@ -1999,32 +2089,63 @@ async fn analyze_model_calibration_update_background(
 /// `model_data_min_refresh_interval_hours` itself, so this can unconditionally
 /// ask for a `STARTUP` refresh without re-checking either concern here.
 fn spawn_startup_model_calibration_refresh(app: &tauri::AppHandle) {
-    let config = {
-        let state = app.state::<AppState>();
-        let Ok(config) = state.config.lock() else {
-            return;
-        };
-        config.clone()
-    };
-    if !config.model_data_refresh_on_startup {
+    if !current_or_default_config(app).model_data_refresh_on_startup {
         return;
     }
+    // Once at startup, then again every `model_data_min_refresh_interval_hours`
+    // (6 by default) for as long as the app runs, so a long-lived app does not
+    // route on stale prices. Each pass re-reads the config, and the refresh
+    // itself skips work that is not yet due, so an early wake-up is harmless.
     let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let inner_handle = handle.clone();
-        let result = tauri::async_runtime::spawn_blocking(move || {
-            run_model_calibration(
-                &inner_handle,
-                &config,
-                refresh_model_data_args(&config, "STARTUP", false),
-                "Startup model data refresh failed",
-            )
+    std::thread::Builder::new()
+        .name("model-data-refresh".into())
+        .spawn(move || {
+            let mut initiator = "STARTUP";
+            loop {
+                let config = current_or_default_config(&handle);
+                if config.model_data_refresh_on_startup {
+                    let result = run_model_calibration(
+                        &handle,
+                        &config,
+                        refresh_model_data_args(&config, initiator, false),
+                        "Model data refresh failed",
+                    );
+                    if let Ok(value) = result {
+                        let _ = handle.emit("model-calibration-refreshed", value);
+                    }
+                }
+                initiator = "SCHEDULED";
+                std::thread::sleep(std::time::Duration::from_secs_f64(
+                    (config.model_data_min_refresh_interval_hours.max(1.0)) * 3600.0,
+                ));
+            }
         })
-        .await;
-        if let Ok(Ok(value)) = result {
-            let _ = handle.emit("model-calibration-refreshed", value);
-        }
-    });
+        .ok();
+}
+
+fn current_or_default_config(app: &tauri::AppHandle) -> AppConfig {
+    app.state::<AppState>()
+        .config
+        .lock()
+        .map(|config| config.clone())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_model_data_key_status() -> bool {
+    secrets::artificial_analysis_key().is_some()
+}
+
+#[tauri::command]
+fn save_model_data_key(key: String) -> Result<bool, String> {
+    secrets::store_artificial_analysis_key(&key)?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn clear_model_data_key() -> Result<bool, String> {
+    secrets::clear_artificial_analysis_key()?;
+    Ok(false)
 }
 
 /// One graded execution row from `ai_execution_history.py --grades`: just
@@ -5070,9 +5191,18 @@ fn run_capture(program: &Path, arguments: &[&str]) -> (bool, String) {
 }
 
 fn run_capture_owned(program: &Path, arguments: &[String]) -> (bool, String) {
+    run_capture_owned_with_env(program, arguments, &[])
+}
+
+fn run_capture_owned_with_env(
+    program: &Path,
+    arguments: &[String],
+    environment: &[(String, String)],
+) -> (bool, String) {
     match Command::new(program)
         .args(arguments)
         .env("PATH", tools::enhanced_path())
+        .envs(environment.iter().map(|(name, value)| (name, value)))
         .output()
     {
         Ok(output) => {
@@ -5316,6 +5446,9 @@ fn main() {
             get_model_calibration_status_background,
             refresh_model_data,
             refresh_model_data_background,
+            get_model_data_key_status,
+            save_model_data_key,
+            clear_model_data_key,
             activate_model_calibration,
             activate_model_calibration_background,
             approve_discovered_model,

@@ -248,9 +248,16 @@ implementation manual refresh (AI Configuration's "Refresh Model Data"
 button), startup refresh, and any future scheduled/AI-triggered refresh all
 call — distinguished only by `initiated_by` (`USER`/`STARTUP`/`SCHEDULED`/
 `AI_AGENT`). `issue_worker/model_data_sources.py` holds the bounded,
-IP-pinned HTTPS adapters for the public sources (`models.dev`, Artificial
-Analysis, or a configured JSON URL); `"local"` re-reads the bundled
-`skills/model-router/models.yaml` with no network access at all.
+IP-pinned HTTPS adapters. The app's source is fixed: it always refreshes from
+`models.dev` (prices, lifecycle), and adds Artificial Analysis benchmarks
+(evaluations, speed, latency — never prices) only when an API key is saved.
+The key lives in the macOS Keychain (`src/secrets.rs`), reaches the refresh
+process only as `ARTIFICIAL_ANALYSIS_API_KEY` in its environment, and is
+redacted from any output. A benchmark failure is reported in the result's
+`source_warnings` and never fails the models.dev refresh. Every refresh
+result — failures included — is logged to Info & Debug under "Model data"
+(`describe_refresh` in `src/main.rs`). The bundled `"local"` source and the
+custom-JSON source remain in Python for tests only; the UI does not offer them.
 
 A refresh never replaces the active calibration on failure or on a
 no-meaningful-change result. Before fetching any external source, the shared
@@ -265,15 +272,19 @@ calibrations are never rebuilt from the bundled catalog.
 
 The live routing hook is `dynamic_router.active_calibration_catalog_path()`,
 gated by `SWARM_MODEL_CALIBRATION_CATALOG` — set by `start_issue_worker` in
-`src/main.rs` only when the repo-independent, app-wide
-`model_calibration_apply_to_routing` setting is on and an activated
-calibration's `active_catalog.json` exists. Unset or missing, every routing
-path falls back to the bundled `models.yaml` exactly as before this existed.
-The other new `AppConfig` fields (`model_data_refresh_on_startup`,
-`model_data_min_refresh_interval_hours`, `model_data_source`,
-`model_data_source_url`, `model_calibration_auto_activate`) are app-wide, not
-per-repository, matching `dynamic_model_routing`/`routing_optimization` above
-rather than the Feedback view's per-page filter pattern.
+`src/main.rs` whenever an activated calibration's `active_catalog.json`
+exists. Clean refreshes are always activated (`--activation-policy auto`); one
+that regresses stays a proposal for review, and a failed refresh keeps the
+last good calibration. Unset or missing, every routing path falls back to the
+bundled `models.yaml` exactly as before this existed. The app refreshes at
+startup and then every `model_data_min_refresh_interval_hours` (6 by default,
+`SCHEDULED`) while it runs. The `AppConfig` fields
+(`model_data_refresh_on_startup`, `model_data_min_refresh_interval_hours`) are
+app-wide, not per-repository, matching `dynamic_model_routing`/
+`routing_optimization` above rather than the Feedback view's per-page filter
+pattern. The former `model_data_source`, `model_data_source_url`,
+`model_calibration_auto_activate` and `model_calibration_apply_to_routing`
+settings were removed; old config files that carry them still load.
 
 Activation publishes the full calibration and its filtered routing models in
 one atomic `active_catalog.json` document. `load_active()` reads that document

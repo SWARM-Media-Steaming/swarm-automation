@@ -1548,8 +1548,34 @@ class ModelCalibrationService:
             overlay, meta = _sources.fetch_source(kind, source_url or "")
         except _sources.SourceError as error:
             raise CalibrationSourceError(str(error)) from error
+        if kind == "models_dev":
+            overlay = list(overlay) + self._benchmark_overlay(meta)
         merged, discovered = merge_overlay(local_entries, overlay, previous=previous)
         return merged, discovered, meta
+
+    @staticmethod
+    def _benchmark_overlay(meta: dict[str, Any]) -> list[dict[str, Any]]:
+        """Artificial Analysis benchmarks, when an API key is configured.
+
+        models.dev stays the authority for prices and lifecycle, so the rows
+        taken from Artificial Analysis are stripped to benchmark, speed and
+        latency fields; two sources can then never contradict each other on a
+        price. Any failure here is recorded in ``meta["warnings"]`` and the
+        models.dev data is used on its own — benchmarks are an enhancement,
+        never a reason for the whole refresh to fail.
+        """
+        if not os.environ.get(_sources.ARTIFICIAL_ANALYSIS_KEY_ENV):
+            return []
+        try:
+            rows, _ = _sources.fetch_source("artificial_analysis")
+        except _sources.SourceError as error:
+            meta.setdefault("warnings", []).append(
+                f"Artificial Analysis benchmarks unavailable: {sanitize_text(str(error))}"
+            )
+            return []
+        keep = ("provider", "model", "source_id", "evaluations", "speed", "latency_seconds")
+        meta["benchmarks"] = "artificial_analysis"
+        return [{key: row[key] for key in keep if key in row} for row in rows]
 
     def refresh(
         self,
@@ -1715,6 +1741,7 @@ class ModelCalibrationService:
                 "status": "changed",
                 "initiated_by": initiated_by,
                 "source_status": source_meta.get("status"),
+                "source_warnings": list(source_meta.get("warnings") or []),
                 "attempted_at": attempted_at,
                 "diff": diff,
                 "simulation": simulation,
@@ -1738,6 +1765,7 @@ class ModelCalibrationService:
                 "status": "no_change",
                 "initiated_by": initiated_by,
                 "source_status": source_meta.get("status"),
+                "source_warnings": list(source_meta.get("warnings") or []),
                 "attempted_at": attempted_at,
                 "diff": diff,
                 "simulation": simulation,
@@ -1766,6 +1794,7 @@ class ModelCalibrationService:
             "status": "changed",
             "initiated_by": initiated_by,
             "source_status": source_meta.get("status"),
+                "source_warnings": list(source_meta.get("warnings") or []),
             "attempted_at": attempted_at,
             "diff": diff,
             "simulation": simulation,
