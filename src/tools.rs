@@ -34,6 +34,59 @@ fn requires_usage_credits(value: &str) -> bool {
         .any(|part| USAGE_CREDIT_MODELS.contains(&part))
 }
 
+/// Models the operator has ruled out: older releases with a better successor.
+/// The same file `issue_worker/available_models.py` reads at run time, embedded
+/// here so the app's option lists and the worker's routing cannot disagree.
+const MODEL_BLACKLIST_JSON: &str = include_str!("../skills/model-router/model-blacklist.json");
+
+/// `claude-opus-4-7-20251001` and `claude-opus-4-7` name the same model.
+fn canonical_model(value: &str) -> String {
+    let mut parts: Vec<&str> = value.trim().split('-').collect();
+    while parts.len() >= 3
+        && parts
+            .last()
+            .is_some_and(|part| part.len() >= 8 && part.chars().all(|c| c.is_ascii_digit()))
+    {
+        parts.pop();
+    }
+    parts.join("-").to_ascii_lowercase()
+}
+
+fn blacklist() -> &'static Vec<String> {
+    static LISTED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LISTED.get_or_init(|| {
+        serde_json::from_str::<serde_json::Value>(MODEL_BLACKLIST_JSON)
+            .ok()
+            .and_then(|value| value["models"].as_array().cloned())
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["model"].as_str().map(canonical_model))
+            .collect()
+    })
+}
+
+/// True when the operator has blacklisted this model. It is never offered in
+/// a dropdown and never the model a saved selection is repaired into.
+pub fn is_blacklisted(value: &str) -> bool {
+    let wanted = canonical_model(value);
+    blacklist().iter().any(|listed| *listed == wanted)
+}
+
+/// `models` without the blacklisted ones, unless that would leave nothing: a
+/// known provider always needs at least one offerable model.
+fn without_blacklisted(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    let kept: Vec<_> = models
+        .iter()
+        .filter(|model| !is_blacklisted(&model.value))
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        models
+    } else {
+        kept
+    }
+}
+
 /// True when a catalog entry itself says the model bills against usage
 /// credits, the way Claude Code's own model picker labels them.
 fn mentions_usage_credits(model: &serde_json::Value) -> bool {
@@ -576,7 +629,7 @@ fn fallback_efforts(id: &str) -> Vec<String> {
 fn fallback_models(id: &str) -> Vec<ModelInfo> {
     let (values, default_effort): (&[&str], &str) = match id {
         "claude" => (
-            &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+            &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"],
             "",
         ),
         "codex" => (&["gpt-5.6-luna"], "medium"),
@@ -624,6 +677,10 @@ fn provider_models(
         }
         model.requires_usage_credits |= requires_usage_credits(&model.value);
     }
+    // Blacklisted models are dropped the same way, so they can never be
+    // offered nor be the model a saved selection is repaired into. Like the
+    // credit filter below, this never filters a provider down to nothing.
+    models = without_blacklisted(models);
     if !allow_credit_models {
         let without_credit_models: Vec<_> = models
             .iter()
@@ -1349,6 +1406,91 @@ mod tests {
             "grok-private-preview"
         );
     }
+    fn model(value: &str) -> ModelInfo {
+        ModelInfo {
+            value: value.into(),
+            label: value.into(),
+            efforts: vec!["low".into(), "high".into()],
+            default_effort: "low".into(),
+            requires_usage_credits: false,
+        }
+    }
+
+    #[test]
+    fn the_blacklist_names_the_old_releases_and_never_their_successors() {
+        for old in [
+            "claude-sonnet-4-6",
+            "claude-sonnet-5",
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-opus-4-7-20251001",
+        ] {
+            assert!(is_blacklisted(old), "{old} should be blacklisted");
+        }
+        for current in [
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-fable-5-1",
+            "claude-haiku-4-5",
+            "gpt-5.6-sol",
+            "grok-4.6",
+        ] {
+            assert!(!is_blacklisted(current), "{current} must stay available");
+        }
+    }
+
+    #[test]
+    fn blacklisted_models_leave_the_option_list_and_saved_selections_move_to_the_successor() {
+        let offered = without_blacklisted(vec![
+            model("claude-sonnet-5-5"),
+            model("claude-sonnet-5"),
+            model("claude-opus-5-5"),
+            model("claude-opus-5"),
+            model("claude-opus-4-8"),
+            model("claude-haiku-4-5"),
+        ]);
+        let values: Vec<_> = offered.iter().map(|m| m.value.as_str()).collect();
+        assert_eq!(values, ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-4-5"]);
+
+        let mut config = AppConfig::default();
+        let claude = config
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == "claude")
+            .unwrap();
+        claude.model = "claude-sonnet-5".into();
+        claude.router_model = "claude-opus-5".into();
+        for tier in config.routing_tiers.get_mut("claude").unwrap() {
+            tier.model = "claude-opus-4-7".into();
+        }
+        let mut tool = basic_tool("claude", "Claude Code", "claude", true, "");
+        tool.models = offered;
+        tool.models_detected = true;
+        reconcile_config_models(&mut config, &[tool]);
+        let claude = config.provider("claude").unwrap();
+        assert_eq!(claude.model, "claude-sonnet-5-5");
+        assert_eq!(claude.router_model, "claude-opus-5-5");
+        assert!(config.routing_tiers["claude"]
+            .iter()
+            .all(|tier| tier.model == "claude-opus-5-5"));
+    }
+
+    #[test]
+    fn a_provider_is_never_filtered_down_to_nothing_by_the_blacklist() {
+        let only = without_blacklisted(vec![model("claude-sonnet-5")]);
+        assert_eq!(only.len(), 1);
+    }
+
+    #[test]
+    fn the_fallback_catalog_offers_no_blacklisted_model() {
+        for id in ["claude", "codex", "grok"] {
+            assert!(fallback_models(id).iter().all(|m| !is_blacklisted(&m.value)), "{id}");
+        }
+    }
+
     #[test]
     fn reported_models_ignores_the_fallback_catalog_and_serializes_for_the_worker() {
         // A CLI that cannot be run reports nothing: the checked-in fallback

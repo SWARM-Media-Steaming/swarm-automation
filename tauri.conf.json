@@ -29,7 +29,8 @@
     "createUpdaterArtifacts": true,
     "resources": {
       "issue_worker/*.py": "issue_worker/",
-      "skills/model-router/*.yaml": "skills/model-router/"
+      "skills/model-router/*.yaml": "skills/model-router/",
+      "skills/model-router/*.json": "skills/model-router/"
     },
     "icon": [
       "icons/32x32.png",

@@ -135,10 +135,10 @@ class DynamicRouterTest(unittest.TestCase):
         # routing_tiers still match the built-in default (see
         # _scored_tier_decision), which is the case for every candidate below.
         expectations = {
-            ("claude", 2): ("claude-sonnet-5", "low"),
-            ("claude", 5): ("claude-sonnet-5", "medium"),
-            ("claude", 8): ("claude-opus-5", "high"),
-            ("claude", 10): ("claude-opus-5", "xhigh"),
+            ("claude", 2): ("claude-sonnet-5-5", "low"),
+            ("claude", 5): ("claude-sonnet-5-5", "medium"),
+            ("claude", 8): ("claude-sonnet-5-5", "high"),
+            ("claude", 10): ("claude-opus-5-5", "xhigh"),
             ("codex", 1): ("gpt-5.6-luna", "low"),
             ("codex", 6): ("gpt-5.6-sol", "medium"),
             ("codex", 7): ("gpt-5.6-sol", "high"),
@@ -712,7 +712,7 @@ class CostAwareRoutingTest(unittest.TestCase):
             title="t", body="b", labels=[], candidates=candidates("claude", "codex", "grok")
         )
         self.assertIn("Model catalog", prompt)
-        for model in ("claude-haiku-4-5", "claude-opus-5", "gpt-6-astra", "grok-4.7"):
+        for model in ("claude-haiku-4-5", "claude-opus-5-5", "gpt-6-astra", "grok-4.7"):
             self.assertIn(f"/ {model} —", prompt)
         self.assertNotIn("claude-fable-5-1", prompt)
 
@@ -730,7 +730,7 @@ class CostAwareRoutingTest(unittest.TestCase):
         catalog = model_catalog(("claude",))
         self.assertEqual(
             [entry.model for entry in catalog],
-            ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"],
+            ["claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"],
         )
         self.assertEqual(catalog[0].cost_label, "lowest cost")
         self.assertEqual(catalog[-1].cost_label, "high cost")
@@ -766,7 +766,7 @@ class CostAwareRoutingTest(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "The frontier models in this catalog are: claude-opus-5, gpt-6-astra, grok-4.7.",
+            "The frontier models in this catalog are: claude-opus-5-5, gpt-6-astra, grok-4.7.",
             prompt,
         )
         self.assertNotIn("claude-fable-5", prompt)
@@ -809,18 +809,18 @@ class CostAwareRoutingTest(unittest.TestCase):
             allow_usage_credit_models=True,
         )
         self.assertIn(
-            "The frontier models in this catalog are: claude-opus-5, claude-fable-5, claude-fable-5-1.",
+            "The frontier models in this catalog are: claude-opus-5-5, claude-fable-5-1.",
             prompt,
         )
 
     def test_frontier_flags_mark_the_most_capable_model_of_each_line(self) -> None:
         self.assertEqual(
             frontier_model_names(model_catalog(allow_usage_credit_models=False)),
-            ("claude-opus-5", "gpt-6-astra", "grok-4.7"),
+            ("claude-opus-5-5", "gpt-6-astra", "grok-4.7"),
         )
         self.assertEqual(
             frontier_model_names(model_catalog(("claude",), allow_usage_credit_models=True)),
-            ("claude-opus-5", "claude-fable-5", "claude-fable-5-1"),
+            ("claude-opus-5-5", "claude-fable-5-1"),
         )
 
     def test_a_frontier_model_still_runs_below_the_floor_when_the_router_names_it(self) -> None:
@@ -891,7 +891,7 @@ class CostAwareRoutingTest(unittest.TestCase):
             routing_optimization="cost",
         )
         self.assertTrue(decision["cost_consideration_enabled"])
-        self.assertEqual(decision["selected_model"], "claude-opus-5")
+        self.assertEqual(decision["selected_model"], "claude-sonnet-5-5")
         self.assertNotEqual(decision["selected_model"], "claude-haiku-4-5")
 
     def test_a_cost_optimized_decision_records_and_reports_the_preference(self) -> None:
@@ -996,7 +996,7 @@ class CostAwareRoutingTest(unittest.TestCase):
             allow_tier_fallback=False,
         )
         self.assertEqual(decision["provider"], "claude")
-        self.assertEqual(decision["selected_model"], "claude-opus-5")
+        self.assertEqual(decision["selected_model"], "claude-sonnet-5-5")
         self.assertEqual(decision["model_source"], "tier")
 
     def test_the_correction_prompt_restates_the_catalog_and_the_rejected_name(self) -> None:

@@ -87,7 +87,7 @@ class SimulateTests(CalculatorTestCase):
 
     def test_a_valid_suggested_model_is_honoured_like_the_real_router(self) -> None:
         row = simulate(taskType="feature", complexity=5, risk="medium", provider="claude",
-                       suggestedModel="claude-opus-5", suggestedEffort="high")["results"][0]
+                       suggestedModel="claude-opus-5-5", suggestedEffort="high")["results"][0]
         self.assertEqual(row["source"], "suggested")
         self.assertEqual(row["effort"], "high")
         self.assertTrue(any("used as suggested" in step for step in row["steps"]))
@@ -99,14 +99,16 @@ class SimulateTests(CalculatorTestCase):
         self.assertEqual((row["model"], row["effort"]), (plain["model"], plain["effort"]))
         self.assertTrue(any("not one Claude can run" in step for step in row["steps"]))
 
-    def test_an_older_suggestion_is_upgraded_to_the_latest_release(self) -> None:
+    def test_a_blacklisted_suggestion_is_ignored_like_the_real_router(self) -> None:
         available_models.configure({"claude": [{"value": v} for v in (
             "claude-sonnet-5", "claude-sonnet-5-5", "claude-opus-5", "claude-opus-5-5")]})
-        row = simulate(taskType="feature", complexity=5, risk="medium", provider="claude",
-                       suggestedModel="claude-sonnet-5", suggestedEffort="medium")["results"][0]
-        self.assertEqual(row["model"], "claude-sonnet-5-5")
-        self.assertEqual(row["upgrade"]["from"], "claude-sonnet-5")
-        self.assertTrue(any("moved up to claude-sonnet-5-5" in step for step in row["steps"]))
+        plain = simulate(taskType="feature", complexity=5, risk="medium", provider="claude")["results"][0]
+        for blacklisted in ("claude-sonnet-5", "claude-opus-5"):
+            row = simulate(taskType="feature", complexity=5, risk="medium", provider="claude",
+                           suggestedModel=blacklisted, suggestedEffort="medium")["results"][0]
+            self.assertEqual((row["model"], row["effort"]), (plain["model"], plain["effort"]))
+            self.assertNotEqual(row["source"], "suggested")
+            self.assertTrue(any("not one Claude can run" in step for step in row["steps"]))
 
     def test_a_task_type_the_router_does_not_know_falls_back_like_the_router(self) -> None:
         result = simulate(taskType="something odd", complexity=4, risk="medium", provider="claude")

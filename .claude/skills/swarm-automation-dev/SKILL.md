@@ -71,7 +71,8 @@ Related, still-accurate mechanics:
 
 - `tauri.conf.json`'s `bundle.resources` entry (`"issue_worker/*.py":
   "issue_worker/"`) is what actually ships these files inside a packaged
-  `.app`. `worker_script_dir()` in `src/main.rs` resolves that bundled
+  `.app`, and `"skills/model-router/*.json"` ships the model blacklist beside
+  the YAML catalogs. `worker_script_dir()` in `src/main.rs` resolves that bundled
   `resource_dir()/issue_worker` path at runtime — there is no fallback to
   a target repository's own script directory; every run, against whatever
   repository is configured, uses this bundled copy. (`inspect_repository_
@@ -136,6 +137,14 @@ JavaScript. GitHub backlog import is the exception: it runs once per selected
 configured repository and returns a success/failure result for each one.
 
 ## Dynamic model routing
+
+Models the operator has ruled out are listed once in
+`skills/model-router/model-blacklist.json` and enforced in both languages (see
+`.claude/rules/model-blacklist.md`). Never re-add a blacklisted model to a
+dropdown, tier table or default, and keep its catalog rows as inactive peers.
+The upgrade to a newer release (`latest_release`) also runs for every fresh
+adversarial tester/fixer session, and each stage's router prompt carries the
+implementation's graded complexity and diff size (`stage_scope_note`).
 
 Optional per-repo setting (`dynamic_model_routing`) that, when on, has one
 of the enabled providers grade a new issue and pick which provider handles

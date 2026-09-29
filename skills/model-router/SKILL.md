@@ -25,6 +25,10 @@ are actually available, which one should run it.
   `_MODEL_CATALOG`, `src/config.rs`'s `default_routing_tiers()`); a model
   missing here cannot be routed to. Adding a model needs no code change — add
   an entry and, once it has real usage, fill in its benchmark numbers.
+- `model-blacklist.json` — models that are never offered or routed to: older
+  releases with a better successor, confirmed by the operator. Read by
+  `issue_worker/available_models.py` and embedded in `src/tools.rs`; see
+  "Model blacklist" below.
 - `routing-rules.yaml` — complexity bands (`TRIVIAL` through `EXTREME`), task
   type groupings and their benchmark emphasis, the scoring weights, and the
   overqualification / unnecessary-reasoning penalty terms. All of it is a
@@ -210,6 +214,17 @@ raises for referencing an unknown slug, it just cannot select it, per the
 issue's "unknown/new models remain excluded from automatic routing until
 enough metadata exists" requirement. If nothing is eligible after filtering,
 `route()` raises `ModelRouterError` rather than guessing.
+
+## Model blacklist
+
+A model listed in `model-blacklist.json` (currently Sonnet 4.6 and 5, Opus 4.6,
+4.7, 4.8 and 5, and Fable 5) is never offered in the app, never discovered from a
+provider CLI, and never chosen by the scorer, the router prompt, Jev, a tier
+table or an upgrade. Its catalog rows stay as inactive, deprecated peers so a
+newer discovered release still infers its metadata from the release it replaced.
+A saved provider, router or tier selection naming one is repaired into its
+successor. A session already started keeps running on its model. The list is
+edited by hand; see `.claude/rules/model-blacklist.md`.
 
 ## Tests
 

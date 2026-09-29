@@ -396,8 +396,24 @@ def load_model_catalog(path: Path | None = None) -> tuple[ModelSpec, ...]:
         raise ModelRouterConfigError("models.yaml must contain a top-level 'models' list")
     catalog: list[ModelSpec] = []
     for entry in data["models"]:
-        catalog.append(_parse_model(entry))
+        catalog.append(_blacklisted(_parse_model(entry)))
     return with_discovered_models(tuple(catalog), _measured_evidence(data))
+
+
+def _blacklisted(spec: ModelSpec) -> ModelSpec:
+    """A blacklisted model stays in the catalog but can never be chosen.
+
+    Kept, not dropped, because a newer discovered release infers its numbers
+    from the closest catalogued relative, and that is usually the model it
+    replaced. Inactive and deprecated, it is skipped by every routing path.
+    """
+    if not (_available_models.is_blacklisted(spec.model)
+            or (spec.model_id and _available_models.is_blacklisted(spec.model_id))):
+        return spec
+    return dataclasses.replace(
+        spec, active=False, recommended=False, deprecated=True,
+        superseded_by=spec.superseded_by or _available_models.blacklist_successor(spec.model) or None,
+    )
 
 
 def _measured_evidence(data: dict[str, Any]) -> dict[str, tuple[tuple[str, float], ...]]:

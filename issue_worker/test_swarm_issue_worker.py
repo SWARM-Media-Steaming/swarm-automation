@@ -1649,7 +1649,7 @@ class WorkerTestCase(unittest.TestCase):
             return 0
 
         replacement = self._routing_payload(
-            selected_provider="claude", selected_model="claude-opus-5"
+            selected_provider="claude", selected_model="claude-opus-5-5"
         )
         output = io.StringIO()
         with (
@@ -1667,7 +1667,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0], ("claude-fable-5-1", "high", "old-session"))
-        self.assertEqual(calls[1][0], "claude-opus-5")
+        self.assertEqual(calls[1][0], "claude-opus-5-5")
         self.assertNotEqual(calls[1][2], "old-session")
         router.assert_called_once()
         # The re-route's own prompt must not offer the rejected model again.
@@ -4744,11 +4744,11 @@ class WorkerTestCase(unittest.TestCase):
 
         # A fresh worker process picks up the retry; the configured model has
         # since been healed back to a real one by the desktop app.
-        self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5", "low", "session-509")
+        self.worker.choice = ProviderChoice("Claude", "claude-sonnet-5-5", "low", "session-509")
         with mock.patch(
             "swarm_issue_worker.run_provider_router",
             return_value=self._routing_payload(
-                selected_provider="claude", selected_model="claude-opus-5", reasoning_effort="high"
+                selected_provider="claude", selected_model="claude-opus-5-5", reasoning_effort="high"
             ),
         ) as router:
             self.worker.maybe_apply_dynamic_routing()

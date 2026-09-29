@@ -93,9 +93,9 @@ EFFORT_LABELS = {
 _DEFAULT_TIER_ROWS: dict[str, tuple[tuple[int, int, str, str], ...]] = {
     "claude": (
         (1, 3, "claude-haiku-4-5", "low"),
-        (4, 6, "claude-sonnet-5", "medium"),
-        (7, 8, "claude-opus-5", "high"),
-        (9, 10, "claude-opus-5", "max"),
+        (4, 6, "claude-sonnet-5-5", "medium"),
+        (7, 8, "claude-opus-5-5", "high"),
+        (9, 10, "claude-opus-5-5", "max"),
     ),
     "codex": (
         (1, 3, "gpt-5.6-luna", "low"),
@@ -206,10 +206,25 @@ _MODEL_CATALOG: tuple[CatalogModel, ...] = (
     ),
     CatalogModel(
         "claude",
+        "claude-sonnet-5-5",
+        3,
+        "Claude's balanced, general-purpose model. The default choice for typical "
+        "multi-file feature work and bug fixes.",
+    ),
+    CatalogModel(
+        "claude",
         "claude-sonnet-5",
         3,
         "Claude's balanced, general-purpose model. The default choice for typical "
         "multi-file feature work and bug fixes.",
+    ),
+    CatalogModel(
+        "claude",
+        "claude-opus-5-5",
+        4,
+        "Claude's most capable model. Reserved for the largest, most ambiguous, or "
+        "highest-risk work, where the deepest reasoning is worth the extra cost and time.",
+        frontier=True,
     ),
     CatalogModel(
         "claude",
@@ -381,6 +396,9 @@ def model_catalog(
     catalog: list[CatalogModel] = []
     for key in keys:
         rows = [entry for entry in _catalog_with_discovered() if entry.provider == key]
+        # Blacklisted rows stay in the catalog so a newer release can infer
+        # from them; they are never offered or named by the router.
+        rows = [entry for entry in rows if not _available_models.is_blacklisted(entry.model)]
         if not allow_usage_credit_models:
             rows = [entry for entry in rows if not entry.requires_usage_credits]
         catalog.extend(sorted(rows, key=lambda entry: (entry.cost, entry.model)))
@@ -505,8 +523,11 @@ def latest_release(
         if effort in old_scores and effort in new_scores:
             if new_scores[effort] < old_scores[effort] - UPGRADE_SCORE_MARGIN:
                 return None
-    elif None in (best.input_cost, best.output_cost):
-        return None  # nothing to compare against and no known price: do not guess
+    elif not _available_models.is_blacklisted(model) and None in (best.input_cost, best.output_cost):
+        # Nothing to compare against and no known price: do not guess. A
+        # blacklisted model has been ruled out by the operator, so its
+        # successor needs no comparison, only the pricing check above.
+        return None
     reason = f"the latest {' '.join(family) or agent} release, same or lower price"
     if current is not None:
         old_scores, new_scores = dict(current.intelligence_by_effort), dict(best.intelligence_by_effort)
@@ -691,7 +712,8 @@ def _parse_tier(provider: str, item: Any) -> RoutingTier:
         raise ValueError(f"{provider} routing tier has an invalid range or model")
     if tier.min_complexity < 1 or tier.max_complexity > 10:
         raise ValueError(f"{provider} routing tier must stay within complexity 1–10")
-    return tier
+    # A saved tier naming a blacklisted model runs its successor instead.
+    return dataclasses.replace(tier, model=_available_models.replace_blacklisted(tier.model))
 
 
 def tier_for_complexity(tiers: tuple[RoutingTier, ...] | list[RoutingTier], complexity: int) -> RoutingTier:

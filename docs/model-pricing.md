@@ -81,7 +81,9 @@ restates history for anything recosted later. Instead:
 4. Bump `PRICING_CATALOG_VERSION`.
 5. Run the validator.
 
-Adding a brand-new model is just step 3 plus step 4.
+Adding a brand-new model is just step 3 plus step 4. The automatic upgrade to a
+newer release only lands on a model that has a price here, so a release stays
+out of that path until its provider-page rate is added.
 
 ### Corrections
 

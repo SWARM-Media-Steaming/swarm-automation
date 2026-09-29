@@ -152,9 +152,9 @@ pub fn default_routing_tiers() -> HashMap<String, Vec<RoutingTier>> {
             "claude".into(),
             vec![
                 routing_tier(1, 3, "claude-haiku-4-5", "low"),
-                routing_tier(4, 6, "claude-sonnet-5", "medium"),
-                routing_tier(7, 8, "claude-opus-5", "high"),
-                routing_tier(9, 10, "claude-opus-5", "max"),
+                routing_tier(4, 6, "claude-sonnet-5-5", "medium"),
+                routing_tier(7, 8, "claude-opus-5-5", "high"),
+                routing_tier(9, 10, "claude-opus-5-5", "max"),
             ],
         ),
         (
@@ -230,7 +230,7 @@ impl Default for ProviderSettings {
 impl ProviderSettings {
     fn preset(id: &str) -> Self {
         let (model, effort) = match id {
-            "claude" => ("claude-sonnet-5", "low"),
+            "claude" => ("claude-sonnet-5-5", "low"),
             "codex" => ("gpt-5.6-luna", "medium"),
             "grok" => ("grok-4.6", "low"),
             _ => ("", "high"),

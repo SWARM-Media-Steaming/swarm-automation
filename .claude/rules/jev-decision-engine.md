@@ -36,6 +36,14 @@ being recorded, a recommendation being actionable, and the final
   candidate are excluded from cost optimization. Among the remaining capable
   candidates, lower estimated total dollar/token cost wins; latency is only a
   tie-breaker.
+- Never let Jev, the router or an upgrade name a model on the operator's
+  blacklist (`skills/model-router/model-blacklist.json`); see
+  `model-blacklist.md`. A `recommended_model` that is blacklisted is treated as
+  not routable.
+- An automatic upgrade to a newer release of the same family (`latest_release`)
+  is not a scoring override: it applies only to a model with a price in the
+  pricing catalog, only when it is no dearer and not measurably weaker, and never
+  to a session that has already started.
 - Preserve explicit manual model selections and the no-Jev behavior when
   dynamic routing is disabled.
 - Preserve baseline, Jev, and modified routing records separately. Never
@@ -57,6 +65,7 @@ Keep these synchronized when changing the policy:
 - `docs/jev-decision-engine.md` — public contract and behavior.
 - `skills/model-router/SKILL.md` — routing algorithm and Jev interaction.
 - `skills/model-router/routing-rules.yaml` — routing thresholds and weights.
+- `skills/model-router/model-blacklist.json` — models that are never offered.
 - `issue_worker/decision_engine.py` — confidence and safety enforcement.
 - `issue_worker/dynamic_router.py` — Jev/routing combination.
 

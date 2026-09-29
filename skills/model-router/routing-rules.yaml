@@ -151,11 +151,11 @@ reference_matrix:
     codex: gpt-5.6-luna
     grok: grok-4.5
   SIMPLE:
-    claude: claude-sonnet-5
+    claude: claude-sonnet-5-5
     codex: gpt-5.6-luna
     grok: grok-4.6
   STANDARD:
-    claude: claude-sonnet-5
+    claude: claude-sonnet-5-5
     codex: gpt-5.6-sol
     grok: grok-4.6
   COMPLEX:

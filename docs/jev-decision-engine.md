@@ -94,7 +94,9 @@ cost wins. Automatic cost routing first removes candidates below the default
 0.80 expected-success floor, then excludes candidates more than 0.03 behind
 the strongest expected-success candidate before cost-aware scoring. Dollar
 cost and token efficiency are considered separately; latency is a tie-breaker
-only. Manual model selections and disabled dynamic routing are not replaced.
+only. Manual model selections and disabled dynamic routing are not replaced. Models on
+the operator's blacklist (`skills/model-router/model-blacklist.json`) are never
+offered to Jev, recommended by it, or routed to.
 
 The full routing policy lives in `skills/model-router/SKILL.md` and
 `skills/model-router/routing-rules.yaml`.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import unittest
+from unittest import mock
 
 import available_models
 import decision_engine
@@ -24,6 +25,10 @@ CLAUDE = {
         {"value": "claude-opus-4-6"},
     ]
 }
+
+# A hypothetical next Sonnet the checked-in catalog does not know yet, used to
+# exercise inference for a newly discovered release.
+NEXT = {"claude": CLAUDE["claude"] + [{"value": "claude-sonnet-5-6"}]}
 
 
 def _route(catalog, complexity):
@@ -73,32 +78,48 @@ class ConfigureTests(AvailableModelsTestCase):
 
 
 class RoutingCatalogTests(AvailableModelsTestCase):
-    def test_without_discovery_the_checked_in_catalog_is_unchanged(self) -> None:
-        models = {spec.model for spec in model_router.load_model_catalog()}
-        self.assertNotIn("claude-sonnet-5-5", models)
-        self.assertNotIn("claude-sonnet-5-5", dynamic_router.catalog_model_names(("claude",)))
+    def test_without_discovery_the_checked_in_catalog_offers_current_releases_only(self) -> None:
+        catalog = {spec.model: spec for spec in model_router.load_model_catalog()}
+        names = dynamic_router.catalog_model_names(("claude",))
+        for current in ("claude-sonnet-5-5", "claude-opus-5-5"):
+            self.assertTrue(catalog[current].active)
+            self.assertIn(current, names)
+        for listed in available_models.blacklist():
+            self.assertNotIn(listed, names)
+            if listed in catalog:
+                self.assertFalse(catalog[listed].active)
+                self.assertTrue(catalog[listed].deprecated)
+
+    def test_blacklisted_models_are_never_offered_discovered_or_routed(self) -> None:
+        available_models.configure({"claude": [{"value": name} for name in available_models.blacklist()]
+                                    + [{"value": "claude-sonnet-5-5"}]})
+        self.assertEqual([m.value for m in available_models.discovered("claude")], ["claude-sonnet-5-5"])
+        catalog = model_router.load_model_catalog()
+        for complexity in range(1, 11):
+            self.assertFalse(available_models.is_blacklisted(_route(catalog, complexity).model))
+        self.assertTrue(available_models.is_blacklisted("claude-opus-4-7-20251001"))
+        self.assertEqual(available_models.blacklist_successor("claude-sonnet-5"), "claude-sonnet-5-5")
+        self.assertFalse(available_models.is_blacklisted("claude-sonnet-5-5"))
 
     def test_a_new_release_is_routable_and_wins_ties_over_its_predecessor(self) -> None:
-        available_models.configure(CLAUDE)
+        available_models.configure(NEXT)
         catalog = model_router.load_model_catalog()
-        self.assertEqual(_route(catalog, 5).model, "claude-sonnet-5-5")
-        self.assertEqual(_route(catalog, 8).model, "claude-opus-5-5")
-        self.assertIn("claude-sonnet-5-5", dynamic_router.catalog_model_names(("claude",)))
-        self.assertIn("claude-opus-5-5", dynamic_router.catalog_model_names(("claude",)))
+        self.assertEqual(_route(catalog, 5).model, "claude-sonnet-5-6")
+        self.assertIn("claude-sonnet-5-6", dynamic_router.catalog_model_names(("claude",)))
 
     def test_a_measurably_stronger_release_at_the_same_price_is_not_penalized_for_it(self) -> None:
-        available_models.configure(CLAUDE)
+        available_models.configure(NEXT)
         catalog = tuple(
-            dataclasses.replace(spec, relative_capability=5) if spec.model == "claude-sonnet-5-5" else spec
+            dataclasses.replace(spec, relative_capability=5) if spec.model == "claude-sonnet-5-6" else spec
             for spec in model_router.load_model_catalog()
         )
-        peer = next(s for s in catalog if s.model == "claude-sonnet-5")
-        stronger = next(s for s in catalog if s.model == "claude-sonnet-5-5")
+        peer = next(s for s in catalog if s.model == "claude-sonnet-5-5")
+        stronger = next(s for s in catalog if s.model == "claude-sonnet-5-6")
         self.assertEqual(stronger.relative_cost, peer.relative_cost)
         self.assertGreater(stronger.relative_capability, peer.relative_capability)
-        self.assertEqual(_route(catalog, 5).model, "claude-sonnet-5-5")
+        self.assertEqual(_route(catalog, 5).model, "claude-sonnet-5-6")
         # A dearer model that is also more capable than needed still loses.
-        self.assertNotIn(_route(catalog, 5).model, ("claude-opus-5", "claude-opus-5-5"))
+        self.assertNotIn(_route(catalog, 5).model, ("claude-opus-5-5",))
 
     def test_the_upgrade_never_lands_on_a_model_with_no_price(self) -> None:
         available_models.configure({"claude": CLAUDE["claude"] + [{"value": "claude-sonnet-5-9"}]})
@@ -108,23 +129,23 @@ class RoutingCatalogTests(AvailableModelsTestCase):
         self.assertEqual(upgrade.model, "claude-sonnet-5-5")
 
     def test_inferred_metadata_is_flagged_and_never_invents_benchmarks(self) -> None:
-        available_models.configure(CLAUDE)
-        spec = next(s for s in model_router.load_model_catalog() if s.model == "claude-sonnet-5-5")
-        peer = next(s for s in model_router.load_model_catalog() if s.model == "claude-sonnet-5")
+        available_models.configure(NEXT)
+        spec = next(s for s in model_router.load_model_catalog() if s.model == "claude-sonnet-5-6")
+        peer = next(s for s in model_router.load_model_catalog() if s.model == "claude-sonnet-5-5")
         self.assertEqual((spec.relative_capability, spec.relative_cost), (peer.relative_capability, peer.relative_cost))
-        self.assertEqual(spec.supported_efforts, ("low", "medium", "high"))
-        self.assertIn("inferred from claude-sonnet-5", spec.notes)
+        self.assertEqual(spec.supported_efforts, peer.supported_efforts)
+        self.assertIn("inferred from claude-sonnet-5-5", spec.notes)
         for entry in spec.benchmarks.values():
             self.assertEqual(entry.data_quality, "HEURISTIC")
             self.assertIsNone(entry.coding_agent_index)
-        self.assertIn("discovered from the claude CLI", dynamic_router.model_description("claude-sonnet-5-5"))
+        self.assertIn("discovered from the claude CLI", dynamic_router.model_description("claude-sonnet-5-6"))
 
     def test_releases_the_catalog_has_moved_past_are_superseded_not_routed(self) -> None:
-        available_models.configure(CLAUDE)
-        spec = next(s for s in model_router.load_model_catalog() if s.model == "claude-opus-4-6")
+        available_models.configure({"claude": [{"value": "claude-sonnet-4-5"}]})
+        spec = next(s for s in model_router.load_model_catalog() if s.model == "claude-sonnet-4-5")
         self.assertTrue(spec.deprecated)
-        self.assertEqual(spec.superseded_by, "claude-opus-5")
-        self.assertNotIn("claude-opus-4-6", dynamic_router.catalog_model_names(("claude",)))
+        self.assertTrue(str(spec.superseded_by).startswith("claude-sonnet-5"))
+        self.assertNotIn("claude-sonnet-4-5", dynamic_router.catalog_model_names(("claude",)))
 
     def test_a_dated_alias_does_not_duplicate_a_catalogued_model(self) -> None:
         available_models.configure(CLAUDE)
@@ -147,10 +168,14 @@ class RoutingCatalogTests(AvailableModelsTestCase):
         self.assertIsNone(estimate.cost)
         self.assertNotEqual(estimate.status, model_pricing.PRICING_STATUS_PRICED)
 
+    def _priced(self, *rows):
+        return mock.patch.object(model_pricing, "PRICING_CATALOG", model_pricing.PRICING_CATALOG + tuple(rows))
+
     def test_a_discovered_model_takes_its_dollar_costs_from_the_pricing_catalog(self) -> None:
-        available_models.configure({"claude": [{"value": "claude-opus-5-5"}, {"value": "claude-quartz-9"}]})
-        catalog = {spec.model: spec for spec in model_router.load_model_catalog()}
-        priced = catalog["claude-opus-5-5"]
+        with self._priced(model_pricing._anthropic("claude-opus-5-6", 4.0, 20.0)):
+            available_models.configure({"claude": [{"value": "claude-opus-5-6"}, {"value": "claude-quartz-9"}]})
+            catalog = {spec.model: spec for spec in model_router.load_model_catalog()}
+        priced = catalog["claude-opus-5-6"]
         self.assertEqual((priced.input_cost, priced.output_cost), (4.0, 20.0))
         self.assertIn("Priced from the pricing catalog", priced.notes)
         unknown = catalog["claude-quartz-9"]
@@ -159,22 +184,20 @@ class RoutingCatalogTests(AvailableModelsTestCase):
 
     def test_a_cheaper_new_release_beats_the_priced_model_it_replaces(self) -> None:
         # Regression: an unpriced discovered model used to be scored as if it
-        # were expensive, so Opus 5 ($5/$25) beat the cheaper Opus 5.5 ($4/$20).
-        available_models.configure({"claude": [{"value": "claude-opus-5-5"}, {"value": "claude-opus-5"}]})
-        catalog = tuple(
-            dataclasses.replace(spec, input_cost=5.0, output_cost=25.0) if spec.model == "claude-opus-5" else spec
-            for spec in model_router.load_model_catalog()
-        )
-        request = model_router.RouteRequest(
-            task_type="feature", complexity=7, cost_consideration_enabled=True,
-            cost_sensitive=True, quality_requirement="high",
-        )
-        availability = model_router.RoutingAvailability(
-            enabled_agents=frozenset({"claude"}),
-            disabled_models=frozenset(s.model for s in catalog if dynamic_router.requires_usage_credits(s.model)),
-        )
-        decision = model_router.route(request, catalog=catalog, availability=availability)
-        self.assertEqual(decision.model, "claude-opus-5-5")
+        # were expensive, so the older model beat the cheaper new release.
+        with self._priced(model_pricing._anthropic("claude-opus-5-6", 3.0, 15.0)):
+            available_models.configure({"claude": [{"value": "claude-opus-5-6"}, {"value": "claude-opus-5-5"}]})
+            catalog = model_router.load_model_catalog()
+            request = model_router.RouteRequest(
+                task_type="feature", complexity=7, cost_consideration_enabled=True,
+                cost_sensitive=True, quality_requirement="high",
+            )
+            availability = model_router.RoutingAvailability(
+                enabled_agents=frozenset({"claude"}),
+                disabled_models=frozenset(s.model for s in catalog if dynamic_router.requires_usage_credits(s.model)),
+            )
+            decision = model_router.route(request, catalog=catalog, availability=availability)
+        self.assertEqual(decision.model, "claude-opus-5-6")
 
     def test_usage_credit_models_stay_filtered(self) -> None:
         available_models.configure({"claude": [{"value": "claude-fable-5-2"}]})
@@ -187,20 +210,21 @@ class RoutingCatalogTests(AvailableModelsTestCase):
 
 class DecisionEngineTests(AvailableModelsTestCase):
     def test_jev_sees_every_routable_model_and_is_asked_to_pick_one(self) -> None:
-        available_models.configure(CLAUDE)
+        available_models.configure(NEXT)
         state, questions = decision_engine.build_jev_request("TASK_CLASSIFICATION", {"title": "t"})
         listed = {item["model"]: item for item in state["availableModels"]["claude"]}
-        self.assertEqual(listed["claude-sonnet-5-5"]["status"], "inferred")
-        self.assertEqual(listed["claude-sonnet-5"]["status"], "catalogued")
-        self.assertEqual(listed["claude-opus-4-6"]["status"], "superseded")
+        self.assertEqual(listed["claude-sonnet-5-6"]["status"], "inferred")
+        self.assertEqual(listed["claude-sonnet-5-5"]["status"], "catalogued")
+        for blacklisted in ("claude-sonnet-5", "claude-opus-5", "claude-opus-4-6"):
+            self.assertNotIn(blacklisted, listed)
         criteria = questions["recommended_model"]["criteria"]
-        self.assertIn("claude/claude-sonnet-5-5", criteria)
-        self.assertNotIn("claude/claude-opus-4-6", criteria)
+        self.assertIn("claude/claude-sonnet-5-6", criteria)
+        self.assertNotIn("claude/claude-sonnet-5", criteria)
 
     def test_a_model_pick_is_kept_only_when_it_is_really_routable(self) -> None:
         available_models.configure(CLAUDE)
         self.assertEqual(decision_engine._recommended_model("claude/claude-sonnet-5-5"), "claude/claude-sonnet-5-5")
-        for answer in ("claude/claude-made-up", "claude/claude-opus-4-6", "", None):
+        for answer in ("claude/claude-made-up", "claude/claude-opus-4-6", "claude/claude-sonnet-5", "", None):
             self.assertEqual(decision_engine._recommended_model(answer), "")
 
     def test_response_carries_the_pick_as_advisory_metadata(self) -> None:

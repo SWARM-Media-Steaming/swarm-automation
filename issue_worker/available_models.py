@@ -20,9 +20,11 @@ checked-in catalogs exactly as they were.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import re
 import threading
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 # Brand prefixes carry no family meaning ("claude-opus-5" is the opus family).
@@ -40,6 +42,10 @@ class DiscoveredModel:
     default_effort: str = ""
     requires_usage_credits: bool = False
 
+
+# Models the operator has ruled out: older releases with a better successor.
+# The one list is shared with the desktop app, which embeds the same file.
+BLACKLIST_PATH = Path(__file__).resolve().parent.parent / "skills" / "model-router" / "model-blacklist.json"
 
 _lock = threading.Lock()
 _models: dict[str, tuple[DiscoveredModel, ...]] = {}
@@ -72,6 +78,8 @@ def configure(raw: Any, *, allow_usage_credit_models: bool = False) -> int:
             models: list[DiscoveredModel] = []
             for row in rows:
                 model = _model_from(key, row)
+                if model is not None and is_blacklisted(model.value):
+                    continue
                 if model is not None and model.value not in seen:
                     seen.add(model.value)
                     models.append(model)
@@ -104,6 +112,40 @@ def _model_from(agent: str, row: Any) -> DiscoveredModel | None:
             row.get("requiresUsageCredits", row.get("requires_usage_credits", False))
         ),
     )
+
+
+@functools.lru_cache(maxsize=1)
+def blacklist() -> dict[str, str]:
+    """``{canonical model: successor}`` for every model that must never be used.
+
+    The successor is ``""`` when none is named. An unreadable or malformed file
+    yields an empty blacklist: routing must degrade, never stall, on a bad list.
+    """
+    try:
+        rows = json.loads(BLACKLIST_PATH.read_text(encoding="utf-8")).get("models") or []
+    except (OSError, ValueError, AttributeError):
+        return {}
+    listed: dict[str, str] = {}
+    for row in rows:
+        name = canonical(str(row.get("model") or "")) if isinstance(row, Mapping) else ""
+        if name:
+            listed[name] = str(row.get("superseded_by") or "").strip()
+    return listed
+
+
+def is_blacklisted(slug: str) -> bool:
+    """Whether ``slug`` (a dated alias counts as its model) is blacklisted."""
+    return canonical(slug) in blacklist()
+
+
+def blacklist_successor(slug: str) -> str:
+    """The model that replaces a blacklisted ``slug``, or ``""``."""
+    return blacklist().get(canonical(slug), "")
+
+
+def replace_blacklisted(slug: str) -> str:
+    """``slug`` itself, or its successor when it is blacklisted and has one."""
+    return blacklist_successor(slug) or slug if is_blacklisted(slug) else slug
 
 
 def reset() -> None:

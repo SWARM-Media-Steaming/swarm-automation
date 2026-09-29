@@ -490,12 +490,19 @@ class ProviderSpec:
     def from_args(cls, args: argparse.Namespace, key: str, name: str) -> "ProviderSpec":
         per_provider = getattr(args, f"{key}_minimum_remaining_percent", None)
         inherited = float(args.minimum_remaining_percent)
+        # A saved or environment model the operator has blacklisted runs as its
+        # successor instead.
+        model = available_models.replace_blacklisted(getattr(args, f"{key}_model"))
+        router_model = available_models.replace_blacklisted(getattr(args, f"{key}_router_model"))
+        for chosen, saved in ((model, getattr(args, f"{key}_model")), (router_model, getattr(args, f"{key}_router_model"))):
+            if chosen != saved:
+                log(f"{name} model {saved} is blacklisted; using {chosen}.")
         return cls(
             key=key,
             name=name,
-            model=getattr(args, f"{key}_model"),
+            model=model,
             effort=getattr(args, f"{key}_effort"),
-            router_model=getattr(args, f"{key}_router_model"),
+            router_model=router_model,
             router_effort=getattr(args, f"{key}_router_effort"),
             strengths=getattr(args, f"{key}_router_strengths", "") or default_provider_strengths(key),
             bin=getattr(args, f"{key}_bin") or None,
@@ -2448,7 +2455,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
 
     def model_still_offered(self, provider_key: str, model: str) -> bool:
         """Whether the current configuration would still offer ``model``."""
-        if not model:
+        if not model or available_models.is_blacklisted(model):
             return False
         host = self.config.spec(provider_key)
         if host is not None and model == host.model:
@@ -7228,7 +7235,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=float(env_value("SWARM_MIN_REMAINING_PERCENT", "10")),
     )
     _provider_model_defaults = {
-        "claude": "claude-sonnet-5",
+        "claude": "claude-sonnet-5-5",
         "codex": "gpt-5.6-luna",
         "grok": "grok-4.6",
     }
