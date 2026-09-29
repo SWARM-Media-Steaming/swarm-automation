@@ -52,10 +52,19 @@ as the other AI CLIs. There is no direct HTTP client in this implementation.
 
 Configurable on AI Configuration. Defaults:
 
-- ≥ 0.90 — allow normal automated continuation
-- 0.70–0.89 — Swarm policy decides whether to proceed or fall back
-- < 0.70 — fall back to deterministic rules and/or a Claude/Codex/Grok oneshot
-- Security-sensitive decisions use a higher configurable threshold (default 0.95)
+- ≥ 0.90 — eligible for normal automated use, subject to Swarm policy gates
+- 0.70–0.89 — usable as an advisory signal; Swarm policy decides whether to
+  proceed, override it, or fall back
+- < 0.70 — Jev is not actionable; fall back to deterministic rules and/or a
+  Claude/Codex/Grok oneshot
+- UAT and Cyber finding decisions are security-sensitive for actionability and
+  use the higher configurable threshold (default 0.95)
+
+These are not authority thresholds. Even a result at 0.99 cannot override a
+deterministic safety gate. In particular, a blocking security finding cannot
+be passed, filed away, or marked out of scope merely because Jev says `PASS`.
+Failed tests cannot be marked complete, and required UAT/Cyber cannot be
+skipped. A low-confidence security result never suppresses a finding.
 
 ## Fallback
 
@@ -73,10 +82,22 @@ call, cost, or latency.
 Jev does not pick the final worker model. Pre-flight still runs the existing
 Swarm grader/router. That result is the **baseline** score. Validated Jev
 signals are stored separately. Swarm re-runs the existing scoring formula
-with bounded Jev inputs to produce the **modified/combined** score. Cost-first
-routing is the only automatic optimization mode: after capability,
+with bounded Jev inputs to produce the **modified/combined** score. Jev is
+asked which available model is the least expensive one that can do the work
+well, but its `recommended_model` answer is advisory metadata; Swarm does not
+blindly apply it. Jev's validated task type, complexity, security-risk, and
+related scores are inputs to the existing router.
+
+Cost-first routing is the only automatic optimization mode: after capability,
 expected-success, safety, and context-fit gates, the lowest estimated total
-cost wins. Latency is a tie-breaker only.
+cost wins. Automatic cost routing first removes candidates below the default
+0.80 expected-success floor, then excludes candidates more than 0.03 behind
+the strongest expected-success candidate before cost-aware scoring. Dollar
+cost and token efficiency are considered separately; latency is a tie-breaker
+only. Manual model selections and disabled dynamic routing are not replaced.
+
+The full routing policy lives in `skills/model-router/SKILL.md` and
+`skills/model-router/routing-rules.yaml`.
 
 ## Persistence and Feedback
 
@@ -103,3 +124,12 @@ AI Configuration → Jev Decision Engine:
 
 Credentials stay with the Jev CLI (`JEV_API_KEY` / `TYPESAFE_API_KEY` or the
 CLI's own sign-in). Swarm never logs secrets.
+
+## Implementation authority
+
+This document describes the contract. The exact enforcement remains in
+`issue_worker/decision_engine.py` (`confidence_band`, `may_act_on`, and
+`swarm_policy_action`) and `issue_worker/dynamic_router.py`
+(`apply_jev_signals_to_decision`). When documentation and implementation
+appear to disagree, update both and treat the safety gates in code as the
+behavior that must not be weakened.

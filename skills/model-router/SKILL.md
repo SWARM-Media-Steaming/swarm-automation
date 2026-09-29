@@ -45,6 +45,25 @@ docstring for the full picture of how AI-graded classification and this
 scoring engine fit together, and `.claude/skills/swarm-automation-dev/SKILL.md`'s
 "Dynamic model routing" section for the surrounding feature.
 
+### Jev interaction
+
+When Jev is enabled, it supplies bounded typed signals such as task type,
+complexity, security risk, and expected success to the existing Swarm router.
+Jev is also asked which available model is the least expensive one that can do
+the task well, but that `recommended_model` answer is advisory metadata and is
+not directly applied as the final route. Swarm reruns its own scoring and
+continues to own the provider/model/effort decision.
+
+Automatic Jev/Swarm routing always uses the cost-on policy. Candidates below
+the default `minimum_expected_success` of `0.80` are not eligible for the
+cost-first choice, and candidates more than the configured
+`cost_optimization_quality_tolerance` (`0.03` by default) behind the strongest
+expected-success candidate are excluded before cost decides among the capable
+remaining candidates. A blocking security finding, failed test, required UAT
+or Cyber review, or another deterministic Swarm gate overrides Jev regardless
+of confidence. See `docs/jev-decision-engine.md` for the decision-layer
+confidence bands and safety contract.
+
 `issue_worker/model_router_yaml.py` is a small, dependency-free loader for the
 YAML subset these two files use (block/flow mappings and sequences, scalars,
 `#` comments — see its module docstring for the exact grammar). Every other
