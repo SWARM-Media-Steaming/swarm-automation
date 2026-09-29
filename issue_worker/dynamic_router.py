@@ -59,6 +59,7 @@ from issue_images import (
     inlined_images,
 )
 import available_models as _available_models
+import model_pricing as _model_pricing
 import model_router as _model_router
 
 
@@ -460,6 +461,7 @@ def latest_release(
     * same provider and same family only (Sonnet stays Sonnet, Opus stays Opus);
     * the release must be active, offered by the provider CLI, allowed by the
       usage-credit setting, support the chosen effort, and not be excluded;
+    * it must have a price in the pricing catalog, so its spend is recorded;
     * it must not cost meaningfully more per token than the model it replaces;
     * a measured Intelligence Index that is clearly *lower* at the same effort
       vetoes it.
@@ -484,6 +486,9 @@ def latest_release(
         and (allow_usage_credit_models or not requires_usage_credits(spec.model))
         and (key, spec.model) not in barred
     ]
+    # An upgrade must land on a model whose spend the app can record: a model
+    # with no price in the pricing catalog would run with its cost unknown.
+    newer = [spec for spec in newer if _model_pricing.resolve_price(spec.model, provider=key).priced]
     if not newer:
         return None
     best = max(newer, key=lambda spec: _available_models.family_and_version(spec.model)[1])

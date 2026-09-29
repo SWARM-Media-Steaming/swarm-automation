@@ -325,6 +325,32 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual((choice.model, choice.effort, choice.session_id), ("claude-sonnet-5-5", "medium", "new-session"))
         self.assertFalse(choice.resume)
 
+    def test_the_stage_router_is_told_how_big_the_change_under_test_is(self):
+        self.prepare()
+        self.worker.update_state(routing_decision={"complexity": 4}, base_sha="base")
+        with mock.patch.object(self.worker, "git", return_value="10\t2\ta.js\n-\t-\timg.png\n3\t0\tb.py"):
+            note = self.worker.stage_scope_note(uat.UAT_STAGE)
+        self.assertIn("graded 4/10", note)
+        self.assertIn("3 file(s), +13/-2 lines", note)
+        self.assertIn("rarely much more complex", note)
+
+    def test_the_scope_note_is_empty_when_nothing_is_known(self):
+        self.prepare()
+        self.worker.update_state(routing_decision=None, base_sha="")
+        self.assertEqual(self.worker.stage_scope_note(uat.UAT_STAGE), "")
+
+    def test_the_stage_router_prompt_carries_the_scope_note(self):
+        self.prepare()
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        self.worker.update_state(routing_decision={"complexity": 4})
+        loop = self.worker.read_state()["adversarial"]
+        decision = {"provider": "codex", "selected_model": "gpt-5.6-terra", "reasoning_effort": "medium", "complexity": 5}
+        with mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 80)), \
+                mock.patch.object(self.worker, "resolve_router_response", return_value=decision) as routed, \
+                mock.patch.object(self.worker, "run_router", return_value="ok"):
+            self.worker.choose_stage_provider(uat.UAT_STAGE, loop)
+        self.assertIn("graded 4/10", routed.call_args.kwargs["prompt"])
+
     def test_a_started_session_keeps_its_model_and_no_upgrade_keeps_the_choice(self):
         self.prepare()
         resumed = ProviderChoice("Claude", "claude-sonnet-5", "high", "session", True)

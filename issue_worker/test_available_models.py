@@ -100,6 +100,13 @@ class RoutingCatalogTests(AvailableModelsTestCase):
         # A dearer model that is also more capable than needed still loses.
         self.assertNotIn(_route(catalog, 5).model, ("claude-opus-5", "claude-opus-5-5"))
 
+    def test_the_upgrade_never_lands_on_a_model_with_no_price(self) -> None:
+        available_models.configure({"claude": CLAUDE["claude"] + [{"value": "claude-sonnet-5-9"}]})
+        self.assertFalse(model_pricing.resolve_price("claude-sonnet-5-9", provider="claude").priced)
+        upgrade = dynamic_router.latest_release("claude", "claude-sonnet-5", "medium")
+        self.assertIsNotNone(upgrade)
+        self.assertEqual(upgrade.model, "claude-sonnet-5-5")
+
     def test_inferred_metadata_is_flagged_and_never_invents_benchmarks(self) -> None:
         available_models.configure(CLAUDE)
         spec = next(s for s in model_router.load_model_catalog() if s.model == "claude-sonnet-5-5")

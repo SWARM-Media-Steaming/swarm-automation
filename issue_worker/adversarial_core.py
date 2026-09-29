@@ -839,7 +839,7 @@ class AdversarialStageMixin:
             self.save_stage(stage, loop)
 
     def choose_stage_provider(self, stage: AdversarialStage, loop: dict[str, Any]):
-        from swarm_issue_worker import ProviderChoice, RouterCandidate, RouterError, build_router_prompt, iso_timestamp
+        from swarm_issue_worker import ProviderChoice, RouterCandidate, RouterError, build_router_prompt, iso_timestamp, log
         usages = {s.name: self.provider_usage(s.key) for s in self.config.enabled_specs}
         remaining = {name: u.remaining_percent for name, u in usages.items() if u.usable}
         previous = loop["fixer_provider"] if loop["phase"] == "test" else ""
@@ -881,6 +881,9 @@ class AdversarialStageMixin:
                         # Routing is re-run at every strict-mode epoch boundary
                         # with the reason the previous epoch did not converge.
                         body += "\n\n" + self.escalation_router_note(stage, loop, escalation)
+                    scope = self.stage_scope_note(stage)
+                    if scope:
+                        body += "\n\n" + scope
                     prompt = build_router_prompt(
                         title=f"{stage.router_task} {loop['phase']}: {self.issue.title}",
                         body=body, labels=self.issue.labels, candidates=candidates,
@@ -893,6 +896,9 @@ class AdversarialStageMixin:
                         host=host, images=[], previous_provider=previous.lower(), rework=bool(previous),
                     )
                     spec = self.config.require_spec(decision["provider"])
+                    log(f"{stage.label} for issue #{self.issue.number}: routing graded this {loop['phase']} "
+                        f"pass {decision.get('complexity')}/10 and chose {decision['provider']} "
+                        f"{decision['selected_model']} at {decision['reasoning_effort']} effort.")
                     choice = ProviderChoice(spec.name, decision["selected_model"], decision["reasoning_effort"], self.new_session_id(spec))
                 except RouterError as error:
                     self.history.warning(f"Adversarial routing used capacity fallback: {error}", iso_timestamp())
@@ -925,6 +931,40 @@ class AdversarialStageMixin:
         log(f"{stage.label} for issue #{self.issue.number}: upgrading {upgrade.previous} to "
             f"{upgrade.model}: {upgrade.reason}.")
         return ProviderChoice(choice.name, upgrade.model, choice.effort, choice.session_id, choice.resume)
+
+    def stage_scope_note(self, stage: AdversarialStage) -> str:
+        """What the change under test is, so the router grades the stage against it.
+
+        A tester or fixer that reviews an implementation already graded and
+        routed once should be graded relative to that change, not from the
+        issue text alone; otherwise a small change can draw a top-tier model.
+        Empty when neither the implementation's grade nor a diff is known.
+        """
+        state = self.read_state()
+        lines: list[str] = []
+        routing = state.get("routing_decision")
+        complexity = routing.get("complexity") if isinstance(routing, dict) else None
+        if isinstance(complexity, int) and not isinstance(complexity, bool):
+            lines.append(f"The implementation under review was graded {complexity}/10 complexity.")
+        base = str(state.get("base_sha") or "")
+        if base:
+            files = added = removed = 0
+            for row in self.git("diff", "--numstat", base, "HEAD", check=False).splitlines():
+                parts = row.split("\t")
+                if len(parts) == 3:
+                    files += 1
+                    added += int(parts[0]) if parts[0].isdigit() else 0
+                    removed += int(parts[1]) if parts[1].isdigit() else 0
+            if files:
+                lines.append(f"Its diff touches {files} file(s), +{added}/-{removed} lines.")
+        if not lines:
+            return ""
+        return (
+            f"Scope of this {stage.label} pass: " + " ".join(lines)
+            + " Grade the testing or fixing work relative to that change: reviewing a change is"
+            " rarely much more complex than making it, so grade higher only for a specific reason"
+            " (a security-sensitive path, a subtle behavior, or a much larger surface than the diff shows)."
+        )
 
     def escalation_router_note(self, stage: AdversarialStage, loop: dict[str, Any],
                                escalation: dict[str, Any]) -> str:

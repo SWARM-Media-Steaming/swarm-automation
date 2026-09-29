@@ -103,7 +103,12 @@ through `latest_release`: a model routed from a fallback tier table or the
 configured default moves to the newest release of its family when that is no
 dearer and not measurably weaker. A session already started keeps its model.
 This is not a separate scoring bonus; measured capability and cost still decide
-which candidate wins.
+which candidate wins. The upgrade only lands on a model with a price in the
+pricing catalog, so its spend is recorded.
+
+Each adversarial stage's router prompt also carries the graded complexity and
+diff size of the change under test, and the stage logs the complexity it was
+graded, so a small change is not tested by a top-tier model without a reason.
 
 The over-qualification penalty is waived for any model that costs no more than
 the cheapest model *capable of the task*, so a newer release at its
