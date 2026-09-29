@@ -5,6 +5,7 @@ shared retry model must allow a fresh corrected report. The observability
 section prohibits credentials in logs even on an error path. These tests use
 synthetic errors and a fake, never-authenticated token; no network is used.
 """
+import dataclasses
 import unittest
 from unittest import mock
 
@@ -18,6 +19,8 @@ class SecurityFailureRecoveryTests(LocalReviewFixture, unittest.TestCase):
         # rules additionally say low-confidence findings are advisory only:
         # they must not act on the review or silently retire its checks.
         self.prepare(vulnerable=True)
+        self.worker.config = dataclasses.replace(
+            self.worker.config, adversarial_best_effort_merge=True)
         self.start()
 
         def reviewer(prompt, activity=""):
