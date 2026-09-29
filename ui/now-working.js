@@ -92,8 +92,28 @@
     return null;
   }
 
+  // "<label> for issue #N: fixer|tester <Provider> model <model> with effort
+  // <effort>." — the worker's structured attribution for the phase that just
+  // began. Only configured values, never reasoning text.
+  function adversarialAttribution(message) {
+    for (const stage of ADVERSARIAL_STAGES) {
+      const found = message.match(new RegExp(
+        `^${stage.label} for issue #(\\d+): (fixer|tester) (\\S+) model (\\S+) with effort (\\S+)\\.$`, "i"));
+      if (found) {
+        return { stage, number: found[1], role: found[2].toLowerCase(), provider: found[3],
+          model: found[4] === "default" ? "" : found[4], effort: found[5] === "default" ? "" : found[5] };
+      }
+    }
+    return null;
+  }
+
   function normalizeRepo(value) {
     return String(value || "").trim().replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
+  }
+
+  function providerLabel(name) {
+    const value = String(name || "");
+    return value ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : "";
   }
 
   function logRows(logs, repositories, workerState) {
@@ -144,6 +164,8 @@
       String(item.number) === String(number) && (!repository || item.repository === repository));
     const updateAdversarial = (entry, repository, number, round, maximum, title, phase, kind = "adversarial") => {
       const key = `${kind}:${repository}#${number}`;
+      // The attribution log follows the round-start log; until it arrives the
+      // previous phase's attribution stays (a "fix applied" line has none).
       const item = {
         kind,
         key,
@@ -153,6 +175,7 @@
         phase,
         state: "running",
         since: entry.time,
+        attribution: items.get(key)?.attribution || null,
       };
       items.set(key, item);
     };
@@ -216,6 +239,14 @@
       } else if ((adversarial = adversarialRound(message))) {
         updateAdversarial(entry, repository, adversarial.number, adversarial.round,
           adversarial.maximum, adversarial.title, adversarial.phase, adversarial.stage.kind);
+      } else if ((adversarial = adversarialAttribution(message))) {
+        const item = items.get(`${adversarial.stage.kind}:${repository}#${adversarial.number}`)
+          || [...items.values()].find((candidate) => candidate.kind === adversarial.stage.kind
+            && String(candidate.number) === adversarial.number && (!repository || candidate.repository === repository));
+        if (item) {
+          item.attribution = { role: adversarial.role, provider: adversarial.provider,
+            model: adversarial.model, effort: adversarial.effort };
+        }
       } else if ((adversarial = adversarialTerminal(message))) {
         const key = `${adversarial.stage.kind}:${repository}#${adversarial.number}`;
         if (adversarial.type === "failed") {
@@ -287,11 +318,17 @@
     const rows = [];
     if (["running", "paused"].includes(workerState)) {
       items.forEach((item) => {
+        const who = item.attribution;
+        const detail = who
+          ? [who.role === "fixer" ? "Fixer" : "Tester", providerLabel(who.provider), who.model,
+            who.effort && `${who.effort} reasoning`, item.phase]
+          : [item.provider, item.model, item.effort && `${item.effort} effort`, item.phase];
         rows.push({
           kind: item.kind,
           key: item.key,
           title: item.title,
-          detail: [item.provider, item.model, item.effort && `${item.effort} effort`, item.phase].filter(Boolean).join(" · "),
+          detail: detail.filter(Boolean).join(" · "),
+          attribution: who ? { ...who } : null,
           repository: item.repository,
           state: item.state,
           since: item.since,

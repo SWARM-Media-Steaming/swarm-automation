@@ -483,6 +483,17 @@ class AdversarialStage:
             detail = f"starting re-test for round {self.round_position(loop)}."
         return f"{self.label} for issue #{issue_number}: {detail}"
 
+    def attribution_log(self, issue_number: int, loop: dict[str, Any], choice) -> str:
+        """Who is doing this phase: role, provider, model and configured effort.
+
+        Structured boundary log the Overview replays, so the live row can name
+        the agent behind the phase. Only configured values are logged, never
+        model reasoning.
+        """
+        role = "fixer" if loop["phase"] == "fix" else "tester"
+        return (f"{self.label} for issue #{issue_number}: {role} {choice.name} model "
+                f"{choice.model or 'default'} with effort {choice.effort or 'default'}.")
+
     def on_round_start(self, worker, loop: dict[str, Any]) -> None:
         """Extra observability a stage wants when a round begins."""
 
@@ -1446,6 +1457,7 @@ class AdversarialStageMixin:
                     loop.update(active=True, stage_base=loop.pop("retry_stage_base", None) or self.git("rev-parse", "HEAD"), response=None)
                     self.save_stage(stage, loop)
                     log(stage.round_start_log(self.issue.number, loop))
+                    log(stage.attribution_log(self.issue.number, loop, choice))
                     stage.on_round_start(self, loop)
                 except WorkerError as error:
                     # Setup/auth/provider errors happen before any report is
