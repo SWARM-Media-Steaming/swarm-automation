@@ -4130,6 +4130,33 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "id": "adversarial-358-calibration-env-isolation",
+      "name": "Issue #358 routing tests ignore host calibration",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3.13",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue358_calibration_env_isolation.py"
+      ],
+      "requirements": {
+        "executables": [
+          "python3.13",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/test_issue358_calibration_env_isolation.py"
+        ]
+      },
+      "timeoutSeconds": 1800
     }
   ],
   "version": 1

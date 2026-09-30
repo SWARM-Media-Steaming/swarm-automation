@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 import available_models
 import dynamic_router
@@ -23,6 +25,14 @@ def simulate(**inputs):
 
 class CalculatorTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        # These tests assert the bundled routing contract. A worker launched
+        # by the desktop app inherits the operator's active calibration path;
+        # letting that host setting leak in makes the expected catalog depend
+        # on which calibration happens to be active locally.
+        calibration = mock.patch.dict(os.environ)
+        calibration.start()
+        self.addCleanup(calibration.stop)
+        os.environ.pop("SWARM_MODEL_CALIBRATION_CATALOG", None)
         available_models.reset()
         self.addCleanup(available_models.reset)
 
