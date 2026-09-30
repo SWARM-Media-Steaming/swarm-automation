@@ -23,6 +23,7 @@ from typing import Any, Protocol
 
 import available_models as _available_models
 from ai_execution_history import sanitize_text
+from issue_context import fit_parts
 from jev_cli import (
     DEFAULT_JEV_MODEL,
     JevCli,
@@ -692,12 +693,27 @@ def routable_models_for_jev() -> dict[str, list[dict[str, Any]]]:
 MAX_ISSUE_CONTEXT_CHARS = 30000
 
 
+def _fit_issue_context(package: Mapping[str, Any]) -> str:
+    """Issue text for the request, within the hard ceiling; excerpts are shortened, not dropped."""
+    text = sanitize_text(package.get("text") or "")
+    if len(text) <= MAX_ISSUE_CONTEXT_CHARS:
+        return text
+    parts = [
+        (sanitize_text(label)[:40], sanitize_text(body))
+        for label, body in list(package.get("parts") or [])
+        if isinstance(body, str)
+    ]
+    if parts:
+        return fit_parts(parts, MAX_ISSUE_CONTEXT_CHARS)
+    return text[:MAX_ISSUE_CONTEXT_CHARS]
+
+
 def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Typed questions for one decision type. State is structured, not a prompt dump."""
     package = context.get("issue_context")
     package = package if isinstance(package, Mapping) else None
     if package is not None:
-        summary = sanitize_text(package.get("text") or "")[:MAX_ISSUE_CONTEXT_CHARS]
+        summary = _fit_issue_context(package)
     else:
         summary = sanitize_text(context.get("summary") or context.get("body_excerpt") or "")[:1200]
     state = {

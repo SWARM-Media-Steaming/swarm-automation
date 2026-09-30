@@ -13,9 +13,10 @@ is bounded, so a credential straddling a cut is still redacted.
 from __future__ import annotations
 
 import concurrent.futures
+import math
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from ai_execution_history import sanitize_text
 
@@ -66,17 +67,20 @@ class IssueContextSettings:
         def bound(value: Any, default: int, low: int) -> int:
             try:
                 number = int(value)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 number = default
             return min(HARD_MAX_CHARS, max(low, number))
 
         try:
-            timeout = min(30.0, max(0.5, float(self.summary_timeout_seconds)))
-        except (TypeError, ValueError):
+            timeout = float(self.summary_timeout_seconds)
+            if not math.isfinite(timeout):
+                raise ValueError(timeout)
+            timeout = min(30.0, max(0.5, timeout))
+        except (TypeError, ValueError, OverflowError):
             timeout = 5.0
         try:
             retries = min(3, max(0, int(self.summary_retries)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             retries = 1
         return IssueContextSettings(
             bound(self.max_raw_chars, 6000, 200),
@@ -170,6 +174,38 @@ def _run_summarizer(
     return deterministic_summary(sections, limit), "deterministic_after_summary_failure"
 
 
+CONTEXT_HEADER = "[context: long issue description summarized; original excerpts follow]"
+
+
+def render_parts(parts: Sequence[tuple[str, str]]) -> str:
+    return "\n\n".join([CONTEXT_HEADER, *(f"[{label}]\n{body}" for label, body in parts)])
+
+
+def fit_parts(parts: Sequence[tuple[str, str]], limit: int) -> str:
+    """Render ``parts`` within ``limit`` characters without dropping any of them.
+
+    The generated summary yields first; only then are the original excerpts
+    shortened, each in proportion, so every excerpt the metadata names survives.
+    """
+    text = render_parts(parts)
+    if len(text) <= limit:
+        return text
+    parts = list(parts)
+    fixed = len(render_parts([(label, "") for label, _ in parts]))
+    room = max(0, limit - fixed)
+    if parts and parts[0][0] == "summary":
+        excerpt_total = sum(len(body) for _, body in parts[1:])
+        parts[0] = ("summary", _clip(parts[0][1], max(0, room - excerpt_total)) if room > excerpt_total else "")
+        if not parts[0][1]:
+            parts = parts[1:]
+            fixed = len(render_parts([(label, "") for label, _ in parts]))
+            room = max(0, limit - fixed)
+    total = sum(len(body) for _, body in parts)
+    if total > room:
+        parts = [(label, _clip(body, max(4, len(body) * room // total))) for label, body in parts]
+    return render_parts(parts)[:limit]
+
+
 def build_issue_context(
     body: Any,
     settings: IssueContextSettings | None = None,
@@ -218,7 +254,7 @@ def build_issue_context(
     tail = clean[-edge:]
     used = len("[beginning]\n") + len(head) + len("\n\n[end]\n") + len(tail)
     chosen: list[str] = ["beginning"]
-    rendered: list[str] = [f"[beginning]\n{head}"]
+    excerpts: list[tuple[str, str]] = [("beginning", head)]
     sections_left = [key for key in EXCERPT_KEYS if sections.get(key)]
     for index, key in enumerate(sections_left):
         label_cost = len(key) + 4  # "\n\n[key]\n"
@@ -229,20 +265,12 @@ def build_issue_context(
         piece = _clip(sections[key], limit)
         used += label_cost + len(piece)
         chosen.append(key)
-        rendered.append(f"[{key}]\n{piece}")
+        excerpts.append((key, piece))
     chosen.append("end")
-    rendered.append(f"[end]\n{tail}")
+    excerpts.append(("end", tail))
 
-    text = "\n\n".join(
-        part
-        for part in (
-            "[context: long issue description summarized; original excerpts follow]",
-            f"[summary]\n{summary}" if summary else "",
-            *rendered,
-        )
-        if part
-    )
-    text = _clip(text, cfg.max_summary_chars + cfg.max_excerpt_chars + 200)
+    parts = ([("summary", summary)] if summary else []) + excerpts
+    text = _clip(render_parts(parts), cfg.max_summary_chars + cfg.max_excerpt_chars + 200)
     metadata.update(
         truncated=True,
         summarized=bool(summary),
@@ -251,4 +279,4 @@ def build_issue_context(
         excerpts=chosen,
         sentLength=len(text),
     )
-    return {"text": text, "metadata": metadata}
+    return {"text": text, "metadata": metadata, "parts": parts}
