@@ -4015,6 +4015,35 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue338_architecture_docs_contracts.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue338-architecture-docs-contracts",
+      "name": "Issue #338: architecture docs redaction, auth signals and squash reconciliation",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/architecture_docs.py",
+          "tests/adversarial/test_issue338_architecture_docs_contracts.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
