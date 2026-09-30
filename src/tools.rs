@@ -1408,7 +1408,10 @@ mod tests {
             model("claude-haiku-4-5"),
         ]);
         let values: Vec<_> = offered.iter().map(|m| m.value.as_str()).collect();
-        assert_eq!(values, ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-4-5"]);
+        assert_eq!(
+            values,
+            ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-4-5"]
+        );
 
         let mut config = AppConfig::default();
         let claude = config
@@ -1436,7 +1439,12 @@ mod tests {
     #[test]
     fn the_fallback_catalog_offers_no_blacklisted_model() {
         for id in ["claude", "codex", "grok"] {
-            assert!(fallback_models(id).iter().all(|m| !is_blacklisted(&m.value)), "{id}");
+            assert!(
+                fallback_models(id)
+                    .iter()
+                    .all(|m| !is_blacklisted(&m.value)),
+                "{id}"
+            );
         }
     }
 

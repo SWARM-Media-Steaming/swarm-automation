@@ -3291,7 +3291,10 @@ fn routing_calculator_args(
 ) -> Vec<String> {
     // Starting defaults are wanted for every known tool, enabled or not.
     let enabled: Vec<String> = if action == "defaults" {
-        config::KNOWN_PROVIDERS.iter().map(|id| id.to_string()).collect()
+        config::KNOWN_PROVIDERS
+            .iter()
+            .map(|id| id.to_string())
+            .collect()
     } else {
         config
             .enabled_providers()
