@@ -3499,6 +3499,37 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue322_registered_collection_contract.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-322-registered-collection-contract",
+      "name": "Issue #322 independent registered collection contract",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".swarm/tests.json",
+          "tests/adversarial/test_issue322_registered_collection_contract.py",
+          "tests/adversarial/test_ci_rustfmt.py",
+          "issue_worker/test_engineering_knowledge.py",
+          "tests/adversarial/test_adversarial_engineering_knowledge.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
