@@ -1483,6 +1483,7 @@ fn jev_feedback_query_args(
     outcome: Option<String>,
     routing_changed: Option<String>,
     created_after: Option<String>,
+    created_before: Option<String>,
     min_delta: Option<String>,
     max_cost: Option<String>,
 ) -> Vec<String> {
@@ -1507,6 +1508,8 @@ fn jev_feedback_query_args(
         routing_changed.unwrap_or_default(),
         "--jev-from".into(),
         created_after.unwrap_or_default(),
+        "--jev-to".into(),
+        created_before.unwrap_or_default(),
         "--jev-min-delta".into(),
         min_delta.unwrap_or_default(),
         "--jev-max-cost".into(),
@@ -1529,6 +1532,7 @@ fn get_jev_feedback<R: tauri::Runtime>(
     outcome: Option<String>,
     routing_changed: Option<String>,
     created_after: Option<String>,
+    created_before: Option<String>,
     min_delta: Option<String>,
     max_cost: Option<String>,
 ) -> Result<serde_json::Value, String> {
@@ -1567,6 +1571,7 @@ fn get_jev_feedback<R: tauri::Runtime>(
             outcome,
             routing_changed,
             created_after,
+            created_before,
             min_delta,
             max_cost,
         ),
@@ -1590,6 +1595,7 @@ async fn get_jev_feedback_background(
     outcome: Option<String>,
     routing_changed: Option<String>,
     created_after: Option<String>,
+    created_before: Option<String>,
     min_delta: Option<String>,
     max_cost: Option<String>,
 ) -> Result<serde_json::Value, String> {
@@ -1606,6 +1612,7 @@ async fn get_jev_feedback_background(
             outcome,
             routing_changed,
             created_after,
+            created_before,
             min_delta,
             max_cost,
         )

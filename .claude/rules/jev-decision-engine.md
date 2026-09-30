@@ -19,6 +19,10 @@ selection decision.
   Required UAT/Cyber, failed-test, completion, and other irreversible-action
   gates remain authoritative.
 
+- A non-actionable recommendation with no Swarm default must never be echoed as
+  the Swarm action when it is irreversible (`COMPLETE`, `FAIL`, `SKIP_*`, a
+  security `PASS`); `swarm_policy_action` substitutes the conservative action.
+
 When changing Jev behavior, preserve the distinction between a recommendation
 being recorded, a recommendation being actionable, and the final
 `swarm_action` selected by policy.

@@ -66,6 +66,11 @@ be passed, filed away, or marked out of scope merely because Jev says `PASS`.
 Failed tests cannot be marked complete, and required UAT/Cyber cannot be
 skipped. A low-confidence security result never suppresses a finding.
 
+A recommendation that is not actionable is never echoed as Swarm's own action
+when Swarm supplied no default: an irreversible one (`COMPLETE`, `FAIL`,
+`SKIP_UAT`, `SKIP_CYBER`, or a security `PASS`) becomes the conservative action
+(human review, `RUN_UAT`, `RUN_CYBER`, or `FIX_NOW`).
+
 ## Fallback
 
 Jev is optional. If it is disabled, missing, timing out, returning malformed
@@ -111,6 +116,9 @@ deltas, routing changes, completion, retries, fallback, latency, and
 estimated cost. Success is measured first by task completion, then by lower
 estimated cost per successfully completed task. Failures and retries are
 never treated as savings.
+The tab's provider/model, date range (from/to, inclusive), minimum score delta
+and maximum Jev cost filters run in the history query, so they cover every page
+of history. The Retries / failures card counts retried and failed outcomes.
 
 GitHub execution comments include a concise `### Jev Decision Engine` section.
 Raw prompts, credentials, and unredacted CLI output are not persisted or posted.
