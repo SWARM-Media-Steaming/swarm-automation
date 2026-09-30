@@ -632,7 +632,7 @@ def deterministic_prediction(profile: dict[str, Any], title: str, body: str,
     # Unknown measurements stay null in profiles; these are explicit scoring priors.
     repo = metrics.get("complexity", 45)
     component = round(sum(item["complexity"] for item in relevant)/len(relevant)) if relevant else 35
-    security = bool(re.search(r"\b(auth\w*|security|crypt\w*|credential\w*|permission\w*|vulnerab\w*|payment\w*)\b", text))
+    security = bool(re.search(r"\b(auth|authn|authz|authenticat\w*|authoriz\w*|oauth\w*|security|crypt\w*|credential\w*|permission\w*|vulnerab\w*|payment\w*)\b", text))
     infra = bool(re.search(r"\b(infra\w*|terraform|kubernetes|deploy\w*|docker|helm)\b", text))
     database = bool(re.search(r"\b(database|schema|migration\w*|sql)\b", text))
     api = bool(re.search(r"\b(api|endpoint\w*|contract\w*|protocol\w*)\b", text))
