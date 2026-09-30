@@ -10,6 +10,7 @@ Jev is a fast, inexpensive typed decision layer. When enabled, it can:
 - classify incoming GitHub issues (bug, feature, security, architecture, …)
 - score pre-flight complexity, security sensitivity, RAG scope, UAT/Cyber need
 - feed those structured scores into Dynamic Model Routing as extra inputs
+- interpret compact repository-profile metrics into the per-issue complexity vector (see `complexity-scoring.md`; always on, advisory, with a deterministic fallback)
 - classify UAT and Cyber findings as in-scope / out-of-scope / fix-now / new issue
 - score candidate RAG context before expensive LLM calls
 - produce a structured completion assessment

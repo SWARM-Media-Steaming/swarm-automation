@@ -77,6 +77,8 @@ from adversarial_uat import (
     UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_LEGACY_NOTICE, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE,
 )
 from architecture_docs import ArchitectureDocsMixin
+from complexity_worker import ComplexityWorkerMixin
+from repository_complexity import format_analysis
 from handoff_context import HandoffContextMixin
 from handoff_context import render_prompt_section as render_handoff_prompt_section
 from issue_images import (
@@ -1087,7 +1089,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin):
+class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin, ComplexityWorkerMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -2260,6 +2262,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 f"- {self.choice.name} usage remaining: {self.format_usage_snapshot(usage_at_start)}\n"
             )
             if self.routing:
+                if self.routing.get("complexity_analysis"):
+                    body += "\n" + format_analysis(self.routing["complexity_analysis"]) + "\n\n## Routing Decision\n\n"
+                    if self.routing.get("complexity_requirements_unmet"):
+                        body += "No available model met all requirements; strongest available best-effort route used.\n\n"
                 body += "\n" + format_routing_notice(self.routing) + "\n"
             jev_report = self.render_jev_report()
             if jev_report:
@@ -2725,6 +2731,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         assert self.choice and self.issue
         self._routing_excluded = set(excluded_models or ())
         host = self.config.require_spec(self.choice.key)
+        self.prepare_issue_complexity(host)
         fallback_model = self.choice.model
         fallback_effort = self.choice.effort
         original_body = self.issue.body
@@ -2748,6 +2755,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 allow_usage_credit_models=self.config.allow_usage_credit_models,
                 historical_signals=self.knowledge_routing_signals(),
             )
+            prompt += self.complexity_prompt_note()
             raw = self.run_router(host, prompt, images)
             decision = self.resolve_router_response(
                 raw,
@@ -2783,8 +2791,16 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 dynamic_model_routing=self.config.dynamic_model_routing,
             )
             self.routing = self.attach_jev_routing(self.routing, candidates)
+            self.routing = self.enforce_issue_complexity(self.routing, candidates)
+            if self.config.dynamic_model_routing:
+                self.adopt_routing_decision(self.routing)
+            else:
+                self.routing = pin_configured_routing_decision(self.routing, provider=self.choice.key,
+                    provider_name=self.choice.name, model=fallback_model, effort=fallback_effort)
+                self.routing["fallback"] = True
         else:
             decision = self.attach_jev_routing(decision, candidates)
+            decision = self.enforce_issue_complexity(decision, candidates)
             if self.config.dynamic_model_routing:
                 decision["dynamic_model_routing"] = True
                 self.adopt_routing_decision(decision)
@@ -2802,6 +2818,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                     f"{self.choice.effort} because Dynamic Model Routing is off."
                 )
         self.issue.body = original_body
+        self.persist_complexity_routing()
         if self.in_progress_file.exists():
             self.update_state(
                 model=self.choice.model,
@@ -2960,6 +2977,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         )
         if upgrade is None:
             return
+        if decision.get("complexity_analysis"):
+            from dynamic_router import complexity_model_meets
+            if not complexity_model_meets(self.choice.key, upgrade.model, self.choice.effort,
+                                          decision["complexity_analysis"]):
+                return
         log(
             f"Upgrading the routed model {upgrade.previous} to {upgrade.model}: {upgrade.reason}."
         )
@@ -3014,6 +3036,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         )
         if execution_id and self.in_progress_file.exists():
             self.update_state(execution_id=execution_id)
+        self.persist_complexity_routing()
 
     @staticmethod
     def summary_section(output: str, heading: str) -> str:
@@ -3031,6 +3054,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         files_changed: Sequence[str] = (),
         pull_request_url: str = "",
     ) -> None:
+        self.finish_complexity_outcome(status, files_changed)
         if not self.history.execution_id:
             return
         completed = iso_timestamp()
@@ -4242,6 +4266,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 "(including its security/ subtree) or suites with origin=adversarial-security in "
                 ".swarm/tests.json."
             )
+        lines.append(self.complexity_prompt_note())
         if self.config.update_claude_assets_enabled and not question_issue:
             lines.append(
                 "Also update any Claude skill relevant to this issue, and where appropriate within the "
@@ -6843,6 +6868,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
             log(f"Dry run complete: would run {self.choice.name} for {self.issue.url}.")
             return 0
 
+        self.prepare_issue_complexity(self.config.require_spec(self.choice.key))
         if not (self.in_progress_file.exists() and self.adversarial_state_present()):
             self.maybe_apply_dynamic_routing()
         if self.issue.work_type == "followup":
@@ -7247,6 +7273,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
             self.deliver_pending()
             self.reconcile_issue_pull_requests()
             self.reconcile_orphan_issue_branches()
+            if not self.config.dry_run:
+                self.refresh_complexity_profile()
             if self.prepare_paused_resume():
                 return 0
             # A CI failure issue the monitor just filed is worked directly by

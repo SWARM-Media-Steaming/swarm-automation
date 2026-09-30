@@ -207,7 +207,74 @@ fn save_config<R: tauri::Runtime>(
         .lock()
         .map_err(|_| "Configuration state lock was poisoned".to_string())? = config.clone();
     let _ = refresh_running_scheduler(&app, &state, &config);
+    schedule_repository_profiles(&app, &config);
     Ok(config)
+}
+
+/// Always-on local measurements share the history database. Serialized, off the
+/// UI thread, and independent of optional knowledge/history/Jev settings.
+static COMPLEXITY_REFRESH_LOCK: Mutex<()> = Mutex::new(());
+
+fn schedule_repository_profiles<R: tauri::Runtime>(app: &tauri::AppHandle<R>, config: &AppConfig) {
+    // Mock command handlers must never launch real processes or touch host state.
+    #[cfg(test)]
+    if app.state::<AppState>().test_data_dir.is_some() {
+        return;
+    }
+    let app = app.clone();
+    let config = config.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(_guard) = COMPLEXITY_REFRESH_LOCK.try_lock() else {
+            return;
+        };
+        let result = (|| -> Result<(), String> {
+            let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+            let git = tools::configured_or_detected("", "git")?;
+            let script = worker_script_dir(&app)?.join("repository_complexity.py");
+            let repositories: Vec<_> = config
+                .repositories
+                .iter()
+                .filter_map(|repo| {
+                    let workspace = resolve_workspace(&app, &config, repo).ok()?;
+                    // Managed repositories not cloned yet are measured at the first worker poll.
+                    workspace.join(".git").exists().then(|| {
+                        serde_json::json!({
+                            "repository": repo.github_repository, "workspace": workspace,
+                            "remote": repo.remote_name, "base": repo.base_branch,
+                        })
+                    })
+                })
+                .collect();
+            if repositories.is_empty() {
+                return Ok(());
+            }
+            let payload = serde_json::json!({"git": git, "repositories": repositories});
+            let arguments = vec![
+                script.to_string_lossy().into_owned(),
+                "--database".into(),
+                execution_history_db_path(&config)
+                    .to_string_lossy()
+                    .into_owned(),
+            ];
+            let (ok, _) = run_capture_with_input(&python, &arguments, &payload.to_string());
+            if !ok {
+                return Err("repository profiler process unavailable".into());
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("SWARM complexity measurements deferred: {error}");
+        }
+    });
+}
+
+fn spawn_repository_profile_maintenance(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        schedule_repository_profiles(&app, &current_or_default_config(&app));
+        // The profiler checks commit/version/age and does a full verification weekly.
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    });
 }
 
 #[tauri::command]
@@ -5341,6 +5408,7 @@ fn main() {
             install_tray(app)?;
             spawn_permission_priming(app.handle());
             spawn_startup_model_calibration_refresh(app.handle());
+            spawn_repository_profile_maintenance(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {

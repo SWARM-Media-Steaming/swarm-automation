@@ -1115,6 +1115,13 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertIn("Router recommendation: Grok 4.6 at High reasoning", notice)
         self.assertNotIn("Dynamic Model Routing applied", notice)
 
+    def assert_complexity_route(self):
+        from dynamic_router import complexity_model_meets
+        analysis = self.worker.routing["complexity_analysis"]
+        self.assertFalse(self.worker.routing["complexity_requirements_unmet"])
+        self.assertTrue(complexity_model_meets(self.worker.choice.key, self.worker.choice.model,
+                                               self.worker.choice.effort, analysis))
+
     def test_cost_consideration_reaches_scored_routing_on_an_invalid_model_name(self):
         self.prepare()
         self.worker.config = dataclasses.replace(
@@ -1136,10 +1143,9 @@ class AdversarialUatTests(unittest.TestCase):
         })
         with mock.patch("swarm_issue_worker.run_provider_router", return_value=payload):
             self.worker.maybe_apply_dynamic_routing()
-        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertTrue(self.worker.routing["cost_consideration_enabled"])
         self.assertEqual(self.worker.routing["routing_optimization"], "cost")
-        self.assertEqual(self.worker.choice.model, "claude-haiku-4-5")
         self.assertEqual(self.worker.choice.effort, "low")
 
     def test_best_fit_routing_handoff_uses_the_scored_grok_fallback(self):
@@ -1177,10 +1183,10 @@ class AdversarialUatTests(unittest.TestCase):
         })
         with mock.patch("swarm_issue_worker.run_provider_router", return_value=payload):
             self.worker.maybe_apply_dynamic_routing()
-        self.assertEqual(self.worker.choice.name, "Grok")
-        self.assertEqual(self.worker.choice.model, "grok-4.7")
-        self.assertEqual(self.worker.choice.effort, "xhigh")
-        self.assertEqual(self.worker.routing["model_source"], "tier")
+        # Capability floors from the complexity vector now decide the provider
+        # before cost; the pick must satisfy them.
+        self.assert_complexity_route()
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertTrue(self.worker.routing["cost_consideration_enabled"])
 
     def test_cost_routing_prompt_holds_frontier_models_to_the_complexity_floor(self):

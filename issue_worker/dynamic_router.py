@@ -1824,6 +1824,77 @@ def apply_jev_signals_to_decision(
     return updated
 
 
+def complexity_model_meets(provider: str, model: str, effort: str, prediction: dict[str, Any]) -> bool:
+    """Release upgrades must preserve the same vector gates as the original pick."""
+    import dataclasses
+    try:
+        catalog = tuple(dataclasses.replace(item, supported_efforts=(effort,)) for item in _routing_catalog()
+                        if item.agent == provider and item.model == model and effort in item.supported_efforts)
+        _model_router.route(_model_router.RouteRequest(
+            "feature", max(1, min(10, round(prediction["vector"]["implementation_complexity"]/10))),
+            complexity_vector=prediction["vector"], capability_requirements=prediction["requirements"]), catalog=catalog)
+        return True
+    except (_model_router.ModelRouterError, _model_router.ModelRouterConfigError):
+        return False
+
+
+def apply_complexity_requirements(
+    decision: dict[str, Any], prediction: dict[str, Any], candidates: Sequence[RouterCandidate],
+    *, allow_usage_credit_models: bool = False, history: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    """Capability/context/security gates precede cost across every available tool.
+
+    If none can meet the requirements, best effort uses the strongest available
+    candidate at its highest effort, explicitly recording the unmet floor. Cost
+    optimization never chooses a below-floor model. Manual choices are pinned by
+    the caller after this recommendation is recorded.
+    """
+    vector = prediction["vector"]
+    offered = {(candidate.key, model.model) for candidate in candidates for model in
+               candidate_catalog(candidate, allow_usage_credit_models=allow_usage_credit_models)}
+    catalog = tuple(model for model in _routing_catalog()
+                    if (model.agent, model.model) in offered and model.active and _model_router.is_priced(model))
+    updated = dict(decision, complexity_analysis=prediction)
+    updated["preflight_recommendation"] = {key: decision.get(key) for key in
+        ("provider", "selected_model", "reasoning_effort", "complexity", "provider_reason")}
+    performance = tuple({"model": item["routing"].get("selected_model"),
+                         "success": item["status"] in {"completed", "reworked", "answered", "environment_only"}}
+                        for item in history)
+    try:
+        result = _model_router.route(
+            _model_router.RouteRequest(
+                task_type=_normalize_task_type(str(decision.get("task_type") or "feature")),
+                complexity=max(1, min(10, int(round(vector["implementation_complexity"]/10)))),
+                complexity_vector=vector, capability_requirements=prediction["requirements"],
+                historical_performance=performance,
+            ), catalog=catalog,
+        )
+        updated.update(provider=result.agent, selected_model=result.model, reasoning_effort=result.effort,
+                       provider_name=next((item.name for item in candidates if item.key == result.agent), result.agent),
+                       tier_explanation=result.reason, model_source="repository_complexity",
+                       complexity_candidate_scores=list(result.candidates), complexity_requirements_unmet=False)
+        if result.agent != decision.get("provider"):
+            updated["provider_reason"] = "Repository-aware capability and context gates, followed by cost ranking: " + result.reason
+    except _model_router.ModelRouterError:
+        rules = _model_router.load_routing_rules()
+        pairs = [(model, effort) for model in catalog for effort in model.supported_efforts if effort in rules.effort_ladder]
+        updated["complexity_requirements_unmet"] = True
+        updated["complexity_candidate_scores"] = []
+        updated["tier_explanation"] = "No available candidate meets all complexity requirements; using the strongest available model as explicit best effort."
+        if pairs:
+            model, effort = max(pairs, key=lambda pair: (pair[0].relative_capability, rules.effort_ladder.index(pair[1])))
+            updated.update(provider=model.agent, selected_model=model.model, reasoning_effort=effort,
+                           provider_name=next((item.name for item in candidates if item.key == model.agent), model.agent),
+                           model_source="complexity_best_effort")
+    updated["complexity"] = max(1, min(10, round(vector["implementation_complexity"]/10)))
+    updated["risk"] = "high" if max(vector["architecture_risk"], vector["security_risk"]) >= 65 else "medium"
+    updated["context_requirement"] = {"low": "small", "medium": "medium", "high": "large"}[prediction["requirements"]["context_requirement"]]
+    # A failed *grading* call is independent of the deterministic model selection.
+    updated["grading_fallback"] = bool(updated.get("fallback"))
+    updated["fallback"] = False
+    return updated
+
+
 def routing_choice_was_applied(decision: dict[str, Any]) -> bool:
     source = str(decision.get("model_source") or "")
     if source in {"router", "tier"}:

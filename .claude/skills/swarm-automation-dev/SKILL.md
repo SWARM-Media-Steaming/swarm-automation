@@ -637,3 +637,11 @@ Per-repository, off by default (`architecture_docs_enabled`, worker flag
 (tests: `test_architecture_docs.py`, run with `python3.13 -m unittest`);
 renderer: `ui/architecture-docs.js`; Tauri command `get_architecture_docs`.
 See `.claude/rules/architecture-docs.md` before changing it.
+
+## Repository-aware complexity scoring
+
+Always on, no toggle. Logic: `issue_worker/repository_complexity.py`,
+`complexity_worker.py`, `dynamic_router.apply_complexity_requirements`; tests
+`test_repository_complexity.py` (`python3.13 -m unittest`). Read
+`.claude/rules/repository-complexity-scoring.md` and `docs/complexity-scoring.md`
+before changing routing, and keep scoring data, versions and the issue output in step.
