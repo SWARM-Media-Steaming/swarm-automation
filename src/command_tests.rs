@@ -2,13 +2,14 @@ use super::{
     automation_log_path, bot_app_slugs_from_config, decide_bot_push_access, describe_refresh,
     detect_tools, execution_history_query_args, feedback_repository_names, get_config,
     get_execution_history, get_prompt_grades, get_usage_report, grant_apps_request,
-    inspect_repository, issue_branch_pr_is_visible, jev_scheduler_arguments,
-    knowledge_routing_payload, knowledge_settings_payload, mark_permission_primed, needs_promotion,
-    parse_pr_ref, promotion_approval_args, prompt_grades_query_args, provider_scheduler_arguments,
-    push_access_message, reconcile_integration_for_promotion, redact_secret,
-    refresh_model_data_args, refresh_running_scheduler, repo_status_args, repo_worker_args,
-    request_issue_scan, require_closed_issue, routing_calculator_args, run_now_request_path,
-    save_config, save_feedback_repo_filter, scheduler_arguments, usage_report_query_args,
+    inspect_repository, issue_branch_pr_is_visible, jev_feedback_query_args,
+    jev_scheduler_arguments, knowledge_routing_payload, knowledge_settings_payload,
+    mark_permission_primed, needs_promotion, parse_pr_ref, promotion_approval_args,
+    prompt_grades_query_args, provider_scheduler_arguments, push_access_message,
+    reconcile_integration_for_promotion, redact_secret, refresh_model_data_args,
+    refresh_running_scheduler, repo_status_args, repo_worker_args, request_issue_scan,
+    require_closed_issue, routing_calculator_args, run_now_request_path, save_config,
+    save_feedback_repo_filter, scheduler_arguments, usage_report_query_args,
     validate_worker_script_dir, write_repos_file, AiExecutionRecord, AppState, BranchAheadBehind,
     ExecutionHistoryPage, PromptGradesQuery, ResolvedProvider, UsageReportQuery,
 };
@@ -1467,6 +1468,36 @@ fn jev_scheduler_arguments_forwards_enabled_configuration() {
     assert!(args
         .windows(2)
         .any(|pair| { pair[0] == "--jev-confidence-security" && pair[1] == "0.94" }));
+}
+
+#[test]
+fn jev_feedback_query_args_forwards_date_range_delta_and_cost() {
+    let args = jev_feedback_query_args(
+        Path::new("history.py"),
+        Path::new("history.sqlite3"),
+        &["acme/app".to_string()],
+        Some(20),
+        None,
+        None,
+        Some("claude".into()),
+        None,
+        None,
+        Some("2026-01-01".into()),
+        Some("2026-02-01".into()),
+        Some("0.05".into()),
+        Some("0.001".into()),
+    );
+    let value = |flag: &str| {
+        args.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+    };
+    assert_eq!(value("--jev-from").as_deref(), Some("2026-01-01"));
+    assert_eq!(value("--jev-to").as_deref(), Some("2026-02-01"));
+    assert_eq!(value("--jev-min-delta").as_deref(), Some("0.05"));
+    assert_eq!(value("--jev-max-cost").as_deref(), Some("0.001"));
+    assert_eq!(value("--jev-provider").as_deref(), Some("claude"));
+    assert_eq!(value("--offset").as_deref(), Some("20"));
 }
 
 #[test]

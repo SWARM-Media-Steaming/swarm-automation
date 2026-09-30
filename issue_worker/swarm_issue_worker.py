@@ -3274,6 +3274,12 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
 
     @staticmethod
     def _is_security_context(item: dict[str, Any]) -> bool:
+        # Persisted provenance is stronger evidence than title wording and is
+        # shared with the context pack's token-reservation policy.
+        from engineering_knowledge import has_security_provenance
+
+        if has_security_provenance(item):
+            return True
         text = " ".join(
             str(item.get(key) or "") for key in ("title", "name", "summary", "body")
         ).lower()
@@ -3316,12 +3322,12 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             keep = above_threshold
         # A low score never discards security-relevant history (incidents,
         # vulnerabilities) even when three other chunks already qualify.
-        kept_ids = {id(item) for item in keep}
-        keep += [
-            item for _, item in scored
-            if id(item) not in kept_ids and self._is_security_context(item)
-        ]
-        pack.items = keep
+        # Put those items first so the final token-bounded render reserves room
+        # for them instead of letting high-scored ordinary chunks crowd them
+        # out.  Jev still evaluates the complete candidate set above.
+        security_items = [item for _, item in scored if self._is_security_context(item)]
+        security_ids = {id(item) for item in security_items}
+        pack.items = [*security_items, *[item for item in keep if id(item) not in security_ids]]
         metadata = getattr(pack, "metadata", None)
         if isinstance(metadata, dict):
             metadata["jevRagScope"] = scope.get("decision")

@@ -213,6 +213,21 @@ def estimate_tokens(text: str) -> int:
     return max(0, (len(text or "") + APPROX_CHARS_PER_TOKEN - 1) // APPROX_CHARS_PER_TOKEN)
 
 
+def has_security_provenance(item: dict[str, Any]) -> bool:
+    """Return whether a knowledge item came from the security review path.
+
+    These fields are assigned while indexing execution history, rather than
+    inferred from attacker-controlled issue wording.  They are therefore safe
+    to use when reserving bounded prompt space for prior security findings.
+    """
+    metadata = item.get("metadata")
+    stage = str(metadata.get("stage") or "") if isinstance(metadata, dict) else ""
+    return (
+        str(item.get("source_kind") or "").strip().lower() == "security_finding"
+        or stage.strip().lower() == "security"
+    )
+
+
 def _bounded(text: str, limit: int) -> str:
     text = text or ""
     if len(text) <= limit:
@@ -1169,13 +1184,20 @@ class KnowledgeStore:
 
     def record_injection(self, payload: dict[str, Any], now: str = "") -> str:
         now = now or utc_now()
-        injection_id = str(uuid.uuid4())
+        injection_id = sanitize_text(payload.get("injection_id")) or str(uuid.uuid4())
         with self.connect() as database:
             database.execute(
                 """INSERT INTO knowledge_context_injections (
                     injection_id, execution_id, repository, issue_number, object_ids_json,
                     context_tokens, sources_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(injection_id) DO UPDATE SET
+                    execution_id = excluded.execution_id,
+                    repository = excluded.repository,
+                    issue_number = excluded.issue_number,
+                    object_ids_json = excluded.object_ids_json,
+                    context_tokens = excluded.context_tokens,
+                    sources_json = excluded.sources_json""",
                 (
                     injection_id,
                     sanitize_text(payload.get("execution_id")),
@@ -2540,9 +2562,47 @@ class KnowledgeQueryService:
 
 
 class KnowledgeContextPack:
-    def __init__(self, items: list[dict[str, Any]], token_limit: int) -> None:
-        self.items = items
+    def __init__(
+        self,
+        items: list[dict[str, Any]],
+        token_limit: int,
+        *,
+        injection_payload: dict[str, Any] | None = None,
+        injection_recorder: Callable[[dict[str, Any]], str] | None = None,
+    ) -> None:
+        self._items = list(items)
+        self._rendered_items: list[dict[str, Any]] | None = None
+        self._rendered_text = ""
         self.token_limit = token_limit
+        self.metadata: dict[str, Any] = {}
+        self._injection_payload = dict(injection_payload or {})
+        self._injection_recorder = injection_recorder
+        self._injection_id = ""
+
+    @property
+    def items(self) -> list[dict[str, Any]]:
+        """The complete bounded candidate set, even after a preview render."""
+        return self._items
+
+    @items.setter
+    def items(self, value: Sequence[dict[str, Any]]) -> None:
+        # Jev replaces this list after scoring.  Clear the previous render so
+        # object_ids/sources and injection telemetry describe the final set.
+        self._items = list(value)
+        self._rendered_items = None
+        self._rendered_text = ""
+
+    @property
+    def rendered_items(self) -> list[dict[str, Any]]:
+        return list(self._rendered_items or [])
+
+    def _ordered_for_render(self) -> list[dict[str, Any]]:
+        # Reserve prompt space for trusted security provenance before ordinary
+        # relevance-ranked context.  Stable partitioning preserves the order
+        # Jev (or the retriever when Jev is off) selected within each group.
+        security = [item for item in self._items if has_security_provenance(item)]
+        ordinary = [item for item in self._items if not has_security_provenance(item)]
+        return [*security, *ordinary]
 
     def render(self) -> str:
         lines = [
@@ -2553,7 +2613,7 @@ class KnowledgeContextPack:
         ]
         used = estimate_tokens("\n".join(lines))
         included: list[dict[str, Any]] = []
-        for item in self.items:
+        for item in self._ordered_for_render():
             provenance = item.get("provenance_kind") or PROVENANCE_SOURCE_FACT
             block = (
                 f"- [{provenance}] {item.get('object_type')} · {item.get('repository')}: "
@@ -2561,17 +2621,33 @@ class KnowledgeContextPack:
             )
             cost = estimate_tokens(block)
             if used + cost > self.token_limit:
-                break
+                continue
             lines.append(block)
             used += cost
             included.append(item)
-        self.items = included
         lines.append(f"Knowledge items included: {len(included)}. Approximate context tokens: {used}.")
-        return "\n".join(lines)
+        rendered = "\n".join(lines)
+        self._rendered_items = included
+        self._rendered_text = rendered
+        if self._injection_recorder is not None:
+            payload = {
+                **self._injection_payload,
+                "injection_id": self._injection_id,
+                "object_ids": self.object_ids,
+                "context_tokens": estimate_tokens(rendered),
+                "sources": self.sources,
+            }
+            self._injection_id = self._injection_recorder(payload)
+        return rendered
+
+    def _effective_items(self) -> list[dict[str, Any]]:
+        if self._rendered_items is not None:
+            return self._rendered_items
+        return self._items
 
     @property
     def object_ids(self) -> list[str]:
-        return [str(item.get("object_id")) for item in self.items if item.get("object_id")]
+        return [str(item.get("object_id")) for item in self._effective_items() if item.get("object_id")]
 
     @property
     def sources(self) -> list[dict[str, Any]]:
@@ -2583,12 +2659,14 @@ class KnowledgeContextPack:
                 "url": item.get("source_url") or "",
                 "provenanceKind": item.get("provenance_kind"),
             }
-            for item in self.items
+            for item in self._effective_items()
         ]
 
     @property
     def token_count(self) -> int:
-        return estimate_tokens(self.render()) if self.items else estimate_tokens("")
+        if self._rendered_items is None and self._items:
+            self.render()
+        return estimate_tokens(self._rendered_text)
 
 
 class KnowledgeGenerationService:
@@ -2810,19 +2888,16 @@ class KnowledgeService:
             if object_id and object_id not in seen:
                 seen.add(object_id)
                 merged.append(item)
-        pack = KnowledgeContextPack(merged, limit)
-        pack.render()  # bound items
-        self.store.record_injection(
-            {
+        return KnowledgeContextPack(
+            merged,
+            limit,
+            injection_payload={
                 "execution_id": execution_id,
                 "repository": repository,
                 "issue_number": issue_number,
-                "object_ids": pack.object_ids,
-                "context_tokens": estimate_tokens(pack.render()) if pack.items else 0,
-                "sources": pack.sources,
-            }
+            },
+            injection_recorder=self.store.record_injection,
         )
-        return pack
 
     def routing_signals(self, *, repository: str, issue_title: str, issue_body: str) -> str:
         block = self.queries.cost_history(

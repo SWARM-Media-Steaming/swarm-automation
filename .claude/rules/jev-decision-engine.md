@@ -19,6 +19,10 @@ selection decision.
   Required UAT/Cyber, failed-test, completion, and other irreversible-action
   gates remain authoritative.
 
+- A non-actionable recommendation with no Swarm default must never be echoed as
+  the Swarm action when it is irreversible (`COMPLETE`, `FAIL`, `SKIP_*`, a
+  security `PASS`); `swarm_policy_action` substitutes the conservative action.
+
 When changing Jev behavior, preserve the distinction between a recommendation
 being recorded, a recommendation being actionable, and the final
 `swarm_action` selected by policy.
@@ -54,6 +58,9 @@ being recorded, a recommendation being actionable, and the final
 - Jev requests must remain structured typed state and questions, not raw
   unrestricted prompt dumps.
 - Sanitize issue text, findings, and RAG candidates before transmission.
+- Score the complete bounded RAG candidate set before token truncation. Reserve
+  final context space for persisted security-finding provenance, and record
+  injection telemetry only from the final rendered set.
 - Do not persist credentials, raw prompts, or unredacted Jev CLI output.
 - Persist sanitized fingerprints, typed results, confidence, scores, reason
   codes, fallback state, final Swarm action, and eventual outcome.

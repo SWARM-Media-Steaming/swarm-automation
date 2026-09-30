@@ -177,6 +177,30 @@ class CompositeTests(unittest.TestCase):
         )
 
 
+    def test_unactionable_irreversible_recommendation_fails_closed_without_default(self) -> None:
+        from decision_engine import DecisionResult
+
+        settings = JevSettings(enabled=True)
+        cases = {
+            ("WORKFLOW", "FAIL"): "HUMAN_REVIEW",
+            ("WORKFLOW", "SKIP_UAT"): "RUN_UAT",
+            ("WORKFLOW", "SKIP_CYBER"): "RUN_CYBER",
+            ("WORKFLOW", "COMPLETE"): "HUMAN_REVIEW",
+            ("COMPLETION", "COMPLETE"): "NEEDS_HUMAN_REVIEW",
+            ("UAT_FINDING", "PASS"): "FIX_NOW",
+            ("WORKFLOW", "CONTINUE"): "CONTINUE",
+        }
+        for (kind, decision), expected in cases.items():
+            result = DecisionResult(decision_type=kind, decision=decision, confidence=0.8, source="jev")
+            self.assertEqual(
+                swarm_policy_action(result, settings=settings, default=""),
+                expected,
+                f"{kind} {decision}",
+            )
+        result = DecisionResult(decision_type="WORKFLOW", decision="FAIL", confidence=0.8, source="jev")
+        self.assertEqual(swarm_policy_action(result, settings=settings, default="RETRY"), "RETRY")
+
+
 class PersistenceAndReportTests(unittest.TestCase):
     def test_decisions_and_score_deltas_persist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -243,6 +267,26 @@ class PersistenceAndReportTests(unittest.TestCase):
             self.assertIsNone(off["jevScore"])
             fallback = repo.jev_feedback(["acme/app"], jev_status="disabled")
             self.assertEqual(fallback["total"], 1)
+
+    def test_feedback_date_range_is_inclusive_on_both_ends(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = ExecutionHistoryRepository(Path(directory) / "history.sqlite3")
+            for day in ("2026-01-01", "2026-01-15", "2026-02-01", "2026-03-01"):
+                repo.record_jev_score_comparison({
+                    "comparison_id": day,
+                    "execution_id": f"exec-{day}",
+                    "repository": "acme/app",
+                    "issue_number": 1,
+                    "jev_status": "enabled",
+                    "created_at": f"{day}T10:00:00+00:00",
+                    "baseline": {"normalized_score": 0.5},
+                    "jev": {"normalized_score": 0.6, "confidence": 0.9},
+                    "modified": {"normalized_score": 0.55},
+                    "delta": {"absolute": 0.05, "percent": 10.0, "routing_changed": False},
+                })
+            page = repo.jev_feedback(["acme/app"], created_after="2026-01-15", created_before="2026-02-01")
+            self.assertEqual(page["total"], 2)
+            self.assertEqual(repo.jev_feedback(["acme/app"], created_before="2026-01-01")["total"], 1)
 
     def test_github_report_is_concise(self) -> None:
         from decision_engine import DecisionResult

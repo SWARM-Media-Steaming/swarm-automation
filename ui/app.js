@@ -68,6 +68,7 @@
     jevFeedbackOutcome: "",
     jevFeedbackProvider: "",
     jevFeedbackFrom: "",
+    jevFeedbackTo: "",
     jevFeedbackDelta: "",
     jevFeedbackCost: "",
     jevFeedbackOffset: 0,
@@ -1770,6 +1771,7 @@
       state.jevFeedbackSearch.trim() ||
         state.jevFeedbackProvider.trim() ||
         state.jevFeedbackFrom.trim() ||
+        state.jevFeedbackTo.trim() ||
         state.jevFeedbackDelta.trim() ||
         state.jevFeedbackCost.trim(),
     );
@@ -1830,6 +1832,7 @@
         outcome: state.jevFeedbackOutcome,
         routingChanged: state.jevFeedbackRouting,
         createdAfter: state.jevFeedbackFrom.trim(),
+        createdBefore: state.jevFeedbackTo.trim(),
         minDelta: state.jevFeedbackDelta.trim(),
         maxCost: state.jevFeedbackCost.trim(),
       });
@@ -5015,6 +5018,9 @@
     });
     byId("jev-feedback-from")?.addEventListener("change", (event) => {
       refreshJevFilters("jevFeedbackFrom", event.target.value);
+    });
+    byId("jev-feedback-to")?.addEventListener("change", (event) => {
+      refreshJevFilters("jevFeedbackTo", event.target.value);
     });
     byId("jev-feedback-delta")?.addEventListener("input", (event) => {
       refreshJevFilters("jevFeedbackDelta", event.target.value);
