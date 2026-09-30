@@ -145,6 +145,119 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue328_jev_deferred_findings.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue328-jev-deferred-findings",
+      "name": "Issue #328: fail-closed Jev authority, critical RAG retention, and full-history Feedback filters",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_issue328_jev_deferred_findings.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue328_jev_feedback_ui.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue328-jev-feedback-ui",
+      "name": "Issue #328: Feedback filter wiring and combined retries/failures summary",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/index.html",
+          "ui/app.js",
+          "ui/jev-decision-ui.js",
+          "tests/adversarial/test_issue328_jev_feedback_ui.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue328_jev_boundary_contracts.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue328-jev-boundary-contracts",
+      "name": "Issue #328: Jev confidence, RAG provenance, and full-history model filter boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_issue328_jev_boundary_contracts.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue328_rag_security_retention.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue328-rag-security-retention",
+      "name": "Issue #328 security: critical RAG context survives pre-Jev token bounding",
+      "origin": "adversarial-security",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/engineering_knowledge.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/security/test_issue328_rag_security_retention.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "issue_worker",
         "-p",
         "test_*.py"

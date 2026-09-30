@@ -33,9 +33,15 @@ class LiveCatalogRecoveryTests(CalibrationUAT):
         })
         env.start()
         self.addCleanup(env.stop)
+        # Build the safety-net tiers from the activated catalog instead of the
+        # removed static-table helper.  This keeps the recovery assertion on
+        # the same live-catalog routing path used by production.
+        tiers = dynamic_router.derived_routing_tiers(
+            "codex", allow_usage_credit_models=True
+        )
+        self.assertTrue(tiers, "the activated calibration must yield routing tiers")
         self.candidate = dynamic_router.RouterCandidate(
-            key="codex", name="Codex",
-            tiers=tuple(dynamic_router.default_routing_tiers()["codex"]),
+            key="codex", name="Codex", tiers=tiers,
         )
         self.assertEqual(self.resolve()["selected_model"], self.survivor)
 

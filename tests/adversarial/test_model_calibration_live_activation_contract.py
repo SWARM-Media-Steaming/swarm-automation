@@ -29,9 +29,16 @@ class LiveActivationContractTests(CalibrationUAT):
         })
         env.start()
         self.addCleanup(env.stop)
+        # Reference tiers are computed from the active catalog.  The former
+        # default_routing_tiers helper was a static table and was deliberately
+        # removed; using it here prevented these tests from reaching the
+        # activation behavior they are meant to exercise.
+        tiers = dynamic_router.derived_routing_tiers(
+            "codex", allow_usage_credit_models=True
+        )
+        self.assertTrue(tiers, "the live calibration fixture must yield routing tiers")
         self.candidate = dynamic_router.RouterCandidate(
-            key="codex", name="Codex",
-            tiers=tuple(dynamic_router.default_routing_tiers()["codex"]),
+            key="codex", name="Codex", tiers=tiers,
         )
 
     def propose_deprecation(self):
