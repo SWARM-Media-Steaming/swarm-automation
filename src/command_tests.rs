@@ -331,6 +331,40 @@ fn adversarial_security_toggle_persists_through_a_real_config_file() {
 }
 
 #[test]
+fn architecture_docs_toggle_is_off_by_default_and_persists_per_repository() {
+    let test_app = test_app();
+    let app = test_app.handle();
+    let repo_dir = real_git_checkout();
+    let mut config = valid_config(repo_dir.path());
+    assert!(
+        !config.repositories[0].architecture_docs_enabled,
+        "documentation is off until an operator turns it on"
+    );
+    config.repositories[0].architecture_docs_enabled = true;
+
+    save_config(app.clone(), app.state(), config).expect("save a valid config");
+    let on_disk: crate::config::AppConfig = serde_json::from_str(
+        &std::fs::read_to_string(test_app._data_dir.path().join(crate::config::CONFIG_FILE))
+            .expect("config.json is readable"),
+    )
+    .expect("config.json parses");
+    assert!(on_disk.repositories[0].architecture_docs_enabled);
+    let loaded = get_config(app.state()).expect("get_config should succeed");
+    assert!(loaded.repositories[0].architecture_docs_enabled);
+}
+
+#[test]
+fn repo_worker_args_carries_the_architecture_docs_toggle() {
+    let on = args_for(&RepoConfig {
+        architecture_docs_enabled: true,
+        ..repo("octocat/example")
+    });
+    assert!(on.contains(&"--architecture-docs-enabled".to_string()));
+    let off = args_for(&repo("octocat/example"));
+    assert!(off.contains(&"--no-architecture-docs-enabled".to_string()));
+}
+
+#[test]
 fn mark_permission_primed_persists_the_flag_and_is_idempotent() {
     let test_app = test_app();
     let app = test_app.handle();

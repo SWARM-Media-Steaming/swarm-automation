@@ -21,6 +21,7 @@
           <button class="nav-item" data-view-target="repository"><span class="nav-icon">⑂</span>Repository</button>
           <button class="nav-item" data-view-target="ai"><span class="nav-icon">✦</span>AI Configuration</button>
           <button class="nav-item" data-view-target="knowledge"><span class="nav-icon">◎</span>Knowledge</button>
+          <button class="nav-item" data-view-target="architecture"><span class="nav-icon">▦</span>Architecture</button>
           <button class="nav-item" data-view-target="feedback"><span class="nav-icon">◆</span>Feedback</button>
           <button class="nav-item" data-view-target="guides"><span class="nav-icon">◈</span>Guides</button>
           <button class="nav-item" data-view-target="debug"><span class="nav-icon">≡</span>Info &amp; Debug <span id="log-count" class="nav-count">0</span></button>
@@ -141,7 +142,7 @@
 
           <div class="settings-grid tab-panel" id="repository-panel-queue" role="tabpanel" aria-labelledby="repository-tab-queue" data-repository-panel="queue" hidden>
             <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">GITHUB QUEUE</p><h3>Issue selection <button class="help-dot" data-help="repo-queue" aria-label="About GitHub queue settings">?</button></h3></div></div><div class="form-grid three"><label>Trusted follow-up authors <input data-repo-config="trusted_followup_authors" data-list placeholder="Defaults to assignee" /><small>Only these users may request another pass.</small></label><label>Completion authors <input data-repo-config="completion_authors" data-list placeholder="Defaults to assignee" /></label><label>Ready label <input data-repo-config="ready_label" /></label></div></article>
-            <article class="panel"><div class="panel-header"><div><p class="eyebrow">WORK POLICY</p><h3>Issue instructions <span class="opt">optional</span> <button class="help-dot" data-help="work-policy" aria-label="About issue instructions">?</button></h3></div></div><div class="stacked-form"><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="require_issue_tests" /><span></span><div><strong>Require issue tests</strong><small>Tell the AI to add or update UAT and integration tests for the issue.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="adversarial_uat_enabled" /><span></span><div><strong>Adversarial UAT</strong><small>Independent tests and renewable three-round epochs before a verified-clean merge. Best-effort delivery is a separate switch under Pull request automation.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="adversarial_security_enabled" /><span></span><div><strong>Adversarial cybersecurity</strong><small>An independent security engineer attacks the change, fixes what it introduced and files anything else as its own <code>adversarial-security</code> issue.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="update_claude_assets_enabled" /><span></span><div><strong>Update Claude assets</strong><small>Tell the AI to update any relevant Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="allow_environment_only_summary" /><span></span><div><strong>Allow environment-only summary</strong><small>If the issue is not a code problem, the AI can explain that without writing code.</small></div></label></div></article>
+            <article class="panel"><div class="panel-header"><div><p class="eyebrow">WORK POLICY</p><h3>Issue instructions <span class="opt">optional</span> <button class="help-dot" data-help="work-policy" aria-label="About issue instructions">?</button></h3></div></div><div class="stacked-form"><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="require_issue_tests" /><span></span><div><strong>Require issue tests</strong><small>Tell the AI to add or update UAT and integration tests for the issue.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="adversarial_uat_enabled" /><span></span><div><strong>Adversarial UAT</strong><small>Independent tests and renewable three-round epochs before a verified-clean merge. Best-effort delivery is a separate switch under Pull request automation.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="adversarial_security_enabled" /><span></span><div><strong>Adversarial cybersecurity</strong><small>An independent security engineer attacks the change, fixes what it introduced and files anything else as its own <code>adversarial-security</code> issue.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="update_claude_assets_enabled" /><span></span><div><strong>Update Claude assets</strong><small>Tell the AI to update any relevant Claude skill, agent, rule, workflow, or CLAUDE.md file in the repository.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="architecture_docs_enabled" /><span></span><div><strong>Maintain interactive architecture documentation</strong><small>Adds a documentation-impact review after completed issue work, which may consume AI/provider capacity. Documentation stays in SWARM and never modifies this repository.</small></div></label><label class="toggle policy-toggle"><input type="checkbox" data-repo-config="allow_environment_only_summary" /><span></span><div><strong>Allow environment-only summary</strong><small>If the issue is not a code problem, the AI can explain that without writing code.</small></div></label></div></article>
           </div>
 
           <div class="settings-grid tab-panel" id="repository-panel-delivery" role="tabpanel" aria-labelledby="repository-tab-delivery" data-repository-panel="delivery" hidden>
@@ -183,6 +184,15 @@
                 </div>
               </div>
             </article>
+          </div>
+        </section>
+
+        <section id="view-architecture" class="view">
+          <div class="section-intro"><div><p class="eyebrow">ARCHITECTURE DOCUMENTATION</p><h2>Architecture <button class="help-dot" data-help="architecture-docs" aria-label="About architecture documentation">?</button></h2><p>One source-backed model for the selected repository, shown for the audience you choose. Statements show whether they are observed, inferred, AI-generated or human-authored.</p></div><div class="control-row"><button id="refresh-architecture" class="secondary-button">Refresh</button></div></div>
+          <div id="architecture-personas" class="arch-persona-bar"></div>
+          <div class="arch-layout">
+            <div id="architecture-page" class="arch-page" aria-live="polite"></div>
+            <aside id="architecture-detail" class="panel arch-detail" aria-live="polite" aria-label="Details"><p class="panel-copy">Select a component, flow, technology or diagram node to see details.</p></aside>
           </div>
         </section>
 
@@ -497,6 +507,7 @@
     <script src="adversarial-delivery.js"></script>
     <script src="debug-diagnose.js"></script>
     <script src="engineering-knowledge.js"></script>
+    <script src="architecture-docs.js"></script>
     <script src="version.js"></script>
     <script src="app.js"></script>
   </body>
