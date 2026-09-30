@@ -70,6 +70,14 @@ from swarm_issue_worker import (
 
 class WorkerTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        # Worker tests use exact bundled model/tier expectations. Do not let
+        # an operator calibration exported by the desktop app replace that
+        # fixture with machine-specific catalog data. Tests for calibration
+        # activation provide their own explicit environment instead.
+        calibration = mock.patch.dict(os.environ)
+        calibration.start()
+        self.addCleanup(calibration.stop)
+        os.environ.pop("SWARM_MODEL_CALIBRATION_CATALOG", None)
         self.temporary = tempfile.TemporaryDirectory(prefix="swarm-worker-test.")
         self.root = Path(self.temporary.name)
         self.repo = self.root / "repo"
