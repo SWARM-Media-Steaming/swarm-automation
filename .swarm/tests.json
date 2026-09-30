@@ -3813,6 +3813,208 @@
         ]
       },
       "timeoutSeconds": 1800
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue337_jev_context_ingestion.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue337-jev-context-ingestion",
+      "name": "Issue #337: bounded complete and structured Jev issue-context ingestion",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "issue_worker/decision_engine.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue337_jev_context_ingestion.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue337_jev_context_request_integrity.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue337-jev-context-request-integrity",
+      "name": "Issue #337: final Jev context request integrity and malformed limits",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "issue_worker/decision_engine.py",
+          "issue_worker/jev_cli.py",
+          "tests/adversarial/test_issue337_jev_context_request_integrity.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue337_jev_context_fallback_and_scope.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue337-jev-context-fallback-and-scope",
+      "name": "Issue #337: long-context fallback and issue-level scope boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "issue_worker/decision_engine.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue337_jev_context_fallback_and_scope.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue337_jev_context_nested_sections.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue337-jev-context-nested-sections",
+      "name": "Issue #337: sub-headings inside recognised sections keep their content",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "tests/adversarial/test_issue337_jev_context_nested_sections.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue337_jev_context_fenced_code.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue337-jev-context-fenced-code",
+      "name": "Issue #337: comment lines inside fenced code do not end a section",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "tests/adversarial/test_issue337_jev_context_fenced_code.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue337_jev_context_fence_edges.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue337-jev-context-fence-edges",
+      "name": "Issue #337: CommonMark fence boundaries keep section content intact",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "tests/adversarial/test_issue337_jev_context_fence_edges.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue337_heading_redos.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue337-heading-redos",
+      "name": "Issue #337: issue heading parsing is not vulnerable to ReDoS",
+      "origin": "adversarial-security",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "tests/adversarial/security/test_issue337_heading_redos.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

@@ -141,6 +141,43 @@ AI Configuration → Jev Decision Engine:
 Credentials stay with the Jev CLI (`JEV_API_KEY` / `TYPESAFE_API_KEY` or the
 CLI's own sign-in). Swarm never logs secrets.
 
+## Issue context strategy
+
+Issue-level decisions (`task_classification`, `issue_triage`) no longer see only
+the first 1,200 characters of the issue body. `issue_worker/issue_context.py`
+builds a tiered package:
+
+- **Short** (at most `context_max_raw_chars`, default 6000): the complete
+  sanitized description is sent.
+- **Long**: a structured summary of the sections found (requested change,
+  acceptance criteria, reproduction steps, technical constraints, affected
+  components, dependencies, security, testing, out of scope), capped at
+  `context_max_summary_chars` (1500), plus original excerpts of acceptance
+  criteria, reproduction steps, security and out-of-scope sections and the
+  first and last 400 characters, capped near `context_max_excerpt_chars` (3000).
+- The default summarizer is deterministic. A caller may inject a cheaper
+  summarizer; it is time-boxed (`context_summary_timeout_seconds`, default 5)
+  and retried (`context_summary_retries`, default 1), and any failure falls back
+  to the deterministic summary. A primary implementation agent is never invoked.
+- The request state carries `issueContext` metadata: original length,
+  `truncated`, `summarized`, `complete`, sections, excerpts and version. The
+  returned decision also carries `contextMetadata`; the limits are recorded there.
+- A low-confidence result on a truncated context is retried once with doubled
+  (still hard-capped at 24000 characters) limits; if it stays low-confidence the
+  existing fallback path applies.
+- Text is sanitized before it is bounded, so credentials cut across a boundary
+  are still redacted. Only the fingerprint, typed result and metadata are
+  persisted, never the prompt or raw Jev output.
+- Per-candidate RAG scoring and finding decisions keep the 1,200 character
+  summary. Section detection is heading-based (lines inside fenced code and lines
+  over 200 characters are never headings, which also keeps parsing linear-time); a long description with no recognizable headings relies
+  on the beginning/end excerpts. Jev stays advisory: thresholds and
+  deterministic gates are unchanged.
+
+Limits are set by `SWARM_JEV_CONTEXT_MAX_RAW_CHARS`, `..._MAX_SUMMARY_CHARS`,
+`..._MAX_EXCERPT_CHARS`, `..._SUMMARY_TIMEOUT_SECONDS`, `..._SUMMARY_RETRIES`
+(or the matching `--jev-context-*` worker flags).
+
 ## Implementation authority
 
 This document describes the contract. The exact enforcement remains in
