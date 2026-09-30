@@ -939,6 +939,14 @@ def _score_candidate(
     return positive - overqualification - unnecessary_reasoning, expected_success
 
 
+def is_priced(spec: ModelSpec) -> bool:
+    """Whether the model's spend can be recorded: it has a price in the pricing
+    catalog or its own input and output prices."""
+    if spec.input_cost is not None and spec.output_cost is not None:
+        return True
+    return _model_pricing.resolve_price(spec.model, provider=spec.agent).priced
+
+
 def _eligible_models(catalog: Sequence[ModelSpec], availability: RoutingAvailability) -> list[ModelSpec]:
     eligible = []
     for model in catalog:

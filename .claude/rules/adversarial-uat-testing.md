@@ -38,8 +38,14 @@ label from a trusted author; the worker owns VERSION.
   change can otherwise draw a model too light to follow the edit rules. A
   rejected tester result restores the edits and tells the next attempt which
   rule it broke and what to do instead (`rejection_remedy`). Listing one more file in an existing adversarial suite's
-  `requirements.files` is not a revision (`_only_gains_required_files`); any other
-  change to an existing suite entry, or to an existing test file, still is. Dispute adjudication is always a new tester.
+  `requirements.files` is not a revision (`_only_gains_required_files`) only when
+  each added entry is an existing regular file inside the repo (a missing path
+  could switch the suite off in the repository's own tooling); any other change
+  to an existing suite entry, or to an existing test file (even a pure append,
+  which can neutralize earlier tests without deleting a line), still is. A tester
+  whose result was rejected steps up rather than repeating: higher effort after
+  the first rejection, then one capability level per further rejection
+  (`apply_tester_floor`). It gets no extra context or permission. Dispute adjudication is always a new tester.
 - Tests live under `tests/adversarial/`, registered with `adversarial-` IDs and
   `origin: "adversarial"` in `.swarm/tests.json`. Preserve non-adversarial suites.
   `tests/adversarial/security/` and `origin: "adversarial-security"` belong to

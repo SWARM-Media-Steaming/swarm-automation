@@ -22,6 +22,11 @@ silently overrides fresh data.
 
 ## Rules
 
+- A model with no price in `model_pricing.py` is never offered or routed to
+  (`model_router.is_priced`, applied in `dynamic_router` scoring, the router
+  prompt catalog, derived tiers, the tester floor and Jev's model list): its
+  spend would be unrecorded and cost-first routing cannot compare it. Add its
+  rate from the provider's own pricing page to bring it back.
 - Do not add a model name, per-band mapping or capability rank to code or
   `config.json` when the catalog, the measurements or the pricing catalog can
   supply it. New models arrive through discovery (`available_models`), the

@@ -31,6 +31,12 @@ CLAUDE = {
 NEXT = {"claude": CLAUDE["claude"] + [{"value": "claude-sonnet-5-6"}]}
 
 
+def _priced(*models):
+    """Price hypothetical releases the way the pricing catalog would."""
+    rows = tuple(model_pricing._anthropic(name, 2.0, 10.0) for name in models)
+    return mock.patch.object(model_pricing, "PRICING_CATALOG", model_pricing.PRICING_CATALOG + rows)
+
+
 def _route(catalog, complexity):
     return model_router.route(
         model_router.RouteRequest(
@@ -103,9 +109,22 @@ class RoutingCatalogTests(AvailableModelsTestCase):
 
     def test_a_new_release_is_routable_and_wins_ties_over_its_predecessor(self) -> None:
         available_models.configure(NEXT)
+        with _priced("claude-sonnet-5-6"):
+            catalog = model_router.load_model_catalog()
+            self.assertEqual(dynamic_router.scored_floor("claude", 5, catalog=catalog)[0], "claude-sonnet-5-6")
+            self.assertIn("claude-sonnet-5-6", dynamic_router.catalog_model_names(("claude",)))
+
+    def test_a_model_with_no_price_is_never_routed_or_offered_until_it_is_priced(self) -> None:
+        available_models.configure(NEXT)
         catalog = model_router.load_model_catalog()
-        self.assertEqual(_route(catalog, 5).model, "claude-sonnet-5-6")
-        self.assertIn("claude-sonnet-5-6", dynamic_router.catalog_model_names(("claude",)))
+        spec = next(s for s in catalog if s.model == "claude-sonnet-5-6")
+        self.assertFalse(model_router.is_priced(spec))
+        self.assertNotIn("claude-sonnet-5-6", dynamic_router.catalog_model_names(("claude",)))
+        for complexity in range(1, 11):
+            self.assertNotEqual(dynamic_router.scored_floor("claude", complexity, catalog=catalog)[0], "claude-sonnet-5-6")
+        self.assertNotIn("claude-sonnet-5-6", [t.model for t in dynamic_router.derived_routing_tiers("claude")])
+        with _priced("claude-sonnet-5-6"):
+            self.assertIn("claude-sonnet-5-6", dynamic_router.catalog_model_names(("claude",)))
 
     def test_a_measurably_stronger_release_at_the_same_price_is_not_penalized_for_it(self) -> None:
         available_models.configure(NEXT)
@@ -201,17 +220,19 @@ class RoutingCatalogTests(AvailableModelsTestCase):
 
     def test_usage_credit_models_stay_filtered(self) -> None:
         available_models.configure({"claude": [{"value": "claude-fable-5-2"}]})
-        self.assertNotIn("claude-fable-5-2", dynamic_router.catalog_model_names(("claude",)))
-        self.assertIn(
-            "claude-fable-5-2",
-            dynamic_router.catalog_model_names(("claude",), allow_usage_credit_models=True),
-        )
+        with _priced("claude-fable-5-2"):
+            self.assertNotIn("claude-fable-5-2", dynamic_router.catalog_model_names(("claude",)))
+            self.assertIn(
+                "claude-fable-5-2",
+                dynamic_router.catalog_model_names(("claude",), allow_usage_credit_models=True),
+            )
 
 
 class DecisionEngineTests(AvailableModelsTestCase):
     def test_jev_sees_every_routable_model_and_is_asked_to_pick_one(self) -> None:
         available_models.configure(NEXT)
-        state, questions = decision_engine.build_jev_request("TASK_CLASSIFICATION", {"title": "t"})
+        with _priced("claude-sonnet-5-6"):
+            state, questions = decision_engine.build_jev_request("TASK_CLASSIFICATION", {"title": "t"})
         listed = {item["model"]: item for item in state["availableModels"]["claude"]}
         self.assertEqual(listed["claude-sonnet-5-6"]["status"], "inferred")
         self.assertEqual(listed["claude-sonnet-5-5"]["status"], "catalogued")

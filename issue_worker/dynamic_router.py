@@ -372,6 +372,9 @@ def model_catalog(
         # Blacklisted rows stay in the catalog so a newer release can infer
         # from them; they are never offered or named by the router.
         rows = [entry for entry in rows if not _available_models.is_blacklisted(entry.model)]
+        # A model with no price would run with its spend unrecorded, so the
+        # router is not offered it until it is priced.
+        rows = [entry for entry in rows if _model_pricing.resolve_price(entry.model, provider=entry.provider).priced]
         if not allow_usage_credit_models:
             rows = [entry for entry in rows if not entry.requires_usage_credits]
         catalog.extend(sorted(rows, key=lambda entry: (entry.cost, entry.model)))
@@ -872,6 +875,9 @@ def scored_tier(
             if not allow_usage_credit_models and requires_usage_credits(model.model)
         }
         disabled |= {str(model).strip() for model in candidate.excluded_models}
+        # A model with no price would run with its spend unrecorded and cannot
+        # be compared fairly on cost, so it stays out of routing until priced.
+        disabled |= {model.model for model in catalog if not _model_router.is_priced(model)}
         cost_on = cost_consideration_enabled(routing_optimization)
         decision = _model_router.route(
             _model_router.RouteRequest(
@@ -921,6 +927,7 @@ def scored_floor(
             model.model for model in catalog
             if not allow_usage_credit_models and requires_usage_credits(model.model)
         } | {str(model).strip() for model in excluded_models}
+        disabled |= {model.model for model in catalog if not _model_router.is_priced(model)}
         cost_on = cost_consideration_enabled(routing_optimization)
         decision = _model_router.route(
             _model_router.RouteRequest(
@@ -938,6 +945,52 @@ def scored_floor(
     except (_model_router.ModelRouterError, _model_router.ModelRouterConfigError):
         return None
     return decision.model, decision.effort
+
+
+def cheapest_capable_model(
+    agent: str,
+    min_capability: int,
+    *,
+    allow_usage_credit_models: bool = False,
+) -> tuple[str, tuple[str, ...]] | None:
+    """The cheapest priced, current model of ``agent`` with capability >= ``min_capability``.
+
+    Falls back to the provider's most capable model when none reaches the
+    requirement. Returns ``(model, supported efforts)``, or ``None`` when the
+    provider has no routable model.
+    """
+    key = str(agent).strip().lower()
+    try:
+        catalog = _routing_catalog()
+    except _model_router.ModelRouterConfigError:
+        return None
+    rows = [
+        spec for spec in catalog
+        if spec.agent == key and spec.active and not spec.deprecated
+        and _model_router.is_priced(spec)
+        and (allow_usage_credit_models or not requires_usage_credits(spec.model))
+    ]
+    if not rows:
+        return None
+    capable = [spec for spec in rows if spec.relative_capability >= min_capability]
+    if capable:
+        best = min(capable, key=lambda spec: (spec.relative_cost, spec.relative_capability, spec.model))
+    else:
+        top = max(spec.relative_capability for spec in rows)
+        best = min((spec for spec in rows if spec.relative_capability == top),
+                   key=lambda spec: (spec.relative_cost, spec.model))
+    return best.model, tuple(best.supported_efforts)
+
+
+def supported_efforts(agent: str, model: str) -> tuple[str, ...]:
+    """Reasoning efforts the catalog lists for ``model``; empty when unknown."""
+    try:
+        catalog = _routing_catalog()
+    except _model_router.ModelRouterConfigError:
+        return ()
+    spec = next((s for s in catalog if s.agent == str(agent).strip().lower()
+                 and model in (s.model, s.model_id)), None)
+    return tuple(spec.supported_efforts) if spec else ()
 
 
 def candidate_catalog(

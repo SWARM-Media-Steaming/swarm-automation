@@ -987,6 +987,27 @@ class AdversarialStageMixin:
             log(f"{stage.label} for issue #{self.issue.number}: raising the tester from {choice.name} "
                 f"{choice.model} at {choice.effort} effort to {model} at {effort} effort "
                 "(testers keep to a minimum model and effort so they follow the edit rules).")
+        # A tester whose result was rejected for breaking an edit rule steps up
+        # rather than repeating the same mistake on the same model: first higher
+        # effort, then one capability level per further rejection. It gets no
+        # extra context and no extra permission, only a stronger model.
+        attempts = int((loop.get("retry_rejection") or {}).get("attempts", 0))
+        if attempts >= 1:
+            from dynamic_router import cheapest_capable_model, supported_efforts
+            if attempts >= 2:
+                current = model_route_profile(choice.key, model, effort)
+                stronger = cheapest_capable_model(
+                    choice.key, (current[0] if current else 0) + attempts - 1,
+                    allow_usage_credit_models=self.config.allow_usage_credit_models,
+                )
+                if stronger is not None:
+                    model = stronger[0]
+            offered = supported_efforts(choice.key, model)
+            step_up = "high" if "high" in offered or not offered else max(offered, key=effort_rank)
+            if effort_rank(effort) < effort_rank(step_up):
+                effort = step_up
+            log(f"{stage.label} for issue #{self.issue.number}: the previous tester result was rejected "
+                f"{attempts} time(s), so this tester runs {model} at {effort} effort.")
         raised = ProviderChoice(choice.name, model, effort, choice.session_id, choice.resume)
         if not reference:
             profile = model_route_profile(raised.key, raised.model, raised.effort)
@@ -1127,12 +1148,14 @@ class AdversarialStageMixin:
         )
 
     @staticmethod
-    def _only_gains_required_files(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    def _only_gains_required_files(old: dict[str, Any], new: dict[str, Any], root: Path | None = None) -> bool:
         """Whether ``new`` is ``old`` plus extra ``requirements.files`` entries.
 
-        The list names files that must exist before a suite runs, so listing one
-        more does not weaken or change what the suite checks. Every other field
-        must be identical.
+        Every other field must be identical. A listed file could be read by a
+        repository's own tooling as a precondition, so a tester may not list one
+        that does not exist (which could switch the suite off): each added entry
+        must be a regular file inside ``root``, not a symlink, when ``root`` is
+        given.
         """
         if old.get("id") != new.get("id"):
             return False
@@ -1142,6 +1165,13 @@ class AdversarialStageMixin:
             return False
         if not set(old_files) <= set(new_files):
             return False
+        if root is not None:
+            base = Path(root).resolve()
+            for added in set(new_files) - set(old_files):
+                path = base / str(added)
+                if (not isinstance(added, str) or path.is_symlink() or not path.is_file()
+                        or base not in path.resolve().parents):
+                    return False
 
         def bare(suite: dict[str, Any]) -> dict[str, Any]:
             copy = {key: value for key, value in suite.items() if key != "requirements"}
@@ -1335,7 +1365,8 @@ class AdversarialStageMixin:
         old_suites = [s for s in before["suites"] if s.get("origin") == stage.origin]
         new_suites = [s for s in after["suites"] if s.get("origin") == stage.origin]
         revised = prior or any(
-            not any(s == n or self._only_gains_required_files(s, n) for n in new_suites) for s in old_suites
+            not any(s == n or self._only_gains_required_files(s, n, self.config.repo_dir) for n in new_suites)
+            for s in old_suites
         )
         if revised and not ((loop.get("dispute") or loop.get("amendments")) and report.get("dispute_resolution", "").strip()):
             raise WorkerError("Only a fresh tester adjudicating a dispute may revise or retire existing adversarial tests")

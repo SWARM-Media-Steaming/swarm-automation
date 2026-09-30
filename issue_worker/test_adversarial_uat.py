@@ -386,6 +386,23 @@ class AdversarialUatTests(unittest.TestCase):
         raised = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Claude", "claude-haiku-4-5", "low", "s"))
         self.assertEqual((raised.model, raised.effort), ("claude-sonnet-5-5", "medium"))
 
+    def test_a_tester_whose_result_was_rejected_steps_up_instead_of_repeating(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        loop["phase"] = "test"
+        weak = ProviderChoice("Claude", "claude-haiku-4-5", "low", "s")
+        plain = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, weak)
+        self.assertEqual((plain.model, plain.effort), ("claude-sonnet-5-5", "medium"))
+        loop["retry_rejection"] = {"reason": "x", "attempts": 1}
+        first = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, weak)
+        self.assertEqual((first.model, first.effort), ("claude-sonnet-5-5", "high"))
+        loop["retry_rejection"] = {"reason": "x", "attempts": 2}
+        second = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, weak)
+        self.assertEqual(second.model, "claude-opus-5-5")
+        self.assertGreaterEqual(adversarial_core.effort_rank(second.effort), adversarial_core.effort_rank("high"))
+        # A step-up never changes what the tester may see or edit.
+        self.assertEqual(second.session_id, "s")
+
     def test_the_tester_floor_leaves_fixers_and_started_sessions_alone(self):
         self.prepare()
         loop = self.worker.read_state()["adversarial"]
@@ -431,7 +448,7 @@ class AdversarialUatTests(unittest.TestCase):
             new.update(changes)
             return new
 
-        self.assertTrue(gains(old, with_files(["a.py", "b.py"])))
+        self.assertTrue(gains(old, with_files(["a.py", "b.py"])))                 # no root: shape only
         self.assertTrue(gains(old, with_files(["a.py"])))
         self.assertFalse(gains(old, with_files(["b.py"])))            # dropped a required file
         self.assertFalse(gains(old, with_files(["a.py", "b.py"], command=["python3", "other.py"])))
@@ -470,6 +487,14 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual((added, modified), (1, 0))
 
         suite["timeoutSeconds"] = 1
+        (self.repo / uat.DEFINITION).write_text(json.dumps(definition))
+        with self.assertRaisesRegex(WorkerError, "Only a fresh tester adjudicating a dispute"):
+            self.worker.validate_stage_edits(uat.UAT_STAGE, loop, {})
+
+        # Listing a file that does not exist could switch a suite off in the
+        # repository's own tooling, so it is treated as changing the suite.
+        suite["timeoutSeconds"] = 120
+        suite["requirements"]["files"].append("tests/adversarial/does_not_exist.py")
         (self.repo / uat.DEFINITION).write_text(json.dumps(definition))
         with self.assertRaisesRegex(WorkerError, "Only a fresh tester adjudicating a dispute"):
             self.worker.validate_stage_edits(uat.UAT_STAGE, loop, {})

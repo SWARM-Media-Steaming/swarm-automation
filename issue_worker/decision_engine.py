@@ -667,7 +667,8 @@ def routable_models_for_jev() -> dict[str, list[dict[str, Any]]]:
     models: dict[str, list[dict[str, Any]]] = {}
     total = 0
     for spec in catalog:
-        if not spec.active or (not allow_credit and requires_usage_credits(spec.model)):
+        if (not spec.active or not model_router.is_priced(spec)
+                or (not allow_credit and requires_usage_credits(spec.model))):
             continue
         if total >= MAX_JEV_MODELS:
             break

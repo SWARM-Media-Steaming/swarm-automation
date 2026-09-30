@@ -102,6 +102,9 @@ defaults`) returns the scoring router's pick for a simple and a trivial task. An
 unset model means "auto" to the worker, and the desktop fills only empty
 settings from it.
 
+A model with no price in the pricing catalog is excluded from routing, the router
+prompt, derived tiers, Jev's model list and upgrades until it is priced.
+
 Refresh cadence: the app re-checks at least hourly, and the service refreshes
 once `model_data_min_refresh_interval_hours` has passed since the last success.
 Data built by an older `ALGORITHM_VERSION` (before per-effort Intelligence Index
