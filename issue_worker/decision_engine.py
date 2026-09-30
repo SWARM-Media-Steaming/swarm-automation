@@ -23,6 +23,7 @@ from typing import Any, Protocol
 
 import available_models as _available_models
 from ai_execution_history import sanitize_text
+from issue_context import fit_parts
 from jev_cli import (
     DEFAULT_JEV_MODEL,
     JevCli,
@@ -688,13 +689,38 @@ def routable_models_for_jev() -> dict[str, list[dict[str, Any]]]:
     return models
 
 
+# Hard ceiling on issue text in one request, whatever the configured limits.
+MAX_ISSUE_CONTEXT_CHARS = 30000
+
+
+def _fit_issue_context(package: Mapping[str, Any]) -> str:
+    """Issue text for the request, within the hard ceiling; excerpts are shortened, not dropped."""
+    text = sanitize_text(package.get("text") or "")
+    if len(text) <= MAX_ISSUE_CONTEXT_CHARS:
+        return text
+    parts = [
+        (sanitize_text(label)[:40], sanitize_text(body))
+        for label, body in list(package.get("parts") or [])
+        if isinstance(body, str)
+    ]
+    if parts:
+        return fit_parts(parts, MAX_ISSUE_CONTEXT_CHARS)
+    return text[:MAX_ISSUE_CONTEXT_CHARS]
+
+
 def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Typed questions for one decision type. State is structured, not a prompt dump."""
+    package = context.get("issue_context")
+    package = package if isinstance(package, Mapping) else None
+    if package is not None:
+        summary = _fit_issue_context(package)
+    else:
+        summary = sanitize_text(context.get("summary") or context.get("body_excerpt") or "")[:1200]
     state = {
         "decisionType": kind,
         "title": sanitize_text(context.get("title") or "")[:400],
         "labels": [sanitize_text(item)[:40] for item in list(context.get("labels") or [])[:20]],
-        "summary": sanitize_text(context.get("summary") or context.get("body_excerpt") or "")[:1200],
+        "summary": summary,
         "repository": sanitize_text(context.get("repository") or "")[:120],
         "signals": {
             key: context.get(key)
@@ -714,6 +740,24 @@ def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, 
             if key in context
         },
     }
+    if package is not None:
+        meta = package.get("metadata") if isinstance(package.get("metadata"), Mapping) else {}
+        state["issueContext"] = {
+            "version": meta.get("version"),
+            "originalLength": meta.get("originalLength"),
+            "truncated": bool(meta.get("truncated")),
+            "summarized": bool(meta.get("summarized")),
+            "complete": bool(meta.get("complete")),
+            "sections": [sanitize_text(item)[:40] for item in list(meta.get("sections") or [])[:12]],
+            "excerpts": [sanitize_text(item)[:40] for item in list(meta.get("excerpts") or [])[:12]],
+            "summarySource": sanitize_text(meta.get("summarySource") or "")[:60],
+            "sentLength": len(summary),
+            "limits": {
+                str(key): value
+                for key, value in dict(meta.get("limits") or {}).items()
+                if isinstance(value, (int, float))
+            },
+        }
     if kind in {DecisionType.TASK_CLASSIFICATION.value, DecisionType.ISSUE_TRIAGE.value}:
         routable = routable_models_for_jev()
         if routable:

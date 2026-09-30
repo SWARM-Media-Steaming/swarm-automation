@@ -75,6 +75,7 @@ Keep these synchronized when changing the policy:
 - `skills/model-router/model-blacklist.json` — models that are never offered.
 - `issue_worker/decision_engine.py` — confidence and safety enforcement.
 - `issue_worker/dynamic_router.py` — Jev/routing combination.
+- `issue_worker/issue_context.py` — bounded, sanitized issue-description context (full when short, summary plus excerpts when long; never an unbounded dump).
 
 The implementation is authoritative for exact enforcement. Any change that
 weakens a deterministic safety gate requires corresponding tests and explicit

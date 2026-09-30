@@ -115,16 +115,23 @@ from dynamic_router import (
     run_provider_router,
 )
 from jev_cli import JevSettings, settings_from_mapping
+from issue_context import build_issue_context, issue_context_settings_from
 from decision_engine import (
     CompositeDecisionEngine,
     DecisionType,
     engine_from_settings,
     format_jev_markdown,
     may_act_on,
+    normalize_decision_type,
     swarm_policy_action,
 )
 
 
+# Issue-level decisions get the richer issue context; per-candidate RAG scoring
+# and finding decisions keep the bounded summary.
+ISSUE_CONTEXT_DECISION_TYPES = frozenset(
+    {DecisionType.TASK_CLASSIFICATION.value, DecisionType.ISSUE_TRIAGE.value}
+)
 ISSUE_COMPLETED_EXIT_CODE = 10
 QUOTA_PAUSED_EXIT_CODE = 11
 PROVIDER_UNAVAILABLE_EXIT_CODE = 12
@@ -653,6 +660,11 @@ class Config:
                     "use_rag": bool(getattr(args, "jev_use_rag", True)),
                     "use_triage": bool(getattr(args, "jev_use_triage", True)),
                     "use_completion": bool(getattr(args, "jev_use_completion", True)),
+                    "context_max_raw_chars": getattr(args, "jev_context_max_raw_chars", 6000),
+                    "context_max_summary_chars": getattr(args, "jev_context_max_summary_chars", 1500),
+                    "context_max_excerpt_chars": getattr(args, "jev_context_max_excerpt_chars", 3000),
+                    "context_summary_timeout_seconds": getattr(args, "jev_context_summary_timeout_seconds", 5.0),
+                    "context_summary_retries": getattr(args, "jev_context_summary_retries", 1),
                 }
             ),
         )
@@ -3109,8 +3121,12 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
             payload.setdefault("labels", list(self.issue.labels))
             payload.setdefault("summary", str(self.issue.body or "")[:1200])
             payload.setdefault("issue_number", self.issue.number)
+            if normalize_decision_type(decision_type) in ISSUE_CONTEXT_DECISION_TYPES:
+                payload.setdefault("issue_context", build_issue_context(
+                    self.issue.body, issue_context_settings_from(self.config.jev)))
         payload.setdefault("repository", self.config.github_repository)
         result = self.decision_engine().evaluate(decision_type, payload)
+        result = self.expand_partial_context(result, decision_type, payload)
         blocking_security = bool(payload.get("blocking_security"))
         if result.decision_type in {
             DecisionType.CYBER_FINDING.value,
@@ -3143,8 +3159,33 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         record["latency_ms"] = result.latency_ms
         record["estimated_cost"] = result.estimated_cost
         record["error_type"] = result.error_type
+        package = payload.get("issue_context")
+        context_metadata = package.get("metadata", {}) if isinstance(package, dict) else None
+        if context_metadata is not None:
+            record["context_metadata"] = context_metadata
         self.history.record_jev_decision(record)
-        return result.as_dict()
+        outcome = result.as_dict()
+        if context_metadata is not None:
+            outcome["contextMetadata"] = context_metadata
+        return outcome
+
+    def expand_partial_context(
+        self, result: Any, decision_type: str, payload: dict[str, Any]
+    ) -> Any:
+        """One retry with doubled (still bounded) limits after a low-confidence partial-context result."""
+        package = payload.get("issue_context")
+        if (
+            self.issue is None
+            or not isinstance(package, dict)
+            or not package.get("metadata", {}).get("truncated")
+            or result.source != "low_confidence"
+        ):
+            return result
+        expanded = build_issue_context(self.issue.body, issue_context_settings_from(self.config.jev).expanded())
+        expanded["metadata"]["expandedRetry"] = True
+        payload["issue_context"] = expanded
+        retry = self.decision_engine().evaluate(decision_type, payload)
+        return retry
 
     def attach_jev_routing(self, decision: dict[str, Any], candidates: Sequence[Any]) -> dict[str, Any]:
         """Score the issue with Jev, then combine with the existing Swarm baseline."""
@@ -3161,8 +3202,6 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
                 {
                     "title": self.issue.title if self.issue else "",
                     "labels": list(self.issue.labels) if self.issue else [],
-                    "summary": str(self.issue.body or "")[:1200] if self.issue else "",
-                    "body_excerpt": str(self.issue.body or "")[:1200] if self.issue else "",
                 },
             )
             status = str(jev_payload.get("source") or "enabled")
@@ -7443,6 +7482,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=float(env_value("SWARM_JEV_TIMEOUT_SECONDS", "8")),
     )
+    for flag, env_name, default, kind in (
+        ("--jev-context-max-raw-chars", "SWARM_JEV_CONTEXT_MAX_RAW_CHARS", "6000", int),
+        ("--jev-context-max-summary-chars", "SWARM_JEV_CONTEXT_MAX_SUMMARY_CHARS", "1500", int),
+        ("--jev-context-max-excerpt-chars", "SWARM_JEV_CONTEXT_MAX_EXCERPT_CHARS", "3000", int),
+        ("--jev-context-summary-timeout-seconds", "SWARM_JEV_CONTEXT_SUMMARY_TIMEOUT_SECONDS", "5", float),
+        ("--jev-context-summary-retries", "SWARM_JEV_CONTEXT_SUMMARY_RETRIES", "1", int),
+    ):
+        parser.add_argument(flag, type=kind, default=kind(env_value(env_name, default)))
     parser.add_argument(
         "--jev-max-retries",
         type=int,
