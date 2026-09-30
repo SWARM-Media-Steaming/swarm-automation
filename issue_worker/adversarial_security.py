@@ -367,17 +367,17 @@ class SecurityStage(AdversarialStage):
         counts = metadata["severity"]
         lines = [
             "<details><summary>Adversarial Cybersecurity review</summary>\n",
-            f"Status: {metadata['status']}\n",
+            f"**Status:** {metadata['status']}\n",
             "Security findings:",
-            f"- In-scope discovered: {metadata['inScopeDiscovered']}",
-            f"- In-scope fixed: {metadata['inScopeFixed']}",
-            f"- In-scope unresolved: {metadata['inScopeOpen']}",
-            f"- Low-confidence advisory: {metadata['advisory']}",
-            f"- Out-of-scope issues created: {metadata['issuesCreated']}",
-            f"- Critical: {counts['Critical']}",
-            f"- High: {counts['High']}",
-            f"- Medium: {counts['Medium']}",
-            f"- Low: {counts['Low']}\n",
+            f"- **In-scope discovered:** {metadata['inScopeDiscovered']}",
+            f"- **In-scope fixed:** {metadata['inScopeFixed']}",
+            f"- **In-scope unresolved:** {metadata['inScopeOpen']}",
+            f"- **Low-confidence advisory:** {metadata['advisory']}",
+            f"- **Out-of-scope issues created:** {metadata['issuesCreated']}",
+            f"- **Critical:** {counts['Critical']}",
+            f"- **High:** {counts['High']}",
+            f"- **Medium:** {counts['Medium']}",
+            f"- **Low:** {counts['Low']}\n",
             "Summary:",
             metadata["summary"] or "No material security findings were reported.",
             "",
@@ -388,10 +388,10 @@ class SecurityStage(AdversarialStage):
         lines += ["", "New GitHub issues:"]
         lines += ([f"- {item.get('url') or item.get('title', '')}" for item in filed] or ["- None."])
         lines += ["", "Validation:"]
-        lines += ([f"- {result['id']}: {'passed' if not result['exit_code'] else 'FAILED'}"
+        lines += ([f"- **{result['id']}:** {'passed' if not result['exit_code'] else 'FAILED'}"
                    for result in loop.get("results", [])] or ["- No executable suite was required for this review."])
         if loop.get("review_error"):
-            lines += ["", f"Review error: {loop['review_error']}"]
+            lines += ["", f"**Review error:** {loop['review_error']}"]
         lines += ["</details>\n"]
         return "\n".join(lines)
 
