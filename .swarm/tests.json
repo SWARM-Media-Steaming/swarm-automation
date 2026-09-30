@@ -3987,6 +3987,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue337_heading_redos.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue337-heading-redos",
+      "name": "Issue #337: issue heading parsing is not vulnerable to ReDoS",
+      "origin": "adversarial-security",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "tests/adversarial/security/test_issue337_heading_redos.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
