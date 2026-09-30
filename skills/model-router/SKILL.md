@@ -243,6 +243,15 @@ A saved provider, router or tier selection naming one is repaired into its
 successor. A session already started keeps running on its model. The list is
 edited by hand; see `.claude/rules/model-blacklist.md`.
 
+## Repository-aware complexity (always on)
+
+Before routing, every issue gets a complexity vector from the cached repository
+and component profiles, interpreted by Jev (or the configured AI fallback, or a
+deterministic fallback). The router applies the vector's capability, context and
+security floors first and only then optimizes cost; it consumes the whole vector,
+not one score. See `docs/complexity-scoring.md` and
+`.claude/rules/repository-complexity-scoring.md`. There is no toggle.
+
 ## Tests
 
 `issue_worker/test_model_router.py` and `issue_worker/test_model_router_yaml.py`

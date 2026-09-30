@@ -1693,9 +1693,10 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0], ("claude-fable-5-1", "high", "old-session"))
-        self.assertEqual(calls[1][0], "claude-opus-5-5")
+        self.assertEqual(calls[1][0], "claude-sonnet-5-5")
+        self.assert_complexity_route()
         self.assertNotEqual(calls[1][2], "old-session")
-        router.assert_called_once()
+        self.assertEqual(router.call_count, 2)
         # The re-route's own prompt must not offer the rejected model again.
         self.assertNotIn("claude-fable-5-1", router.call_args.kwargs["prompt"])
         state = self.worker.read_state()
@@ -4318,6 +4319,15 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(is_worker_comment({"body": body}))
         self.assertTrue(self.worker.read_state()["started_comment_posted"])
 
+    def assert_complexity_route(self) -> None:
+        from dynamic_router import complexity_model_meets
+        analysis = self.worker.routing["complexity_analysis"]
+        self.assertFalse(self.worker.routing["complexity_requirements_unmet"])
+        self.assertTrue(complexity_model_meets(self.worker.choice.key, self.worker.choice.model,
+                                             self.worker.choice.effort, analysis))
+        self.assertEqual(self.worker.routing["selected_model"], self.worker.choice.model)
+        self.assertTrue(self.worker.routing["complexity_candidate_scores"])
+
     def _routing_payload(self, **overrides: object) -> str:
         payload: dict[str, object] = {
             "task_type": "debugging",
@@ -4355,14 +4365,15 @@ class WorkerTestCase(unittest.TestCase):
             ),
         ) as router:
             self.worker.maybe_apply_dynamic_routing()
-        router.assert_called_once()
+        self.assertEqual(router.call_count, 2)
         self.assertEqual(self.worker.choice.name, "Grok")
         self.assertEqual(self.worker.choice.model, "grok-4.6")
         self.assertEqual(self.worker.choice.effort, "medium")
         self.assertEqual(self.worker.issue.body, "ORIGINAL")
         self.assertEqual(self.worker.routing["model_source"], "configured")
         self.assertEqual(self.worker.routing["prompt_grade"], "B+")
-        self.assertEqual(self.worker.routing["complexity"], 7)
+        self.assertEqual(self.worker.routing["complexity"], 3)
+        self.assertTrue(self.worker.routing["complexity_analysis"]["fallback_used"])
         self.assertEqual(self.worker.routing["confidence"], 0.91)
         self.assertEqual(
             self.worker.routing["complexity_reason"], "Touches the parser and two callers."
@@ -4433,7 +4444,7 @@ class WorkerTestCase(unittest.TestCase):
             side_effect=RouterError("router returned an empty response"),
         ) as router:
             self.worker.maybe_apply_dynamic_routing()
-        router.assert_called_once()
+        self.assertEqual(router.call_count, 2)
         self.assertEqual(self.worker.choice.name, "Grok")
         self.assertEqual(self.worker.choice.model, "grok-4.6")
         self.assertEqual(self.worker.choice.effort, "medium")
@@ -4502,16 +4513,16 @@ class WorkerTestCase(unittest.TestCase):
         before = self.worker.build_prompt(False, "", False)
         with mock.patch("swarm_issue_worker.run_provider_router", return_value=self._routing_payload()) as router:
             self.worker.maybe_apply_dynamic_routing()
-        router.assert_called_once()
+        self.assertEqual(router.call_count, 2)
         self.assertIn(body, router.call_args.kwargs["prompt"])
         self.assertEqual(self.worker.issue.body, body)
-        # The router's own pick runs, rather than complexity 7's tier row.
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
-        self.assertEqual(self.worker.choice.effort, "low")
-        self.assertEqual(self.worker.routing["model_source"], "router")
+        # The AI suggestion is advisory; repository requirements gate the final choice.
+        self.assert_complexity_route()
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertFalse(self.worker.routing["fallback"])
-        self.assertEqual(self.worker.build_prompt(False, "", False), before)
-        self.assertEqual(self.worker.read_state()["model"], "gpt-5.6-luna")
+        self.assertIn(body, self.worker.build_prompt(False, "", False))
+        self.assertIn("Repository-aware task assessment", self.worker.build_prompt(False, "", False))
+        self.assertEqual(self.worker.read_state()["model"], self.worker.choice.model)
         self.assertEqual(self.worker.read_state()["routing_decision"]["prompt_grade"], "B+")
         self.assertEqual(self.worker.read_state()["routing_decision"]["provider"], "codex")
 
@@ -4538,7 +4549,7 @@ class WorkerTestCase(unittest.TestCase):
             prompt,
         )
         self.assertNotIn("escalate to a stronger", prompt)
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-terra")
+        self.assert_complexity_route()
         self.assertEqual(self.worker.routing["routing_optimization"], "cost")
 
     def test_dynamic_routing_asks_once_more_when_the_router_invents_a_model(self) -> None:
@@ -4548,19 +4559,19 @@ class WorkerTestCase(unittest.TestCase):
         with mock.patch(
             "swarm_issue_worker.run_provider_router",
             side_effect=[
+                "{}",  # Complexity evaluator fails closed; the next answers grade/correct.
                 self._routing_payload(selected_model="gpt-5.6-hyperion"),
                 self._routing_payload(selected_model="gpt-5.6-terra", reasoning_effort="medium"),
             ],
         ) as router:
             self.worker.maybe_apply_dynamic_routing()
-        self.assertEqual(router.call_count, 2)
-        correction = router.call_args_list[1].kwargs["prompt"]
+        self.assertEqual(router.call_count, 3)
+        correction = router.call_args_list[2].kwargs["prompt"]
         self.assertIn("gpt-5.6-hyperion", correction)
         self.assertIn("not a model that exists", correction)
         self.assertIn("gpt-5.6-terra", correction.split("Correction —")[1])
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-terra")
-        self.assertEqual(self.worker.choice.effort, "medium")
-        self.assertEqual(self.worker.routing["model_source"], "router")
+        self.assert_complexity_route()
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertFalse(self.worker.routing["fallback"])
 
     def test_dynamic_routing_degrades_to_the_tier_after_a_second_invented_model(self) -> None:
@@ -4572,11 +4583,10 @@ class WorkerTestCase(unittest.TestCase):
             return_value=self._routing_payload(selected_model="gpt-5.6-hyperion"),
         ) as router:
             self.worker.maybe_apply_dynamic_routing()
-        # Exactly one corrective call, then today's deterministic tier lookup.
-        self.assertEqual(router.call_count, 2)
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
-        self.assertEqual(self.worker.choice.effort, "high")
-        self.assertEqual(self.worker.routing["model_source"], "tier")
+        # One complexity call, one grade, one correction; capability gates run last.
+        self.assertEqual(router.call_count, 3)
+        self.assert_complexity_route()
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertFalse(self.worker.routing["fallback"])
         self.assertEqual(self.worker.routing["router_suggested_model"], "gpt-5.6-hyperion")
 
@@ -4598,9 +4608,9 @@ class WorkerTestCase(unittest.TestCase):
             return_value=self._routing_payload(**payload),
         ):
             self.worker.maybe_apply_dynamic_routing()
-        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertTrue(self.worker.routing["cost_consideration_enabled"])
-        self.assertEqual(self.worker.choice.model, "claude-haiku-4-5")
+        self.assert_complexity_route()
         self.assertEqual(self.worker.routing["jev"]["status"], "disabled")
         self.assertIsNone(self.worker.routing["jev"]["jev"])
 
@@ -4611,9 +4621,9 @@ class WorkerTestCase(unittest.TestCase):
             return_value=self._routing_payload(**payload),
         ):
             self.worker.maybe_apply_dynamic_routing()
-        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertTrue(self.worker.routing["cost_consideration_enabled"])
-        self.assertEqual(self.worker.choice.model, "claude-haiku-4-5")
+        self.assert_complexity_route()
 
     def test_dynamic_routing_degrades_to_the_tier_when_the_corrective_call_fails(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
@@ -4622,14 +4632,15 @@ class WorkerTestCase(unittest.TestCase):
         with mock.patch(
             "swarm_issue_worker.run_provider_router",
             side_effect=[
+                "{}",  # Complexity evaluator fails closed; the next answers grade/correct.
                 self._routing_payload(selected_model="gpt-5.6-hyperion"),
                 RouterError("router timed out"),
             ],
         ) as router:
             self.worker.maybe_apply_dynamic_routing()
-        self.assertEqual(router.call_count, 2)
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-sol")
-        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertEqual(router.call_count, 3)
+        self.assert_complexity_route()
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertFalse(self.worker.routing["fallback"])
 
     def test_dynamic_routing_falls_back_and_still_posts_the_configured_model(self) -> None:
@@ -4643,9 +4654,8 @@ class WorkerTestCase(unittest.TestCase):
             side_effect=RouterError("router returned an empty response"),
         ):
             self.worker.maybe_apply_dynamic_routing()
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
-        self.assertEqual(self.worker.choice.effort, "medium")
-        self.assertTrue(self.worker.routing["fallback"])
+        self.assert_complexity_route()
+        self.assertTrue(self.worker.routing["grading_fallback"])
         self.assertEqual(self.worker.issue.body, body)
         with (
             mock.patch.object(self.worker, "comments", return_value=[]),
@@ -4654,8 +4664,8 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
         self.assertIn("SWARM AI Routing", notice)
-        self.assertIn("fell back", notice)
-        self.assertIn("Selected Model: GPT-5.6 Luna", notice)
+        self.assertIn("deterministic fallback", notice)
+        self.assertIn("Selected Model: GPT-5.6 Sol", notice)
         self.assertIn("router returned an empty response", notice)
 
     def test_dynamic_routing_on_names_the_model_once_and_says_the_choice_was_applied(self) -> None:
@@ -4671,9 +4681,8 @@ class WorkerTestCase(unittest.TestCase):
             ),
         ):
             self.worker.maybe_apply_dynamic_routing()
-        self.assertEqual(self.worker.choice.model, "grok-4.6")
-        self.assertEqual(self.worker.choice.effort, "high")
-        self.assertEqual(self.worker.routing["model_source"], "router")
+        self.assert_complexity_route()
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
         with (
             mock.patch.object(self.worker, "comments", return_value=[]),
@@ -4780,7 +4789,7 @@ class WorkerTestCase(unittest.TestCase):
             ),
         ) as router:
             self.worker.maybe_apply_dynamic_routing()
-        router.assert_called_once()
+        self.assertEqual(router.call_count, 2)
         self.assertNotEqual(self.worker.choice.model, "fable")
         self.assertFalse(self.worker.routing["fallback"])
 
@@ -4807,14 +4816,13 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(router.call_args.kwargs["provider"], "codex")
         self.assertEqual(self.worker.choice.name, "Grok")
         # The router named Codex's model while handing off to Grok, so the
-        # reusable scorer supplies Grok's capable complexity-7 fallback.
-        self.assertEqual(self.worker.choice.model, "grok-4.7")
-        self.assertEqual(self.worker.choice.effort, "xhigh")
+        # reusable scorer supplies a model meeting the repository-aware vector.
+        self.assert_complexity_route()
         self.assertTrue(self.worker.choice.session_id)
         self.assertEqual(self.worker.expected_branch(), "ai/xai/issue-506")
         self.assertEqual(self.worker.start_usage, self.worker.provider_usages["Grok"])
         self.assertEqual(self.worker.routing["provider"], "grok")
-        self.assertEqual(self.worker.routing["model_source"], "tier")
+        self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertTrue(self.worker.routing["cost_consideration_enabled"])
         self.assertEqual(
             self.worker.routing["provider_reason"],
@@ -4855,7 +4863,7 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.maybe_apply_dynamic_routing()
         prompt = router.call_args.kwargs["prompt"]
         self.assertIn("codex completed the previous pass", prompt)
-        self.assertEqual(self.worker.choice.name, "Claude")
+        self.assertIn(self.worker.choice.name, {"Claude", "Grok"})
         self.assertIn("Rework:", self.worker.routing["provider_override_reason"])
         with (
             mock.patch.object(self.worker, "comments", return_value=[]),
@@ -4864,7 +4872,7 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
-        self.assertIn("Selected AI: Claude", notice)
+        self.assertIn("Selected AI: " + self.worker.choice.name, notice)
         self.assertIn("Rework: Codex completed the previous pass", notice)
 
     def test_dynamic_routing_keeps_the_previous_tool_when_it_is_clearly_better(self) -> None:
@@ -4885,7 +4893,7 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.maybe_apply_dynamic_routing()
         self.assertEqual(self.worker.choice.name, "Codex")
-        self.assertEqual(self.worker.choice.model, "gpt-5.6-luna")
+        self.assert_complexity_route()
         self.assertEqual(self.worker.routing["provider_override_reason"], "")
 
     def test_dynamic_routing_cannot_change_tools_on_an_owned_branch(self) -> None:

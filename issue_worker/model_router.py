@@ -42,6 +42,7 @@ must degrade, never block, matching every other resilience rule in
 from __future__ import annotations
 
 import dataclasses
+import math
 import json
 from pathlib import Path
 from typing import Any, Sequence
@@ -277,6 +278,11 @@ class RouteRequest:
     token_sensitive: bool = False
     latency_sensitive: bool = False
     quality_requirement: str = "normal"
+    # Optional for backwards-compatible calculator/stage callers. Issue routing
+    # always supplies the complete repository-aware vector and requirements.
+    complexity_vector: dict[str, Any] = dataclasses.field(default_factory=dict)
+    capability_requirements: dict[str, Any] = dataclasses.field(default_factory=dict)
+    historical_performance: tuple[dict[str, Any], ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -862,6 +868,12 @@ def _required_capability(band: ComplexityBand, request: RouteRequest) -> int:
     required = band.min_capability
     if str(request.quality_requirement).strip().lower() == "high":
         required = min(5, required + 1)
+    if request.capability_requirements:
+        # Existing catalog ranks are ordinal 1-5, not measured percentages.
+        floor = float(request.capability_requirements.get("recommended_capability_floor", 0))
+        required = max(required, min(5, math.ceil(floor / 20)))
+        if request.complexity_vector.get("security_risk", 0) >= 70:
+            required = max(required, 4)
     return required
 
 
@@ -869,7 +881,10 @@ def _required_min_effort(band: ComplexityBand, rules: RoutingRules, request: Rou
     floor = rules.min_effort_by_complexity[band.level]
     if str(request.quality_requirement).strip().lower() == "high":
         index = min(len(rules.effort_ladder) - 1, rules.effort_ladder.index(floor) + 1)
-        return rules.effort_ladder[index]
+        floor = rules.effort_ladder[index]
+    requested = request.capability_requirements.get("recommended_reasoning")
+    if requested in rules.effort_ladder:
+        floor = rules.effort_ladder[max(rules.effort_ladder.index(floor), rules.effort_ladder.index(requested))]
     return floor
 
 
@@ -894,6 +909,12 @@ def _score_candidate(
     )
     cost_on = _uses_cost_consideration(request)
     expected_success = _expected_success(model, required_capability)
+    samples = [item for item in request.historical_performance if item.get("model") == model.model]
+    if len(samples) >= 3:
+        # Twenty prior observations shrink sparse history; influence is capped.
+        successes = sum(bool(item.get("success")) for item in samples)
+        observed = (20 * expected_success + successes) / (20 + len(samples))
+        expected_success += max(-.08, min(.03, observed - expected_success))
 
     components = {
         "expected_success": expected_success,
@@ -907,6 +928,11 @@ def _score_candidate(
     }
 
     weights = rules.active_weights(cost_on)
+    vector = request.complexity_vector
+    if vector:
+        weights["context_fit"] = weights.get("context_fit", 0) + .12 * vector.get("change_surface", 0) / 100
+        weights["coding_capability"] = weights.get("coding_capability", 0) + .08 * vector.get("implementation_complexity", 0) / 100
+        weights["reliability"] = weights.get("reliability", 0) + .08 * max(vector.get("architecture_risk", 0), vector.get("security_risk", 0)) / 100
     for key, bonus in group.extra_weights.items():
         if not cost_on and key in {"cost_efficiency", "token_efficiency"}:
             continue
@@ -986,6 +1012,11 @@ def route(
     normalizer = _BenchmarkNormalizer(catalog)
 
     eligible = _eligible_models(catalog, availability)
+    if request.capability_requirements:
+        context_floor = {"low": 0, "medium": .4, "high": .7}.get(request.capability_requirements.get("context_requirement"), 0)
+        eligible = [model for model in eligible if model.relative_capability >= required_capability
+                    and max(_context_fit(model, normalizer.normalize("swe_atlas_qna", entry.swe_atlas_qna))
+                            for entry in (list(model.benchmarks.values()) or [BenchmarkEntry(*([None] * 7), "HEURISTIC")])) >= context_floor]
     # The exemption from the over-qualification penalty is measured against the
     # cheapest model that can do this work. Measured against the cheapest model
     # overall (a model too weak for the task), it never applied, so a newer
@@ -1036,6 +1067,8 @@ def route(
     pool = scored
     if cost_on:
         sufficient = [c for c in scored if c.expected_success >= rules.minimum_expected_success]
+        if request.capability_requirements and not sufficient:
+            raise ModelRouterError("no candidate meets repository-aware expected-success requirements")
         if sufficient:
             best_success = max(candidate.expected_success for candidate in sufficient)
             close = [
@@ -1047,12 +1080,18 @@ def route(
 
     pool = sorted(pool, key=lambda candidate: candidate.score, reverse=True)
     top_score = pool[0].score
-    tied = [c for c in pool if top_score - c.score <= rules.tie_break_margin]
+    tied = pool if request.capability_requirements and cost_on else [c for c in pool if top_score - c.score <= rules.tie_break_margin]
     if cost_on:
+        # Dollar estimates only order candidates when every one has a measured
+        # rate; an unmeasured price is unknown, not infinite, so the catalog's
+        # relative cost tier orders a mixed pool.
+        dollars_first = bool(request.capability_requirements) and all(
+            c.estimated_cost is not None for c in tied)
         # Cost, then effort, then latency. A faster model cannot beat a cheaper
         # adequately capable one solely because it is faster.
         tied.sort(
             key=lambda c: (
+                c.estimated_cost if dollars_first else (c.relative_cost if c.relative_cost else c.model.relative_cost),
                 c.relative_cost if c.relative_cost else c.model.relative_cost,
                 rules.effort_ladder.index(c.effort),
                 c.relative_latency if c.relative_latency else c.model.relative_latency,
