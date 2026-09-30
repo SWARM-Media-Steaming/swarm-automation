@@ -1661,7 +1661,16 @@ class AdversarialStageMixin:
         # not consume the cybersecurity stage's renewals in the same process.
         self.adversarial_epochs_this_run = 0
         loop = self.read_state()[stage.key]
+        # A same-session resume (quota pause, restart) skips the setup below, so
+        # replay the boundary logs once; the Overview rebuilds its row from the
+        # log tail, which may have rotated past the originals.
+        resumed = bool(loop.get("active")) and loop["phase"] != "done"
         while loop["phase"] != "done":
+            if resumed:
+                resumed = False
+                if getattr(self, "choice", None) is not None:
+                    log(stage.round_start_log(self.issue.number, loop))
+                    log(stage.attribution_log(self.issue.number, loop, self.choice))
             if not loop.get("active"):
                 choice = self.choose_stage_provider(stage, loop)
                 if choice is None:
