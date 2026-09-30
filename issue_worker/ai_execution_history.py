@@ -1737,7 +1737,7 @@ class ExecutionHistoryRepository:
                 "LOWER(COALESCE(c.modified_provider, '') || ' ' || COALESCE(c.modified_model, '') || ' ' "
                 "|| COALESCE(c.baseline_provider, '') || ' ' || COALESCE(c.baseline_model, '') || ' ' "
                 "|| COALESCE(c.jev_model, '') || ' ' "
-                "|| COALESCE(e.ai_provider, '')) LIKE ? ESCAPE '\\'"
+                "|| COALESCE(e.ai_provider, '') || ' ' || COALESCE(e.model, '')) LIKE ? ESCAPE '\\'"
             )
             params.append(f"%{escaped}%")
         outcome_key = sanitize_text(outcome)
