@@ -4265,6 +4265,34 @@
         ]
       },
       "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue369_manifest_redos.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue369-manifest-redos",
+      "name": "Issue #369 security: go.mod dependency parsing is linear time",
+      "origin": "adversarial-security",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/repository_complexity.py",
+          "tests/adversarial/security/test_issue369_manifest_redos.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
