@@ -4101,6 +4101,35 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue340_resume_boundary_log_replay.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue340-resume-boundary-log-replay",
+      "name": "Issue #340: same-session quota resume replays round and attribution logs",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/adversarial_core.py",
+          "tests/adversarial/test_issue340_resume_boundary_log_replay.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
