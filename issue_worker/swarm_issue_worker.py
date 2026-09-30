@@ -1549,8 +1549,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         """Build the Markdown usage block shown on the completion comment."""
         if not start and not end:
             return ""
-        lines = [f"- {provider} usage at start: {self.format_usage_snapshot(start)}"]
-        lines.append(f"- {provider} usage at completion: {self.format_usage_snapshot(end)}")
+        lines = [f"- **{provider} usage at start:** {self.format_usage_snapshot(start)}"]
+        lines.append(f"- **{provider} usage at completion:** {self.format_usage_snapshot(end)}")
         if (
             start
             and end
@@ -1560,12 +1560,12 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
             spent = float(start["remaining_percent"]) - float(end["remaining_percent"])
             if spent >= 0:
                 lines.append(
-                    f"- Approx. {provider} usage for this issue: {spent:g} percentage "
+                    f"- **Approx. {provider} usage for this issue:** {spent:g} percentage "
                     "points of its most constrained quota window"
                 )
             else:
                 lines.append(
-                    f"- {provider} quota window reset during this run; "
+                    f"- **{provider} quota window reset during this run:** "
                     "per-issue consumption could not be measured"
                 )
         return "\n".join(lines) + "\n"
@@ -2218,7 +2218,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         if not existing:
             body = (
                 f"{marker}\nWork paused because **{self.choice.name}** no longer has sufficient usage available.\n\n"
-                f"- Model: `{self.choice.model}`\n- Session: `{self.choice.session_id}`\n"
+                f"- **Model:** `{self.choice.model}`\n- **Session:** `{self.choice.session_id}`\n"
                 "- The current work and AI session were saved.\n"
                 f"- The worker will wait for {self.choice.name} specifically, include new trusted comments, "
                 "and resume this same session automatically.\n"
@@ -2257,9 +2257,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 usage_at_start = self.usage_snapshot(self.choice.key)
             body = (
                 f"{marker}\n🤖 **{self.choice.name} Bot** {action} this issue.\n\n"
-                f"- Model: `{self.choice.model}`\n"
-                f"- Branch: `{self.expected_branch()}`\n"
-                f"- {self.choice.name} usage remaining: {self.format_usage_snapshot(usage_at_start)}\n"
+                f"- **Model:** `{self.choice.model}`\n"
+                f"- **Branch:** `{self.expected_branch()}`\n"
+                f"- **{self.choice.name} usage remaining:** {self.format_usage_snapshot(usage_at_start)}\n"
             )
             if self.routing:
                 if self.routing.get("complexity_analysis"):
@@ -2337,21 +2337,21 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 marker,
                 f"🤖 **{self.choice.name} Bot** is resuming work on this issue.",
                 "",
-                f"- Model: `{self.choice.model}`",
-                f"- Branch: `{self.expected_branch()}`",
-                f"- Session: `{self.choice.session_id}`",
-                f"- {self.choice.name} usage remaining: {self.format_usage_snapshot(usage)}",
+                f"- **Model:** `{self.choice.model}`",
+                f"- **Branch:** `{self.expected_branch()}`",
+                f"- **Session:** `{self.choice.session_id}`",
+                f"- **{self.choice.name} usage remaining:** {self.format_usage_snapshot(usage)}",
             ]
             if isinstance(rerouted, dict) and rerouted.get("to"):
                 lines.append(
-                    f"- Re-routed: {rerouted.get('from')} → {rerouted.get('to')} "
+                    f"- **Re-routed:** {rerouted.get('from')} → {rerouted.get('to')} "
                     f"({rerouted.get('reason')})"
                 )
             if new_comments:
                 count = len(new_comments)
                 noun = "comment" if count == 1 else "comments"
                 lines.append(
-                    f"- Picking up {count} new trusted {noun} left while the work was paused."
+                    f"- **Picking up new comments:** {count} new trusted {noun} left while the work was paused."
                 )
             body = "\n".join(lines) + "\n"
             self.github.gh(
@@ -3938,7 +3938,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         branch_line = ""
         if pending.get("branch_name"):
             pr = f" → {pending['pull_request_url']}" if pending.get("pull_request_url") else ""
-            branch_line = f"- Branch: `{pending['branch_name']}`{pr}\n"
+            branch_line = f"- **Branch:** `{pending['branch_name']}`{pr}\n"
         usage_lines = self.render_usage_report(
             provider, pending.get("usage_at_start"), pending.get("usage_at_completion")
         )
@@ -3946,10 +3946,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         jev_report = pending.get("jev_report") or self.render_jev_report()
         return (
             f"{marker}\n{verb} by **{pending.get('ai_tool') or pending.get('ai')}**.\n\n"
-            f"- Model: `{pending.get('model', 'unknown')}`\n"
-            f"- Effort: `{pending.get('effort', 'unknown')}`\n"
+            f"- **Model:** `{pending.get('model', 'unknown')}`\n"
+            f"- **Effort:** `{pending.get('effort', 'unknown')}`\n"
             f"{branch_line}"
-            f"- Commit: `{commit_sha}` — {pending['commit_message']}\n"
+            f"- **Commit:** `{commit_sha}` — {pending['commit_message']}\n"
             f"{usage_lines}\n"
             f"{pending.get('adversarial_summary', '')}"
             f"{self.render_adversarial_policy(pending.get('adversarial_policy'))}"
@@ -4012,7 +4012,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
             epochs = int(report.get("epochs") or 1)
             detail = f" after {epochs} strict-mode epochs" if epochs > 1 else ""
             policy = "best effort allowed" if report.get("policy") == "best_effort" else "strict"
-            return f"- Adversarial merge policy: {policy} — verified clean before merge{detail}.\n"
+            return f"- **Adversarial merge policy:** {policy} — verified clean before merge{detail}.\n"
 
         def describe(unresolved: dict[str, Any]) -> str:
             suites = [f"`{item.get('id')}`" for item in unresolved.get("suites", [])]
@@ -4032,11 +4032,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         merged = (f"merged into `{after.get('integration_branch')}` as `{after.get('merged_sha')}`"
                   if after.get("merged") else "pull request left open")
         return (
-            f"- Adversarial merge policy: **{BEST_EFFORT_LABEL}** — this repository allows a best-effort "
+            f"- **Adversarial merge policy:** **{BEST_EFFORT_LABEL}** — this repository allows a best-effort "
             "adversarial merge after 3 rounds.\n"
-            f"- Delivery: {merged}; {promotion}.\n"
-            f"- Unresolved before merge: {describe(report.get('before_merge') or {})}.\n"
-            f"- Unresolved after merge: {describe(after)} — the merged commit is the one the final round "
+            f"- **Delivery:** {merged}; {promotion}.\n"
+            f"- **Unresolved before merge:** {describe(report.get('before_merge') or {})}.\n"
+            f"- **Unresolved after merge:** {describe(after)} — the merged commit is the one the final round "
             "tested, so these remain open and are tracked in the follow-up issue.\n"
         )
 

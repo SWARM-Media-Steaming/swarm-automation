@@ -233,7 +233,10 @@ class PersistenceContractTests(JevWorkerFixture, unittest.TestCase):
         )
         self.assertIn("### Jev Decision Engine", markdown)
         self.assertIn("Architecture Refactor", markdown)
-        self.assertIn("Complexity: 8/10 (very complex)", markdown)
+        # Issue #373 makes this nested lifecycle key:value label bold while
+        # preserving the concise Jev score and rubric wording from #299.
+        self.assertIn("- **Complexity:** 8/10 (very complex)", markdown)
+        self.assertNotIn("- Complexity: 8/10", markdown)
         self.assertNotIn("FULL CLI STDOUT", markdown)
         self.assertNotIn(SECRET_TOKEN, markdown)
         self.assertLess(len(markdown.splitlines()), 40)

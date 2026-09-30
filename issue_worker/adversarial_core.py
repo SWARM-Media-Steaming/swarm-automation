@@ -594,7 +594,7 @@ class AdversarialStage:
     def summary_line(self, loop: dict[str, Any]) -> str:
         if not loop.get("outcome"):
             return ""
-        return f"- {self.label}: {self.outcome_description(loop)}, {loop['tests_added']} test files added.\n"
+        return f"- **{self.label}:** {self.outcome_description(loop)}, {loop['tests_added']} test files added.\n"
 
     def history_fields(self, loop: dict[str, Any]) -> dict[str, Any]:
         return {"adversarial_round_count": loop["round"], "adversarial_outcome": loop["outcome"],

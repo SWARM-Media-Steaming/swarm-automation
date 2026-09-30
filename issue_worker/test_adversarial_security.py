@@ -216,7 +216,7 @@ class AdversarialSecurityTests(unittest.TestCase):
         self.assertEqual((loop["outcome"], loop["status"]), ("clean_first_pass", "PASS"))
         push.assert_called_once()
         self.assertEqual(len(self.comments_posted), 1)
-        self.assertIn("Adversarial Cybersecurity: PASS", self.comments_posted[0])
+        self.assertIn("**Adversarial Cybersecurity:** PASS", self.comments_posted[0])
 
     def test_in_scope_vulnerability_is_fixed_and_independently_reverified(self):
         self.prepare()
@@ -234,9 +234,9 @@ class AdversarialSecurityTests(unittest.TestCase):
         self.assertEqual(len(loop["fixed_findings"]), 1)
         self.assertEqual(loop["open_findings"], [])
         self.assertNotIn("ghp_", (self.repo / "service.py").read_text())
-        self.assertIn("Adversarial Cybersecurity: FIXED", self.comments_posted[0])
-        self.assertIn("- In-scope discovered: 1", self.comments_posted[0])
-        self.assertIn("- High: 1", self.comments_posted[0])
+        self.assertIn("**Adversarial Cybersecurity:** FIXED", self.comments_posted[0])
+        self.assertIn("- **In-scope discovered:** 1", self.comments_posted[0])
+        self.assertIn("- **High:** 1", self.comments_posted[0])
 
     def test_history_records_security_rounds_beside_uat_rounds_of_the_same_issue(self):
         self.prepare(uat_enabled=True)
@@ -260,8 +260,8 @@ class AdversarialSecurityTests(unittest.TestCase):
                          [("security", 0), ("security", 1), ("uat", 0)])
         self.assertEqual([r["findings_found"] for r in rounds if r["stage"] == "security"], [1, 0])
         body = self.comments_posted[0]
-        self.assertIn("- Adversarial UAT: clean first pass", body)
-        self.assertIn("- Adversarial Cybersecurity: FIXED", body)
+        self.assertIn("- **Adversarial UAT:** clean first pass", body)
+        self.assertIn("- **Adversarial Cybersecurity:** FIXED", body)
 
     def test_security_round_also_runs_the_uat_suites_so_a_hardening_regression_blocks(self):
         self.prepare(uat_enabled=True)
@@ -343,7 +343,7 @@ class AdversarialSecurityTests(unittest.TestCase):
         row = self.worker.history.repository.for_repository(
             self.worker.config.github_repository)[0]
         self.assertEqual(row["security_review_status"], "FAILED")
-        self.assertNotIn("Adversarial Cybersecurity: PASS", self.comments_posted[0])
+        self.assertNotIn("**Adversarial Cybersecurity:** PASS", self.comments_posted[0])
         self.assertIn("did not reach a clean state after three", self.comments_posted[0])
         self.assertIn("Best-effort merge with unresolved adversarial results", self.comments_posted[0])
         self.assertIn("Service token is hardcoded", self.comments_posted[0])
@@ -439,12 +439,12 @@ class AdversarialSecurityTests(unittest.TestCase):
 
         # and all of it is reported back on the originating issue
         body = self.comments_posted[0]
-        self.assertIn("Adversarial Cybersecurity: FIXED", body)
-        self.assertIn("- In-scope discovered: 1", body)
-        self.assertIn("- In-scope fixed: 1", body)
-        self.assertIn("- Out-of-scope issues created: 1", body)
+        self.assertIn("**Adversarial Cybersecurity:** FIXED", body)
+        self.assertIn("- **In-scope discovered:** 1", body)
+        self.assertIn("- **In-scope fixed:** 1", body)
+        self.assertIn("- **Out-of-scope issues created:** 1", body)
         self.assertIn("https://example.invalid/issues/300", body)
-        self.assertIn("adversarial-security-278: passed", body)
+        self.assertIn("**adversarial-security-278:** passed", body)
         self.assertNotIn("SECRET implementer reasoning", body.split("<details>")[0])
 
     # -- out-of-scope findings -----------------------------------------------------

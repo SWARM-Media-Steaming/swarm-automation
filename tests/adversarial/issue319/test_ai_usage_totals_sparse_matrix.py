@@ -51,7 +51,7 @@ def total_values(markdown):
     values = {}
     for line in totals.splitlines():
         for field, label in LABELS.items():
-            prefix = f"{label}: "
+            prefix = f"**{label}:** "
             if line.startswith(prefix):
                 values[field] = line[len(prefix):].strip()
     return values

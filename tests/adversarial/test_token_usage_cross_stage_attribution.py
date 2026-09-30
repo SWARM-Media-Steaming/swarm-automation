@@ -170,11 +170,11 @@ class CrossStageTokenAttributionIntegrityTests(unittest.TestCase):
         # The GitHub-facing report must show every one of the six rows, with
         # UAT and cybersecurity independently labelled per item 9.
         report = worker.render_ai_usage_report()
-        self.assertIn("AI Invocations: 6", report)
+        self.assertIn("**AI Invocations:** 6", report)
         self.assertIn("UAT Adversarial", report)
         self.assertIn("Cyber Adversarial", report)
         self.assertNotIn("| Adversarial |", report)
-        self.assertIn(f"Input: {111 + 222 + 333 + 444 + 555 + 666:,}", report)
+        self.assertIn(f"**Input:** {111 + 222 + 333 + 444 + 555 + 666:,}", report)
 
         # Flushing to the execution-history DB must preserve every row's own
         # distinct attribution and support per-agent-type aggregation without
