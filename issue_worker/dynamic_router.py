@@ -1641,7 +1641,9 @@ def blend_complexity(baseline: int, jev_complexity: float | None, confidence: fl
     base = min(10, max(1, base))
     if jev_complexity is None:
         return base
-    jev = min(10, max(1, int(round(float(jev_complexity) * 9 + 1))))
+    from decision_engine import complexity_out_of_ten
+
+    jev = complexity_out_of_ten(jev_complexity)
     weight = min(1.0, max(0.0, float(confidence))) * 0.5
     blended = int(round(base + (jev - base) * weight))
     return min(base + 2, max(base - 2, min(10, max(1, blended))))

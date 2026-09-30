@@ -9,6 +9,8 @@ from unittest import mock
 
 from ai_execution_history import ExecutionHistoryRepository
 from decision_engine import (
+    complexity_out_of_ten,
+    _field_score,
     CompletionVerdict,
     CompositeDecisionEngine,
     DecisionType,
@@ -23,7 +25,8 @@ from decision_engine import (
     may_act_on,
     swarm_policy_action,
 )
-from jev_cli import JevError, JevResponse, JevSettings, JevUsage
+from dynamic_router import blend_complexity
+from jev_cli import JevError, JevResponse, JevSettings, JevUsage, clamp_confidence_threshold
 
 
 class ConfidenceTests(unittest.TestCase):
@@ -312,9 +315,77 @@ class PersistenceAndReportTests(unittest.TestCase):
         ])
         self.assertIn("### Jev Decision Engine", markdown)
         self.assertIn("Architecture Refactor", markdown)
-        self.assertIn("Complexity: 81%", markdown)
+        self.assertIn("Complexity: 8/10 (very complex)", markdown)
         self.assertNotIn("RAW PROMPT", markdown)
         self.assertEqual(format_jev_markdown([], verbose=True), "")
+
+
+def _levels(score: float, count: int, confidence: float = 0.8) -> dict:
+    """A Jev ``score`` answer as the CLI returns it: the expected level, 0..count-1."""
+    return {
+        "type": "score", "score": score, "confidence": confidence,
+        "probabilities": {str(level): 0.0 for level in range(count)},
+    }
+
+
+class ScoreScaleTests(unittest.TestCase):
+    """Regression: Jev scores are rubric levels, not fractions (issue #369 read as 4%)."""
+
+    def preflight(self, **answers):
+        response = JevResponse(
+            answers={"task_type": {"type": "choice", "choice": "ENHANCEMENT", "confidence": 0.83}, **answers},
+            usage=JevUsage(), raw_shape="answers", model="jev-test",
+        )
+        return interpret_jev_response("TASK_CLASSIFICATION", {"title": "t"}, response)
+
+    def test_a_very_complex_issue_is_not_read_as_four_percent(self):
+        # Level 4 of the six-level complexity rubric (very_complex) is 80%, which
+        # agrees with the router's 8/10 for issue #369.
+        result = self.preflight(complexity=_levels(4.0, 6), security_risk=_levels(2.0, 5))
+        result.source = Source.JEV.value
+        self.assertAlmostEqual(result.scores["complexity"], 0.8)
+        self.assertAlmostEqual(result.scores["securityRisk"], 0.5)
+        text = format_jev_markdown([result])
+        self.assertIn("Complexity: 8/10 (very complex)", text)
+        self.assertNotIn("Complexity: 8/10 (very complex);", text)  # no router grade given
+        self.assertIn("Security sensitivity: 50% (moderate)", text)
+
+    def test_the_comment_compares_jev_with_the_routers_grade_on_one_scale(self):
+        result = self.preflight(complexity=_levels(4.0, 6))
+        result.source = Source.JEV.value
+        text = format_jev_markdown([result], router_complexity=10)
+        self.assertIn("Complexity: 8/10 (very complex); the router graded 10/10", text)
+        self.assertEqual([complexity_out_of_ten(f) for f in (0.0, 0.2, 0.5, 0.8, 1.0)], [1, 3, 6, 8, 10])
+        self.assertEqual(blend_complexity(10, 0.8, 0.83), 9)   # Jev's real level barely moves the grade
+        self.assertEqual(blend_complexity(10, 0.04, 0.83), 8)  # what the misread 4% used to do
+
+    def test_a_simple_issue_is_not_read_as_ninety_six_percent(self):
+        result = self.preflight(complexity=_levels(0.96, 6))
+        self.assertAlmostEqual(result.scores["complexity"], 0.192)
+
+    def test_real_cli_values_scale_to_their_rubric_ends(self):
+        for field, count in (("complexity", 6), ("security_risk", 5), ("ambiguity", 5),
+                             ("failure_risk", 3), ("reasoning_intensity", 4), ("context_size", 5)):
+            low = self.preflight(**{field: _levels(0.0, count)})
+            high = self.preflight(**{field: _levels(float(count - 1), count)})
+            key = {"security_risk": "securityRisk", "failure_risk": "failureRisk",
+                   "reasoning_intensity": "reasoningIntensity", "context_size": "contextSize"}.get(field, field)
+            self.assertEqual(low.scores.get(key), 0.0, field)
+            self.assertEqual(high.scores.get(key), 1.0, field)
+
+    def test_out_of_range_and_broken_levels_never_escape_zero_to_one(self):
+        self.assertEqual(_field_score(_levels(9.0, 6), "complexity"), 1.0)
+        self.assertEqual(_field_score(_levels(-3.0, 6), "complexity"), 0.0)
+        # A broken level is "no score", never 0.0 (which for security risk means "no risk").
+        broken = {"type": "score", "score": float("nan"), "probabilities": {"0": 0, "1": 1}}
+        self.assertIsNone(_field_score(broken, "unknown_field"))
+        self.assertIsNone(_field_score({**broken, "score": float("inf")}, "complexity"))
+        self.assertEqual(clamp_confidence_threshold(float("nan"), 0.7), 0.7)
+
+    def test_bare_numbers_and_labels_keep_their_existing_reading(self):
+        self.assertEqual(_field_score(0.4, "complexity"), 0.4)
+        self.assertEqual(_field_score({"value": "critical"}, "security_risk"), 1.0)
+        self.assertEqual(_field_score({"value": "very_complex"}, "complexity"), 0.8)
 
 
 class EngineFactoryTests(unittest.TestCase):

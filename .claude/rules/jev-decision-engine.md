@@ -23,6 +23,15 @@ selection decision.
   the Swarm action when it is irreversible (`COMPLETE`, `FAIL`, `SKIP_*`, a
   security `PASS`); `swarm_policy_action` substitutes the conservative action.
 
+## Score scale
+
+Jev `score` answers are rubric levels (0 to the top level), never fractions. Convert
+with `decision_engine._level_fraction` (level / (levels - 1)); never pass a raw score
+through `clamp_confidence_threshold`, which treats numbers above 1 as percentages
+and turned "very complex" (4) into 4%. A broken level is "no score", not 0.0. Show
+complexity on the router's 1-10 scale (`complexity_out_of_ten`) next to the router's
+grade. See `docs/jev-decision-engine.md`.
+
 When changing Jev behavior, preserve the distinction between a recommendation
 being recorded, a recommendation being actionable, and the final
 `swarm_action` selected by policy.

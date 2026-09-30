@@ -3312,7 +3312,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         engine = self._decision_engine
         if engine is None or not engine.records:
             return ""
-        return format_jev_markdown(engine.records)
+        # The router's own grade, before Jev's bounded blend, sits beside Jev's
+        # complexity so the two can be compared on the same 1-10 scale.
+        routing = self.routing or {}
+        baseline = ((routing.get("jev") or {}).get("baseline") or {}).get("complexity")
+        return format_jev_markdown(engine.records, router_complexity=baseline or routing.get("complexity"))
 
     @staticmethod
     def _is_security_context(item: dict[str, Any]) -> bool:

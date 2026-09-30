@@ -388,6 +388,48 @@ def _ordinal_label_score(value: str, criteria: Sequence[str]) -> float | None:
     return None
 
 
+_NOT_A_LEVEL_ANSWER = object()
+
+
+def _level_fraction(answer: Any, field: str) -> Any:
+    """A Jev ``score`` answer as a 0..1 fraction of its rubric.
+
+    The Jev CLI answers a score question with "the expected level, from 0 to
+    the highest level" of the rubric it was given (complexity: 0-5 across six
+    levels, security risk: 0-4 across five), not with a fraction. Reading 4.63
+    as a percentage turned "very complex" into 5% and a near-trivial 0.96 into
+    96%, the opposite of the truth. The fraction is ``level / (levels - 1)``,
+    where the level count is the rubric this app offered for the field (or the
+    answer's own ``probabilities``). Returns ``_NOT_A_LEVEL_ANSWER`` when the
+    answer is not a level answer (a bare number, a label) so the caller keeps its
+    other readings, and ``None`` when it is one but carries no usable number: a
+    broken level must read as "no score", never as 0.0 (which for security risk
+    would mean "no risk").
+    """
+    if not isinstance(answer, Mapping):
+        return _NOT_A_LEVEL_ANSWER
+    if answer.get("type") != "score" and not isinstance(answer.get("probabilities"), Mapping):
+        return _NOT_A_LEVEL_ANSWER
+    levels = len(_SCORE_CRITERIA.get(field, ()))
+    if levels < 2 and isinstance(answer.get("probabilities"), Mapping):
+        levels = len(answer["probabilities"])
+    if levels < 2:
+        return _NOT_A_LEVEL_ANSWER
+    for key in ("score", "value", "position"):
+        raw = answer.get(key)
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            level = float(raw)
+        except (TypeError, ValueError):
+            # A label such as {"type": "score", "value": "very_complex"}.
+            return _NOT_A_LEVEL_ANSWER
+        if level != level or level in (float("inf"), float("-inf")):
+            return None
+        return max(0.0, min(1.0, level / (levels - 1)))
+    return None
+
+
 def _field_score(answer: Any, field: str) -> float | None:
     """Numeric score, or a criteria-label answer mapped by its offered position.
 
@@ -396,6 +438,9 @@ def _field_score(answer: Any, field: str) -> float | None:
     0.0 (its float-parse default), which is indistinguishable from a
     correctly parsed near-zero score.
     """
+    level = _level_fraction(answer, field)
+    if level is not _NOT_A_LEVEL_ANSWER:
+        return level
     raw = answer.get("value") if isinstance(answer, Mapping) else answer
     if isinstance(raw, str):
         try:
@@ -1271,8 +1316,32 @@ def summarize_decisions(records: Sequence[DecisionResult]) -> dict[str, Any]:
     }
 
 
-def format_jev_markdown(records: Sequence[DecisionResult], *, verbose: bool = True) -> str:
-    """Concise GitHub section. Never includes raw prompts or CLI output."""
+def complexity_out_of_ten(fraction: float) -> int:
+    """Jev's 0..1 complexity on the router's 1..10 grade scale (rubric ends map to 1 and 10)."""
+    return min(10, max(1, int(round(float(fraction) * 9 + 1))))
+
+
+def _rubric_label(field: str, fraction: float) -> str:
+    """The rubric level a 0..1 fraction sits nearest to, e.g. 0.8 of complexity -> very complex."""
+    criteria = _SCORE_CRITERIA.get(field, ())
+    if len(criteria) < 2:
+        return ""
+    index = int(round(max(0.0, min(1.0, float(fraction))) * (len(criteria) - 1)))
+    return _pretty(criteria[index]).lower()
+
+
+def format_jev_markdown(
+    records: Sequence[DecisionResult],
+    *,
+    verbose: bool = True,
+    router_complexity: int | None = None,
+) -> str:
+    """Concise GitHub section. Never includes raw prompts or CLI output.
+
+    Complexity is shown out of 10, the router's own scale, with the rubric level
+    Jev picked; ``router_complexity`` adds the router's grade beside it so the
+    two can be compared directly.
+    """
     if not verbose:
         return ""
     items = list(records)
@@ -1286,11 +1355,19 @@ def format_jev_markdown(records: Sequence[DecisionResult], *, verbose: bool = Tr
         lines.append("Pre-flight:")
         lines.append(f"- Task: {_pretty(preflight.decision)}")
         if "complexity" in scores:
-            lines.append(f"- Complexity: {int(round(scores['complexity'] * 100))}%")
+            label = _rubric_label("complexity", scores["complexity"])
+            line = f"- Complexity: {complexity_out_of_ten(scores['complexity'])}/10" + (f" ({label})" if label else "")
+            if router_complexity:
+                line += f"; the router graded {int(router_complexity)}/10"
+            lines.append(line)
         if "crossRepoProbability" in scores:
             lines.append(f"- Cross-repository likelihood: {int(round(scores['crossRepoProbability'] * 100))}%")
         if "securityRisk" in scores:
-            lines.append(f"- Security sensitivity: {int(round(scores['securityRisk'] * 100))}%")
+            label = _rubric_label("security_risk", scores["securityRisk"])
+            lines.append(
+                f"- Security sensitivity: {int(round(scores['securityRisk'] * 100))}%"
+                + (f" ({label})" if label else "")
+            )
         rag = (preflight.metadata or {}).get("ragScope")
         if rag:
             lines.append(f"- Recommended context: {_pretty(str(rag))}")

@@ -48,6 +48,21 @@ adapter (`issue_worker/jev_cli.py`) following the same executable discovery,
 timeout, retry, health check, structured output, and sanitized error handling
 as the other AI CLIs. There is no direct HTTP client in this implementation.
 
+## Score scale
+
+A Jev `score` answer is the expected **level** of the rubric it was given, from
+0 to the top level (`jev score --help`): complexity is 0-5 across six levels
+(trivial, simple, standard, complex, very complex, extreme), security risk 0-4.
+It is not a fraction or a percentage. Swarm divides the level by the rubric's top
+level to get a 0-1 value, then shows complexity on the router's own 1-10 scale
+(`1 + 9 x fraction`, so "very complex" is 8/10) with the rubric level beside it and,
+on the GitHub comment, the router's grade for comparison. Jev's complexity is
+blended into the applied grade by at most 2 points, weighted by its confidence.
+
+Decisions recorded before this was corrected (through 2026-09-30) hold the
+misread values: a level of 4 was stored as 0.04. Do not compare them with newer
+rows.
+
 ## Confidence thresholds
 
 Configurable on AI Configuration. Defaults:

@@ -150,6 +150,8 @@ def clamp_confidence_threshold(value: Any, default: float) -> float:
         number = float(value)
     except (TypeError, ValueError):
         return default
+    if number != number:  # NaN compares false to everything and would slip through
+        return default
     if number > 1 and number <= 100:
         number /= 100
     if number < 0 or number > 1:
