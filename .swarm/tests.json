@@ -4211,6 +4211,33 @@
         ]
       },
       "timeoutSeconds": 600
+    },
+    {
+      "id": "adversarial-369-calibration-persistence",
+      "name": "Issue #369 calibration, version isolation and persistence",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3.13",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue369_calibration_persistence.py"
+      ],
+      "requirements": {
+        "executables": [
+          "python3.13",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/test_issue369_calibration_persistence.py"
+        ]
+      },
+      "timeoutSeconds": 600
     }
   ],
   "version": 1
