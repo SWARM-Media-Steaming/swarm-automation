@@ -226,6 +226,46 @@ class Issue373LifecycleBoldLabelTests(unittest.TestCase):
         self.assert_bold_label(body, "Claude quota window reset during this run")
         self.assertNotIn("- **Branch:**", body)
 
+    def test_completion_bolds_adversarial_policy_labels(self) -> None:
+        harness = LifecycleCommentHarness("Codex")
+        pending = {
+            "ai": "Codex",
+            "model": "gpt-test",
+            "effort": "high",
+            "commit_sha": "c" * 40,
+            "commit_message": "Report merge policy (#373)",
+            "ai_usage_report": " ",
+            "jev_report": " ",
+            "ai_output": "done",
+            "adversarial_policy": {
+                "policy": "best_effort",
+                "delivery": "best_effort",
+                "before_merge": {
+                    "suites": [{"id": "adversarial-example"}],
+                    "findings": [{"title": "Example finding"}],
+                },
+                "after_merge": {
+                    "merged": True,
+                    "integration_branch": "ai-main",
+                    "merged_sha": "c" * 40,
+                    "promotion": "not_configured",
+                    "base_branch": "main",
+                    "suites": [{"id": "adversarial-example"}],
+                    "findings": [{"title": "Example finding"}],
+                },
+            },
+        }
+
+        body = harness.worker.render_pending_comment(pending)
+
+        for label in (
+            "Adversarial merge policy",
+            "Delivery",
+            "Unresolved before merge",
+            "Unresolved after merge",
+        ):
+            self.assert_bold_label(body, label)
+
     def test_completion_ai_usage_totals_bold_every_key_value_label(self) -> None:
         markdown = render_ai_usage_markdown(
             [

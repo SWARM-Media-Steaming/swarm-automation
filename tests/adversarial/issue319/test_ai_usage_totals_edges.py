@@ -28,39 +28,39 @@ def totals_lines(events):
 class TotalsEdgeCases(unittest.TestCase):
     def test_thousands_separator_on_summed_totals(self):
         lines = totals_lines([ev(1, input_tokens=1_000_000), ev(2, input_tokens=234_567)])
-        self.assertIn("Input: 1,234,567", lines)
+        self.assertIn("**Input:** 1,234,567", lines)
 
     def test_missing_row_does_not_zero_out_other_metrics(self):
         lines = totals_lines([ev(1, input_tokens=7), ev(2, output_tokens=3)])
-        self.assertIn("Input: 7", lines)
-        self.assertIn("Output: 3", lines)
-        self.assertIn("Total Tokens: —", lines)
+        self.assertIn("**Input:** 7", lines)
+        self.assertIn("**Output:** 3", lines)
+        self.assertIn("**Total Tokens:** —", lines)
 
     def test_zero_then_missing_stays_zero(self):
         lines = totals_lines([ev(1, reasoning_tokens=0), ev(2)])
-        self.assertIn("Reasoning: 0", lines)
-        self.assertIn("Cached Input: —", lines)
+        self.assertIn("**Reasoning:** 0", lines)
+        self.assertIn("**Cached Input:** —", lines)
 
     def test_missing_then_zero_stays_zero(self):
         lines = totals_lines([ev(1), ev(2, reasoning_tokens=0)])
-        self.assertIn("Reasoning: 0", lines)
+        self.assertIn("**Reasoning:** 0", lines)
 
     def test_genuine_zero_cost_is_not_a_dash(self):
         lines = totals_lines([ev(1, estimated_cost=0.0)])
-        self.assertIn("Estimated Cost: $0.00", lines)
+        self.assertIn("**Estimated Cost:** $0.00", lines)
 
     def test_missing_cost_is_a_dash(self):
         lines = totals_lines([ev(1, estimated_cost=None)])
-        self.assertIn("Estimated Cost: —", lines)
+        self.assertIn("**Estimated Cost:** —", lines)
 
     def test_invocation_count_counts_rows_with_no_usage(self):
         lines = totals_lines([ev(1), ev(2), ev(3)])
-        self.assertIn("AI Invocations: 3", lines)
+        self.assertIn("**AI Invocations:** 3", lines)
 
     def test_no_zero_rendered_for_all_missing(self):
         text = render_ai_usage_markdown([ev(1)]).split("**AI Usage Totals**", 1)[1]
         for label in ("Input", "Cached Input", "Reasoning", "Output", "Total Tokens"):
-            self.assertNotIn(f"{label}: 0", text)
+            self.assertNotIn(f"**{label}:** 0", text)
 
     def test_empty_input_renders_nothing(self):
         self.assertEqual(render_ai_usage_markdown([]), "")
