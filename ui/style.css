@@ -484,6 +484,8 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
 .calc-result .usage-table-wrap { margin-top: 8px; }
 .calc-result tr.chosen td { color: var(--text); font-weight: 750; }
 @media (max-width: 1060px) {
+  .arch-layout { grid-template-columns: minmax(0, 1fr); }
+  .arch-detail { position: static; max-height: none; }
   .router-row { grid-template-columns: 96px minmax(0, 1fr); }
   .execution-record.grade-record > summary { grid-template-columns: auto minmax(0, 1fr); }.grade-record .execution-tagging { grid-column: 1 / -1; grid-row: 2; }
   .execution-record > summary { grid-template-columns: minmax(0, 1fr) auto; }.execution-tagging { grid-column: 1 / -1; grid-row: 2; }
@@ -493,6 +495,8 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
   .calc-layout { grid-template-columns: 1fr; }
 }
 @media (max-width: 820px) {
+  .arch-overview { grid-template-columns: minmax(0, 1fr); }
+  .arch-overview .span-two { grid-column: auto; }
   .grade-summary { grid-template-columns: 1fr; }
   .usage-summary { grid-template-columns: 1fr; }
   .usage-filters { grid-template-columns: 1fr; }.usage-filters label.execution-search { grid-column: auto; }
@@ -515,3 +519,36 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
 
 .secret-field { display: grid; gap: 8px; align-content: start; }
 .secret-field > label { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
+
+/* Architecture documentation (issue #338): tokens only, no new colors. */
+.arch-persona-bar { margin-bottom: 18px; }
+.arch-persona-bar .segmented { margin-top: 0; flex-wrap: wrap; }
+.arch-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
+.arch-detail { position: sticky; top: 12px; max-height: calc(100vh - 60px); overflow: auto; }
+.arch-detail h3, .arch-detail h4 { margin: 4px 0; }
+.arch-detail h4 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-top: 14px; }
+.arch-detail ul { margin: 4px 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+.arch-status { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+.arch-overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 18px; }
+.arch-overview .span-two { grid-column: span 2; }
+.arch-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.arch-item { width: 100%; text-align: left; display: grid; gap: 3px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); cursor: pointer; }
+.arch-item:hover, .arch-item.selected { border-color: var(--violet); }
+.arch-item:focus-visible, .diagram-node:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.arch-item span { color: var(--muted); font-size: 12px; }
+.arch-item small { color: var(--muted-2); font-size: 10px; }
+.arch-section { border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel); margin-bottom: 10px; padding: 0 14px; }
+.arch-section summary { cursor: pointer; padding: 13px 0; font-weight: 700; }
+.arch-section .arch-list { padding-bottom: 14px; }
+.arch-evidence { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.arch-diagram { width: 100%; height: auto; max-height: 420px; }
+.diagram-node { cursor: pointer; }
+.diagram-node rect { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.2; }
+.diagram-node text { fill: var(--text); font-size: 11px; }
+.diagram-node:hover rect, .diagram-node.selected rect { stroke: var(--violet); }
+.diagram-node.kind-datastore rect { stroke: var(--cyan); }
+.diagram-node.kind-integration rect { stroke: var(--amber); }
+.diagram-edge { fill: none; stroke: var(--muted-2); stroke-width: 1.4; }
+.diagram-arrow { fill: var(--muted-2); }
+.banner ul { margin: 6px 0 0; padding-left: 18px; }
+@media (prefers-reduced-motion: reduce) { .arch-item, .diagram-node rect { transition: none; } }
