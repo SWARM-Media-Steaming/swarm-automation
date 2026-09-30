@@ -97,7 +97,6 @@ from dynamic_router import (
     InvalidRouterModel,
     RouterCandidate,
     RouterError,
-    RoutingTier,
     apply_jev_signals_to_decision,
     build_model_correction_prompt,
     build_router_prompt,
@@ -109,7 +108,7 @@ from dynamic_router import (
     default_router_model,
     fallback_routing_decision,
     format_routing_notice,
-    load_routing_tiers,
+    derived_routing_tiers,
     normalize_routing_optimization,
     pin_configured_routing_decision,
     resolve_routing_decision,
@@ -524,7 +523,6 @@ class Config:
     minimum_remaining_percent: float
     providers: tuple[ProviderSpec, ...]
     dynamic_model_routing: bool
-    routing_tiers: dict[str, tuple[Any, ...]]
     routing_optimization: str
     allow_usage_credit_models: bool
     preferred_provider: str
@@ -593,7 +591,6 @@ class Config:
                 ProviderSpec.from_args(args, key, name) for key, name in KNOWN_PROVIDERS
             ),
             dynamic_model_routing=bool(args.dynamic_model_routing),
-            routing_tiers=_routing_tiers_from_args(args.routing_tiers),
             routing_optimization=normalize_routing_optimization(args.routing_optimization),
             allow_usage_credit_models=bool(args.allow_usage_credit_models),
             preferred_provider=args.preferred_provider,
@@ -653,6 +650,22 @@ class Config:
     def spec(self, provider: str) -> ProviderSpec | None:
         provider = str(provider).lower()
         return next((s for s in self.providers if s.key == provider), None)
+
+    def tiers_for(self, provider: str, excluded: Sequence[str] = ()) -> tuple[Any, ...]:
+        """The provider's per-band reference tiers, computed now from the live catalog.
+
+        Nothing is stored: the tiers follow the refreshed measurements, prices,
+        the blacklist and what the provider CLI offers. The provider's
+        configured model is the last resort for a band the router cannot decide.
+        """
+        spec = self.spec(provider)
+        return derived_routing_tiers(
+            str(provider).lower(),
+            routing_optimization=self.routing_optimization,
+            allow_usage_credit_models=self.allow_usage_credit_models,
+            fallback=(spec.model, spec.effort) if spec is not None else None,
+            excluded=excluded,
+        )
 
     def require_spec(self, provider: str) -> ProviderSpec:
         spec = self.spec(provider)
@@ -2460,10 +2473,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         host = self.config.spec(provider_key)
         if host is not None and model == host.model:
             return True
-        if any(tier.model == model for tier in self.config.routing_tiers.get(provider_key, ())):
-            return True
-        # The router picks from the model catalog, not only from the tiers, so
-        # a catalog model this configuration still offers is just as valid.
+        # The router picks from the live model catalog.
         return model in catalog_model_names(
             (provider_key,),
             allow_usage_credit_models=self.config.allow_usage_credit_models,
@@ -2665,21 +2675,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         candidates: list[RouterCandidate] = []
         for key in keys:
             spec = self.config.spec(key)
-            tiers: list[RoutingTier] = []
-            for tier in self.config.routing_tiers.get(key, ()):
-                if (key, tier.model) not in excluded:
-                    tiers.append(tier)
-                elif spec is not None and (key, spec.model) not in excluded:
-                    # Keep every complexity band covered, but substitute the
-                    # validated configured model for the one just rejected.
-                    tiers.append(
-                        RoutingTier(
-                            tier.min_complexity,
-                            tier.max_complexity,
-                            spec.model,
-                            spec.effort,
-                        )
-                    )
+            # A model the provider just rejected is left out of every band.
+            tiers = self.config.tiers_for(key, [model for provider, model in excluded if provider == key])
             if spec is None or not tiers:
                 continue
             usage = self.provider_usages.get(spec.name)
@@ -7196,13 +7193,6 @@ def executable_default(name: str) -> str:
     return shutil.which(name) or ""
 
 
-def _routing_tiers_from_args(raw: str) -> dict[str, tuple[Any, ...]]:
-    try:
-        return load_routing_tiers(raw)
-    except ValueError as error:
-        raise WorkerError(str(error)) from error
-
-
 def build_parser() -> argparse.ArgumentParser:
     script_dir = SCRIPT_HOME
     home = Path.home()
@@ -7309,7 +7299,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--routing-tiers",
         default=env_value("SWARM_ROUTING_TIERS", ""),
-        help="JSON object of per-provider complexity tiers. Empty uses the built-in table.",
+        help="Ignored. Routing tiers are computed from the live catalog and are no longer configurable.",
     )
     parser.add_argument(
         "--available-models",

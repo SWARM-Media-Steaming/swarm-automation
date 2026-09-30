@@ -1,0 +1,35 @@
+# No Static Routing Tables
+
+Which model runs which complexity is computed, never stored. The scoring router
+(`model_router.py`) reads the live catalog (refreshed Artificial Analysis
+measurements, prices, the model blacklist, what each provider CLI offers) and
+picks the cheapest capable model. Any table that names models per complexity band
+goes stale the moment a new release lands, and a stored copy in `config.json`
+silently overrides fresh data.
+
+## What exists instead
+
+- `dynamic_router.derived_routing_tiers(agent, ...)` asks the scoring router for
+  every complexity 1-10 and merges neighbours that agree. `Config.tiers_for(key,
+  excluded)` supplies the provider's configured model as the last resort for a
+  score the router cannot decide. Use these for the router prompt's reference
+  tiers, escalation ladders, diagnostics and the routing calculator.
+- `dynamic_router.scored_floor(agent, complexity, ...)` is the one scored pick
+  for a given score; the adversarial tester floor uses it.
+- The worker ignores `--routing-tiers` / `--tiers`, and the desktop app neither
+  stores nor sends `routing_tiers`; an old `config.json` that still has the key
+  loads and drops it on the next save.
+
+## Rules
+
+- Do not add a model name, per-band mapping or capability rank to code or
+  `config.json` when the catalog, the measurements or the pricing catalog can
+  supply it. New models arrive through discovery (`available_models`), the
+  refreshed calibration and `models.yaml`; retired ones through
+  `model-blacklist.json`.
+- Provider defaults (worker model, router model, the CLI-unavailable fallback
+  list) are the only places allowed to name a model, and each must not be
+  blacklisted. Keep their Python and Rust copies in sync.
+- Thresholds are policy, not data (`CAPABILITY_BANDS`, the expected-success
+  floor, the frontier floor, upgrade tolerances). Keep them in one named
+  constant or in `routing-rules.yaml`, not duplicated across files.

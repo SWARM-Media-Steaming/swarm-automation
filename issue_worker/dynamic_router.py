@@ -2,8 +2,8 @@
 
 The router grades the original issue, scores its complexity, and picks which of
 the enabled AI tools runs the work and on which model. The original issue text
-is never rewritten. Keep the default tier tables and provider strengths in sync
-with ``default_routing_tiers`` / ``ProviderSettings`` in ``src/config.rs``.
+is never rewritten. Keep the provider strengths in sync with
+``ProviderSettings`` in ``src/config.rs``.
 
 The model is the router's own call, not a table lookup. It is shown the full
 cross-provider catalog (``_MODEL_CATALOG``) — every model, what it is good at,
@@ -14,18 +14,19 @@ that clear those floors, the lowest estimated total cost wins. A frontier
 model is a last resort at complexity 9 or 10. Saved ``"best"`` preferences
 migrate to ``"cost"``.
 
-The operator's ``routing_tiers`` table is still graded against and still shown
-as reference, and it remains the deterministic safety net: if the router names
-a model outside the catalog it gets exactly one corrective follow-up call with
-the catalog restated (``build_model_correction_prompt``), and a second invalid
-answer resolves through ``tier_for_complexity`` instead — so a persistently
-wrong router response degrades to the old behavior rather than stalling the
-issue. The same tier path covers a decision where the router's tool pick was
+No tier table is stored anywhere. The per-band reference tiers shown to the
+router are computed on demand (``derived_routing_tiers``) from the same live
+catalog the scoring router reads, and they are the deterministic safety net: if
+the router names a model outside the catalog it gets exactly one corrective
+follow-up call with the catalog restated (``build_model_correction_prompt``),
+and a second invalid answer resolves through the band's derived tier instead —
+so a persistently wrong router response degrades rather than stalling the
+issue. The same path covers a decision where the router's tool pick was
 overruled, since its model then belongs to a different tool.
 
-``_MODEL_CATALOG`` exists only here: unlike the tier tables and provider
-strengths, it is never sent to the app or persisted in config.json, so there is
-no matching copy to keep in sync in ``src/config.rs``.
+``_MODEL_CATALOG`` exists only here: unlike the provider strengths, it is never
+sent to the app or persisted in config.json, so there is no matching copy to
+keep in sync in ``src/config.rs``.
 
 Whenever the router's own free-choice model (above) is not usable — its pick
 was outside the catalog, or its tool pick was overruled — the deterministic
@@ -88,28 +89,6 @@ EFFORT_LABELS = {
     "max": "Max",
 }
 
-# Complexity bands from the feature request. Models stay in this table so the
-# rest of the app does not hardcode which slug serves which score.
-_DEFAULT_TIER_ROWS: dict[str, tuple[tuple[int, int, str, str], ...]] = {
-    "claude": (
-        (1, 3, "claude-haiku-4-5", "low"),
-        (4, 6, "claude-sonnet-5-5", "medium"),
-        (7, 8, "claude-opus-5-5", "high"),
-        (9, 10, "claude-opus-5-5", "max"),
-    ),
-    "codex": (
-        (1, 3, "gpt-5.6-luna", "low"),
-        (4, 6, "gpt-5.6-terra", "medium"),
-        (7, 8, "gpt-5.6-sol", "high"),
-        (9, 10, "gpt-6-astra", "xhigh"),
-    ),
-    "grok": (
-        (1, 3, "grok-4.6", "low"),
-        (4, 6, "grok-4.6", "medium"),
-        (7, 8, "grok-4.6", "high"),
-        (9, 10, "grok-4.6", "xhigh"),
-    ),
-}
 _DEFAULT_ROUTER = {
     "claude": ("claude-haiku-4-5", "low"),
     "codex": ("gpt-5.6-luna", "low"),
@@ -662,58 +641,45 @@ def default_router_effort(provider: str) -> str:
     return _DEFAULT_ROUTER.get(provider, ("", "low"))[1]
 
 
-def default_routing_tiers() -> dict[str, tuple[RoutingTier, ...]]:
-    return {
-        provider: tuple(
-            RoutingTier(min_complexity, max_complexity, model, effort)
-            for min_complexity, max_complexity, model, effort in rows
-        )
-        for provider, rows in _DEFAULT_TIER_ROWS.items()
-    }
+def derived_routing_tiers(
+    agent: str,
+    *,
+    routing_optimization: str = DEFAULT_ROUTING_OPTIMIZATION,
+    allow_usage_credit_models: bool = False,
+    fallback: tuple[str, str] | None = None,
+    excluded: Sequence[str] = (),
+) -> tuple[RoutingTier, ...]:
+    """The reference tiers for ``agent``, computed now from the catalog.
 
-
-def load_routing_tiers(raw: str) -> dict[str, tuple[RoutingTier, ...]]:
-    """Built-in tiers, with any JSON object replacing the listed providers.
-
-    Missing providers keep the built-in table. An empty string means the
-    built-in table alone.
+    Nothing is stored and no band is named here: the scoring router is asked
+    which model and effort it would run at each complexity from 1 to 10 (live
+    measurements, prices, the blacklist and what the provider CLI offers), and
+    neighbouring scores with the same answer are merged into one range. A score
+    the router cannot decide for takes ``fallback`` (the provider's configured
+    model and effort); with neither, that score is left uncovered.
     """
-    tiers = default_routing_tiers()
-    text = str(raw or "").strip()
-    if not text:
-        return tiers
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"routing tiers are not valid JSON: {error}") from error
-    if not isinstance(parsed, dict):
-        raise ValueError("routing tiers must be a JSON object keyed by provider")
-    for key, rows in parsed.items():
-        provider = str(key).strip().lower()
-        if not isinstance(rows, list) or not rows:
-            raise ValueError(f"{provider} routing tiers must be a non-empty list")
-        tiers[provider] = tuple(_parse_tier(provider, item) for item in rows)
-    return tiers
-
-
-def _parse_tier(provider: str, item: Any) -> RoutingTier:
-    if not isinstance(item, dict):
-        raise ValueError(f"{provider} routing tier must be an object")
-    try:
-        tier = RoutingTier(
-            min_complexity=int(item["min_complexity"]),
-            max_complexity=int(item["max_complexity"]),
-            model=str(item["model"]).strip(),
-            effort=str(item["effort"]).strip(),
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(f"{provider} routing tier is incomplete") from error
-    if tier.min_complexity > tier.max_complexity or not tier.model or not tier.effort:
-        raise ValueError(f"{provider} routing tier has an invalid range or model")
-    if tier.min_complexity < 1 or tier.max_complexity > 10:
-        raise ValueError(f"{provider} routing tier must stay within complexity 1–10")
-    # A saved tier naming a blacklisted model runs its successor instead.
-    return dataclasses.replace(tier, model=_available_models.replace_blacklisted(tier.model))
+    catalog = _routing_catalog()
+    skipped = set(excluded)
+    picks: list[tuple[int, tuple[str, str] | None]] = []
+    for complexity in range(1, COMPLEXITY_SCALE_TOP + 1):
+        picked = scored_floor(
+            agent, complexity,
+            routing_optimization=routing_optimization,
+            allow_usage_credit_models=allow_usage_credit_models,
+            excluded_models=excluded,
+            catalog=catalog,
+        ) or (fallback if fallback and fallback[0] not in skipped else None)
+        picks.append((complexity, picked))
+    rows: list[RoutingTier] = []
+    for complexity, picked in picks:
+        if picked is None:
+            continue
+        last = rows[-1] if rows else None
+        if last and last.max_complexity == complexity - 1 and (last.model, last.effort) == picked:
+            rows[-1] = RoutingTier(last.min_complexity, complexity, picked[0], picked[1])
+        else:
+            rows.append(RoutingTier(complexity, complexity, picked[0], picked[1]))
+    return tuple(rows)
 
 
 def tier_for_complexity(tiers: tuple[RoutingTier, ...] | list[RoutingTier], complexity: int) -> RoutingTier:
@@ -837,12 +803,10 @@ def _scored_tier_decision(
 ) -> tuple[str, str, str]:
     """(model, effort, explanation) from the reusable scoring router.
 
-    Falls back to the static complexity-tier table when the scoring router's
-    own config cannot be loaded or nothing is eligible — the same "degrade,
-    never block" rule every other part of this module follows — and also when
-    the operator has explicitly customized this tool's ``routing_tiers``, so
-    that documented per-provider override still takes effect rather than
-    being silently superseded by the scoring engine's own catalog.
+    Falls back to the reference tier for the band (itself derived, see
+    ``derived_routing_tiers``) when the scoring router's own config cannot be
+    loaded or nothing is eligible — the same "degrade, never block" rule every
+    other part of this module follows.
     """
     model, effort, explanation, _ = scored_tier(
         candidate,
@@ -866,8 +830,8 @@ def scored_tier(
 ) -> tuple[str, str, str, "_model_router.RoutingDecision | None"]:
     """``_scored_tier_decision`` plus the scoring router's full decision.
 
-    The decision (with every scored candidate) is ``None`` when the static tier
-    table decided instead. The routing calculator uses this so it shows exactly
+    The decision (with every scored candidate) is ``None`` when the band's
+    reference tier decided instead. The routing calculator uses this so it shows exactly
     what the worker would do, from the one implementation.
     """
     calibrated = _active_calibration_catalog()
@@ -875,10 +839,6 @@ def scored_tier(
         model.model for model in calibrated
         if model.agent == candidate.key and model.active and not model.deprecated
     }
-    if tuple(candidate.tiers) != tuple(default_routing_tiers().get(candidate.key, ())):
-        tier = tier_for_complexity(candidate.tiers, complexity)
-        if eligible is None or tier.model in eligible:
-            return tier.model, tier.effort, describe_tier(candidate, tier, complexity), None
     try:
         catalog = calibrated if calibrated is not None else _model_router.load_model_catalog()
         disabled = {
@@ -910,26 +870,32 @@ def scored_tier(
         return tier.model, tier.effort, describe_tier(candidate, tier, complexity), None
 
 
+def _routing_catalog() -> "tuple[_model_router.ModelSpec, ...]":
+    """The catalog live routing scores: the active calibration, else the bundled one."""
+    calibrated = _active_calibration_catalog()
+    return calibrated if calibrated is not None else _model_router.load_model_catalog()
+
+
 def scored_floor(
     agent: str,
     complexity: int,
     *,
     routing_optimization: str = DEFAULT_ROUTING_OPTIMIZATION,
     allow_usage_credit_models: bool = False,
+    excluded_models: Sequence[str] = (),
+    catalog: Sequence["_model_router.ModelSpec"] | None = None,
 ) -> tuple[str, str] | None:
     """``(model, effort)`` the scoring router picks for ``agent`` at ``complexity``.
 
-    Unlike ``scored_tier`` this never consults an operator's saved tier table, so
-    a floor built from it cannot be dragged up (or down) by tiers that name one
-    model for every band. ``None`` when the router cannot decide.
+    Read from the live catalog only, so nothing stored can drag it up or down.
+    ``None`` when the router cannot decide.
     """
-    calibrated = _active_calibration_catalog()
     try:
-        catalog = calibrated if calibrated is not None else _model_router.load_model_catalog()
+        catalog = catalog if catalog is not None else _routing_catalog()
         disabled = {
             model.model for model in catalog
             if not allow_usage_credit_models and requires_usage_credits(model.model)
-        }
+        } | {str(model).strip() for model in excluded_models}
         cost_on = cost_consideration_enabled(routing_optimization)
         decision = _model_router.route(
             _model_router.RouteRequest(
@@ -1036,7 +1002,7 @@ def optimization_prompt_lines(
         f"Use a frontier model only when the complexity score is {floor} or {top}.",
         "High risk may justify leaving the cheapest tier for a capable mid-tier model only.",
         "High risk is not a license to pick a frontier model below the floor.",
-        "The operator reference tiers are the best-fit ladder under cost optimization.",
+        "The reference tiers are the best-fit ladder under cost optimization.",
         "Do not follow a tier that names a frontier model below the floor.",
         "In provider_reason, name the cheaper capable model you considered and why it cannot",
         "do this task.",
@@ -1115,7 +1081,7 @@ def build_router_prompt(
         tool_lines.append(headline)
         if candidate.strengths.strip():
             tool_lines.append(f"  Best at: {candidate.strengths.strip()}")
-        tool_lines.append("  Operator reference tiers (guidance, not a rule you must follow):")
+        tool_lines.append("  Reference tiers (what scoring would pick per band; guidance, not a rule you must follow):")
         for tier in candidate.tiers:
             line = (
                 f"    complexity {tier.min_complexity}-{tier.max_complexity} → "

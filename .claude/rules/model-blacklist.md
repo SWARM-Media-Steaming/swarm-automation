@@ -27,8 +27,9 @@ account.
   `model_router.load_model_catalog` forces `active=false`; `model_catalog`
   filters it out of the router prompt. Do not delete those rows.
 - It can never be a routing, upgrade, Jev-recommended or tier target
-  (`model_still_offered` is false for it, `load_routing_tiers` and
-  `ProviderSpec.from_args` swap in the successor).
+  (`model_still_offered` is false for it and `ProviderSpec.from_args` swaps in
+  the successor; reference tiers are derived from the catalog, so it never
+  appears in them).
 - A started session pinned to one finishes on it; the next fresh session, tester
   or fixer does not. `latest_release` moves a blacklisted model to its
   successor without a price comparison, but only when the successor has a price.
@@ -40,8 +41,8 @@ account.
   Index bands in `model_router.CAPABILITY_BANDS`), a price in
   `model_pricing.py` from the provider's own pricing page, then a blacklist
   entry for the release it replaces.
-- Tier tables (`_DEFAULT_TIER_ROWS`, `default_routing_tiers()` in
-  `src/config.rs`) and the provider defaults must name a model that is not
-  blacklisted; keep the Python and Rust copies in sync.
+- The provider defaults (`swarm_issue_worker.py`, `src/config.rs`) must name a
+  model that is not blacklisted; keep the Python and Rust copies in sync. There
+  is no tier table to update: see `model-routing-no-static-tables.md`.
 - Add or update tests: the blacklist tests in `test_available_models.py` and
   `src/tools.rs` should keep passing without edits when only the JSON changes.

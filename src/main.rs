@@ -779,10 +779,6 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
         .into(),
     );
     arguments.extend([
-        "--routing-tiers".into(),
-        serde_json::to_string(&config.routing_tiers).unwrap_or_else(|_| "{}".into()),
-    ]);
-    arguments.extend([
         "--available-models".into(),
         available_models_json(config, providers),
     ]);
@@ -3281,8 +3277,6 @@ fn routing_calculator_args(
         action.into(),
         "--providers".into(),
         enabled.join(","),
-        "--tiers".into(),
-        serde_json::to_string(&config.routing_tiers).unwrap_or_else(|_| "{}".into()),
         "--available-models".into(),
         available_models.into(),
     ];

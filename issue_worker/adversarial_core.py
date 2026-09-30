@@ -875,9 +875,10 @@ class AdversarialStageMixin:
                     choice = ProviderChoice(spec.name, spec.model, spec.effort, self.new_session_id(spec))
         if self.config.dynamic_model_routing:
             candidates = [RouterCandidate(
-                key=s.key, name=s.name, tiers=self.config.routing_tiers[s.key],
+                key=s.key, name=s.name, tiers=self.config.tiers_for(s.key),
                 strengths=s.strengths, usage_remaining=remaining[s.name],
-            ) for s in self.config.enabled_specs if s.name in names and self.config.routing_tiers.get(s.key)]
+            ) for s in self.config.enabled_specs if s.name in names]
+            candidates = [candidate for candidate in candidates if candidate.tiers]
             host = self.config.require_spec(choice.key)
             if candidates:
                 try:
@@ -1051,10 +1052,10 @@ class AdversarialStageMixin:
         to the strongest model the enabled providers offer.
         """
         from swarm_issue_worker import ProviderChoice, log
-        from dynamic_router import COMPLEXITY_SCALE_TOP, RouterError, default_routing_tiers, model_cost, tier_for_complexity
+        from dynamic_router import COMPLEXITY_SCALE_TOP, RouterError, model_cost, tier_for_complexity
 
         def tiers_for(key: str) -> tuple:
-            return tuple(self.config.routing_tiers.get(key) or default_routing_tiers().get(key) or ())
+            return tuple(self.config.tiers_for(key))
 
         def top_tier(key: str):
             try:

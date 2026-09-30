@@ -141,7 +141,7 @@ configured repository and returns a success/failure result for each one.
 Models the operator has ruled out are listed once in
 `skills/model-router/model-blacklist.json` and enforced in both languages (see
 `.claude/rules/model-blacklist.md`). Never re-add a blacklisted model to a
-dropdown, tier table or default, and keep its catalog rows as inactive peers.
+dropdown or default, and keep its catalog rows as inactive peers.
 The upgrade to a newer release (`latest_release`) also runs for every fresh
 adversarial tester/fixer session, and each stage's router prompt carries the
 implementation's graded complexity and diff size (`stage_scope_note`).
@@ -169,11 +169,11 @@ now genuine AI discretion bounded by operator settings:
    `resolve_routing_decision` now honours the router's own `selected_model` /
    `reasoning_effort`, validated against the canonical cross-provider catalog
    (`_MODEL_CATALOG`) rather than re-derived from the complexity band. Before
-   that issue the suggestion was deliberately discarded in favor of
-   `tier_for_complexity(chosen.tiers, complexity)`; that lookup is still in the
-   code and still matters, but only as the **fallback** path — do not read an
-   older comment or docstring as saying the tier table is the sole source of
-   the worker model.
+   that issue the suggestion was deliberately discarded in favor of a lookup by
+   complexity band; that lookup (`tier_for_complexity`) still exists, but only
+   as the **fallback** path over reference tiers that are *derived on demand*
+   from the live catalog (`derived_routing_tiers`, `Config.tiers_for`). No
+   tier table is stored in `config.json` or in code; never reintroduce one.
 
    Automatic routing is always cost-first after capability, expected-success,
    safety, and context-fit gates (issue #299). Among adequately capable
@@ -193,8 +193,7 @@ any later change here:
 
 - **The prompt is grounded in the whole valid set.** `build_router_prompt`
   lists every model of every offered tool from `_MODEL_CATALOG`, filtered by
-  `allow_usage_credit_models` (forwarded from the desktop the same way
-  `routing_tiers` is) and by any model the provider just rejected in this run
+  `allow_usage_credit_models` (forwarded from the desktop) and by any model the provider just rejected in this run
   (`RouterCandidate.excluded_models`, from the credit-model re-route path).
 - **One corrective retry, never a silent substitution.** A model outside that
   catalog raises `InvalidRouterModel`; `SwarmIssueWorker.resolve_router_
@@ -202,9 +201,9 @@ any later change here:
   the original prompt plus the rejected name and the catalog restated) and
   takes that second answer.
 - **Failure degrades, never blocks.** A second invalid answer — or a failed
-  corrective call — resolves the first response through `tier_for_complexity`
-  (`model_source: "tier"`), so the worst case is exactly the pre-#176
-  behavior. The same tier path covers a decision whose *tool* pick was
+  corrective call — resolves the first response through the band's derived tier
+  (`model_source: "tier"`), so the worst case is the scoring router's own pick.
+  The same tier path covers a decision whose *tool* pick was
   overruled, since the router's model then belongs to a different tool.
 
 Since 2026-09-22, each model also carries a short built-in description of what
@@ -215,7 +214,7 @@ comparable across providers, which is what makes cost-first routing a
 cross-provider judgement rather than a per-tier one. These are shown in the
 router prompt and folded into the stored `tier_explanation`, so they show up in
 AI execution history and the routing notice posted on the issue. Unlike the
-tier tables and provider strengths, this table has no `config.rs` counterpart
+provider strengths, this table has no `config.rs` counterpart
 and nothing to keep in sync: it is never sent to the app or saved in
 `config.json`, only built into `dynamic_router.py`. A model missing from it
 cannot be routed to, so adding a model means adding it here.

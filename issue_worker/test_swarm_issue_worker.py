@@ -4894,9 +4894,14 @@ class WorkerTestCase(unittest.TestCase):
             worker.maybe_apply_dynamic_routing()
         self.assertIn("Best at: Grok is best at scripting", router.call_args.kwargs["prompt"])
 
-    def test_invalid_routing_tier_json_is_rejected(self) -> None:
-        with self.assertRaises(WorkerError):
-            Config.from_args(build_parser().parse_args(self._worker_argv(auto=False) + ["--routing-tiers", "{"]))
+    def test_the_routing_tiers_flag_is_ignored_and_tiers_are_derived(self) -> None:
+        config = Config.from_args(
+            build_parser().parse_args(self._worker_argv(auto=False) + ["--routing-tiers", "{"])
+        )
+        self.assertFalse(hasattr(config, "routing_tiers"))
+        tiers = config.tiers_for("claude")
+        self.assertEqual((tiers[0].min_complexity, tiers[-1].max_complexity), (1, 10))
+        self.assertEqual(config.tiers_for("claude", ["claude-haiku-4-5"])[0].model != "claude-haiku-4-5", True)
 
     def test_execution_history_stores_the_routing_decision(self) -> None:
         database_path = self.state / "routing-history.sqlite3"

@@ -310,7 +310,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertIn("Escalation context", routed.call_args.kwargs["prompt"])
         self.assertIn("no_progress", routed.call_args.kwargs["prompt"])
         from dynamic_router import COMPLEXITY_SCALE_TOP, tier_for_complexity
-        top = tier_for_complexity(self.worker.config.routing_tiers[choice.key], COMPLEXITY_SCALE_TOP)
+        top = tier_for_complexity(self.worker.config.tiers_for(choice.key), COMPLEXITY_SCALE_TOP)
         floor = min(adversarial_core.effort_rank("xhigh"), adversarial_core.effort_rank(top.effort))
         self.assertGreaterEqual(adversarial_core.effort_rank(choice.effort), floor)
 
@@ -374,14 +374,13 @@ class AdversarialUatTests(unittest.TestCase):
         again = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Codex", "gpt-5.6-sol", "low", "c"))
         self.assertEqual((again.model, again.effort), ("gpt-5.6-sol", "high"))
 
-    def test_the_tester_floor_ignores_the_operators_saved_tier_table(self):
-        # Regression: a saved table naming Opus for every band made the
-        # "standard" floor Opus, so a 2/10 change drew the priciest tester.
-        from dynamic_router import RoutingTier
+    def test_the_tester_floor_does_not_depend_on_the_configured_worker_model(self):
+        # Regression: a table naming Opus for every band made the "standard"
+        # floor Opus, so a 2/10 change drew the priciest tester.
         self.prepare()
-        tiers = dict(self.worker.config.routing_tiers)
-        tiers["claude"] = tuple(RoutingTier(lo, hi, "claude-opus-5-5", "high") for lo, hi in ((1, 3), (4, 6), (7, 8), (9, 10)))
-        self.worker.config = dataclasses.replace(self.worker.config, routing_tiers=tiers)
+        specs = tuple(dataclasses.replace(s, model="claude-opus-5-5") if s.key == "claude" else s
+                      for s in self.worker.config.providers)
+        self.worker.config = dataclasses.replace(self.worker.config, providers=specs)
         loop = self.worker.read_state()["adversarial"]
         loop["phase"] = "test"
         raised = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Claude", "claude-haiku-4-5", "low", "s"))

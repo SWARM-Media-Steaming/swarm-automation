@@ -8,7 +8,8 @@
 # with capability/cost inferred from its closest same-family entry, flagged
 # "Discovered", benchmarks null, price unset. Add a real entry here to replace
 # the inference. Keep the slugs in sync with dynamic_router.py's _MODEL_CATALOG
-# and src/config.rs's default_routing_tiers() for the models you do catalogue.
+# for the models you do catalogue. There is no per-band tier table to update:
+# reference tiers are derived from this catalog each time they are needed.
 #
 # Scales (all 1-5, comparable across providers):
 #   relative_capability       1 = lightest, 5 = frontier/deepest reasoning

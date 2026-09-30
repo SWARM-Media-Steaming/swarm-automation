@@ -20,14 +20,13 @@ from dynamic_router import (
     build_model_correction_prompt,
     build_router_prompt,
     default_provider_strengths,
-    default_routing_tiers,
+    derived_routing_tiers,
     describe_model_choice,
     describe_tier,
     display_model_name,
     fallback_routing_decision,
     format_routing_notice,
     frontier_model_names,
-    load_routing_tiers,
     model_catalog,
     model_description,
     parse_router_payload,
@@ -46,7 +45,7 @@ PROVIDER_NAMES = {"claude": "Claude", "codex": "Codex", "grok": "Grok"}
 
 
 def candidates(*keys: str, tiers: dict[str, object] | None = None) -> list[RouterCandidate]:
-    table = tiers or default_routing_tiers()
+    table = tiers or {key: derived_routing_tiers(key) for key in keys}
     return [
         RouterCandidate(
             key=key,
@@ -234,21 +233,34 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertEqual(decision["provider"], "codex")
         self.assertEqual(decision["provider_override_reason"], "")
 
-    def test_custom_tiers_replace_the_built_in_mapping(self) -> None:
-        raw = json.dumps(
-            {
-                "codex": [
-                    {"min_complexity": 1, "max_complexity": 10, "model": "custom-worker", "effort": "low"}
-                ]
-            }
-        )
-        tiers = load_routing_tiers(raw)
-        decision = resolve(
-            sample_payload(complexity=9, selected_model="no-such-model"),
-            candidates=candidates("codex", tiers=tiers),
-        )
-        self.assertEqual(decision["selected_model"], "custom-worker")
-        self.assertEqual(tiers["claude"][0].model, "claude-haiku-4-5")
+    def test_reference_tiers_are_derived_from_the_live_catalog_and_cover_every_score(self) -> None:
+        for key in ("claude", "codex", "grok"):
+            tiers = derived_routing_tiers(key)
+            # Every score 1-10 is covered exactly once, in order, with no gaps.
+            self.assertEqual(tiers[0].min_complexity, 1)
+            self.assertEqual(tiers[-1].max_complexity, 10)
+            for before, after in zip(tiers, tiers[1:]):
+                self.assertEqual(after.min_complexity, before.max_complexity + 1)
+                self.assertNotEqual((before.model, before.effort), (after.model, after.effort))
+            names = {entry.model for entry in model_catalog((key,))}
+            for tier in tiers:
+                self.assertIn(tier.model, names, f"{key} {tier}")
+                self.assertTrue(tier.effort)
+        self.assertEqual(derived_routing_tiers("claude")[0].model, "claude-haiku-4-5")
+
+    def test_reference_tiers_follow_the_blacklist_and_the_configured_fallback(self) -> None:
+        import available_models
+        listed = dict(available_models.blacklist(), **{"claude-sonnet-5-5": "claude-opus-5-5"})
+        with mock.patch.object(available_models, "blacklist", return_value=listed):
+            tiers = derived_routing_tiers("claude")
+        self.assertNotIn("claude-sonnet-5-5", [t.model for t in tiers])
+        # A model the provider just rejected is left out of every band.
+        rejected = derived_routing_tiers("claude", excluded=["claude-haiku-4-5"])
+        self.assertNotIn("claude-haiku-4-5", [t.model for t in rejected])
+        # With no provider the router cannot decide for, the fallback fills the bands.
+        fallback = derived_routing_tiers("nonexistent", fallback=("my-model", "low"))
+        self.assertEqual({t.model for t in fallback}, {"my-model"})
+        self.assertEqual(derived_routing_tiers("nonexistent"), ())
 
     def test_invalid_grade_is_rejected(self) -> None:
         with self.assertRaises(RouterError):
@@ -274,8 +286,8 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertEqual(decision["selected_model"], "grok-4.6")
 
     def test_model_description_covers_every_default_tier_model(self) -> None:
-        for tiers in default_routing_tiers().values():
-            for tier in tiers:
+        for key in ("claude", "codex", "grok"):
+            for tier in derived_routing_tiers(key):
                 description = model_description(tier.model)
                 self.assertTrue(description, f"{tier.model} has no description")
                 self.assertGreater(len(description), 20, tier.model)
@@ -668,10 +680,6 @@ class DynamicRouterTest(unittest.TestCase):
                     cwd=__import__("pathlib").Path("."),
                 )
 
-    def test_malformed_tier_json_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            load_routing_tiers("{")
-
     def test_oneshot_uses_the_given_schema_not_the_router_schema(self) -> None:
         from pathlib import Path
 
@@ -737,8 +745,8 @@ class CostAwareRoutingTest(unittest.TestCase):
 
     def test_catalog_covers_every_model_the_default_tiers_name(self) -> None:
         catalog = {entry.model for entry in model_catalog()}
-        for provider, tiers in default_routing_tiers().items():
-            for tier in tiers:
+        for provider in ("claude", "codex", "grok"):
+            for tier in derived_routing_tiers(provider):
                 self.assertIn(tier.model, catalog, f"{provider} tier model missing from catalog")
 
     def test_a_rejected_model_is_kept_out_of_the_catalog_and_cannot_be_named(self) -> None:

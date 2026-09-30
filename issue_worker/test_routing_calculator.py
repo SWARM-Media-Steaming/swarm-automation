@@ -16,7 +16,7 @@ ALL = ["claude", "codex", "grok"]
 
 def simulate(**inputs):
     return calc.simulate(
-        inputs, providers=ALL, tiers=dynamic_router.load_routing_tiers(""),
+        inputs, providers=ALL,
         allow_usage_credit_models=False,
     )
 
@@ -49,7 +49,7 @@ class SimulateTests(CalculatorTestCase):
         # Parity: the calculator must not be a second implementation.
         result = simulate(taskType="feature", complexity=7, risk="high", provider="claude")
         candidate = dynamic_router.RouterCandidate(
-            key="claude", name="Claude", tiers=dynamic_router.load_routing_tiers("")["claude"],
+            key="claude", name="Claude", tiers=dynamic_router.derived_routing_tiers("claude"),
             strengths="", usage_remaining=None, excluded_models=(),
         )
         model, effort, _explanation = dynamic_router._scored_tier_decision(
@@ -128,7 +128,7 @@ class ValidationTests(CalculatorTestCase):
     def test_a_tool_that_is_not_enabled_is_rejected(self) -> None:
         with self.assertRaisesRegex(calc.CalculatorError, "not an enabled"):
             calc.simulate({"complexity": 5, "provider": "grok"}, providers=["claude"],
-                          tiers=dynamic_router.load_routing_tiers(""), allow_usage_credit_models=False)
+                          allow_usage_credit_models=False)
 
 
 class CommandLineTests(CalculatorTestCase):

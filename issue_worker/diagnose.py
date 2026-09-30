@@ -312,7 +312,7 @@ def synthesize(
     """
     host = app_worker.config.require_spec(choice.key)
     router_candidates = [
-        RouterCandidate(key=spec.key, name=spec.name, tiers=app_worker.config.routing_tiers.get(spec.key, ()),
+        RouterCandidate(key=spec.key, name=spec.name, tiers=app_worker.config.tiers_for(spec.key),
                          strengths=spec.strengths, usage_remaining=remaining.get(spec.name))
         for spec in app_worker.config.enabled_specs
     ]

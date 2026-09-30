@@ -22,7 +22,7 @@ are actually available, which one should run it.
   benchmark data (Coding Agent Index, DeepSWE, Terminal-Bench, SWE-Atlas-QnA,
   cost/tokens/runtime per task). `model` slugs must match the exact strings
   the app already invokes providers with (`issue_worker/dynamic_router.py`'s
-  `_MODEL_CATALOG`, `src/config.rs`'s `default_routing_tiers()`); a model
+  `_MODEL_CATALOG` and the provider defaults in `src/config.rs`); a model
   missing here cannot be routed to. Adding a model needs no code change — add
   an entry and, once it has real usage, fill in its benchmark numbers.
 - `model-blacklist.json` — models that are never offered or routed to: older
@@ -103,7 +103,7 @@ scores were folded into one row per model) is rebuilt regardless of the
 interval, because it cannot rank a new release.
 
 Every fresh adversarial tester or fixer session, like the primary run, passes
-through `latest_release`: a model routed from a fallback tier table or the
+through `latest_release`: a model routed from a fallback tier or the
 configured default moves to the newest release of its family when that is no
 dearer and not measurably weaker. A session already started keeps its model.
 This is not a separate scoring bonus; measured capability and cost still decide
@@ -115,7 +115,7 @@ diff size of the change under test, and the stage logs the complexity it was
 graded, so a small change is not tested by a top-tier model without a reason.
 That grade never lowers a tester below a floor: the model the scoring router
 itself picks for a STANDARD task (complexity 4, `dynamic_router.scored_floor`,
-never the operator's saved tier table) at medium effort or better, and, on the
+computed from the live catalog, never from a stored table) at medium effort or better, and, on the
 same provider, no weaker than the first assessment's tester
 (`apply_tester_floor`, recorded as `tester_reference`). A
 tester that breaks an edit rule is rejected, its edits restored, and the next

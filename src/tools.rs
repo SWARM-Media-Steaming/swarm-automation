@@ -829,36 +829,6 @@ pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Ve
             ));
             provider.router_effort = effort;
         }
-
-        if let Some(tiers) = config.routing_tiers.get_mut(&tool.id) {
-            for tier in tiers {
-                let model = matching_model(&tool.models, &tier.model);
-                if tier.model != model.value {
-                    repairs.push(format!(
-                        "{} routing tier {}-{} model '{}' is unavailable; using '{}'.",
-                        tool.label,
-                        tier.min_complexity,
-                        tier.max_complexity,
-                        tier.model,
-                        model.value
-                    ));
-                    tier.model = model.value.clone();
-                }
-                let effort = supported_effort(model, &tier.effort);
-                if tier.effort != effort {
-                    repairs.push(format!(
-                        "{} routing tier {}-{} effort '{}' is unavailable for '{}'; using '{}'.",
-                        tool.label,
-                        tier.min_complexity,
-                        tier.max_complexity,
-                        tier.effort,
-                        tier.model,
-                        effort
-                    ));
-                    tier.effort = effort;
-                }
-            }
-        }
     }
     repairs
 }
@@ -1248,9 +1218,6 @@ mod tests {
                 provider.router_model = "fable".into();
             }
         }
-        for tier in config.routing_tiers.get_mut("claude").unwrap() {
-            tier.model = "fable".into();
-        }
         let mut tool = basic_tool("claude", "Claude Code", "claude", true, "");
         tool.models = vec![
             ModelInfo {
@@ -1275,9 +1242,6 @@ mod tests {
         let claude = config.provider("claude").unwrap();
         assert_eq!(claude.model, "opus");
         assert_eq!(claude.router_model, "opus");
-        assert!(config.routing_tiers["claude"]
-            .iter()
-            .all(|tier| tier.model == "opus"));
         assert!(repairs
             .iter()
             .any(|repair| repair.contains("worker model 'fable' is unavailable")));
@@ -1295,8 +1259,6 @@ mod tests {
         grok.effort = "max".into();
         grok.router_model = "grok-retired".into();
         grok.router_effort = "max".into();
-        config.routing_tiers.get_mut("grok").unwrap()[0].model = "grok-retired".into();
-        config.routing_tiers.get_mut("grok").unwrap()[0].effort = "max".into();
         let tools = vec![ToolInfo {
             id: "grok".into(),
             label: "Grok Build".into(),
@@ -1328,12 +1290,7 @@ mod tests {
             (grok.router_model.as_str(), grok.router_effort.as_str()),
             ("grok-current", "medium")
         );
-        assert_eq!(config.routing_tiers["grok"][0].model, "grok-current");
-        assert_eq!(config.routing_tiers["grok"][0].effort, "medium");
         assert!(repairs.iter().any(|repair| repair.contains("router model")));
-        assert!(repairs
-            .iter()
-            .any(|repair| repair.contains("routing tier 1-3")));
     }
 
     #[test]
@@ -1349,7 +1306,6 @@ mod tests {
                 provider.router_model = "haiku".into();
             }
         }
-        config.routing_tiers.get_mut("claude").unwrap()[0].model = "claude-sonnet-4-1".into();
         let mut tool = basic_tool("claude", "Claude Code", "claude", true, "");
         tool.models = ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5"]
             .into_iter()
@@ -1368,7 +1324,6 @@ mod tests {
         let claude = config.provider("claude").unwrap();
         assert_eq!(claude.model, "claude-opus-5");
         assert_eq!(claude.router_model, "claude-haiku-4-5");
-        assert_eq!(config.routing_tiers["claude"][0].model, "claude-sonnet-5");
     }
 
     #[test]
@@ -1463,9 +1418,6 @@ mod tests {
             .unwrap();
         claude.model = "claude-sonnet-5".into();
         claude.router_model = "claude-opus-5".into();
-        for tier in config.routing_tiers.get_mut("claude").unwrap() {
-            tier.model = "claude-opus-4-7".into();
-        }
         let mut tool = basic_tool("claude", "Claude Code", "claude", true, "");
         tool.models = offered;
         tool.models_detected = true;
@@ -1473,9 +1425,6 @@ mod tests {
         let claude = config.provider("claude").unwrap();
         assert_eq!(claude.model, "claude-sonnet-5-5");
         assert_eq!(claude.router_model, "claude-opus-5-5");
-        assert!(config.routing_tiers["claude"]
-            .iter()
-            .all(|tier| tier.model == "claude-opus-5-5"));
     }
 
     #[test]

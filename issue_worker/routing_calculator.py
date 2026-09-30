@@ -16,8 +16,8 @@ the AI router's opinion changes the outcome — a valid suggestion is honoured.
 
 Usage::
 
-    routing_calculator.py describe [--tiers JSON] [--providers claude,codex]
-    routing_calculator.py simulate --input JSON [--tiers JSON] [--providers ...]
+    routing_calculator.py describe [--providers claude,codex]
+    routing_calculator.py simulate --input JSON [--providers ...]
 
 Both accept ``--available-models JSON`` and ``--allow-usage-credit-models``.
 """
@@ -158,14 +158,18 @@ def _read_inputs(raw: Mapping[str, Any]) -> dict[str, Any]:
 def _decide(
     key: str,
     inputs: Mapping[str, Any],
-    tiers: Mapping[str, Sequence[Any]],
+    tiers: Mapping[str, Sequence[Any]] | None,
     *,
     allow_usage_credit_models: bool,
 ) -> dict[str, Any]:
     """The worker's model-and-effort decision for one AI tool."""
     name = PROVIDER_NAMES[key]
+    # Reference tiers are derived from the live catalog; a caller-supplied table
+    # is only for tests that pin one.
+    reference = tuple((tiers or {}).get(key) or dynamic_router.derived_routing_tiers(
+        key, allow_usage_credit_models=allow_usage_credit_models))
     candidate = dynamic_router.RouterCandidate(
-        key=key, name=name, tiers=tuple(tiers.get(key, ())), strengths="",
+        key=key, name=name, tiers=reference, strengths="",
         usage_remaining=None, excluded_models=(),
     )
     complexity, risk, task_type = inputs["complexity"], inputs["risk"], inputs["task_type"]
@@ -194,7 +198,7 @@ def _decide(
             "expected success, capability, and cost; the lowest-cost one that is capable enough wins."
         )
     else:
-        steps.append("The configured complexity tiers decided, because scoring was not available.")
+        steps.append("The band's reference tier decided, because scoring was not available.")
 
     model, effort, source = tier_model, tier_effort, "scored" if decision is not None else "tier"
     explanation = tier_explanation
@@ -256,7 +260,7 @@ def simulate(
     raw_inputs: Mapping[str, Any],
     *,
     providers: Sequence[str],
-    tiers: Mapping[str, Sequence[Any]],
+    tiers: Mapping[str, Sequence[Any]] | None = None,
     allow_usage_credit_models: bool,
 ) -> dict[str, Any]:
     """Decide for the chosen AI tool, or for every enabled tool when none is chosen."""
@@ -289,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("describe", "simulate"):
         command = sub.add_parser(name)
         command.add_argument("--providers", default="", help="Comma-separated enabled AI tool keys.")
-        command.add_argument("--tiers", default="", help="The app's routing_tiers JSON; empty uses the built-in table.")
+        command.add_argument("--tiers", default="", help="Ignored. Reference tiers are computed from the live catalog.")
         command.add_argument("--available-models", default="", help="JSON of models each provider CLI reports.")
         command.add_argument("--allow-usage-credit-models", action="store_true")
         if name == "simulate":
@@ -316,7 +320,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = simulate(
                 raw,
                 providers=providers,
-                tiers=dynamic_router.load_routing_tiers(args.tiers),
                 allow_usage_credit_models=bool(args.allow_usage_credit_models),
             )
     except (CalculatorError, ValueError, dynamic_router.RouterError, model_router.ModelRouterError) as error:

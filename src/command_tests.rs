@@ -201,13 +201,8 @@ fn provider_scheduler_arguments_carry_dynamic_routing_settings() {
     assert!(off
         .windows(2)
         .any(|pair| pair[0] == "--codex-router-strengths" && pair[1] == "codex is best at tests"));
-    let tiers = off
-        .windows(2)
-        .find(|pair| pair[0] == "--routing-tiers")
-        .unwrap()[1]
-        .clone();
-    let parsed: serde_json::Value = serde_json::from_str(&tiers).unwrap();
-    assert_eq!(parsed["codex"][2]["model"], "gpt-5.6-sol");
+    // Routing tiers are computed by the worker from the live catalog; none travel.
+    assert!(!off.iter().any(|argument| argument == "--routing-tiers"));
 
     // The router picks the worker model itself, so it needs both the cost
     // preference and the same credit-model filter the desktop applies.
@@ -2048,9 +2043,8 @@ fn routing_calculator_sees_what_the_worker_sees() {
         Some(r#"{"claude":[{"value":"claude-sonnet-5-5"}]}"#)
     );
     assert_eq!(after("--input"), Some(input.to_string().as_str()));
-    // The configured tiers and enabled tools travel too, as they do to the worker.
-    let tiers: serde_json::Value = serde_json::from_str(after("--tiers").unwrap()).unwrap();
-    assert!(tiers.get("claude").is_some());
+    // Enabled tools travel too, as they do to the worker; tiers are derived, not sent.
+    assert!(after("--tiers").is_none());
     assert!(!after("--providers").unwrap().is_empty());
     assert!(arguments.contains(&"--allow-usage-credit-models".to_string()));
 

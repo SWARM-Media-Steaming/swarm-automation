@@ -2428,7 +2428,7 @@ class KnowledgeQueryService:
             RoutingTier,
             build_router_prompt,
             default_provider_strengths,
-            default_routing_tiers,
+            derived_routing_tiers,
             parse_router_payload,
             resolve_routing_decision,
             run_provider_oneshot,
@@ -2436,12 +2436,12 @@ class KnowledgeQueryService:
         )
 
         candidates: list[Any] = []
-        table = default_routing_tiers()
         for item in providers:
             key = str(item.get("id") or "")
             if not key:
                 continue
-            tiers = tuple(table.get(key) or ())
+            model, effort = str(item.get("model") or ""), str(item.get("effort") or "low")
+            tiers = derived_routing_tiers(key, fallback=(model, effort) if model else None)
             if not tiers:
                 tiers = (
                     RoutingTier(1, 10, str(item.get("model") or ""), str(item.get("effort") or "low")),
