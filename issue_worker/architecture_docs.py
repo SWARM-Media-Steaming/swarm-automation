@@ -86,7 +86,7 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b(authorization\s*:\s*(?:bearer|token|basic)\s+)[^\s]+"), _LABEL),
     (re.compile(
         r"(?i)\b((?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|"
-        r"password|passwd|secret|token|credential|private[_-]?key)\w*\s*[=:]\s*)[^\s,;]+"), _LABEL),
+        r"password|passwd|secret|token|credential|private[_-]?key)\w*[\"']?\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"), _LABEL),
     (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b"), "[REDACTED]"),
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED]"),
     (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"), "[REDACTED]"),
@@ -148,7 +148,7 @@ _SIGNAL_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("api", re.compile(
         r"(?i)openapi|swagger|\.proto$|graphql|(?:^|/)(?:api|routes?|controllers?|handlers?|endpoints?)(?:/|\.[a-z]+$)")),
     ("authentication_authorization", re.compile(
-        r"(?i)(?:^|[/_.-])(?:auth|oauth|authn|authz|login|session|permissions?|rbac|acl|iam|crypto|secrets?|tokens?)(?:[/_.-]|$)")),
+        r"(?i)(?:^|[/_.-])(?:auth|authenticat\w*|authoriz\w*|oauth\d*|authn|authz|login|session|permissions?|rbac|acl|iam|crypto|secrets?|tokens?)(?:[/_.-]|$)")),
     ("deployment", re.compile(
         r"(?i)(?:^|/)(?:dockerfile[^/]*|docker-compose[^/]*\.ya?ml|tauri\.conf\.json|helm|charts|k8s|kubernetes|"
         r"terraform|deploy|deployment|infra)(?:/|$)|\.tf$|\.dockerfile$")),
@@ -773,10 +773,25 @@ class ArchitectureDocsMixin:
             return False
         remote = f"{self.config.remote_name}/{self.config.integration_branch}"
         self.git("fetch", self.config.remote_name, self.config.integration_branch, check=False)
-        return subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [self.config.git_bin, "-C", str(self.config.repo_dir), "merge-base", "--is-ancestor", commit, remote],
-            capture_output=True, check=False,
-        ).returncode == 0
+        def run(*arguments: str) -> "subprocess.CompletedProcess[str]":
+            return subprocess.run(  # noqa: S603 - fixed argv, no shell
+                [self.config.git_bin, "-C", str(self.config.repo_dir), *arguments],
+                capture_output=True, text=True, check=False)
+
+        if run("merge-base", "--is-ancestor", commit, remote).returncode == 0:
+            return True
+        # Issue PRs may be squash-merged, so the commit is never an ancestor:
+        # accept it when every file it touched has identical content on the branch.
+        listing = run("diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit)
+        paths = [line for line in listing.stdout.splitlines() if line] if listing.returncode == 0 else []
+        if not paths:
+            return False
+
+        def blob(revision: str, path: str) -> str | None:
+            result = run("rev-parse", "--verify", "-q", f"{revision}:{path}")
+            return result.stdout.strip() if result.returncode == 0 else None
+
+        return all(blob(commit, path) == blob(remote, path) for path in paths)
 
     def run_architecture_docs_review(
         self, *, base_sha: str, commit_sha: str, merged: bool, pull_request_url: str, branch: str,
