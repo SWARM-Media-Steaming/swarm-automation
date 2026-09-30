@@ -233,7 +233,7 @@ class PersistenceContractTests(JevWorkerFixture, unittest.TestCase):
         )
         self.assertIn("### Jev Decision Engine", markdown)
         self.assertIn("Architecture Refactor", markdown)
-        self.assertIn("Complexity: 81%", markdown)
+        self.assertIn("Complexity: 8/10 (very complex)", markdown)
         self.assertNotIn("FULL CLI STDOUT", markdown)
         self.assertNotIn(SECRET_TOKEN, markdown)
         self.assertLess(len(markdown.splitlines()), 40)
