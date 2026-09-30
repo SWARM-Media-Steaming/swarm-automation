@@ -1082,11 +1082,16 @@ def route(
     top_score = pool[0].score
     tied = pool if request.capability_requirements and cost_on else [c for c in pool if top_score - c.score <= rules.tie_break_margin]
     if cost_on:
+        # Dollar estimates only order candidates when every one has a measured
+        # rate; an unmeasured price is unknown, not infinite, so the catalog's
+        # relative cost tier orders a mixed pool.
+        dollars_first = bool(request.capability_requirements) and all(
+            c.estimated_cost is not None for c in tied)
         # Cost, then effort, then latency. A faster model cannot beat a cheaper
         # adequately capable one solely because it is faster.
         tied.sort(
             key=lambda c: (
-                (c.estimated_cost if c.estimated_cost is not None else float("inf")) if request.capability_requirements else (c.relative_cost if c.relative_cost else c.model.relative_cost),
+                c.estimated_cost if dollars_first else (c.relative_cost if c.relative_cost else c.model.relative_cost),
                 c.relative_cost if c.relative_cost else c.model.relative_cost,
                 rules.effort_ladder.index(c.effort),
                 c.relative_latency if c.relative_latency else c.model.relative_latency,
