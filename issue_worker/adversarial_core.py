@@ -1028,6 +1028,9 @@ class AdversarialStageMixin:
         state = self.read_state()
         lines: list[str] = []
         routing = state.get("routing_decision")
+        if isinstance(routing, dict) and routing.get("complexity_analysis"):
+            analysis = routing["complexity_analysis"]
+            lines.append("Repository-aware complexity vector: " + json.dumps(analysis["vector"], sort_keys=True))
         complexity = routing.get("complexity") if isinstance(routing, dict) else None
         if isinstance(complexity, int) and not isinstance(complexity, bool):
             lines.append(f"The implementation under review was graded {complexity}/10 complexity.")
@@ -1262,7 +1265,10 @@ class AdversarialStageMixin:
         return "\n".join(lines) + "\n"
 
     def adversarial_prompt(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
-        return stage.prompt(self, loop, self.adversarial_common_prompt(stage, loop))
+        prompt = stage.prompt(self, loop, self.adversarial_common_prompt(stage, loop))
+        if hasattr(self, "complexity_prompt_note"):
+            prompt += self.complexity_prompt_note()
+        return prompt
 
     def adversarial_changed_paths(self, baseline: str) -> set[str]:
         # --no-renames sees a moved test as a deletion plus an addition.

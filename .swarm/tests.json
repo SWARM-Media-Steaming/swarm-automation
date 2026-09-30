@@ -4157,6 +4157,142 @@
         ]
       },
       "timeoutSeconds": 1800
+    },
+    {
+      "id": "adversarial-369-complexity-contracts",
+      "name": "Issue #369 repository-aware complexity contracts",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3.13",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue369_complexity_contracts.py"
+      ],
+      "requirements": {
+        "executables": [
+          "python3.13",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/test_issue369_complexity_contracts.py"
+        ]
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "adversarial-369-cost-ranking-lifecycle",
+      "name": "Issue #369 cost ranking after capability floors and profile lifecycle edges",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3.13",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue369_cost_ranking_and_lifecycle.py"
+      ],
+      "requirements": {
+        "executables": [
+          "python3.13",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/test_issue369_cost_ranking_and_lifecycle.py"
+        ]
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "adversarial-369-calibration-persistence",
+      "name": "Issue #369 calibration, version isolation and persistence",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3.13",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue369_calibration_persistence.py"
+      ],
+      "requirements": {
+        "executables": [
+          "python3.13",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/test_issue369_calibration_persistence.py"
+        ]
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "adversarial-369-worker-router-boundaries",
+      "name": "Issue #369 worker lifecycle, profiler process and router eligibility boundaries",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3.13",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue369_worker_and_router_boundaries.py"
+      ],
+      "requirements": {
+        "executables": [
+          "python3.13",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/test_issue369_worker_and_router_boundaries.py"
+        ]
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue369_manifest_redos.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue369-manifest-redos",
+      "name": "Issue #369 security: go.mod dependency parsing is linear time",
+      "origin": "adversarial-security",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/repository_complexity.py",
+          "tests/adversarial/security/test_issue369_manifest_redos.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
