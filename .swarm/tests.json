@@ -4411,6 +4411,37 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue373_conditional_label_matrix.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue373-conditional-label-matrix",
+      "name": "Issue #373: optional lifecycle report labels use bold Markdown",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/repository_complexity.py",
+          "issue_worker/dynamic_router.py",
+          "issue_worker/decision_engine.py",
+          "tests/adversarial/test_issue373_conditional_label_matrix.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
