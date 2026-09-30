@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
@@ -11,42 +10,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
-def _adopt_adversarial_twin_during_uat_discovery() -> bool:
-    """Yield to tests/adversarial/test_engineering_knowledge.py when that tree is being collected.
-
-    Unittest discover of `tests/adversarial` with pattern `test_*.py` (the
-    rustfmt suite) imports earlier files that insert `issue_worker/` at the
-    front of sys.path. The later import of this module name then loads this
-    file instead of the adversarial twin and aborts collection.
-    """
-    here = Path(__file__).resolve()
-    twin = here.parents[1] / "tests" / "adversarial" / "test_engineering_knowledge.py"
-    if not twin.is_file() or twin == here:
-        return False
-    twin_dir = twin.parent
-    discovering = False
-    for entry in sys.path:
-        if not entry:
-            continue
-        try:
-            if Path(entry).resolve() == twin_dir:
-                discovering = True
-                break
-        except OSError:
-            continue
-    if not discovering:
-        return False
-    spec = importlib.util.spec_from_file_location(__name__, twin)
-    if spec is None or spec.loader is None:
-        return False
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[__name__] = module
-    spec.loader.exec_module(module)
-    return True
-
-
-_adopt_adversarial_twin_during_uat_discovery()
 
 from ai_execution_history import ExecutionHistoryRepository, ExecutionStart
 from engineering_knowledge import (
@@ -660,7 +623,7 @@ repo = Path(%r).resolve()
 sys.path.insert(0, str(repo / "tests" / "adversarial"))
 sys.path.insert(0, str(repo / "issue_worker"))
 loader = unittest.TestLoader()
-suite = loader.discover(str(repo / "tests" / "adversarial"), pattern="test_engineering_knowledge.py")
+suite = loader.discover(str(repo / "tests" / "adversarial"), pattern="test_adversarial_engineering_knowledge.py")
 if loader.errors:
     raise SystemExit("".join(loader.errors))
 print("COUNT", suite.countTestCases())
