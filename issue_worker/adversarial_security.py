@@ -351,7 +351,7 @@ class SecurityStage(AdversarialStage):
         if loop.get("outcome") == "cap_hit":
             status += f" ({BEST_EFFORT_LABEL.lower()})"
         line = (
-            f"- {self.label}: {status} — {metadata['inScopeDiscovered']} in-scope finding(s), "
+            f"- **{self.label}:** {status} — {metadata['inScopeDiscovered']} in-scope finding(s), "
             f"{metadata['inScopeFixed']} fixed, {metadata['issuesCreated']} follow-up issue(s) filed; "
             f"Critical {counts['Critical']} / High {counts['High']} / Medium {counts['Medium']} / "
             f"Low {counts['Low']}; {metadata['testsAdded']} security test file(s) added.\n"

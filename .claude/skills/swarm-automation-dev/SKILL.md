@@ -69,6 +69,12 @@ explicit `math.isfinite` check — not something `float()` validation catches.
 
 Related, still-accurate mechanics:
 
+- Lifecycle comments use bold Markdown labels for key:value output, such as
+  `- **Model:** value`. Keep labels consistent across providers and all
+  started, resumed, quota-paused, and completed notices; completion usage and
+  adversarial verdict lines follow the same rule. Do not rewrite arbitrary
+  AI-authored answer or blocker text just to alter its Markdown.
+
 - `tauri.conf.json`'s `bundle.resources` entry (`"issue_worker/*.py":
   "issue_worker/"`) is what actually ships these files inside a packaged
   `.app`, and `"skills/model-router/*.json"` ships the model blacklist beside

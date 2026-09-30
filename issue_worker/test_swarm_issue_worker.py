@@ -4344,8 +4344,8 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(provider, "codex")
         self.assertIn("issue", arguments)
         self.assertIn("**Codex Bot** started working on this issue", body)
-        self.assertIn("- Model: `test-model`", body)
-        self.assertIn("- Branch: `ai/codex/issue-407`", body)
+        self.assertIn("- **Model:** `test-model`", body)
+        self.assertIn("- **Branch:** `ai/codex/issue-407`", body)
         self.assertNotIn("SWARM AI Routing", body)
         self.assertTrue(is_worker_comment({"body": body}))
         self.assertTrue(self.worker.read_state()["started_comment_posted"])
@@ -5484,7 +5484,7 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         body = github.call_args.args[2]
         self.assertIn(
-            "Claude usage remaining: 82% remaining (session 82% / week 95% remaining)", body
+            "**Claude usage remaining:** 82% remaining (session 82% / week 95% remaining)", body
         )
         self.assertEqual(self.worker.read_state()["usage_at_start"]["remaining_percent"], 82.0)
 
@@ -5497,9 +5497,9 @@ class WorkerTestCase(unittest.TestCase):
             "usage_at_completion": {"remaining_percent": 73.5, "detail": "session 73.5% / week 95% remaining"},
         }
         rendered = self.worker.render_pending_comment(pending)
-        self.assertIn("Claude usage at start: 80% remaining", rendered)
-        self.assertIn("Claude usage at completion: 73.5% remaining", rendered)
-        self.assertIn("Approx. Claude usage for this issue: 6.5 percentage points", rendered)
+        self.assertIn("**Claude usage at start:** 80% remaining", rendered)
+        self.assertIn("**Claude usage at completion:** 73.5% remaining", rendered)
+        self.assertIn("**Approx. Claude usage for this issue:** 6.5 percentage points", rendered)
 
     def test_completion_comment_without_usage_snapshots_is_unchanged(self) -> None:
         pending = {
@@ -5549,7 +5549,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(provider, "codex")
         self.assertIn("issue", arguments)
         self.assertIn("**Codex Bot** is resuming work on this issue", body)
-        self.assertIn("- Branch: `ai/codex/issue-420`", body)
+        self.assertIn("- **Branch:** `ai/codex/issue-420`", body)
         self.assertTrue(is_worker_comment({"body": body}))
         self.assertEqual(
             self.worker.read_state()["resumed_comment_token"], "2026-09-05T09:00:00-05:00"
@@ -5577,7 +5577,7 @@ class WorkerTestCase(unittest.TestCase):
         body = github.call_args.args[2]
         self.assertIn("**Codex Bot** is resuming work on this issue", body)
         self.assertIn(
-            "- Re-routed: Claude claude-sonnet-5 (medium) → Codex test-model (high) "
+            "- **Re-routed:** Claude claude-sonnet-5 (medium) → Codex test-model (high) "
             "(routing now prefers Codex)",
             body,
         )
@@ -5613,7 +5613,10 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.post_resumed_comment()
         body = github.call_args.args[2]
-        self.assertIn("Picking up 2 new trusted comments left while the work was paused", body)
+        self.assertIn(
+            "**Picking up new comments:** 2 new trusted comments left while the work was paused.",
+            body,
+        )
 
     def test_resume_comment_is_skipped_for_a_fresh_first_round(self) -> None:
         self.worker.issue = IssueContext(421, "Fresh start", "", [], "https://example.invalid/421")
