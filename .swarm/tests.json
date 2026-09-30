@@ -3586,6 +3586,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue323_checkout_node_runtime.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue323-checkout-node-runtime",
+      "name": "Issue #323: CI checkout actions no longer use deprecated Node.js 20",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".github/workflows/ci.yml",
+          "tests/adversarial/test_issue323_checkout_node_runtime.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
