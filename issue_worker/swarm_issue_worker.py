@@ -4372,7 +4372,12 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
     def ai_reported_environment_only(self, output: str) -> tuple[bool, str]:
         if not self.config.allow_environment_only_summary:
             return False, output
-        pattern = rf"^\s*{re.escape(ENVIRONMENT_ONLY_MARKER)}\s*$\n?"
+        marker = re.escape(ENVIRONMENT_ONLY_MARKER)
+        # The marker is normally on its own line. A model sometimes appends it to
+        # the end of the last sentence instead; that is still the same signal, so
+        # it is accepted as the final token of the reply. It only matters when the
+        # run left no changes and no commit, so the looser match cannot hide work.
+        pattern = rf"(?:^[ \t]*|(?<=\s)){marker}[ \t]*$\n?"
         if not re.search(pattern, output, re.MULTILINE):
             return False, output
         cleaned = re.sub(pattern, "", output, flags=re.MULTILINE).rstrip() + "\n"

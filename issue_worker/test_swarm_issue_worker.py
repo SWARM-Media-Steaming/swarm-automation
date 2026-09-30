@@ -1155,6 +1155,23 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(github.call_args_list[1].args[0][0:2], ["label", "create"])
         self.assertEqual(github.call_args_list[2].args[0][0:2], ["issue", "edit"])
 
+    def test_environment_only_marker_is_accepted_alone_on_a_line_or_as_the_final_token(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, allow_environment_only_summary=True)
+        report = self.worker.ai_reported_environment_only
+        self.assertEqual(report("## Summary\nDone.\nSWARM_ENVIRONMENT_ONLY\n"), (True, "## Summary\nDone.\n"))
+        # Regression: Codex ended issue #352's "already resolved" reply with the
+        # marker on the same line as the last sentence, so the worker retried
+        # forever on an error instead of finishing as a no-code result.
+        self.assertEqual(
+            report("Already resolved. No migration required. SWARM_ENVIRONMENT_ONLY"),
+            (True, "Already resolved. No migration required.\n"),
+        )
+        # Mentioning the token mid-sentence is not the signal.
+        unchanged = "Do not print SWARM_ENVIRONMENT_ONLY unless nothing changed, then continue."
+        self.assertEqual(report(unchanged), (False, unchanged))
+        self.worker.config = dataclasses.replace(self.worker.config, allow_environment_only_summary=False)
+        self.assertEqual(report("x SWARM_ENVIRONMENT_ONLY"), (False, "x SWARM_ENVIRONMENT_ONLY"))
+
     def test_environment_only_marker_finishes_without_commit(self) -> None:
         self.worker.config = dataclasses.replace(
             self.worker.config,
