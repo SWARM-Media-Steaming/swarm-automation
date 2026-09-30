@@ -128,11 +128,23 @@ def extract_sections(text: str) -> dict[str, str]:
     """Group the description by recognised heading; repeated headings are joined."""
     sections: dict[str, list[str]] = {}
     current: str | None = None
+    current_level = 0
     for line in text.splitlines():
         match = _HEADING.match(line)
         if match:
             title = match.group("h") or match.group("b") or match.group("c") or ""
-            current = _classify(title)
+            level = len(line.lstrip()) - len(line.lstrip().lstrip("#")) if match.group("h") else 0
+            if current and level > current_level > 0:
+                # A sub-heading belongs to the section it sits under.
+                sections.setdefault(current, []).append(line.strip())
+                continue
+            kind = _classify(title)
+            if current and not match.group("h") and kind is None:
+                # An unrecognised bold or "Label:" line is content, not a new section.
+                sections.setdefault(current, []).append(line.strip())
+                continue
+            current = kind
+            current_level = level
             continue
         if current and line.strip():
             sections.setdefault(current, []).append(line.rstrip())
@@ -240,11 +252,15 @@ def build_issue_context(
         return {"text": clean, "metadata": metadata}
 
     sections = extract_sections(clean)
+    overview = " ".join(clean.split())
     metadata["sections"] = [key for key in SECTION_KEYS if key in sections]
     if summarizer is not None:
         summary, source = _run_summarizer(summarizer, sections, cfg.max_summary_chars, cfg)
     else:
         summary, source = deterministic_summary(sections, cfg.max_summary_chars), "deterministic"
+    if not summary.strip():
+        # No recognisable headings: summarise the prose itself, bounded.
+        summary = _clip("overview: " + overview, cfg.max_summary_chars)
 
     budget = cfg.max_excerpt_chars
     # Head and tail are reserved first so long sections cannot crowd them out, but
