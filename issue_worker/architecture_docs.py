@@ -84,8 +84,9 @@ _SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 _LABEL = r"\1[REDACTED]"
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b(authorization\s*:\s*(?:bearer|token|basic)\s+)[^\s]+"), _LABEL),
+    # No leading \b: `_` is a word character, so DB_PASSWORD / dbPassword must still match.
     (re.compile(
-        r"(?i)\b((?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|"
+        r"(?i)((?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|"
         r"password|passwd|secret|token|credential|private[_-]?key)\w*[\"']?\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"), _LABEL),
     (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b"), "[REDACTED]"),
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED]"),
@@ -708,7 +709,11 @@ def seed_entities(root: Path) -> list[dict[str, Any]]:
             "confidence": confidence,
         })
 
-    readme = next((root / name for name in ("README.md", "README.rst", "README.txt", "README") if (root / name).is_file()), None)
+    def plain_file(candidate: Path) -> bool:
+        # Symlinks could point outside the checkout; never follow them.
+        return candidate.is_file() and not candidate.is_symlink()
+
+    readme = next((root / name for name in ("README.md", "README.rst", "README.txt", "README") if plain_file(root / name)), None)
     if readme:
         try:
             with readme.open("r", encoding="utf-8", errors="replace") as stream:
