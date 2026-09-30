@@ -229,6 +229,35 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue328_rag_security_retention.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue328-rag-security-retention",
+      "name": "Issue #328 security: critical RAG context survives pre-Jev token bounding",
+      "origin": "adversarial-security",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/engineering_knowledge.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/security/test_issue328_rag_security_retention.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "issue_worker",
         "-p",
         "test_*.py"
