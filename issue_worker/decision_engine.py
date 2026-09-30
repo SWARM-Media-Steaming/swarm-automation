@@ -688,13 +688,23 @@ def routable_models_for_jev() -> dict[str, list[dict[str, Any]]]:
     return models
 
 
+# Hard ceiling on issue text in one request, whatever the configured limits.
+MAX_ISSUE_CONTEXT_CHARS = 30000
+
+
 def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Typed questions for one decision type. State is structured, not a prompt dump."""
+    package = context.get("issue_context")
+    package = package if isinstance(package, Mapping) else None
+    if package is not None:
+        summary = sanitize_text(package.get("text") or "")[:MAX_ISSUE_CONTEXT_CHARS]
+    else:
+        summary = sanitize_text(context.get("summary") or context.get("body_excerpt") or "")[:1200]
     state = {
         "decisionType": kind,
         "title": sanitize_text(context.get("title") or "")[:400],
         "labels": [sanitize_text(item)[:40] for item in list(context.get("labels") or [])[:20]],
-        "summary": sanitize_text(context.get("summary") or context.get("body_excerpt") or "")[:1200],
+        "summary": summary,
         "repository": sanitize_text(context.get("repository") or "")[:120],
         "signals": {
             key: context.get(key)
@@ -714,6 +724,17 @@ def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, 
             if key in context
         },
     }
+    if package is not None:
+        meta = package.get("metadata") if isinstance(package.get("metadata"), Mapping) else {}
+        state["issueContext"] = {
+            "version": meta.get("version"),
+            "originalLength": meta.get("originalLength"),
+            "truncated": bool(meta.get("truncated")),
+            "summarized": bool(meta.get("summarized")),
+            "complete": bool(meta.get("complete")),
+            "sections": [sanitize_text(item)[:40] for item in list(meta.get("sections") or [])[:12]],
+            "excerpts": [sanitize_text(item)[:40] for item in list(meta.get("excerpts") or [])[:12]],
+        }
     if kind in {DecisionType.TASK_CLASSIFICATION.value, DecisionType.ISSUE_TRIAGE.value}:
         routable = routable_models_for_jev()
         if routable:

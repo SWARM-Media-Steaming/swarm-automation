@@ -118,6 +118,12 @@ class JevSettings:
     use_rag: bool = True
     use_triage: bool = True
     use_completion: bool = True
+    # Issue-description context limits (see issue_context.py).
+    context_max_raw_chars: int = 6000
+    context_max_summary_chars: int = 1500
+    context_max_excerpt_chars: int = 3000
+    context_summary_timeout_seconds: float = 5.0
+    context_summary_retries: int = 1
 
     def use_category(self, category: str) -> bool:
         mapping = {
@@ -149,6 +155,26 @@ def clamp_confidence_threshold(value: Any, default: float) -> float:
     if number < 0 or number > 1:
         return default
     return number
+
+
+def _context_limits(data: Mapping[str, Any]) -> dict[str, Any]:
+    from issue_context import IssueContextSettings
+
+    defaults = IssueContextSettings()
+    limits = IssueContextSettings(
+        data.get("context_max_raw_chars", defaults.max_raw_chars),
+        data.get("context_max_summary_chars", defaults.max_summary_chars),
+        data.get("context_max_excerpt_chars", defaults.max_excerpt_chars),
+        data.get("context_summary_timeout_seconds", defaults.summary_timeout_seconds),
+        data.get("context_summary_retries", defaults.summary_retries),
+    ).normalized()
+    return {
+        "context_max_raw_chars": limits.max_raw_chars,
+        "context_max_summary_chars": limits.max_summary_chars,
+        "context_max_excerpt_chars": limits.max_excerpt_chars,
+        "context_summary_timeout_seconds": limits.summary_timeout_seconds,
+        "context_summary_retries": limits.summary_retries,
+    }
 
 
 def settings_from_mapping(raw: Mapping[str, Any] | None) -> JevSettings:
@@ -191,6 +217,7 @@ def settings_from_mapping(raw: Mapping[str, Any] | None) -> JevSettings:
         use_rag=_flag(data, "use_rag", "useRag", True),
         use_triage=_flag(data, "use_triage", "useTriage", True),
         use_completion=_flag(data, "use_completion", "useCompletion", True),
+        **_context_limits(data),
     )
 
 
