@@ -315,7 +315,7 @@ class PersistenceAndReportTests(unittest.TestCase):
         ])
         self.assertIn("### Jev Decision Engine", markdown)
         self.assertIn("Architecture Refactor", markdown)
-        self.assertIn("Complexity: 8/10 (very complex)", markdown)
+        self.assertIn("**Complexity:** 8/10 (very complex)", markdown)
         self.assertNotIn("RAW PROMPT", markdown)
         self.assertEqual(format_jev_markdown([], verbose=True), "")
 
@@ -346,15 +346,15 @@ class ScoreScaleTests(unittest.TestCase):
         self.assertAlmostEqual(result.scores["complexity"], 0.8)
         self.assertAlmostEqual(result.scores["securityRisk"], 0.5)
         text = format_jev_markdown([result])
-        self.assertIn("Complexity: 8/10 (very complex)", text)
-        self.assertNotIn("Complexity: 8/10 (very complex);", text)  # no router grade given
-        self.assertIn("Security sensitivity: 50% (moderate)", text)
+        self.assertIn("**Complexity:** 8/10 (very complex)", text)
+        self.assertNotIn("**Complexity:** 8/10 (very complex);", text)  # no router grade given
+        self.assertIn("**Security sensitivity:** 50% (moderate)", text)
 
     def test_the_comment_compares_jev_with_the_routers_grade_on_one_scale(self):
         result = self.preflight(complexity=_levels(4.0, 6))
         result.source = Source.JEV.value
         text = format_jev_markdown([result], router_complexity=10)
-        self.assertIn("Complexity: 8/10 (very complex); the router graded 10/10", text)
+        self.assertIn("**Complexity:** 8/10 (very complex); the router graded 10/10", text)
         self.assertEqual([complexity_out_of_ten(f) for f in (0.0, 0.2, 0.5, 0.8, 1.0)], [1, 3, 6, 8, 10])
         self.assertEqual(blend_complexity(10, 0.8, 0.83), 9)   # Jev's real level barely moves the grade
         self.assertEqual(blend_complexity(10, 0.04, 0.83), 8)  # what the misread 4% used to do

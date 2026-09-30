@@ -252,8 +252,8 @@ class ScoringTests(unittest.TestCase):
         base["drivers"] = ["<img src=x> @everyone [click](https://evil.invalid)\n## Forged"]
         rendered = rc.format_analysis(base)
         self.assertIn("## Complexity Analysis", rendered)
-        self.assertIn("Repository Profile Version: 143", rendered)
-        self.assertIn("Complexity Scoring Version: v1.0", rendered)
+        self.assertIn("**Repository Profile Version:** 143", rendered)
+        self.assertIn("**Complexity Scoring Version:** v1.0", rendered)
         self.assertNotIn("<img", rendered)
         self.assertNotIn("@everyone", rendered)
         self.assertNotIn("\n## Forged", rendered)

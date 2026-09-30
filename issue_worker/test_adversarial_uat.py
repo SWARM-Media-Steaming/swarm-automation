@@ -1112,7 +1112,7 @@ class AdversarialUatTests(unittest.TestCase):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
         self.assertIn("Set in SWARM Automation", notice)
-        self.assertIn("Router recommendation: Grok 4.6 at High reasoning", notice)
+        self.assertIn("**Router recommendation:** Grok 4.6 at High reasoning", notice)
         self.assertNotIn("Dynamic Model Routing applied", notice)
 
     def assert_complexity_route(self):

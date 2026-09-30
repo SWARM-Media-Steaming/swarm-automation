@@ -4434,11 +4434,11 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
         self.assertIn("SWARM AI Routing", notice)
-        self.assertIn("Selected AI: Grok", notice)
-        self.assertIn("Selected Model: Grok 4.6", notice)
-        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn("**Selected AI:** Grok", notice)
+        self.assertIn("**Selected Model:** Grok 4.6", notice)
+        self.assertIn("**Reasoning:** Medium", notice)
         self.assertIn("Set in SWARM Automation", notice)
-        self.assertIn("Router recommendation: Grok 4.6 at High reasoning", notice)
+        self.assertIn("**Router recommendation:** Grok 4.6 at High reasoning", notice)
         self.assertNotIn("matches the configured setting", notice)
         self.assertNotIn("The router chose", notice)
         self.assertNotIn("Grok Grok", notice)
@@ -4463,7 +4463,7 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
         self.assertIn(
-            "Router recommendation: Grok 4.6 at Medium reasoning (matches the configured setting)",
+            "**Router recommendation:** Grok 4.6 at Medium reasoning (matches the configured setting)",
             notice,
         )
 
@@ -4490,8 +4490,8 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
         self.assertIn("Pre-flight grading was unavailable", notice)
-        self.assertIn("Selected Model: Grok 4.6", notice)
-        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn("**Selected Model:** Grok 4.6", notice)
+        self.assertIn("**Reasoning:** Medium", notice)
         self.assertIn("router returned an empty response", notice)
 
     def test_routing_off_does_not_reroute_a_resumed_session(self) -> None:
@@ -4696,7 +4696,7 @@ class WorkerTestCase(unittest.TestCase):
         notice = github.call_args.args[2]
         self.assertIn("SWARM AI Routing", notice)
         self.assertIn("deterministic fallback", notice)
-        self.assertIn("Selected Model: GPT-5.6 Sol", notice)
+        self.assertIn("**Selected Model:** GPT-5.6 Sol", notice)
         self.assertIn("router returned an empty response", notice)
 
     def test_dynamic_routing_on_names_the_model_once_and_says_the_choice_was_applied(self) -> None:
@@ -4721,7 +4721,7 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
-        self.assertIn("Selected Model: Grok 4.6", notice)
+        self.assertIn("**Selected Model:** Grok 4.6", notice)
         self.assertIn("Dynamic Model Routing applied this model and effort", notice)
         self.assertNotIn("Grok Grok", notice)
         self.assertNotIn("Set in SWARM Automation", notice)
@@ -4747,14 +4747,14 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
-        self.assertIn("Prompt Grade: B+", notice)
-        self.assertIn("Complexity: 7/10", notice)
-        self.assertIn("Selected Model: GPT-5.6 Sol", notice)
-        self.assertIn("Reasoning: High", notice)
-        self.assertIn("Routing Confidence: 91%", notice)
-        self.assertIn("Selected AI: Codex", notice)
-        self.assertIn("AI Tools Considered: Codex, Claude, Grok", notice)
-        self.assertIn("Why Codex: Codex is best at test-driven bug fixes", notice)
+        self.assertIn("**Prompt Grade:** B+", notice)
+        self.assertIn("**Complexity:** 7/10", notice)
+        self.assertIn("**Selected Model:** GPT-5.6 Sol", notice)
+        self.assertIn("**Reasoning:** High", notice)
+        self.assertIn("**Routing Confidence:** 91%", notice)
+        self.assertIn("**Selected AI:** Codex", notice)
+        self.assertIn("**AI Tools Considered:** Codex, Claude, Grok", notice)
+        self.assertIn("**Why Codex:** Codex is best at test-driven bug fixes", notice)
         self.assertIn("acceptance criteria are incomplete", notice)
         self.assertEqual(self.worker.issue.body, "ORIGINAL")
 
@@ -4903,8 +4903,8 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
-        self.assertIn("Selected AI: " + self.worker.choice.name, notice)
-        self.assertIn("Rework: Codex completed the previous pass", notice)
+        self.assertIn("**Selected AI:** " + self.worker.choice.name, notice)
+        self.assertIn("**Rework:** Codex completed the previous pass", notice)
 
     def test_dynamic_routing_keeps_the_previous_tool_when_it_is_clearly_better(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
