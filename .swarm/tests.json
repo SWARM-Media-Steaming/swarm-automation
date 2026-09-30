@@ -3388,6 +3388,87 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue319",
+        "-p",
+        "test_*.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue319-ai-usage-totals-missing",
+      "name": "AI Usage totals keep missing distinct from zero",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/token_usage.py",
+          "tests/adversarial/issue319/test_ai_usage_totals_missing.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue319",
+        "-p",
+        "test_ai_usage_totals_edges.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue319-ai-usage-totals-edges",
+      "name": "AI Usage totals edge cases for missing vs zero",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/token_usage.py",
+          "tests/adversarial/issue319/test_ai_usage_totals_edges.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/issue319",
+        "-p",
+        "test_ai_usage_totals_sparse_matrix.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue319-ai-usage-totals-sparse-matrix",
+      "name": "AI Usage totals aggregate sparse metrics independently",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/token_usage.py",
+          "tests/adversarial/issue319/test_ai_usage_totals_sparse_matrix.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
