@@ -156,11 +156,20 @@ class ComplexityWorkerMixin:
         try:
             return apply_complexity_requirements(decision, prediction, candidates,
                 allow_usage_credit_models=self.config.allow_usage_credit_models,
-                history=getattr(self, "_complexity_history", ()))
+                history=getattr(self, "_complexity_history", ()),
+                keep_provider=self.rework_kept_provider(decision))
         except Exception as error:
             # Catalog failures must not stop work; never claim the floor was met.
             log(f"WARNING: Complexity-aware routing unavailable ({type(error).__name__}); requirements retained for audit.")
             return dict(decision, complexity_analysis=prediction, complexity_requirements_unmet=True)
+
+    def rework_kept_provider(self, decision) -> str:
+        """The previous tool when the router deliberately kept it for a follow-up."""
+        previous = (self.issue.previous_ai or "").lower()
+        if (self.issue.work_type == "followup" and previous and decision.get("provider") == previous
+                and not decision.get("provider_override_reason")):
+            return previous
+        return ""
 
     def persist_complexity_routing(self) -> None:
         from swarm_issue_worker import log

@@ -1841,8 +1841,12 @@ def complexity_model_meets(provider: str, model: str, effort: str, prediction: d
 def apply_complexity_requirements(
     decision: dict[str, Any], prediction: dict[str, Any], candidates: Sequence[RouterCandidate],
     *, allow_usage_credit_models: bool = False, history: Sequence[dict[str, Any]] = (),
+    keep_provider: str = "",
 ) -> dict[str, Any]:
     """Capability/context/security gates precede cost across every available tool.
+
+    ``keep_provider`` is a rework's previous tool that the router deliberately
+    kept; routing stays on it while it has a model meeting every requirement.
 
     If none can meet the requirements, best effort uses the strongest available
     candidate at its highest effort, explicitly recording the unmet floor. Cost
@@ -1860,15 +1864,22 @@ def apply_complexity_requirements(
     performance = tuple({"model": item["routing"].get("selected_model"),
                          "success": item["status"] in {"completed", "reworked", "answered", "environment_only"}}
                         for item in history)
+    request = _model_router.RouteRequest(
+        task_type=_normalize_task_type(str(decision.get("task_type") or "feature")),
+        complexity=max(1, min(10, int(round(vector["implementation_complexity"]/10)))),
+        complexity_vector=vector, capability_requirements=prediction["requirements"],
+        historical_performance=performance,
+    )
     try:
-        result = _model_router.route(
-            _model_router.RouteRequest(
-                task_type=_normalize_task_type(str(decision.get("task_type") or "feature")),
-                complexity=max(1, min(10, int(round(vector["implementation_complexity"]/10)))),
-                complexity_vector=vector, capability_requirements=prediction["requirements"],
-                historical_performance=performance,
-            ), catalog=catalog,
-        )
+        kept = tuple(model for model in catalog if model.agent == keep_provider) if keep_provider else ()
+        result = None
+        if kept:
+            try:
+                result = _model_router.route(request, catalog=kept)
+            except _model_router.ModelRouterError:
+                result = None
+        if result is None:
+            result = _model_router.route(request, catalog=catalog)
         updated.update(provider=result.agent, selected_model=result.model, reasoning_effort=result.effort,
                        provider_name=next((item.name for item in candidates if item.key == result.agent), result.agent),
                        tier_explanation=result.reason, model_source="repository_complexity",
