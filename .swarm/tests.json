@@ -3530,6 +3530,33 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue322_unittest_duplicate_module_reproducer.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-322-unittest-duplicate-module-reproducer",
+      "name": "Issue #322: broad unittest discovery reproduces basename collision",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue322_unittest_duplicate_module_reproducer.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
