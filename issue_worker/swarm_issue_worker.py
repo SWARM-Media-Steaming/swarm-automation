@@ -2533,8 +2533,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         With no work product yet, any change is free, so it is taken. Once the
         attempt has edits or commits, a session's context is worth keeping
         unless the pinned route can no longer run, the router now wants a
-        different tool or a more capable model, or a same-tool model is
-        materially cheaper.
+        different tool or a more capable model, or a different same-tool model
+        is materially cheaper. A change of effort alone on the same model is
+        kept unless it needs more capability.
         """
         if (pinned.key, pinned.model, pinned.effort) == (fresh.key, fresh.model, fresh.effort):
             return False, "the routing decision is unchanged"
@@ -2549,6 +2550,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         if old and new:
             if new[0] > old[0]:
                 return True, f"routing now needs a more capable model than {pinned.model}"
+            if pinned.model == fresh.model:
+                # Effort alone is routing noise worth less than the session.
+                return False, "the saved session is kept because only the effort differs"
             if new[0] >= old[0] and old[1] and new[1] is not None and new[1] <= old[1] * self.REROUTE_COST_MARGIN:
                 return True, (
                     f"{fresh.model} is materially cheaper than {pinned.model} "

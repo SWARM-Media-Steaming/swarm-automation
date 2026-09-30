@@ -2546,6 +2546,37 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(bundles, [])
         self.assertIn("kept Claude claude-sonnet-5 (medium)", self.worker._reroute_note)
 
+    def _reroute_effort_only(self, new_effort: str, costs: dict[str, tuple[int, float]]):
+        with mock.patch("swarm_issue_worker.model_route_profile",
+                        side_effect=lambda agent, model, effort: costs[effort]):
+            return self._reroute("Claude", "claude-sonnet-5", new_effort)
+
+    def test_an_effort_only_downgrade_keeps_the_session_mid_work(self) -> None:
+        self._saved_attempt(dirty=True)
+        self._router_costs = {"medium": (3, 0.048), "low": (3, 0.028)}
+        bundles = self._reroute_effort_only("low", self._router_costs)
+        state = self.worker.read_state()
+        self.assertEqual((state["model"], state["effort"]), ("claude-sonnet-5", "medium"))
+        self.assertEqual(state["session_id"], "session-old")
+        self.assertTrue(self.worker.choice.resume)
+        self.assertEqual(bundles, [])
+        self.assertNotIn("Re-routed", self.worker._reroute_note)
+        self.assertNotIn("materially cheaper", self.worker._reroute_note)
+
+    def test_an_effort_only_change_needing_more_capability_still_switches(self) -> None:
+        self._saved_attempt(dirty=True)
+        self._reroute_effort_only("high", {"medium": (3, 0.03), "high": (4, 0.05)})
+        self.assertEqual(self.worker.read_state()["effort"], "high")
+        self.assertIn("more capable", self.worker._reroute_note)
+
+    def test_an_effort_only_downgrade_switches_when_nothing_has_been_done(self) -> None:
+        self._saved_attempt()
+        self._reroute_effort_only("low", {"medium": (3, 0.048), "low": (3, 0.028)})
+        state = self.worker.read_state()
+        self.assertEqual(state["effort"], "low")
+        self.assertEqual(state["session_id"], "new-claude")
+        self.assertIn("Re-routed on resume", self.worker._reroute_note)
+
     def test_a_model_that_is_no_longer_offered_is_replaced(self) -> None:
         self._saved_attempt(dirty=True)
         profiles = {("claude", "claude-sonnet-5"): (3, 0.03), ("claude", "claude-sonnet-5-5"): (3, 0.03)}
