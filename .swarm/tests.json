@@ -4293,6 +4293,33 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3.13",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue372_effort_only_reroute.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-372-effort-only-reroute",
+      "name": "Issue #372: effort-only re-route keeps the session",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3.13"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue372_effort_only_reroute.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
