@@ -3813,6 +3813,36 @@
         ]
       },
       "timeoutSeconds": 1800
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue337_jev_context_ingestion.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue337-jev-context-ingestion",
+      "name": "Issue #337: bounded complete and structured Jev issue-context ingestion",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "issue_worker/decision_engine.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue337_jev_context_ingestion.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
