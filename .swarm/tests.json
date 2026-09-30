@@ -173,7 +173,7 @@
         "-s",
         "tests/adversarial",
         "-p",
-        "test_*.py"
+        "test_ci_rustfmt.py"
       ],
       "disruptive": false,
       "enabled": true,
@@ -2530,7 +2530,7 @@
         "-s",
         "tests/adversarial",
         "-p",
-        "test_engineering_knowledge.py"
+        "test_adversarial_engineering_knowledge.py"
       ],
       "disruptive": false,
       "enabled": true,
@@ -2544,7 +2544,7 @@
         "files": [
           "issue_worker/engineering_knowledge.py",
           "issue_worker/test_engineering_knowledge.py",
-          "tests/adversarial/test_engineering_knowledge.py"
+          "tests/adversarial/test_adversarial_engineering_knowledge.py"
         ]
       },
       "timeoutSeconds": 300
@@ -3469,6 +3469,123 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue322_rustfmt_discovery.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-322-rustfmt-discovery",
+      "name": "Issue #322: rustfmt suite discovery stays scoped and module names remain unambiguous",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".swarm/tests.json",
+          "tests/adversarial/test_ci_rustfmt.py",
+          "tests/adversarial/test_adversarial_engineering_knowledge.py",
+          "issue_worker/test_engineering_knowledge.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue322_registered_collection_contract.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-322-registered-collection-contract",
+      "name": "Issue #322 independent registered collection contract",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".swarm/tests.json",
+          "tests/adversarial/test_issue322_registered_collection_contract.py",
+          "tests/adversarial/test_ci_rustfmt.py",
+          "issue_worker/test_engineering_knowledge.py",
+          "tests/adversarial/test_adversarial_engineering_knowledge.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue322_unittest_duplicate_module_reproducer.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-322-unittest-duplicate-module-reproducer",
+      "name": "Issue #322: broad unittest discovery reproduces basename collision",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue322_unittest_duplicate_module_reproducer.py"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue322_sequential_discovery_isolation.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-322-sequential-discovery-isolation",
+      "name": "Issue #322: sequential unittest discovery keeps module origins isolated",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/test_engineering_knowledge.py",
+          "tests/adversarial/test_adversarial_engineering_knowledge.py",
+          "tests/adversarial/test_issue322_sequential_discovery_isolation.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
