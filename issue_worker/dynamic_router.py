@@ -910,6 +910,45 @@ def scored_tier(
         return tier.model, tier.effort, describe_tier(candidate, tier, complexity), None
 
 
+def scored_floor(
+    agent: str,
+    complexity: int,
+    *,
+    routing_optimization: str = DEFAULT_ROUTING_OPTIMIZATION,
+    allow_usage_credit_models: bool = False,
+) -> tuple[str, str] | None:
+    """``(model, effort)`` the scoring router picks for ``agent`` at ``complexity``.
+
+    Unlike ``scored_tier`` this never consults an operator's saved tier table, so
+    a floor built from it cannot be dragged up (or down) by tiers that name one
+    model for every band. ``None`` when the router cannot decide.
+    """
+    calibrated = _active_calibration_catalog()
+    try:
+        catalog = calibrated if calibrated is not None else _model_router.load_model_catalog()
+        disabled = {
+            model.model for model in catalog
+            if not allow_usage_credit_models and requires_usage_credits(model.model)
+        }
+        cost_on = cost_consideration_enabled(routing_optimization)
+        decision = _model_router.route(
+            _model_router.RouteRequest(
+                task_type="general_reasoning",
+                complexity=complexity,
+                cost_consideration_enabled=cost_on,
+                cost_sensitive=cost_on,
+            ),
+            catalog=catalog,
+            availability=_model_router.RoutingAvailability(
+                enabled_agents=frozenset({str(agent).strip().lower()}),
+                disabled_models=frozenset(disabled),
+            ),
+        )
+    except (_model_router.ModelRouterError, _model_router.ModelRouterConfigError):
+        return None
+    return decision.model, decision.effort
+
+
 def candidate_catalog(
     candidate: RouterCandidate,
     *,

@@ -943,38 +943,43 @@ class AdversarialStageMixin:
 
         Grading the stage relative to a small change is right for cost, but a
         tester on the lightest model at low effort rewrote the first round's
-        protected tests. A tester runs on at least the provider's STANDARD-band
-        tier at medium effort, and no weaker than the first assessment's tester.
-        Fixers and started sessions are untouched.
+        protected tests. A tester runs on at least the model the scoring router
+        itself picks for a STANDARD task (never derived from the operator's saved
+        tier table) at medium effort or better, and, on the same provider, no
+        weaker than the first assessment's tester. Fixers and started sessions
+        are untouched.
         """
         from swarm_issue_worker import ProviderChoice, log
-        from dynamic_router import RouterError, default_routing_tiers, model_route_profile, tier_for_complexity
+        from dynamic_router import model_route_profile, scored_floor
 
         if loop["phase"] != "test" or choice.resume or self.config.dry_run:
             return choice
-        ladder = sorted(
-            self.config.routing_tiers.get(choice.key) or default_routing_tiers().get(choice.key) or (),
-            key=lambda tier: tier.min_complexity,
-        )
-        baseline = loop.get("tester_baseline") or {}
+        reference = loop.get("tester_reference") or {}
         model, effort = choice.model, choice.effort
-        try:
-            floor_tier = tier_for_complexity(tuple(ladder), TESTER_FLOOR_COMPLEXITY)
-        except RouterError:
-            floor_tier = None
-        floor = model_route_profile(choice.key, floor_tier.model, floor_tier.effort) if floor_tier else None
-        needed = max(floor[0] if floor else 0, int(baseline.get("capability") or 0))
+        floor = scored_floor(
+            choice.key, TESTER_FLOOR_COMPLEXITY,
+            routing_optimization=self.config.routing_optimization,
+            allow_usage_credit_models=self.config.allow_usage_credit_models,
+        )
+        target = None
+        if reference.get("provider") == choice.name and reference.get("model"):
+            target = (str(reference["model"]), str(reference.get("effort") or TESTER_MIN_EFFORT))
+        floor_profile = model_route_profile(choice.key, *floor) if floor else None
+        target_profile = model_route_profile(choice.key, *target) if target else None
+        needed = max(
+            floor_profile[0] if floor_profile else 0,
+            target_profile[0] if target_profile else 0,
+        )
         current = model_route_profile(choice.key, model, effort)
         if needed and current is not None and current[0] < needed:
-            profiles = [(tier, model_route_profile(choice.key, tier.model, tier.effort)) for tier in ladder]
-            profiles = [(tier, profile) for tier, profile in profiles if profile is not None]
-            capable = [tier for tier, profile in profiles if profile[0] >= needed]
-            target = capable[0] if capable else (max(profiles, key=lambda item: item[1][0])[0] if profiles else None)
-            if target is not None:
-                model = target.model
+            # The reference tester's own model, when it is the stronger of the two.
+            if target_profile and (not floor_profile or target_profile[0] >= floor_profile[0]):
+                model = target[0]
+            elif floor:
+                model = floor[0]
         minimum = TESTER_MIN_EFFORT
-        if baseline.get("provider") == choice.name and baseline.get("model") == model:
-            minimum = max(minimum, str(baseline.get("effort") or ""), key=effort_rank)
+        if reference.get("provider") == choice.name and reference.get("model") == model:
+            minimum = max(minimum, str(reference.get("effort") or ""), key=effort_rank)
         if effort_rank(effort) < effort_rank(minimum):
             effort = minimum
         if (model, effort) != (choice.model, choice.effort):
@@ -982,9 +987,9 @@ class AdversarialStageMixin:
                 f"{choice.model} at {choice.effort} effort to {model} at {effort} effort "
                 "(testers keep to a minimum model and effort so they follow the edit rules).")
         raised = ProviderChoice(choice.name, model, effort, choice.session_id, choice.resume)
-        if not baseline:
+        if not reference:
             profile = model_route_profile(raised.key, raised.model, raised.effort)
-            loop["tester_baseline"] = {
+            loop["tester_reference"] = {
                 "provider": raised.name, "model": raised.model, "effort": raised.effort,
                 "capability": profile[0] if profile else 0,
             }
@@ -1121,15 +1126,41 @@ class AdversarialStageMixin:
         )
 
     @staticmethod
+    def _only_gains_required_files(old: dict[str, Any], new: dict[str, Any]) -> bool:
+        """Whether ``new`` is ``old`` plus extra ``requirements.files`` entries.
+
+        The list names files that must exist before a suite runs, so listing one
+        more does not weaken or change what the suite checks. Every other field
+        must be identical.
+        """
+        if old.get("id") != new.get("id"):
+            return False
+        old_files = (old.get("requirements") or {}).get("files") or []
+        new_files = (new.get("requirements") or {}).get("files") or []
+        if not (isinstance(old_files, list) and isinstance(new_files, list)):
+            return False
+        if not set(old_files) <= set(new_files):
+            return False
+
+        def bare(suite: dict[str, Any]) -> dict[str, Any]:
+            copy = {key: value for key, value in suite.items() if key != "requirements"}
+            copy["requirements"] = {k: v for k, v in (suite.get("requirements") or {}).items() if k != "files"}
+            return copy
+
+        return bare(old) == bare(new)
+
+    @staticmethod
     def rejection_remedy(reason: str) -> str:
         """What to do differently, for the rule a rejected tester result broke."""
         text = reason.lower()
         if "revise or retire existing adversarial tests" in text:
             return (
                 "Existing adversarial tests are protected. Leave every file that already exists under "
-                "tests/adversarial/ exactly as it is, and register only NEW test files with new names. If a "
-                "protected test looks wrong, report it in your findings instead of editing it. Do not add "
-                "summary or notes files; only test files and the suite definition may change.\n"
+                "tests/adversarial/ exactly as it is. Put each new test in a NEW file with a new name and "
+                "register it as a NEW suite entry in .swarm/tests.json with its own unique 'adversarial-' id; "
+                "do not edit any existing suite entry (its command, name, or other fields). If a protected test "
+                "looks wrong, report it in your findings instead of editing it. Do not add summary or notes "
+                "files; only test files and the suite definition may change.\n"
             )
         if "exactly one swarm_adversarial_result" in text:
             return (
@@ -1302,7 +1333,9 @@ class AdversarialStageMixin:
         prior = changed_tests & existed_at_baseline
         old_suites = [s for s in before["suites"] if s.get("origin") == stage.origin]
         new_suites = [s for s in after["suites"] if s.get("origin") == stage.origin]
-        revised = prior or any(s not in new_suites for s in old_suites)
+        revised = prior or any(
+            not any(s == n or self._only_gains_required_files(s, n) for n in new_suites) for s in old_suites
+        )
         if revised and not ((loop.get("dispute") or loop.get("amendments")) and report.get("dispute_resolution", "").strip()):
             raise WorkerError("Only a fresh tester adjudicating a dispute may revise or retire existing adversarial tests")
         owned = [p for p in self.git("ls-files", "--cached", "--others", "--exclude-standard", "-z").split("\0")

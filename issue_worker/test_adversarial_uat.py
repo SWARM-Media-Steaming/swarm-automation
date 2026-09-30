@@ -367,12 +367,25 @@ class AdversarialUatTests(unittest.TestCase):
         loop["phase"] = "test"
         first = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Codex", "gpt-5.6-sol", "high", "a"))
         self.assertEqual((first.model, first.effort), ("gpt-5.6-sol", "high"))
-        self.assertEqual(loop["tester_baseline"]["model"], "gpt-5.6-sol")
+        self.assertEqual(loop["tester_reference"]["model"], "gpt-5.6-sol")
         later = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Codex", "gpt-5.6-luna", "low", "b"))
         # Raised onto the first assessment's model, it also keeps that effort.
         self.assertEqual((later.model, later.effort), ("gpt-5.6-sol", "high"))
         again = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Codex", "gpt-5.6-sol", "low", "c"))
         self.assertEqual((again.model, again.effort), ("gpt-5.6-sol", "high"))
+
+    def test_the_tester_floor_ignores_the_operators_saved_tier_table(self):
+        # Regression: a saved table naming Opus for every band made the
+        # "standard" floor Opus, so a 2/10 change drew the priciest tester.
+        from dynamic_router import RoutingTier
+        self.prepare()
+        tiers = dict(self.worker.config.routing_tiers)
+        tiers["claude"] = tuple(RoutingTier(lo, hi, "claude-opus-5-5", "high") for lo, hi in ((1, 3), (4, 6), (7, 8), (9, 10)))
+        self.worker.config = dataclasses.replace(self.worker.config, routing_tiers=tiers)
+        loop = self.worker.read_state()["adversarial"]
+        loop["phase"] = "test"
+        raised = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Claude", "claude-haiku-4-5", "low", "s"))
+        self.assertEqual((raised.model, raised.effort), ("claude-sonnet-5-5", "medium"))
 
     def test_the_tester_floor_leaves_fixers_and_started_sessions_alone(self):
         self.prepare()
@@ -402,10 +415,65 @@ class AdversarialUatTests(unittest.TestCase):
         remedy = adversarial_core.AdversarialStageMixin.rejection_remedy
         protected = remedy("Only a fresh tester adjudicating a dispute may revise or retire existing adversarial tests")
         self.assertIn("Leave every file that already exists", protected)
-        self.assertIn("NEW test files", protected)
+        self.assertIn("NEW suite entry", protected)
+        self.assertIn("do not edit any existing suite entry", protected)
         self.assertIn("SWARM_ADVERSARIAL_RESULT", remedy("Tester must return exactly one SWARM_ADVERSARIAL_RESULT JSON line"))
         self.assertIn("Do not modify product code", remedy("Tester changed product files: a.pyc"))
         self.assertEqual(remedy("something unrelated"), "")
+
+    def test_listing_one_more_required_file_is_not_a_revision_but_any_other_change_is(self):
+        gains = adversarial_core.AdversarialStageMixin._only_gains_required_files
+        old = {"id": "adversarial-a", "command": ["python3", "t.py"], "enabled": True,
+               "requirements": {"executables": ["python3"], "files": ["a.py"]}, "timeoutSeconds": 120}
+
+        def with_files(files, **changes):
+            new = json.loads(json.dumps(old))
+            new["requirements"]["files"] = files
+            new.update(changes)
+            return new
+
+        self.assertTrue(gains(old, with_files(["a.py", "b.py"])))
+        self.assertTrue(gains(old, with_files(["a.py"])))
+        self.assertFalse(gains(old, with_files(["b.py"])))            # dropped a required file
+        self.assertFalse(gains(old, with_files(["a.py", "b.py"], command=["python3", "other.py"])))
+        self.assertFalse(gains(old, with_files(["a.py", "b.py"], enabled=False)))
+        self.assertFalse(gains(old, with_files(["a.py", "b.py"], timeoutSeconds=1)))
+        self.assertFalse(gains(old, with_files(["a.py", "b.py"], id="adversarial-b")))
+        changed = with_files(["a.py", "b.py"])
+        changed["requirements"]["executables"] = ["node"]
+        self.assertFalse(gains(old, changed))
+
+    def _commit_baseline_suite(self):
+        self.prepare()
+        (self.repo / ".swarm").mkdir(exist_ok=True)
+        if not (self.repo / uat.DEFINITION).exists():
+            (self.repo / uat.DEFINITION).write_text(json.dumps({"suites": []}))
+        self.add_tests()
+        definition = uat.read_definition(self.repo)
+        for suite in definition["suites"]:
+            if suite.get("id") == "adversarial-180":
+                suite["requirements"] = {"files": ["tests/adversarial/test_issue.py"]}
+        (self.repo / uat.DEFINITION).write_text(json.dumps(definition))
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "baseline suite")
+        loop = self.worker.read_state()["adversarial"]
+        loop.update(phase="test", stage_base=self.git("rev-parse", "HEAD"))
+        return loop
+
+    def test_a_tester_may_list_a_new_file_in_an_existing_suite_but_not_change_the_suite(self):
+        loop = self._commit_baseline_suite()
+        (self.repo / "tests/adversarial/test_more.py").write_text("import unittest\n")
+        definition = uat.read_definition(self.repo)
+        suite = next(s for s in definition["suites"] if s["id"] == "adversarial-180")
+        suite["requirements"]["files"].append("tests/adversarial/test_more.py")
+        (self.repo / uat.DEFINITION).write_text(json.dumps(definition))
+        added, modified = self.worker.validate_stage_edits(uat.UAT_STAGE, loop, {})
+        self.assertEqual((added, modified), (1, 0))
+
+        suite["timeoutSeconds"] = 1
+        (self.repo / uat.DEFINITION).write_text(json.dumps(definition))
+        with self.assertRaisesRegex(WorkerError, "Only a fresh tester adjudicating a dispute"):
+            self.worker.validate_stage_edits(uat.UAT_STAGE, loop, {})
 
     def test_the_rejection_guidance_reaches_the_next_prompt_and_counts_attempts(self):
         self.prepare()

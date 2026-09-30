@@ -113,9 +113,11 @@ pricing catalog, so its spend is recorded.
 Each adversarial stage's router prompt also carries the graded complexity and
 diff size of the change under test, and the stage logs the complexity it was
 graded, so a small change is not tested by a top-tier model without a reason.
-That grade never lowers a tester below a floor: the provider's STANDARD-band
-tier (complexity 4) at medium effort or better, and no weaker than the first
-assessment's tester (`apply_tester_floor`, recorded as `tester_baseline`). A
+That grade never lowers a tester below a floor: the model the scoring router
+itself picks for a STANDARD task (complexity 4, `dynamic_router.scored_floor`,
+never the operator's saved tier table) at medium effort or better, and, on the
+same provider, no weaker than the first assessment's tester
+(`apply_tester_floor`, recorded as `tester_reference`). A
 tester that breaks an edit rule is rejected, its edits restored, and the next
 attempt is told which rule it broke and what to do instead
 (`rejection_remedy`, with `attempts` counted in `retry_rejection`).
