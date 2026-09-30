@@ -50,7 +50,11 @@ _SECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("technical_constraints", re.compile(r"constraint|requirement|limitation|compatib|must not|technical", re.I)),
     ("requested_change", re.compile(r"objective|goal|summary|description|problem|request|proposal|implementation prompt|feature|change", re.I)),
 )
-_HEADING = re.compile(r"^\s{0,3}(?:#{1,6}\s+(?P<h>.+?)\s*#*|\*\*(?P<b>[^*\n]{2,80})\*\*:?|(?P<c>[A-Za-z][A-Za-z /&-]{2,60}):)\s*$")
+# Matched against a right-stripped line, so no quantifier overlaps another and matching is
+# linear; the closing "#" run of an ATX heading is trimmed afterwards, not in the pattern.
+_HEADING = re.compile(r"^\s{0,3}(?:#{1,6}\s+(?P<h>\S.*)|\*\*(?P<b>[^*\n]{2,80})\*\*:?|(?P<c>[A-Za-z][A-Za-z /&-]{2,60}):)$")
+# Longer lines are prose, never headings; skipping them also bounds work per line.
+MAX_HEADING_LINE_CHARS = 200
 # CommonMark fenced code: 3+ backticks or tildes; a backtick fence's info string has no backtick.
 _FENCE_OPEN = re.compile(r"^ {0,3}(?P<f>`{3,}(?=[^`]*$)|~{3,})")
 
@@ -151,9 +155,12 @@ def extract_sections(text: str) -> dict[str, str]:
             if current and line.strip():
                 sections.setdefault(current, []).append(line.rstrip())
             continue
-        match = _HEADING.match(line)
+        match = _HEADING.match(line.rstrip()) if len(line) <= MAX_HEADING_LINE_CHARS else None
         if match:
-            title = match.group("h") or match.group("b") or match.group("c") or ""
+            atx = match.group("h")
+            if atx:
+                atx = atx.rstrip("#").rstrip() or atx
+            title = atx or match.group("b") or match.group("c") or ""
             level = len(line.lstrip()) - len(line.lstrip().lstrip("#")) if match.group("h") else 0
             if current and level > current_level > 0:
                 # A sub-heading belongs to the section it sits under.
