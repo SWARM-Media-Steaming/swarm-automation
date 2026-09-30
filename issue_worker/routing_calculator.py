@@ -16,6 +16,7 @@ the AI router's opinion changes the outcome — a valid suggestion is honoured.
 
 Usage::
 
+    routing_calculator.py defaults [--providers claude,codex]
     routing_calculator.py describe [--providers claude,codex]
     routing_calculator.py simulate --input JSON [--providers ...]
 
@@ -96,6 +97,18 @@ def _catalog_info() -> dict[str, Any]:
         except (OSError, ValueError):
             pass
     return {"source": "bundled", "label": "Bundled model catalog", "version": ""}
+
+
+def defaults(*, providers: Sequence[str], allow_usage_credit_models: bool) -> dict[str, Any]:
+    """Starting worker and router settings per AI tool, from the live catalog."""
+    return {
+        "defaults": {
+            key: dynamic_router.suggested_defaults(
+                key, allow_usage_credit_models=allow_usage_credit_models
+            )
+            for key in _providers(providers)
+        }
+    }
 
 
 def describe(*, providers: Sequence[str]) -> dict[str, Any]:
@@ -290,7 +303,7 @@ def simulate(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="action", required=True)
-    for name in ("describe", "simulate"):
+    for name in ("describe", "simulate", "defaults"):
         command = sub.add_parser(name)
         command.add_argument("--providers", default="", help="Comma-separated enabled AI tool keys.")
         command.add_argument("--tiers", default="", help="Ignored. Reference tiers are computed from the live catalog.")
@@ -310,6 +323,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.action == "describe":
             result = describe(providers=providers)
+        elif args.action == "defaults":
+            result = defaults(providers=providers, allow_usage_credit_models=bool(args.allow_usage_credit_models))
         else:
             try:
                 raw = json.loads(args.input)

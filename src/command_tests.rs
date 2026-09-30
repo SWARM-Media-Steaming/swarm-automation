@@ -2048,6 +2048,14 @@ fn routing_calculator_sees_what_the_worker_sees() {
     assert!(!after("--providers").unwrap().is_empty());
     assert!(arguments.contains(&"--allow-usage-credit-models".to_string()));
 
+    // Starting defaults are wanted for every known tool, even one that is disabled.
+    let mut without_grok = config.clone();
+    without_grok.provider_mut("grok").unwrap().enabled = false;
+    let defaults = routing_calculator_args(&PathBuf::from("x.py"), "defaults", &without_grok, "{}", None);
+    assert_eq!(defaults[1], "defaults");
+    let providers = &defaults[defaults.iter().position(|a| a == "--providers").unwrap() + 1];
+    assert_eq!(providers, "claude,codex,grok");
+
     config.allow_usage_credit_models = false;
     let describe = routing_calculator_args(&PathBuf::from("x.py"), "describe", &config, "{}", None);
     assert!(!describe.contains(&"--allow-usage-credit-models".to_string()));

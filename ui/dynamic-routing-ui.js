@@ -5,17 +5,12 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, () => {
   "use strict";
 
-  // Suggested router defaults for a provider card that has no router settings
-  // yet. Keep in sync with router_preset in src/config.rs. The desktop saves
-  // whatever the user picks.
-  const DEFAULT_ROUTER = {
-    claude: { model: "claude-haiku-4-5", effort: "low" },
-    codex: { model: "gpt-5.6-luna", effort: "low" },
-    grok: { model: "grok-4.6", effort: "low" },
-  };
-
-  function defaultRouter(providerId) {
-    return DEFAULT_ROUTER[providerId] || { model: "", effort: "low" };
+  // A provider card with no router settings yet shows no model: the desktop
+  // fills an empty router model from the live catalog (the worker's
+  // routing_calculator.py defaults), so no model is named here. The desktop
+  // saves whatever the user picks.
+  function defaultRouter() {
+    return { model: "", effort: "low" };
   }
 
   // A few settings are a two-value string rather than a boolean, but are still
@@ -65,7 +60,6 @@
   }
 
   return {
-    DEFAULT_ROUTER,
     defaultRouter,
     valuedToggleChecked,
     valuedToggleValue,

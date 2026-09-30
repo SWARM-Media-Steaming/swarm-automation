@@ -104,8 +104,7 @@ from dynamic_router import (
     latest_release,
     model_route_profile,
     default_provider_strengths,
-    default_router_effort,
-    default_router_model,
+    suggested_defaults,
     fallback_routing_decision,
     format_routing_notice,
     derived_routing_tiers,
@@ -491,18 +490,29 @@ class ProviderSpec:
         inherited = float(args.minimum_remaining_percent)
         # A saved or environment model the operator has blacklisted runs as its
         # successor instead.
-        model = available_models.replace_blacklisted(getattr(args, f"{key}_model"))
-        router_model = available_models.replace_blacklisted(getattr(args, f"{key}_router_model"))
-        for chosen, saved in ((model, getattr(args, f"{key}_model")), (router_model, getattr(args, f"{key}_router_model"))):
-            if chosen != saved:
-                log(f"{name} model {saved} is blacklisted; using {chosen}.")
+        # An unset model or effort follows the live catalog.
+        wanted = {
+            field: str(getattr(args, f"{key}_{field}", "") or "").strip()
+            for field in ("model", "effort", "router_model", "router_effort")
+        }
+        suggested = suggested_defaults(
+            key,
+            routing_optimization=normalize_routing_optimization(getattr(args, "routing_optimization", "")),
+            allow_usage_credit_models=bool(getattr(args, "allow_usage_credit_models", False)),
+        ) if not all(wanted.values()) else {}
+        chosen = {field: wanted[field] or suggested.get(field, "") for field in wanted}
+        model = available_models.replace_blacklisted(chosen["model"])
+        router_model = available_models.replace_blacklisted(chosen["router_model"])
+        for now, saved in ((model, chosen["model"]), (router_model, chosen["router_model"])):
+            if now != saved:
+                log(f"{name} model {saved} is blacklisted; using {now}.")
         return cls(
             key=key,
             name=name,
             model=model,
-            effort=getattr(args, f"{key}_effort"),
+            effort=chosen["effort"],
             router_model=router_model,
-            router_effort=getattr(args, f"{key}_router_effort"),
+            router_effort=chosen["router_effort"],
             strengths=getattr(args, f"{key}_router_strengths", "") or default_provider_strengths(key),
             bin=getattr(args, f"{key}_bin") or None,
             enabled=key in set(args.enabled_provider or KNOWN_PROVIDER_KEYS),
@@ -7224,33 +7234,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=float(env_value("SWARM_MIN_REMAINING_PERCENT", "10")),
     )
-    _provider_model_defaults = {
-        "claude": "claude-sonnet-5-5",
-        "codex": "gpt-5.6-luna",
-        "grok": "grok-4.6",
-    }
-    _provider_effort_defaults = {
-        "claude": "low",
-        "codex": "medium",
-        "grok": "low",
-    }
     for _key in KNOWN_PROVIDER_KEYS:
-        parser.add_argument(
-            f"--{_key}-model",
-            default=env_value(f"SWARM_{_key.upper()}_MODEL", _provider_model_defaults[_key]),
-        )
-        parser.add_argument(
-            f"--{_key}-effort",
-            default=env_value(f"SWARM_{_key.upper()}_EFFORT", _provider_effort_defaults[_key]),
-        )
-        parser.add_argument(
-            f"--{_key}-router-model",
-            default=env_value(f"SWARM_{_key.upper()}_ROUTER_MODEL", default_router_model(_key)),
-        )
-        parser.add_argument(
-            f"--{_key}-router-effort",
-            default=env_value(f"SWARM_{_key.upper()}_ROUTER_EFFORT", default_router_effort(_key)),
-        )
+        # Nothing here names a model: an unset value is filled from the live
+        # catalog by ProviderSpec.from_args (dynamic_router.suggested_defaults).
+        parser.add_argument(f"--{_key}-model", default=env_value(f"SWARM_{_key.upper()}_MODEL", ""))
+        parser.add_argument(f"--{_key}-effort", default=env_value(f"SWARM_{_key.upper()}_EFFORT", ""))
+        parser.add_argument(f"--{_key}-router-model", default=env_value(f"SWARM_{_key.upper()}_ROUTER_MODEL", ""))
+        parser.add_argument(f"--{_key}-router-effort", default=env_value(f"SWARM_{_key.upper()}_ROUTER_EFFORT", ""))
         parser.add_argument(
             f"--{_key}-router-strengths",
             default=env_value(

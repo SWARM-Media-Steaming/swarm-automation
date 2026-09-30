@@ -44,14 +44,21 @@ pub fn repo_slug(github_repository: &str) -> String {
         .collect()
 }
 
-/// Suggested router model and its reasoning effort for one provider.
-fn router_preset(id: &str) -> (&str, &str) {
-    match id {
-        "claude" => ("claude-haiku-4-5", "low"),
-        "codex" => ("gpt-5.6-luna", "low"),
-        "grok" => ("grok-4.6", "low"),
-        _ => ("", "low"),
-    }
+/// Starting worker and router settings for one provider, derived by the worker
+/// from the live model catalog (`routing_calculator.py defaults`). Nothing here
+/// names a model: the app fills only settings that are still empty, so a
+/// fresh install follows the current measurements, prices and blacklist and a
+/// saved choice is never overwritten.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SuggestedModels {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub effort: String,
+    #[serde(default)]
+    pub router_model: String,
+    #[serde(default)]
+    pub router_effort: String,
 }
 
 /// What each AI tool tends to be good at. The router weighs these when it
@@ -177,20 +184,15 @@ impl Default for ProviderSettings {
 
 impl ProviderSettings {
     fn preset(id: &str) -> Self {
-        let (model, effort) = match id {
-            "claude" => ("claude-sonnet-5-5", "low"),
-            "codex" => ("gpt-5.6-luna", "medium"),
-            "grok" => ("grok-4.6", "low"),
-            _ => ("", "high"),
-        };
-        let (router_model, router_effort) = router_preset(id);
+        // Models start empty and are filled from the live catalog; see
+        // [`SuggestedModels`]. An empty model reaches the worker as "auto".
         Self {
             id: id.into(),
             enabled: true,
-            model: model.into(),
-            effort: effort.into(),
-            router_model: router_model.into(),
-            router_effort: router_effort.into(),
+            model: String::new(),
+            effort: "low".into(),
+            router_model: String::new(),
+            router_effort: "low".into(),
             strengths: provider_strengths_preset(id).into(),
             bin: String::new(),
             minimum_remaining_percent: None,
@@ -734,7 +736,6 @@ impl AppConfig {
         }
 
         self.validate_providers()?;
-        self.validate_routing()?;
         if !matches!(
             self.schedule_mode.as_str(),
             "continuous" | "daily" | "weekdays" | "custom" | "manual"
@@ -791,13 +792,8 @@ impl AppConfig {
             if !seen.insert(provider.id.as_str()) {
                 return Err(format!("Duplicate AI provider entry: {}", provider.id));
             }
-            if provider.enabled && provider.model.trim().is_empty() {
-                return Err(format!(
-                    "{} model cannot be empty while {} is enabled.",
-                    provider_label(&provider.id),
-                    provider_label(&provider.id),
-                ));
-            }
+            // An empty worker model means "auto": the worker picks it from the
+            // live catalog, so it is not an error.
         }
         if self.enabled_providers().next().is_none() {
             return Err("Enable at least one AI provider.".into());
@@ -806,23 +802,6 @@ impl AppConfig {
             return Err(
                 "The global preferred provider must be one of the enabled providers.".into(),
             );
-        }
-        Ok(())
-    }
-
-    /// Dynamic routing is optional. While it is on, every enabled provider
-    /// needs a router model; the worker derives the per-band models itself.
-    fn validate_routing(&self) -> Result<(), String> {
-        if !self.dynamic_model_routing {
-            return Ok(());
-        }
-        for provider in self.enabled_providers() {
-            if provider.router_model.trim().is_empty() {
-                return Err(format!(
-                    "{} router model cannot be empty while dynamic model routing is on.",
-                    provider_label(&provider.id),
-                ));
-            }
         }
         Ok(())
     }
@@ -851,6 +830,52 @@ impl AppConfig {
         self.provider(id)
             .and_then(|provider| provider.minimum_remaining_percent)
             .unwrap_or(self.minimum_remaining_percent)
+    }
+
+    /// True while any provider still has no worker or router model, which the
+    /// worker fills from the live catalog (see [`SuggestedModels`]).
+    pub fn has_unset_models(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|provider| provider.model.trim().is_empty() || provider.router_model.trim().is_empty())
+    }
+
+    /// Fill only the settings that are still empty from `suggested`. A model the
+    /// user (or an earlier fill) chose is never replaced. Returns one line per
+    /// change for the log.
+    pub fn apply_suggested_models(
+        &mut self,
+        suggested: &std::collections::HashMap<String, SuggestedModels>,
+    ) -> Vec<String> {
+        let mut changes = Vec::new();
+        for provider in &mut self.providers {
+            let Some(found) = suggested.get(&provider.id) else {
+                continue;
+            };
+            if provider.model.trim().is_empty() && !found.model.trim().is_empty() {
+                provider.model = found.model.clone();
+                if !found.effort.trim().is_empty() {
+                    provider.effort = found.effort.clone();
+                }
+                changes.push(format!(
+                    "{} worker model set to '{}' from the live catalog.",
+                    provider_label(&provider.id),
+                    provider.model
+                ));
+            }
+            if provider.router_model.trim().is_empty() && !found.router_model.trim().is_empty() {
+                provider.router_model = found.router_model.clone();
+                if !found.router_effort.trim().is_empty() {
+                    provider.router_effort = found.router_effort.clone();
+                }
+                changes.push(format!(
+                    "{} router model set to '{}' from the live catalog.",
+                    provider_label(&provider.id),
+                    provider.router_model
+                ));
+            }
+        }
+        changes
     }
 
     #[cfg(test)]
@@ -920,12 +945,8 @@ impl AppConfig {
         }
         let inherited_minimum = self.minimum_remaining_percent;
         for provider in &mut self.providers {
-            let (router_model, router_effort) = router_preset(&provider.id);
-            if provider.router_model.trim().is_empty() {
-                provider.router_model = router_model.into();
-            }
             if provider.router_effort.trim().is_empty() {
-                provider.router_effort = router_effort.into();
+                provider.router_effort = "low".into();
             }
             if provider.strengths.trim().is_empty() {
                 provider.strengths = provider_strengths_preset(&provider.id).into();
@@ -1417,11 +1438,40 @@ mod tests {
 
         config.providers = default_providers();
         config.preferred_provider = "claude".into();
+        // An empty model is "auto", not an error: the worker fills it from the catalog.
         config.provider_mut("claude").unwrap().model.clear();
-        assert!(config
-            .validate_providers()
-            .unwrap_err()
-            .contains("model cannot be empty"));
+        assert!(config.validate_providers().is_ok());
+    }
+
+    #[test]
+    fn empty_models_are_filled_from_suggestions_and_chosen_ones_are_kept() {
+        let mut config = config_with_one_repo();
+        config.normalize();
+        // Nothing in the app names a model: a fresh config starts empty.
+        assert!(config.has_unset_models());
+        assert!(config.providers.iter().all(|p| p.model.is_empty() && p.router_model.is_empty()));
+
+        config.provider_mut("codex").unwrap().model = "my-chosen-model".into();
+        config.provider_mut("codex").unwrap().effort = "high".into();
+        let suggested: std::collections::HashMap<String, SuggestedModels> = serde_json::from_value(
+            serde_json::json!({
+                "claude": {"model": "w", "effort": "medium", "router_model": "r", "router_effort": "low"},
+                "codex": {"model": "w2", "effort": "low", "router_model": "r2", "router_effort": "low"},
+            }),
+        )
+        .unwrap();
+        let changes = config.apply_suggested_models(&suggested);
+
+        let claude = config.provider("claude").unwrap();
+        assert_eq!((claude.model.as_str(), claude.effort.as_str()), ("w", "medium"));
+        assert_eq!(claude.router_model, "r");
+        let codex = config.provider("codex").unwrap();
+        assert_eq!((codex.model.as_str(), codex.effort.as_str()), ("my-chosen-model", "high"));
+        assert_eq!(codex.router_model, "r2");
+        assert_eq!(changes.len(), 3);
+        // Grok had no suggestion, so it stays unset for the worker's auto.
+        assert!(config.has_unset_models());
+        assert!(config.apply_suggested_models(&suggested).is_empty());
     }
 
     #[test]
@@ -1496,12 +1546,10 @@ mod tests {
         let mut config = config_with_one_repo();
         config.normalize();
         assert!(!config.dynamic_model_routing);
-        assert_eq!(
-            config.provider("claude").unwrap().router_model,
-            "claude-haiku-4-5"
-        );
+        // Router models are filled from the live catalog, not named here.
+        assert_eq!(config.provider("claude").unwrap().router_model, "");
         assert_eq!(config.provider("codex").unwrap().router_effort, "low");
-        assert_eq!(config.provider("grok").unwrap().router_model, "grok-4.6");
+        assert_eq!(config.provider("grok").unwrap().router_model, "");
         assert_eq!(
             config.provider("codex").unwrap().strengths,
             provider_strengths_preset("codex")
@@ -1564,10 +1612,7 @@ mod tests {
         assert!(!older.dynamic_model_routing);
         assert!(older.providers.is_empty());
         older.normalize();
-        assert_eq!(
-            older.provider("claude").unwrap().router_model,
-            "claude-haiku-4-5"
-        );
+        assert_eq!(older.provider("claude").unwrap().router_model, "");
     }
 
     #[test]

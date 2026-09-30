@@ -27,9 +27,16 @@ silently overrides fresh data.
   supply it. New models arrive through discovery (`available_models`), the
   refreshed calibration and `models.yaml`; retired ones through
   `model-blacklist.json`.
-- Provider defaults (worker model, router model, the CLI-unavailable fallback
-  list) are the only places allowed to name a model, and each must not be
-  blacklisted. Keep their Python and Rust copies in sync.
+- Starting worker and router models are derived too:
+  `dynamic_router.suggested_defaults` (worker = the scoring router's pick for a
+  simple task, router = its pick for a trivial one) via
+  `routing_calculator.py defaults`. The desktop fills only empty settings
+  (`AppConfig::apply_suggested_models`) and a saved choice is never replaced; an
+  empty model reaches the worker as "auto". Do not put default model names in
+  `config.rs`, `dynamic-routing-ui.js` or argparse defaults.
+- The one remaining literal list is `fallback_models` in `src/tools.rs`, shown
+  only when a provider CLI is not installed. Keep it free of blacklisted models
+  (a test enforces this).
 - Thresholds are policy, not data (`CAPABILITY_BANDS`, the expected-success
   floor, the frontier floor, upgrade tolerances). Keep them in one named
   constant or in `routing-rules.yaml`, not duplicated across files.

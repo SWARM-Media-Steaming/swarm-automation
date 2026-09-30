@@ -441,7 +441,10 @@ async fn detect_tools_background(app: tauri::AppHandle) -> Result<Vec<tools::Too
     // efforts. Persist repairs so a removed model cannot fail every future
     // routing cycle, then refresh repos.json for an already-running scheduler.
     config = current_config(&app.state())?;
-    let repairs = tools::reconcile_config_models(&mut config, &tools);
+    // Settings that are still empty start from the live catalog (cheapest
+    // capable models), before the installed CLIs' own lists repair the rest.
+    let mut repairs = fill_suggested_models(&app, &mut config);
+    repairs.extend(tools::reconcile_config_models(&mut config, &tools));
     if !repairs.is_empty() {
         config::save(&app_config_path(&app)?, &config)?;
         *app.state::<AppState>()
@@ -821,6 +824,24 @@ fn available_models_json(config: &AppConfig, providers: &[ResolvedProvider]) -> 
         }
     }
     serde_json::Value::Object(models).to_string()
+}
+
+/// Fills empty worker and router models from `routing_calculator.py defaults`.
+/// A failure leaves them empty: the worker treats an empty model as auto and
+/// the CLI-list repair still picks something offerable.
+fn fill_suggested_models<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &mut AppConfig,
+) -> Vec<String> {
+    if !config.has_unset_models() {
+        return Vec::new();
+    }
+    let Ok(value) = run_routing_calculator(app, config, "defaults", None) else {
+        return Vec::new();
+    };
+    let suggested: std::collections::HashMap<String, config::SuggestedModels> =
+        serde_json::from_value(value["defaults"].clone()).unwrap_or_default();
+    config.apply_suggested_models(&suggested)
 }
 
 fn jev_scheduler_arguments(config: &AppConfig) -> Vec<String> {
@@ -3268,10 +3289,15 @@ fn routing_calculator_args(
     available_models: &str,
     input: Option<&serde_json::Value>,
 ) -> Vec<String> {
-    let enabled: Vec<String> = config
-        .enabled_providers()
-        .map(|provider| provider.id.clone())
-        .collect();
+    // Starting defaults are wanted for every known tool, enabled or not.
+    let enabled: Vec<String> = if action == "defaults" {
+        config::KNOWN_PROVIDERS.iter().map(|id| id.to_string()).collect()
+    } else {
+        config
+            .enabled_providers()
+            .map(|provider| provider.id.clone())
+            .collect()
+    };
     let mut arguments = vec![
         script.to_string_lossy().into_owned(),
         action.into(),

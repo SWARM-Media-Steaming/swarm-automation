@@ -21,6 +21,7 @@ from dynamic_router import (
     build_router_prompt,
     default_provider_strengths,
     derived_routing_tiers,
+    suggested_defaults,
     describe_model_choice,
     describe_tier,
     display_model_name,
@@ -247,6 +248,23 @@ class DynamicRouterTest(unittest.TestCase):
                 self.assertIn(tier.model, names, f"{key} {tier}")
                 self.assertTrue(tier.effort)
         self.assertEqual(derived_routing_tiers("claude")[0].model, "claude-haiku-4-5")
+
+    def test_suggested_defaults_come_from_the_catalog_and_never_name_a_blacklisted_model(self) -> None:
+        import available_models
+        for key in ("claude", "codex", "grok"):
+            found = suggested_defaults(key)
+            names = {entry.model for entry in model_catalog((key,))}
+            self.assertIn(found["model"], names)
+            self.assertIn(found["router_model"], names)
+            self.assertFalse(available_models.is_blacklisted(found["model"]))
+            self.assertFalse(available_models.is_blacklisted(found["router_model"]))
+            self.assertTrue(found["effort"] and found["router_effort"])
+        self.assertEqual(suggested_defaults("nonexistent")["model"], "")
+        # Blacklisting the pick moves the default to another model.
+        first = suggested_defaults("claude")["model"]
+        listed = dict(available_models.blacklist(), **{first: ""})
+        with mock.patch.object(available_models, "blacklist", return_value=listed):
+            self.assertNotEqual(suggested_defaults("claude")["model"], first)
 
     def test_reference_tiers_follow_the_blacklist_and_the_configured_fallback(self) -> None:
         import available_models

@@ -22,7 +22,7 @@ are actually available, which one should run it.
   benchmark data (Coding Agent Index, DeepSWE, Terminal-Bench, SWE-Atlas-QnA,
   cost/tokens/runtime per task). `model` slugs must match the exact strings
   the app already invokes providers with (`issue_worker/dynamic_router.py`'s
-  `_MODEL_CATALOG` and the provider defaults in `src/config.rs`); a model
+  `_MODEL_CATALOG`); a model
   missing here cannot be routed to. Adding a model needs no code change — add
   an entry and, once it has real usage, fill in its benchmark numbers.
 - `model-blacklist.json` — models that are never offered or routed to: older
@@ -95,6 +95,12 @@ reviewable even when representative routing examples do not change. These
 inputs affect requests outside the simulation sample. Calibration version IDs
 are never recycled after history pruning or rollback, and refresh summaries
 retain their originating version independently of which version is active.
+
+Starting worker and router models are derived the same way, not configured:
+`dynamic_router.suggested_defaults` (surfaced as `routing_calculator.py
+defaults`) returns the scoring router's pick for a simple and a trivial task. An
+unset model means "auto" to the worker, and the desktop fills only empty
+settings from it.
 
 Refresh cadence: the app re-checks at least hourly, and the service refreshes
 once `model_data_min_refresh_interval_hours` has passed since the last success.

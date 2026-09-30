@@ -115,6 +115,15 @@ class SimulateTests(CalculatorTestCase):
         self.assertEqual(result["inputs"]["taskType"], "general_reasoning")
 
 
+class DefaultsTests(CalculatorTestCase):
+    def test_defaults_are_derived_per_tool_from_the_catalog(self) -> None:
+        result = calc.defaults(providers=ALL, allow_usage_credit_models=False)["defaults"]
+        self.assertEqual(set(result), set(ALL))
+        for key, found in result.items():
+            self.assertEqual(found, dynamic_router.suggested_defaults(key))
+            self.assertTrue(found["model"] and found["router_model"])
+
+
 class ValidationTests(CalculatorTestCase):
     def test_bad_inputs_are_explained_not_crashed_on(self) -> None:
         for bad in ({"complexity": 0}, {"complexity": 11}, {"complexity": "abc"}, {"complexity": None}):

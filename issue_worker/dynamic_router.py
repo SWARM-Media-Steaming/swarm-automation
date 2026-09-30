@@ -89,12 +89,6 @@ EFFORT_LABELS = {
     "max": "Max",
 }
 
-_DEFAULT_ROUTER = {
-    "claude": ("claude-haiku-4-5", "low"),
-    "codex": ("gpt-5.6-luna", "low"),
-    "grok": ("grok-4.6", "low"),
-}
-
 # What each AI tool tends to be good at. The router weighs these when it picks
 # which enabled tool receives an issue, so "Codex is better at A, Grok at B" is
 # a setting an operator edits rather than a judgement baked into this file.
@@ -633,12 +627,43 @@ def default_provider_strengths(provider: str) -> str:
     return _DEFAULT_PROVIDER_STRENGTHS.get(provider, "")
 
 
+def suggested_defaults(
+    agent: str,
+    *,
+    routing_optimization: str = DEFAULT_ROUTING_OPTIMIZATION,
+    allow_usage_credit_models: bool = False,
+) -> dict[str, str]:
+    """Starting worker and router settings for ``agent``, computed from the catalog.
+
+    The worker default is what the scoring router picks for a simple task
+    (complexity 3) and the router default what it picks for a trivial one
+    (complexity 1), so a fresh install starts on the cheapest capable models and
+    follows the live measurements, prices and blacklist. When the router cannot
+    decide, the cheapest model the catalog offers for the provider is used; an
+    unknown provider yields empty models.
+    """
+    key = str(agent).strip().lower()
+    catalog = _routing_catalog()
+    options = dict(
+        routing_optimization=routing_optimization,
+        allow_usage_credit_models=allow_usage_credit_models,
+        catalog=catalog,
+    )
+    worker = scored_floor(key, 3, **options)
+    router = scored_floor(key, 1, **options)
+    if worker is None or router is None:
+        rows = model_catalog((key,), allow_usage_credit_models=allow_usage_credit_models)
+        last_resort = (rows[0].model, "low") if rows else ("", "low")
+        worker, router = worker or last_resort, router or last_resort
+    return {"model": worker[0], "effort": worker[1], "router_model": router[0], "router_effort": router[1]}
+
+
 def default_router_model(provider: str) -> str:
-    return _DEFAULT_ROUTER.get(provider, ("", "low"))[0]
+    return suggested_defaults(provider)["router_model"]
 
 
 def default_router_effort(provider: str) -> str:
-    return _DEFAULT_ROUTER.get(provider, ("", "low"))[1]
+    return suggested_defaults(provider)["router_effort"]
 
 
 def derived_routing_tiers(

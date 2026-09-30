@@ -41,8 +41,9 @@ account.
   Index bands in `model_router.CAPABILITY_BANDS`), a price in
   `model_pricing.py` from the provider's own pricing page, then a blacklist
   entry for the release it replaces.
-- The provider defaults (`swarm_issue_worker.py`, `src/config.rs`) must name a
-  model that is not blacklisted; keep the Python and Rust copies in sync. There
-  is no tier table to update: see `model-routing-no-static-tables.md`.
+- Nothing else needs a name: starting worker/router models
+  (`dynamic_router.suggested_defaults`) and the reference tiers are derived from
+  the catalog, which already excludes blacklisted models. See
+  `model-routing-no-static-tables.md`.
 - Add or update tests: the blacklist tests in `test_available_models.py` and
   `src/tools.rs` should keep passing without edits when only the JSON changes.

@@ -31,6 +31,7 @@ from ai_execution_history import (
     summarize_router_matrix,
 )
 from dynamic_router import (
+    suggested_defaults,
     COMPLEXITY_SCALE_TOP,
     FRONTIER_COMPLEXITY_FLOOR,
     PROMPT_GRADES,
@@ -4311,10 +4312,12 @@ class WorkerTestCase(unittest.TestCase):
 
     def test_dynamic_routing_defaults_off_and_keeps_the_manual_model(self) -> None:
         self.assertFalse(self.worker.config.dynamic_model_routing)
-        self.assertEqual(self.worker.config.spec("claude").router_model, "claude-haiku-4-5")
-        self.assertEqual(self.worker.config.spec("codex").router_model, "gpt-5.6-luna")
+        # Router defaults are derived from the live catalog, not named in code.
+        for key in ("claude", "codex", "grok"):
+            wanted = suggested_defaults(key)
+            spec = self.worker.config.spec(key)
+            self.assertEqual((spec.router_model, spec.router_effort), (wanted["router_model"], wanted["router_effort"]))
         self.assertEqual(self.worker.config.spec("codex").router_effort, "low")
-        self.assertEqual(self.worker.config.spec("grok").router_model, "grok-4.6")
         self.worker.issue = IssueContext(501, "Manual", "ORIGINAL", [], "https://example.invalid/501")
         self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "")
         with mock.patch(
@@ -4893,6 +4896,25 @@ class WorkerTestCase(unittest.TestCase):
         ) as router:
             worker.maybe_apply_dynamic_routing()
         self.assertIn("Best at: Grok is best at scripting", router.call_args.kwargs["prompt"])
+
+    def test_unset_models_follow_the_catalog_and_set_ones_are_kept(self) -> None:
+        argv = self._worker_argv(auto=False)
+        blank = Config.from_args(build_parser().parse_args(
+            argv + ["--claude-model", "", "--claude-effort", "", "--claude-router-model", "", "--claude-router-effort", ""]
+        ))
+        wanted = suggested_defaults("claude")
+        claude = blank.spec("claude")
+        self.assertEqual(
+            (claude.model, claude.effort, claude.router_model, claude.router_effort),
+            (wanted["model"], wanted["effort"], wanted["router_model"], wanted["router_effort"]),
+        )
+        kept = Config.from_args(build_parser().parse_args(
+            argv + ["--claude-model", "claude-haiku-4-5", "--claude-effort", "high"]
+        ))
+        self.assertEqual((kept.spec("claude").model, kept.spec("claude").effort), ("claude-haiku-4-5", "high"))
+        # A blacklisted saved model runs as its successor.
+        old = Config.from_args(build_parser().parse_args(argv + ["--claude-model", "claude-sonnet-5"]))
+        self.assertEqual(old.spec("claude").model, "claude-sonnet-5-5")
 
     def test_the_routing_tiers_flag_is_ignored_and_tiers_are_derived(self) -> None:
         config = Config.from_args(

@@ -46,11 +46,11 @@ function card() {
   };
 }
 
-test("dynamic routing defaults name the inexpensive router for each provider", () => {
-  assert.equal(defaultRouter("claude").model, "claude-haiku-4-5");
-  assert.equal(defaultRouter("claude").effort, "low");
-  assert.equal(defaultRouter("codex").model, "gpt-5.6-luna");
-  assert.equal(defaultRouter("grok").model, "grok-4.6");
+test("dynamic routing names no router model: the desktop fills it from the live catalog", () => {
+  for (const id of ["claude", "codex", "grok", "unknown"]) {
+    assert.equal(defaultRouter(id).model, "");
+    assert.equal(defaultRouter(id).effort, "low");
+  }
 });
 
 test("routing off leaves the worker selectors usable and hides the router selectors", () => {
