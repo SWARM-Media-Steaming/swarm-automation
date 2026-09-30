@@ -1438,6 +1438,38 @@ fn every_jev_decision_use_is_always_enabled() {
 }
 
 #[test]
+fn jev_scheduler_arguments_forwards_enabled_configuration() {
+    let config = AppConfig {
+        jev_enabled: true,
+        jev_model: "test-jev-model".into(),
+        jev_timeout_seconds: 17.5,
+        jev_confidence_automation: 0.81,
+        jev_confidence_fallback: 0.62,
+        jev_confidence_security: 0.94,
+        ..AppConfig::default()
+    };
+
+    let args = jev_scheduler_arguments(&config);
+    assert!(args.contains(&"--jev-enabled".to_string()));
+    assert!(!args.contains(&"--no-jev-enabled".to_string()));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--jev-model" && pair[1] == "test-jev-model"));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--jev-timeout-seconds" && pair[1] == "17.5"));
+    assert!(args
+        .windows(2)
+        .any(|pair| { pair[0] == "--jev-confidence-automation" && pair[1] == "0.81" }));
+    assert!(args
+        .windows(2)
+        .any(|pair| { pair[0] == "--jev-confidence-fallback" && pair[1] == "0.62" }));
+    assert!(args
+        .windows(2)
+        .any(|pair| { pair[0] == "--jev-confidence-security" && pair[1] == "0.94" }));
+}
+
+#[test]
 fn repo_worker_args_carries_engineering_knowledge_settings() {
     let repo = repo("octocat/example");
     let mut config = AppConfig {

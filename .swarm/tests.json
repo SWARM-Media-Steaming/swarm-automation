@@ -3670,6 +3670,36 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue326_jev_scheduler_arguments_enabled.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue326-jev-scheduler-arguments-enabled",
+      "name": "Issue #326: jev_scheduler_arguments enabled-path coverage",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "cargo"
+        ],
+        "files": [
+          "src/main.rs",
+          "src/command_tests.rs",
+          "tests/adversarial/test_issue326_jev_scheduler_arguments_enabled.py"
+        ]
+      },
+      "timeoutSeconds": 1800
     }
   ],
   "version": 1
