@@ -757,23 +757,23 @@ def format_analysis(prediction: dict[str, Any]) -> str:
     vector, scope, req = prediction["vector"], prediction["scope"], prediction["requirements"]
     lines = ["## Complexity Analysis", ""]
     order = ("repository_complexity", "relevant_component_complexity", *AI_KEYS)
-    lines.extend(f"{key.replace('_', ' ').title()}: {vector[key]}/100  " for key in order)
-    lines += [f"Confidence: {vector['confidence']:.0%} ({escaped(prediction['source'])})", "", "Estimated Scope:",
-              f"- Files/modules likely affected: {scope['estimated_files']}/{scope['estimated_modules']}",
-              f"- Services affected: {scope['services_affected']} (estimate)"]
+    lines.extend(f"**{key.replace('_', ' ').title()}:** {vector[key]}/100  " for key in order)
+    lines += [f"**Confidence:** {vector['confidence']:.0%} ({escaped(prediction['source'])})", "", "Estimated Scope:",
+              f"- **Files/modules likely affected:** {scope['estimated_files']}/{scope['estimated_modules']}",
+              f"- **Services affected:** {scope['services_affected']} (estimate)"]
     for key, label in (("database_change_likely", "Database"), ("api_change_likely", "API"), ("infrastructure_change_likely", "Infrastructure")):
-        lines.append(f"- {label} changes: {'Yes' if scope[key] else 'No'}")
-    lines += ["", "Routing Requirements:", f"- Minimum capability: {req['recommended_capability_floor']}/100",
-              f"- Reasoning: {req['recommended_reasoning'].title()}", f"- Context requirement: {req['context_requirement'].title()}",
-              f"- Estimated repair/adversarial rounds: {req['estimated_fix_rounds']}", "", "Primary complexity drivers:"]
+        lines.append(f"- **{label} changes:** {'Yes' if scope[key] else 'No'}")
+    lines += ["", "Routing Requirements:", f"- **Minimum capability:** {req['recommended_capability_floor']}/100",
+              f"- **Reasoning:** {req['recommended_reasoning'].title()}", f"- **Context requirement:** {req['context_requirement'].title()}",
+              f"- **Estimated repair/adversarial rounds:** {req['estimated_fix_rounds']}", "", "Primary complexity drivers:"]
     lines += [f"- {escaped(item)}" for item in prediction["drivers"]]
     if prediction["fallback_used"]:
         lines += ["", "AI evaluation unavailable; deterministic fallback with reduced confidence."]
     if prediction["unavailable"]:
-        lines += ["", "Partial metrics: " + ", ".join(escaped(item) for item in prediction["unavailable"][:10]) + "."]
-    lines += ["", f"Complexity Scoring Version: v{escaped(prediction['scoring_version'])}  ",
-              f"Repository Profile Version: {prediction.get('profile_version') or 'unavailable'}  ",
-              f"Repository Commit: {prediction.get('repo_commit') or 'unavailable'}"]
+        lines += ["", "**Partial metrics:** " + ", ".join(escaped(item) for item in prediction["unavailable"][:10]) + "."]
+    lines += ["", f"**Complexity Scoring Version:** v{escaped(prediction['scoring_version'])}  ",
+              f"**Repository Profile Version:** {prediction.get('profile_version') or 'unavailable'}  ",
+              f"**Repository Commit:** {prediction.get('repo_commit') or 'unavailable'}"]
     return "\n".join(lines)
 
 

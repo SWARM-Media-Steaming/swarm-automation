@@ -51,9 +51,9 @@ resume) always gets its own comment.
 <!-- swarm-issue-worker:started:issue:<n>;provider:<key>;branch:<branch> -->
 🤖 **<Provider> Bot** started working on this issue.
 
-- Model: `<model>`
-- Branch: `<branch>`
-- <Provider> usage remaining: <usage>
+- **Model:** `<model>`
+- **Branch:** `<branch>`
+- **<Provider> usage remaining:** <usage>
 ```
 ("started working on" becomes "started follow-up work on" when
 `work_type == "followup"`.)
@@ -63,13 +63,13 @@ resume) always gets its own comment.
 <!-- swarm-issue-worker:commit:<sha>[;through-comment:<id>] -->
 <Reworked|Completed> by **<Provider>**.
 
-- Model: `<model>`
-- Effort: `<effort>`
-- Branch: `<branch>` → <pull_request_url>
-- Commit: `<sha>` — <commit message>
-<usage report line(s)>
-- Adversarial UAT: <clean first pass|resolved after N rounds>, <N> test files added.
-- Adversarial Cybersecurity: <PASS|FIXED|FINDINGS_CREATED|FAILED> — <N> in-scope finding(s), <N> fixed, <N> follow-up issue(s) filed; Critical <N> / High <N> / Medium <N> / Low <N>; <N> security test file(s) added.
+- **Model:** `<model>`
+- **Effort:** `<effort>`
+- **Branch:** `<branch>` → <pull_request_url>
+- **Commit:** `<sha>` — <commit message>
+<usage report line(s), with the label portion of each key:value line bolded>
+- **Adversarial UAT:** <clean first pass|resolved after N rounds>, <N> test files added.
+- **Adversarial Cybersecurity:** <PASS|FIXED|FINDINGS_CREATED|FAILED> — <N> in-scope finding(s), <N> fixed, <N> follow-up issue(s) filed; Critical <N> / High <N> / Medium <N> / Low <N>; <N> security test file(s) added.
 <details><summary>AI completion summary</summary>
 
 <the AI's own final output>
@@ -83,8 +83,8 @@ resume) always gets its own comment.
 <!-- swarm-issue-worker:quota-paused:issue:<n>;session:<session_id> -->
 Work paused because **<Provider>** no longer has sufficient usage available.
 
-- Model: `<model>`
-- Session: `<session_id>`
+- **Model:** `<model>`
+- **Session:** `<session_id>`
 - The current work and AI session were saved.
 - The worker will wait for <Provider> specifically, include new trusted
   comments, and resume this same session automatically.
@@ -95,7 +95,12 @@ Work paused because **<Provider>** no longer has sufficient usage available.
 <!-- swarm-issue-worker:resumed:issue:<n>;provider:<key>;session:<session_id>;at:<resume_token> -->
 🤖 **<Provider> Bot** is resuming work on this issue.
 
-- Model: `<model>`
+- **Model:** `<model>`
+- **Branch:** `<branch>`
+- **Session:** `<session_id>`
+- **<Provider> usage remaining:** <usage>
+- **Re-routed:** <from> → <to> (<reason>) — when applicable
+- **Picking up new comments:** <count> new trusted comments — when applicable
 ...
 ```
 

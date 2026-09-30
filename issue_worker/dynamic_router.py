@@ -1932,21 +1932,21 @@ def how_model_was_chosen(decision: dict[str, Any]) -> str:
         preference = routing_optimization_label(decision.get("routing_optimization"))
         if preference:
             return (
-                "How this was chosen: Dynamic Model Routing applied this model and effort "
+                "**How this was chosen:** Dynamic Model Routing applied this model and effort "
                 f"({preference.lower()})."
             )
-        return "How this was chosen: Dynamic Model Routing applied this model and effort."
+        return "**How this was chosen:** Dynamic Model Routing applied this model and effort."
     if decision.get("fallback"):
         if decision.get("dynamic_model_routing") is False:
             return (
-                "How this was chosen: Set in SWARM Automation. Pre-flight grading was unavailable."
+                "**How this was chosen:** Set in SWARM Automation. Pre-flight grading was unavailable."
             )
         return ""
     if str(decision.get("model_source") or "") == "configured" or (
         decision.get("dynamic_model_routing") is False
     ):
         return (
-            "How this was chosen: Set in SWARM Automation. Dynamic Model Routing is off, so the "
+            "**How this was chosen:** Set in SWARM Automation. Dynamic Model Routing is off, so the "
             "pre-flight grade was recorded and was not applied."
         )
     return ""
@@ -1960,7 +1960,7 @@ def router_recommendation_line(decision: dict[str, Any]) -> str:
         return ""
     model = display_model_name(suggested_model)
     effort = display_effort(suggested_effort)
-    line = f"Router recommendation: {model} at {effort} reasoning"
+    line = f"**Router recommendation:** {model} at {effort} reasoning"
     selected_model = str(decision.get("selected_model") or "").strip()
     selected_effort = str(decision.get("reasoning_effort") or "").strip().lower()
     if suggested_model == selected_model and suggested_effort.lower() == selected_effort:
@@ -2115,13 +2115,13 @@ def format_routing_notice(decision: dict[str, Any]) -> str:
             heading = "Routing fell back to the configured worker model and reasoning effort."
         lines = ["SWARM AI Routing", heading]
         if provider:
-            lines.append(f"Selected AI: {provider}")
-        lines.extend([f"Selected Model: {model}", f"Reasoning: {effort}"])
+            lines.append(f"**Selected AI:** {provider}")
+        lines.extend([f"**Selected Model:** {model}", f"**Reasoning:** {effort}"])
         chosen = how_model_was_chosen(decision)
         if chosen:
             lines.append(chosen)
         if grader:
-            lines.append(f"Routed by: {grader}")
+            lines.append(f"**Routed by:** {grader}")
         reason = str(decision.get("grade_reason") or "").strip()
         if reason:
             lines.extend(["", reason])
@@ -2135,11 +2135,11 @@ def format_routing_notice(decision: dict[str, Any]) -> str:
     ]
     lines = [
         "SWARM AI Routing",
-        f"Prompt Grade: {decision.get('prompt_grade')}",
-        f"Complexity: {decision.get('complexity')}/10",
-        f"Selected AI: {provider}",
-        f"Selected Model: {model}",
-        f"Reasoning: {effort}",
+        f"**Prompt Grade:** {decision.get('prompt_grade')}",
+        f"**Complexity:** {decision.get('complexity')}/10",
+        f"**Selected AI:** {provider}",
+        f"**Selected Model:** {model}",
+        f"**Reasoning:** {effort}",
     ]
     chosen = how_model_was_chosen(decision)
     if chosen:
@@ -2147,30 +2147,32 @@ def format_routing_notice(decision: dict[str, Any]) -> str:
     recommendation = router_recommendation_line(decision) if not applied else ""
     if recommendation:
         lines.append(recommendation)
-    lines.append(f"Routing Confidence: {percent}%")
+    lines.append(f"**Routing Confidence:** {percent}%")
     if grader:
-        lines.append(f"Graded and routed by: {grader}")
+        lines.append(f"**Graded and routed by:** {grader}")
     preference = routing_optimization_label(decision.get("routing_optimization"))
     if preference and applied:
-        lines.append(f"Routing Preference: {preference}")
+        lines.append(f"**Routing Preference:** {preference}")
     if considered:
-        lines.append(f"AI Tools Considered: {', '.join(considered)}")
+        lines.append(f"**AI Tools Considered:** {', '.join(considered)}")
     provider_reason = str(decision.get("provider_reason") or "").strip()
     if provider_reason and applied:
-        lines.append(f"Why {provider}: {provider_reason}")
+        lines.append(f"**Why {provider}:** {provider_reason}")
     override = str(decision.get("provider_override_reason") or "").strip()
     if override and applied:
+        if override.startswith("Rework: "):
+            override = "**Rework:** " + override.removeprefix("Rework: ")
         lines.append(override)
     grade_reason = str(decision.get("grade_reason") or "").strip()
     if grade_reason:
-        lines.extend(["", f"Why this grade ({decision.get('prompt_grade')}): {grade_reason}"])
+        lines.extend(["", f"**Why this grade ({decision.get('prompt_grade')}):** {grade_reason}"])
     complexity_reason = str(decision.get("complexity_reason") or "").strip()
     tier_explanation = str(decision.get("tier_explanation") or "").strip() if applied else ""
     if complexity_reason or tier_explanation:
         lines.append("")
         if complexity_reason:
             lines.append(
-                f"How complexity was determined ({decision.get('complexity')}/10): {complexity_reason}"
+                f"**How complexity was determined ({decision.get('complexity')}/10):** {complexity_reason}"
             )
         if tier_explanation:
             lines.append(tier_explanation)

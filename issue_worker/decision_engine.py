@@ -1381,25 +1381,25 @@ def format_jev_markdown(
     if preflight and preflight.source == Source.JEV.value:
         scores = preflight.scores
         lines.append("Pre-flight:")
-        lines.append(f"- Task: {_pretty(preflight.decision)}")
+        lines.append(f"- **Task:** {_pretty(preflight.decision)}")
         if "complexity" in scores:
             label = _rubric_label("complexity", scores["complexity"])
-            line = f"- Complexity: {complexity_out_of_ten(scores['complexity'])}/10" + (f" ({label})" if label else "")
+            line = f"- **Complexity:** {complexity_out_of_ten(scores['complexity'])}/10" + (f" ({label})" if label else "")
             if router_complexity:
                 line += f"; the router graded {int(router_complexity)}/10"
             lines.append(line)
         if "crossRepoProbability" in scores:
-            lines.append(f"- Cross-repository likelihood: {int(round(scores['crossRepoProbability'] * 100))}%")
+            lines.append(f"- **Cross-repository likelihood:** {int(round(scores['crossRepoProbability'] * 100))}%")
         if "securityRisk" in scores:
             label = _rubric_label("security_risk", scores["securityRisk"])
             lines.append(
-                f"- Security sensitivity: {int(round(scores['securityRisk'] * 100))}%"
+                f"- **Security sensitivity:** {int(round(scores['securityRisk'] * 100))}%"
                 + (f" ({label})" if label else "")
             )
         rag = (preflight.metadata or {}).get("ragScope")
         if rag:
-            lines.append(f"- Recommended context: {_pretty(str(rag))}")
-        lines.append(f"- Confidence: {int(round(preflight.confidence * 100))}%")
+            lines.append(f"- **Recommended context:** {_pretty(str(rag))}")
+        lines.append(f"- **Confidence:** {int(round(preflight.confidence * 100))}%")
         lines.append("")
     workflow = [
         item
@@ -1414,13 +1414,13 @@ def format_jev_markdown(
             extra = f"{_pretty(item.decision)} — {int(round(item.confidence * 100))}%"
             if item.source != Source.JEV.value:
                 extra += f" ({item.source.replace('_', ' ')})"
-            lines.append(f"- {label}: {extra}")
+            lines.append(f"- **{label}:** {extra}")
         lines.append("")
-    lines.append(f"Jev calls: {summary['jevCalls']}")
-    lines.append(f"Total decision latency: {summary['totalLatencyMs'] / 1000:.1f}s")
-    lines.append(f"Estimated cost: ${summary['estimatedCost']:.4f}")
+    lines.append(f"**Jev calls:** {summary['jevCalls']}")
+    lines.append(f"**Total decision latency:** {summary['totalLatencyMs'] / 1000:.1f}s")
+    lines.append(f"**Estimated cost:** ${summary['estimatedCost']:.4f}")
     if summary["llmCallsAvoided"]:
-        lines.append(f"Estimated LLM decision calls avoided: {summary['llmCallsAvoided']}")
+        lines.append(f"**Estimated LLM decision calls avoided:** {summary['llmCallsAvoided']}")
     return "\n".join(lines).rstrip() + "\n"
 
 

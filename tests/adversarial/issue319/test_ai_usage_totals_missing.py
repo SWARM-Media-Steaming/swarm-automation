@@ -31,9 +31,9 @@ def totals(events):
     text = render_ai_usage_markdown(events).split("**AI Usage Totals**", 1)[1]
     out = {}
     for line in text.splitlines():
-        if ": " in line:
-            k, v = line.rsplit(": ", 1) if line.startswith("Estimated") else line.split(": ", 1)
-            out[k.strip()] = v.strip()
+        if line.startswith("**") and ":** " in line:
+            k, v = line[2:].split(":** ", 1)
+            out[k] = v.strip()
     return out
 
 

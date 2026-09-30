@@ -332,7 +332,7 @@ class RenderAiUsageMarkdownTests(unittest.TestCase):
         # merged under one generic "Adversarial" label (issue #280 item 9).
         self.assertNotIn("| Adversarial |", markdown)
         self.assertIn("3,000", markdown)  # total input across the three rows
-        self.assertIn("AI Invocations: 3", markdown)
+        self.assertIn("**AI Invocations:** 3", markdown)
         self.assertIn("—", markdown)  # the row with no captured usage
 
     def test_totals_sum_every_row(self) -> None:
@@ -341,11 +341,11 @@ class RenderAiUsageMarkdownTests(unittest.TestCase):
             _record(input_tokens=200, output_tokens=20, cached_input_tokens=15, total_tokens=235, estimated_cost=0.002),
         ]
         markdown = render_ai_usage_markdown(events)
-        self.assertIn("Input: 300", markdown)
-        self.assertIn("Cached Input: 20", markdown)
-        self.assertIn("Output: 30", markdown)
-        self.assertIn("Total Tokens: 350", markdown)
-        self.assertIn("AI Invocations: 2", markdown)
+        self.assertIn("**Input:** 300", markdown)
+        self.assertIn("**Cached Input:** 20", markdown)
+        self.assertIn("**Output:** 30", markdown)
+        self.assertIn("**Total Tokens:** 350", markdown)
+        self.assertIn("**AI Invocations:** 2", markdown)
 
     def test_totals_preserve_missing_values_and_sum_known_values(self) -> None:
         markdown = render_ai_usage_markdown(
@@ -361,11 +361,11 @@ class RenderAiUsageMarkdownTests(unittest.TestCase):
             ]
         )
         totals = markdown.split("**AI Usage Totals**", 1)[1]
-        self.assertIn("Input: —", totals)
-        self.assertIn("Cached Input: —", totals)
-        self.assertIn("Reasoning: —", totals)
-        self.assertIn("Output: 0", totals)
-        self.assertIn("Total Tokens: —", totals)
+        self.assertIn("**Input:** —", totals)
+        self.assertIn("**Cached Input:** —", totals)
+        self.assertIn("**Reasoning:** —", totals)
+        self.assertIn("**Output:** 0", totals)
+        self.assertIn("**Total Tokens:** —", totals)
 
     def test_totals_sum_known_values_when_some_rows_are_missing(self) -> None:
         markdown = render_ai_usage_markdown(
@@ -375,11 +375,11 @@ class RenderAiUsageMarkdownTests(unittest.TestCase):
             ]
         )
         totals = markdown.split("**AI Usage Totals**", 1)[1]
-        self.assertIn("Input: 100", totals)
-        self.assertIn("Cached Input: 5", totals)
-        self.assertIn("Reasoning: 2", totals)
-        self.assertIn("Output: 10", totals)
-        self.assertIn("Total Tokens: 110", totals)
+        self.assertIn("**Input:** 100", totals)
+        self.assertIn("**Cached Input:** 5", totals)
+        self.assertIn("**Reasoning:** 2", totals)
+        self.assertIn("**Output:** 10", totals)
+        self.assertIn("**Total Tokens:** 110", totals)
 
 
 class FormatUsageLogLineTests(unittest.TestCase):

@@ -438,23 +438,23 @@ class DynamicRouterTest(unittest.TestCase):
         decision = resolve(sample_payload(), "codex", "grok")
         notice = format_routing_notice(decision)
         self.assertIn("SWARM AI Routing", notice)
-        self.assertIn("Prompt Grade: B+", notice)
-        self.assertIn("Complexity: 7/10", notice)
-        self.assertIn("Selected AI: Codex", notice)
-        self.assertIn("Selected Model: GPT-5.6 Luna", notice)
-        self.assertIn("Reasoning: Low", notice)
+        self.assertIn("**Prompt Grade:** B+", notice)
+        self.assertIn("**Complexity:** 7/10", notice)
+        self.assertIn("**Selected AI:** Codex", notice)
+        self.assertIn("**Selected Model:** GPT-5.6 Luna", notice)
+        self.assertIn("**Reasoning:** Low", notice)
         self.assertIn(
-            "How this was chosen: Dynamic Model Routing applied this model and effort "
+            "**How this was chosen:** Dynamic Model Routing applied this model and effort "
             "(cheapest model that fits the work).",
             notice,
         )
-        self.assertIn("Routing Confidence: 91%", notice)
-        self.assertIn("Routing Preference: Cheapest model that fits the work", notice)
+        self.assertIn("**Routing Confidence:** 91%", notice)
+        self.assertIn("**Routing Preference:** Cheapest model that fits the work", notice)
         self.assertNotIn("Grok Grok", notice)
-        self.assertIn("AI Tools Considered: Codex, Grok", notice)
-        self.assertIn("Why Codex: Codex is best at test-driven bug fixes", notice)
-        self.assertIn("Why this grade (B+): Clear objective and context, but acceptance criteria are incomplete.", notice)
-        self.assertIn("How complexity was determined (7/10): Touches the parser and two callers", notice)
+        self.assertIn("**AI Tools Considered:** Codex, Grok", notice)
+        self.assertIn("**Why Codex:** Codex is best at test-driven bug fixes", notice)
+        self.assertIn("**Why this grade (B+):** Clear objective and context, but acceptance criteria are incomplete.", notice)
+        self.assertIn("**How complexity was determined (7/10):** Touches the parser and two callers", notice)
         self.assertIn(
             "Complexity 7/10. The router chose Codex GPT-5.6 Luna at Low reasoning, optimizing for "
             "the least expensive model that can do the work.",
@@ -487,8 +487,8 @@ class DynamicRouterTest(unittest.TestCase):
         self.assertEqual(decision["router_effort"], "low")
         self.assertEqual(router_description(decision), "Grok (Grok 4.6, Low reasoning)")
         notice = format_routing_notice(decision)
-        self.assertIn("Graded and routed by: Grok (Grok 4.6, Low reasoning)", notice)
-        self.assertIn("Selected AI: Codex", notice)
+        self.assertIn("**Graded and routed by:** Grok (Grok 4.6, Low reasoning)", notice)
+        self.assertIn("**Selected AI:** Codex", notice)
 
     def test_router_description_tolerates_a_decision_without_router_fields(self) -> None:
         self.assertEqual(router_description({}), "")
@@ -508,7 +508,7 @@ class DynamicRouterTest(unittest.TestCase):
             router_effort="low",
         )
         self.assertIn(
-            "Routed by: Claude (Claude Haiku 4.5, Low reasoning)",
+            "**Routed by:** Claude (Claude Haiku 4.5, Low reasoning)",
             format_routing_notice(decision),
         )
 
@@ -536,8 +536,8 @@ class DynamicRouterTest(unittest.TestCase):
             rework=True,
         )
         notice = format_routing_notice(decision)
-        self.assertIn("Selected AI: Claude", notice)
-        self.assertIn("Rework: Codex completed the previous pass", notice)
+        self.assertIn("**Selected AI:** Claude", notice)
+        self.assertIn("**Rework:** Codex completed the previous pass", notice)
 
     def test_fallback_notice_keeps_the_configured_model(self) -> None:
         decision = fallback_routing_decision(
@@ -551,10 +551,10 @@ class DynamicRouterTest(unittest.TestCase):
         )
         notice = format_routing_notice(decision)
         self.assertIn("fell back", notice)
-        self.assertIn("Selected AI: Codex", notice)
-        self.assertIn("Selected Model: GPT-5.6 Luna", notice)
-        self.assertIn("Reasoning: Medium", notice)
-        self.assertNotIn("Prompt Grade:", notice)
+        self.assertIn("**Selected AI:** Codex", notice)
+        self.assertIn("**Selected Model:** GPT-5.6 Luna", notice)
+        self.assertIn("**Reasoning:** Medium", notice)
+        self.assertNotIn("**Prompt Grade:**", notice)
         self.assertNotIn("Set in SWARM Automation", notice)
 
     def test_configured_notice_records_the_grade_and_labels_the_recommendation(self) -> None:
@@ -570,20 +570,20 @@ class DynamicRouterTest(unittest.TestCase):
         )
         notice = format_routing_notice(decision)
         self.assertIn("SWARM AI Routing", notice)
-        self.assertIn("Prompt Grade: B+", notice)
-        self.assertIn("Selected AI: Grok", notice)
-        self.assertIn("Selected Model: Grok 4.6", notice)
-        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn("**Prompt Grade:** B+", notice)
+        self.assertIn("**Selected AI:** Grok", notice)
+        self.assertIn("**Selected Model:** Grok 4.6", notice)
+        self.assertIn("**Reasoning:** Medium", notice)
         self.assertIn(
-            "How this was chosen: Set in SWARM Automation. Dynamic Model Routing is off, so the "
+            "**How this was chosen:** Set in SWARM Automation. Dynamic Model Routing is off, so the "
             "pre-flight grade was recorded and was not applied.",
             notice,
         )
-        self.assertIn("Router recommendation: Grok 4.6 at High reasoning", notice)
+        self.assertIn("**Router recommendation:** Grok 4.6 at High reasoning", notice)
         self.assertNotIn("matches the configured setting", notice)
         self.assertNotIn("The router chose", notice)
         self.assertNotIn("Grok Grok", notice)
-        self.assertNotIn("Routing Preference:", notice)
+        self.assertNotIn("**Routing Preference:**", notice)
 
     def test_configured_notice_says_when_the_recommendation_matches(self) -> None:
         decision = pin_configured_routing_decision(
@@ -598,7 +598,7 @@ class DynamicRouterTest(unittest.TestCase):
         )
         notice = format_routing_notice(decision)
         self.assertIn(
-            "Router recommendation: Grok 4.6 at Medium reasoning (matches the configured setting)",
+            "**Router recommendation:** Grok 4.6 at Medium reasoning (matches the configured setting)",
             notice,
         )
 
@@ -615,11 +615,11 @@ class DynamicRouterTest(unittest.TestCase):
         )
         notice = format_routing_notice(decision)
         self.assertIn("Pre-flight grading was unavailable", notice)
-        self.assertIn("Selected AI: Grok", notice)
-        self.assertIn("Selected Model: Grok 4.6", notice)
-        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn("**Selected AI:** Grok", notice)
+        self.assertIn("**Selected Model:** Grok 4.6", notice)
+        self.assertIn("**Reasoning:** Medium", notice)
         self.assertIn(
-            "How this was chosen: Set in SWARM Automation. Pre-flight grading was unavailable.",
+            "**How this was chosen:** Set in SWARM Automation. Pre-flight grading was unavailable.",
             notice,
         )
         self.assertNotIn("The router chose", notice)
@@ -965,14 +965,14 @@ class CostAwareRoutingTest(unittest.TestCase):
             decision["tier_explanation"],
         )
         self.assertIn(
-            "Routing Preference: Cheapest model that fits the work",
+            "**Routing Preference:** Cheapest model that fits the work",
             format_routing_notice(decision),
         )
 
     def test_a_decision_recorded_before_the_preference_existed_reports_none(self) -> None:
         decision = resolve(sample_payload(), "codex")
         del decision["routing_optimization"]
-        self.assertNotIn("Routing Preference:", format_routing_notice(decision))
+        self.assertNotIn("**Routing Preference:**", format_routing_notice(decision))
 
     def test_a_credit_model_cannot_be_named_unless_the_operator_allows_it(self) -> None:
         payload = sample_payload(selected_provider="claude", selected_model="claude-fable-5-1")

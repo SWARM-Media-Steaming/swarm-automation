@@ -96,21 +96,25 @@ class ScoringInvariants(unittest.TestCase):
 
     def test_github_section_has_spec_fields_in_order(self):
         text = rc.format_analysis(rc.deterministic_prediction(profile(), "Fix ui typo", "Fix wording"))
-        labels = ["## Complexity Analysis", "Repository Complexity:", "Relevant Component Complexity:",
-                  "Implementation Complexity:", "Change Surface:", "Architecture Risk:", "Security Risk:",
-                  "Uncertainty:", "Confidence:", "Estimated Scope:", "Routing Requirements:",
-                  "Minimum capability:", "Reasoning:", "Context requirement:", "Primary complexity drivers:",
-                  "Complexity Scoring Version: v1.0", "Repository Profile Version: 7", "Repository Commit: " + "b" * 40]
+        # Issue #373 changes lifecycle key:value labels to **Label:**. Keep
+        # #369's ordering and value contract while requiring valid bold Markdown.
+        labels = ["## Complexity Analysis", "**Repository Complexity:**", "**Relevant Component Complexity:**",
+                  "**Implementation Complexity:**", "**Change Surface:**", "**Architecture Risk:**", "**Security Risk:**",
+                  "**Uncertainty:**", "**Confidence:**", "Estimated Scope:", "Routing Requirements:",
+                  "**Minimum capability:**", "**Reasoning:**", "**Context requirement:**", "Primary complexity drivers:",
+                  "**Complexity Scoring Version:** v1.0", "**Repository Profile Version:** 7", "**Repository Commit:** " + "b" * 40]
         pos = -1
         for label in labels:
             nxt = text.find(label, pos + 1)
             self.assertGreater(nxt, pos, label)
             pos = nxt
-        self.assertRegex(text, r"Confidence: \d+% ")
+        self.assertRegex(text, r"\*\*Confidence:\*\* \d+% ")
+        self.assertNotRegex(text, r"(?m)^(?:- )?(?:Repository Complexity|Confidence|Minimum capability):\s")
 
     def test_missing_profile_renders_unavailable_not_none(self):
         text = rc.format_analysis(rc.deterministic_prediction(rc.unavailable_profile(), "t", "b"))
-        self.assertIn("Repository Profile Version: unavailable", text)
+        self.assertIn("**Repository Profile Version:** unavailable", text)
+        self.assertNotIn("Repository Profile Version: unavailable", text)
         self.assertNotIn("None", text)
 
     def test_relevant_components_avoid_substring_false_positives(self):

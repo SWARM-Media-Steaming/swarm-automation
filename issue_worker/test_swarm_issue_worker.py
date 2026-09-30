@@ -4344,8 +4344,8 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(provider, "codex")
         self.assertIn("issue", arguments)
         self.assertIn("**Codex Bot** started working on this issue", body)
-        self.assertIn("- Model: `test-model`", body)
-        self.assertIn("- Branch: `ai/codex/issue-407`", body)
+        self.assertIn("- **Model:** `test-model`", body)
+        self.assertIn("- **Branch:** `ai/codex/issue-407`", body)
         self.assertNotIn("SWARM AI Routing", body)
         self.assertTrue(is_worker_comment({"body": body}))
         self.assertTrue(self.worker.read_state()["started_comment_posted"])
@@ -4434,11 +4434,11 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
         self.assertIn("SWARM AI Routing", notice)
-        self.assertIn("Selected AI: Grok", notice)
-        self.assertIn("Selected Model: Grok 4.6", notice)
-        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn("**Selected AI:** Grok", notice)
+        self.assertIn("**Selected Model:** Grok 4.6", notice)
+        self.assertIn("**Reasoning:** Medium", notice)
         self.assertIn("Set in SWARM Automation", notice)
-        self.assertIn("Router recommendation: Grok 4.6 at High reasoning", notice)
+        self.assertIn("**Router recommendation:** Grok 4.6 at High reasoning", notice)
         self.assertNotIn("matches the configured setting", notice)
         self.assertNotIn("The router chose", notice)
         self.assertNotIn("Grok Grok", notice)
@@ -4463,7 +4463,7 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
         self.assertIn(
-            "Router recommendation: Grok 4.6 at Medium reasoning (matches the configured setting)",
+            "**Router recommendation:** Grok 4.6 at Medium reasoning (matches the configured setting)",
             notice,
         )
 
@@ -4490,8 +4490,8 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
         self.assertIn("Pre-flight grading was unavailable", notice)
-        self.assertIn("Selected Model: Grok 4.6", notice)
-        self.assertIn("Reasoning: Medium", notice)
+        self.assertIn("**Selected Model:** Grok 4.6", notice)
+        self.assertIn("**Reasoning:** Medium", notice)
         self.assertIn("router returned an empty response", notice)
 
     def test_routing_off_does_not_reroute_a_resumed_session(self) -> None:
@@ -4696,7 +4696,7 @@ class WorkerTestCase(unittest.TestCase):
         notice = github.call_args.args[2]
         self.assertIn("SWARM AI Routing", notice)
         self.assertIn("deterministic fallback", notice)
-        self.assertIn("Selected Model: GPT-5.6 Sol", notice)
+        self.assertIn("**Selected Model:** GPT-5.6 Sol", notice)
         self.assertIn("router returned an empty response", notice)
 
     def test_dynamic_routing_on_names_the_model_once_and_says_the_choice_was_applied(self) -> None:
@@ -4721,7 +4721,7 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
-        self.assertIn("Selected Model: Grok 4.6", notice)
+        self.assertIn("**Selected Model:** Grok 4.6", notice)
         self.assertIn("Dynamic Model Routing applied this model and effort", notice)
         self.assertNotIn("Grok Grok", notice)
         self.assertNotIn("Set in SWARM Automation", notice)
@@ -4747,14 +4747,14 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
-        self.assertIn("Prompt Grade: B+", notice)
-        self.assertIn("Complexity: 7/10", notice)
-        self.assertIn("Selected Model: GPT-5.6 Sol", notice)
-        self.assertIn("Reasoning: High", notice)
-        self.assertIn("Routing Confidence: 91%", notice)
-        self.assertIn("Selected AI: Codex", notice)
-        self.assertIn("AI Tools Considered: Codex, Claude, Grok", notice)
-        self.assertIn("Why Codex: Codex is best at test-driven bug fixes", notice)
+        self.assertIn("**Prompt Grade:** B+", notice)
+        self.assertIn("**Complexity:** 7/10", notice)
+        self.assertIn("**Selected Model:** GPT-5.6 Sol", notice)
+        self.assertIn("**Reasoning:** High", notice)
+        self.assertIn("**Routing Confidence:** 91%", notice)
+        self.assertIn("**Selected AI:** Codex", notice)
+        self.assertIn("**AI Tools Considered:** Codex, Claude, Grok", notice)
+        self.assertIn("**Why Codex:** Codex is best at test-driven bug fixes", notice)
         self.assertIn("acceptance criteria are incomplete", notice)
         self.assertEqual(self.worker.issue.body, "ORIGINAL")
 
@@ -4903,8 +4903,8 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
             self.worker.post_started_comment()
         notice = github.call_args.args[2]
-        self.assertIn("Selected AI: " + self.worker.choice.name, notice)
-        self.assertIn("Rework: Codex completed the previous pass", notice)
+        self.assertIn("**Selected AI:** " + self.worker.choice.name, notice)
+        self.assertIn("**Rework:** Codex completed the previous pass", notice)
 
     def test_dynamic_routing_keeps_the_previous_tool_when_it_is_clearly_better(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
@@ -5484,7 +5484,7 @@ class WorkerTestCase(unittest.TestCase):
             self.worker.post_started_comment()
         body = github.call_args.args[2]
         self.assertIn(
-            "Claude usage remaining: 82% remaining (session 82% / week 95% remaining)", body
+            "**Claude usage remaining:** 82% remaining (session 82% / week 95% remaining)", body
         )
         self.assertEqual(self.worker.read_state()["usage_at_start"]["remaining_percent"], 82.0)
 
@@ -5497,9 +5497,9 @@ class WorkerTestCase(unittest.TestCase):
             "usage_at_completion": {"remaining_percent": 73.5, "detail": "session 73.5% / week 95% remaining"},
         }
         rendered = self.worker.render_pending_comment(pending)
-        self.assertIn("Claude usage at start: 80% remaining", rendered)
-        self.assertIn("Claude usage at completion: 73.5% remaining", rendered)
-        self.assertIn("Approx. Claude usage for this issue: 6.5 percentage points", rendered)
+        self.assertIn("**Claude usage at start:** 80% remaining", rendered)
+        self.assertIn("**Claude usage at completion:** 73.5% remaining", rendered)
+        self.assertIn("**Approx. Claude usage for this issue:** 6.5 percentage points", rendered)
 
     def test_completion_comment_without_usage_snapshots_is_unchanged(self) -> None:
         pending = {
@@ -5549,7 +5549,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(provider, "codex")
         self.assertIn("issue", arguments)
         self.assertIn("**Codex Bot** is resuming work on this issue", body)
-        self.assertIn("- Branch: `ai/codex/issue-420`", body)
+        self.assertIn("- **Branch:** `ai/codex/issue-420`", body)
         self.assertTrue(is_worker_comment({"body": body}))
         self.assertEqual(
             self.worker.read_state()["resumed_comment_token"], "2026-09-05T09:00:00-05:00"
@@ -5577,7 +5577,7 @@ class WorkerTestCase(unittest.TestCase):
         body = github.call_args.args[2]
         self.assertIn("**Codex Bot** is resuming work on this issue", body)
         self.assertIn(
-            "- Re-routed: Claude claude-sonnet-5 (medium) → Codex test-model (high) "
+            "- **Re-routed:** Claude claude-sonnet-5 (medium) → Codex test-model (high) "
             "(routing now prefers Codex)",
             body,
         )
@@ -5613,7 +5613,10 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.post_resumed_comment()
         body = github.call_args.args[2]
-        self.assertIn("Picking up 2 new trusted comments left while the work was paused", body)
+        self.assertIn(
+            "**Picking up new comments:** 2 new trusted comments left while the work was paused.",
+            body,
+        )
 
     def test_resume_comment_is_skipped_for_a_fresh_first_round(self) -> None:
         self.worker.issue = IssueContext(421, "Fresh start", "", [], "https://example.invalid/421")
@@ -6583,7 +6586,7 @@ class WorkerTestCase(unittest.TestCase):
         body = self.worker.render_pending_comment(pending)
         self.assertIn("### AI Usage", body)
         self.assertIn("Primary", body)
-        self.assertIn("AI Invocations: 1", body)
+        self.assertIn("**AI Invocations:** 1", body)
         # Re-rendering from the same persisted `pending` dict must not
         # duplicate or otherwise change the usage section.
         body_again = self.worker.render_pending_comment(pending)

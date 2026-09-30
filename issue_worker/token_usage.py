@@ -500,13 +500,13 @@ def render_ai_usage_markdown(events: Iterable[dict[str, Any]]) -> str:
     lines.append("")
     lines.append("**AI Usage Totals**")
     lines.append("")
-    lines.append(f"Input: {_format_int(total_input)}  ")
-    lines.append(f"Cached Input: {_format_int(total_cached)}  ")
-    lines.append(f"Reasoning: {_format_int(total_reasoning)}  ")
-    lines.append(f"Output: {_format_int(total_output)}  ")
-    lines.append(f"Total Tokens: {_format_int(total_tokens)}  ")
-    lines.append(f"Estimated Cost: {_format_cost(total_cost) if any_cost else '—'}  ")
-    lines.append(f"AI Invocations: {len(records)}")
+    lines.append(f"**Input:** {_format_int(total_input)}  ")
+    lines.append(f"**Cached Input:** {_format_int(total_cached)}  ")
+    lines.append(f"**Reasoning:** {_format_int(total_reasoning)}  ")
+    lines.append(f"**Output:** {_format_int(total_output)}  ")
+    lines.append(f"**Total Tokens:** {_format_int(total_tokens)}  ")
+    lines.append(f"**Estimated Cost:** {_format_cost(total_cost) if any_cost else '—'}  ")
+    lines.append(f"**AI Invocations:** {len(records)}")
     return "\n".join(lines) + "\n"
 
 

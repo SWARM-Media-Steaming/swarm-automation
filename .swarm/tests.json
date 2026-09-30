@@ -4320,6 +4320,128 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue373_lifecycle_bold_labels.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue373-lifecycle-bold-labels",
+      "name": "Issue #373: lifecycle comment labels use valid bold Markdown",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/adversarial_core.py",
+          "issue_worker/adversarial_security.py",
+          "issue_worker/token_usage.py",
+          "tests/adversarial/test_issue373_lifecycle_bold_labels.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue373_cyber_review_bold_labels.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue373-cyber-review-bold-labels",
+      "name": "Issue #373: expanded cybersecurity review labels use bold Markdown",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/adversarial_security.py",
+          "tests/adversarial/test_issue373_cyber_review_bold_labels.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue373_nested_lifecycle_bold_labels.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue373-nested-lifecycle-bold-labels",
+      "name": "Issue #373: conditional lifecycle reports use bold key labels",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/repository_complexity.py",
+          "issue_worker/dynamic_router.py",
+          "issue_worker/decision_engine.py",
+          "tests/adversarial/test_issue373_nested_lifecycle_bold_labels.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue373_conditional_label_matrix.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue373-conditional-label-matrix",
+      "name": "Issue #373: optional lifecycle report labels use bold Markdown",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/repository_complexity.py",
+          "issue_worker/dynamic_router.py",
+          "issue_worker/decision_engine.py",
+          "tests/adversarial/test_issue373_conditional_label_matrix.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
