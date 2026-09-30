@@ -82,6 +82,12 @@ decision model.
 When Jev is disabled, existing Swarm behavior is unchanged and Jev adds no
 call, cost, or latency.
 
+For RAG, Jev scores the complete bounded candidate set before prompt-token
+truncation. Historical findings carrying persisted security provenance are
+retained and given reserved space in the final context, even when ordinary
+chunks score higher. Injection telemetry is recorded from that final rendered
+set rather than from a preliminary render.
+
 ## Routing integration
 
 Jev does not pick the final worker model. Pre-flight still runs the existing

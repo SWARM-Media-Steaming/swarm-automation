@@ -58,6 +58,9 @@ being recorded, a recommendation being actionable, and the final
 - Jev requests must remain structured typed state and questions, not raw
   unrestricted prompt dumps.
 - Sanitize issue text, findings, and RAG candidates before transmission.
+- Score the complete bounded RAG candidate set before token truncation. Reserve
+  final context space for persisted security-finding provenance, and record
+  injection telemetry only from the final rendered set.
 - Do not persist credentials, raw prompts, or unredacted Jev CLI output.
 - Persist sanitized fingerprints, typed results, confidence, scores, reason
   codes, fallback state, final Swarm action, and eventual outcome.
