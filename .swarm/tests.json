@@ -3931,6 +3931,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue337_jev_context_fenced_code.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue337-jev-context-fenced-code",
+      "name": "Issue #337: comment lines inside fenced code do not end a section",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "tests/adversarial/test_issue337_jev_context_fenced_code.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
