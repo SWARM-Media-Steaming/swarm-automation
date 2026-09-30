@@ -4044,6 +4044,35 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue338_architecture_docs_boundaries.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue338-architecture-docs-boundaries",
+      "name": "Issue #338: architecture docs validation boundaries and pending lifecycle",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/architecture_docs.py",
+          "tests/adversarial/test_issue338_architecture_docs_boundaries.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
