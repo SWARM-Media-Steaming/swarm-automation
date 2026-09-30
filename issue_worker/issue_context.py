@@ -51,6 +51,13 @@ _SECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("requested_change", re.compile(r"objective|goal|summary|description|problem|request|proposal|implementation prompt|feature|change", re.I)),
 )
 _HEADING = re.compile(r"^\s{0,3}(?:#{1,6}\s+(?P<h>.+?)\s*#*|\*\*(?P<b>[^*\n]{2,80})\*\*:?|(?P<c>[A-Za-z][A-Za-z /&-]{2,60}):)\s*$")
+# CommonMark fenced code: 3+ backticks or tildes; a backtick fence's info string has no backtick.
+_FENCE_OPEN = re.compile(r"^ {0,3}(?P<f>`{3,}(?=[^`]*$)|~{3,})")
+
+
+def _closes_fence(line: str, fence: str) -> bool:
+    """A closing fence repeats the opening character at least as many times, with nothing after it."""
+    return re.match(rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}\s*$", line) is not None
 
 Summarizer = Callable[[Mapping[str, str], int], Any]
 
@@ -129,7 +136,21 @@ def extract_sections(text: str) -> dict[str, str]:
     sections: dict[str, list[str]] = {}
     current: str | None = None
     current_level = 0
+    fence: str | None = None
     for line in text.splitlines():
+        # Inside fenced code a "# comment" or "Usage:" line is code, never a heading.
+        if fence is not None:
+            in_code = True
+            if _closes_fence(line, fence):
+                fence = None
+        else:
+            opening = _FENCE_OPEN.match(line)
+            fence = opening.group("f") if opening else None
+            in_code = fence is not None
+        if in_code:
+            if current and line.strip():
+                sections.setdefault(current, []).append(line.rstrip())
+            continue
         match = _HEADING.match(line)
         if match:
             title = match.group("h") or match.group("b") or match.group("c") or ""

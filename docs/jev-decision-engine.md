@@ -169,9 +169,10 @@ builds a tiered package:
   are still redacted. Only the fingerprint, typed result and metadata are
   persisted, never the prompt or raw Jev output.
 - Per-candidate RAG scoring and finding decisions keep the 1,200 character
-  summary. Section detection is heading-based; a long description with no
-  recognizable headings relies on the beginning/end excerpts. Jev stays
-  advisory: thresholds and deterministic gates are unchanged.
+  summary. Section detection is heading-based (lines inside fenced code are
+  never headings); a long description with no recognizable headings relies
+  on the beginning/end excerpts. Jev stays advisory: thresholds and
+  deterministic gates are unchanged.
 
 Limits are set by `SWARM_JEV_CONTEXT_MAX_RAW_CHARS`, `..._MAX_SUMMARY_CHARS`,
 `..._MAX_EXCERPT_CHARS`, `..._SUMMARY_TIMEOUT_SECONDS`, `..._SUMMARY_RETRIES`

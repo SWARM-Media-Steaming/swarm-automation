@@ -32,6 +32,12 @@ class IssueContextTests(unittest.TestCase):
         self.assertEqual(m["originalLength"], len(body))
         self.assertLessEqual(len(pkg["text"]), 400 + 1200 + 200)
 
+    def test_comment_lines_in_fenced_code_do_not_end_a_section(self):
+        body = long_body("## Acceptance criteria\n```bash\n# setup\nnpm ci\n```\n- AFTER_FENCE\n\n## Notes\nbye")
+        pkg = build_issue_context(body, SMALL)
+        self.assertIn("AFTER_FENCE", pkg["text"])
+        self.assertIn("acceptance_criteria", pkg["metadata"]["excerpts"])
+
     def test_secret_straddling_cut_is_redacted(self):
         secret = "ghp_" + "a" * 36
         pkg = build_issue_context(long_body(f"## Security\nleaked {secret}\n"), SMALL)
