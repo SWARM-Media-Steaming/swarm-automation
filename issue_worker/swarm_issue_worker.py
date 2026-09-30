@@ -4012,7 +4012,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
             epochs = int(report.get("epochs") or 1)
             detail = f" after {epochs} strict-mode epochs" if epochs > 1 else ""
             policy = "best effort allowed" if report.get("policy") == "best_effort" else "strict"
-            return f"- Adversarial merge policy: {policy} — verified clean before merge{detail}.\n"
+            return f"- **Adversarial merge policy:** {policy} — verified clean before merge{detail}.\n"
 
         def describe(unresolved: dict[str, Any]) -> str:
             suites = [f"`{item.get('id')}`" for item in unresolved.get("suites", [])]
@@ -4032,11 +4032,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         merged = (f"merged into `{after.get('integration_branch')}` as `{after.get('merged_sha')}`"
                   if after.get("merged") else "pull request left open")
         return (
-            f"- Adversarial merge policy: **{BEST_EFFORT_LABEL}** — this repository allows a best-effort "
+            f"- **Adversarial merge policy:** **{BEST_EFFORT_LABEL}** — this repository allows a best-effort "
             "adversarial merge after 3 rounds.\n"
-            f"- Delivery: {merged}; {promotion}.\n"
-            f"- Unresolved before merge: {describe(report.get('before_merge') or {})}.\n"
-            f"- Unresolved after merge: {describe(after)} — the merged commit is the one the final round "
+            f"- **Delivery:** {merged}; {promotion}.\n"
+            f"- **Unresolved before merge:** {describe(report.get('before_merge') or {})}.\n"
+            f"- **Unresolved after merge:** {describe(after)} — the merged commit is the one the final round "
             "tested, so these remain open and are tracked in the follow-up issue.\n"
         )
 
