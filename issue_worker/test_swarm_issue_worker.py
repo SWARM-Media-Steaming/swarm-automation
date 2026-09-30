@@ -6586,7 +6586,7 @@ class WorkerTestCase(unittest.TestCase):
         body = self.worker.render_pending_comment(pending)
         self.assertIn("### AI Usage", body)
         self.assertIn("Primary", body)
-        self.assertIn("AI Invocations: 1", body)
+        self.assertIn("**AI Invocations:** 1", body)
         # Re-rendering from the same persisted `pending` dict must not
         # duplicate or otherwise change the usage section.
         body_again = self.worker.render_pending_comment(pending)
