@@ -155,7 +155,17 @@ def dependencies(path: str, source: str) -> list[str]:
             return [match.group(1) for line in source.splitlines()
                     if (match := re.match(r"^([A-Za-z0-9_.-]+)(?:[<>=!~\[;\s]|$)", line))][:2000]
         if name == "go.mod":
-            return re.findall(r"(?m)^\s*(?:require\s+)?([\w./-]+)\s+v[0-9]", source)[:2000]
+            # Anchored per line: a multiline `^\s*` restarts at every blank line
+            # and consumes the newlines, which is quadratic on hostile input.
+            found = []
+            for line in source.splitlines():
+                if len(line) > 1000:
+                    continue
+                if match := re.match(r"[ \t]*(?:require[ \t]+)?([\w./-]+)[ \t]+v[0-9]", line):
+                    found.append(match.group(1))
+                    if len(found) >= 2000:
+                        break
+            return found
     except (ValueError, TypeError, AttributeError):
         pass
     return []
