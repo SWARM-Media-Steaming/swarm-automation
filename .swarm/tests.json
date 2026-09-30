@@ -199,6 +199,36 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue328_jev_boundary_contracts.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue328-jev-boundary-contracts",
+      "name": "Issue #328: Jev confidence, RAG provenance, and full-history model filter boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_issue328_jev_boundary_contracts.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "issue_worker",
         "-p",
         "test_*.py"
