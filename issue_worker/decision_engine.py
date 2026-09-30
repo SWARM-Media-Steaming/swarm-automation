@@ -1321,23 +1321,26 @@ def swarm_policy_action(
     if not actionable:
         # An empty default must never turn "not actionable" into Jev's own
         # irreversible recommendation, whatever the decision type.
-        return str(default or _fail_closed_action(kind, recommended))
+        return str(default or _fail_closed_action(result))
     return recommended
 
 
-def _fail_closed_action(kind: str, recommended: str) -> str:
+def _fail_closed_action(result: DecisionResult) -> str:
     """Conservative Swarm action for a non-actionable result with no default.
 
     Only irreversible recommendations (and a security PASS, which would let a
     finding through) are replaced; a reversible one is echoed unchanged.
     """
+    kind = result.decision_type
+    recommended = result.decision
+    security = kind in SECURITY_DECISION_TYPES or bool(result.metadata.get("security"))
     if kind == DecisionType.COMPLETION.value:
         return CompletionVerdict.NEEDS_HUMAN_REVIEW.value
     if recommended == WorkflowAction.SKIP_UAT.value:
         return WorkflowAction.RUN_UAT.value
     if recommended == WorkflowAction.SKIP_CYBER.value:
         return WorkflowAction.RUN_CYBER.value
-    if kind in SECURITY_DECISION_TYPES and recommended in NON_BLOCKING_FINDING_DECISIONS:
+    if security and recommended in NON_BLOCKING_FINDING_DECISIONS:
         return WorkflowAction.FIX_NOW.value
     if recommended in IRREVERSIBLE_ACTIONS:
         return WorkflowAction.HUMAN_REVIEW.value

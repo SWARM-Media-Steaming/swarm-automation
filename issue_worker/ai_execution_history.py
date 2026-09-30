@@ -1736,6 +1736,7 @@ class ExecutionHistoryRepository:
             conditions.append(
                 "LOWER(COALESCE(c.modified_provider, '') || ' ' || COALESCE(c.modified_model, '') || ' ' "
                 "|| COALESCE(c.baseline_provider, '') || ' ' || COALESCE(c.baseline_model, '') || ' ' "
+                "|| COALESCE(c.jev_model, '') || ' ' "
                 "|| COALESCE(e.ai_provider, '')) LIKE ? ESCAPE '\\'"
             )
             params.append(f"%{escaped}%")

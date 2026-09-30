@@ -3274,6 +3274,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
 
     @staticmethod
     def _is_security_context(item: dict[str, Any]) -> bool:
+        # Persisted provenance is stronger evidence than title wording.
+        metadata = item.get("metadata")
+        stage = str(metadata.get("stage") or "") if isinstance(metadata, dict) else ""
+        if str(item.get("source_kind") or "").lower() == "security_finding" or stage.lower() == "security":
+            return True
         text = " ".join(
             str(item.get(key) or "") for key in ("title", "name", "summary", "body")
         ).lower()
