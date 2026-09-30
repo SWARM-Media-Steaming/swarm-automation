@@ -29,7 +29,13 @@ label from a trusted author; the worker owns VERSION.
   reasoning. Quota resume may continue the same unfinished phase. Provider
   capacity is checked again for each phase and the dynamic router is reused
   when enabled. Prefer another provider for testing; same-provider fallback
-  still starts a fresh session. Dispute adjudication is always a new tester.
+  still starts a fresh session. A tester never runs below a floor: its provider's
+  STANDARD-band tier (complexity 4) at medium effort or better, and no weaker
+  than the first assessment's tester (`apply_tester_floor`, `tester_baseline`).
+  The stage router grades the pass against the change under test, so a small
+  change can otherwise draw a model too light to follow the edit rules. A
+  rejected tester result restores the edits and tells the next attempt which
+  rule it broke and what to do instead (`rejection_remedy`). Dispute adjudication is always a new tester.
 - Tests live under `tests/adversarial/`, registered with `adversarial-` IDs and
   `origin: "adversarial"` in `.swarm/tests.json`. Preserve non-adversarial suites.
   `tests/adversarial/security/` and `origin: "adversarial-security"` belong to

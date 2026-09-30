@@ -351,6 +351,74 @@ class AdversarialUatTests(unittest.TestCase):
             self.worker.choose_stage_provider(uat.UAT_STAGE, loop)
         self.assertIn("graded 4/10", routed.call_args.kwargs["prompt"])
 
+    def test_a_tester_never_runs_below_the_standard_tier_at_medium_effort(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        loop["phase"] = "test"
+        weak = ProviderChoice("Claude", "claude-haiku-4-5", "low", "s")
+        raised = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, weak)
+        self.assertEqual((raised.model, raised.effort, raised.session_id), ("claude-sonnet-5-5", "medium", "s"))
+        strong = ProviderChoice("Claude", "claude-opus-5-5", "high", "s")
+        self.assertEqual(self.worker.apply_tester_floor(uat.UAT_STAGE, loop, strong), strong)
+
+    def test_later_testers_are_no_weaker_than_the_first_assessment(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        loop["phase"] = "test"
+        first = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Codex", "gpt-5.6-sol", "high", "a"))
+        self.assertEqual((first.model, first.effort), ("gpt-5.6-sol", "high"))
+        self.assertEqual(loop["tester_baseline"]["model"], "gpt-5.6-sol")
+        later = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Codex", "gpt-5.6-luna", "low", "b"))
+        # Raised onto the first assessment's model, it also keeps that effort.
+        self.assertEqual((later.model, later.effort), ("gpt-5.6-sol", "high"))
+        again = self.worker.apply_tester_floor(uat.UAT_STAGE, loop, ProviderChoice("Codex", "gpt-5.6-sol", "low", "c"))
+        self.assertEqual((again.model, again.effort), ("gpt-5.6-sol", "high"))
+
+    def test_the_tester_floor_leaves_fixers_and_started_sessions_alone(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        weak = ProviderChoice("Claude", "claude-haiku-4-5", "low", "s")
+        loop["phase"] = "fix"
+        self.assertEqual(self.worker.apply_tester_floor(uat.UAT_STAGE, loop, weak), weak)
+        loop["phase"] = "test"
+        resumed = ProviderChoice("Claude", "claude-haiku-4-5", "low", "s", True)
+        self.assertEqual(self.worker.apply_tester_floor(uat.UAT_STAGE, loop, resumed), resumed)
+
+    def test_stage_routing_raises_a_weak_tester_pick(self):
+        self.prepare()
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
+        loop = self.worker.read_state()["adversarial"]
+        loop["phase"] = "test"
+        decision = {"provider": "claude", "selected_model": "claude-haiku-4-5", "reasoning_effort": "low", "complexity": 2}
+        with mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 80)), \
+                mock.patch.object(self.worker, "resolve_router_response", return_value=decision), \
+                mock.patch.object(self.worker, "run_router", return_value="ok"):
+            choice = self.worker.choose_stage_provider(uat.UAT_STAGE, loop)
+        self.assertIsNotNone(choice)
+        self.assertNotEqual(choice.model, "claude-haiku-4-5")
+        self.assertGreaterEqual(adversarial_core.effort_rank(choice.effort), adversarial_core.effort_rank("medium"))
+
+    def test_a_rejected_tester_is_told_exactly_which_rule_it_broke(self):
+        remedy = adversarial_core.AdversarialStageMixin.rejection_remedy
+        protected = remedy("Only a fresh tester adjudicating a dispute may revise or retire existing adversarial tests")
+        self.assertIn("Leave every file that already exists", protected)
+        self.assertIn("NEW test files", protected)
+        self.assertIn("SWARM_ADVERSARIAL_RESULT", remedy("Tester must return exactly one SWARM_ADVERSARIAL_RESULT JSON line"))
+        self.assertIn("Do not modify product code", remedy("Tester changed product files: a.pyc"))
+        self.assertEqual(remedy("something unrelated"), "")
+
+    def test_the_rejection_guidance_reaches_the_next_prompt_and_counts_attempts(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        loop["retry_rejection"] = {
+            "reason": "Only a fresh tester adjudicating a dispute may revise or retire existing adversarial tests",
+            "paths": ["tests/adversarial/issue1/test_a.py"], "patch": "p", "attempts": 2,
+        }
+        prompt = self.worker.adversarial_common_prompt(uat.UAT_STAGE, loop)
+        self.assertIn("Rejected attempts so far: 2", prompt)
+        self.assertIn("Leave every file that already exists", prompt)
+        self.assertIn("tests/adversarial/issue1/test_a.py", prompt)
+
     def test_a_started_session_keeps_its_model_and_no_upgrade_keeps_the_choice(self):
         self.prepare()
         resumed = ProviderChoice("Claude", "claude-sonnet-5", "high", "session", True)

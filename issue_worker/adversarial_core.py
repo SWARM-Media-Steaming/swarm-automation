@@ -65,6 +65,11 @@ STALLED_EPOCHS_BEFORE_STRONGEST = 2
 #: Reasoning effort, weakest first. Escalation climbs this ladder and is
 #: clamped to the highest effort the chosen provider's own tiers use.
 EFFORT_LADDER = ("low", "medium", "high", "xhigh", "max")
+# A tester must follow strict rules about what it may edit, so it never runs on
+# a provider's lightest model or below medium effort: the STANDARD band's tier
+# is the floor, and later rounds are no weaker than the first assessment.
+TESTER_FLOOR_COMPLEXITY = 4
+TESTER_MIN_EFFORT = "medium"
 DEFINITION = ".swarm/tests.json"
 TEST_ROOT = "tests/adversarial/"
 CAP_HIT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-cap-hit -->"
@@ -903,6 +908,7 @@ class AdversarialStageMixin:
                 except RouterError as error:
                     self.history.warning(f"Adversarial routing used capacity fallback: {error}", iso_timestamp())
         choice = self.upgrade_stage_choice(stage, choice)
+        choice = self.apply_tester_floor(stage, loop, choice)
         if escalation:
             choice = self.escalate_stage_choice(stage, loop, choice, escalation, remaining)
         if choice.name not in loop["capacity_used"]:
@@ -931,6 +937,58 @@ class AdversarialStageMixin:
         log(f"{stage.label} for issue #{self.issue.number}: upgrading {upgrade.previous} to "
             f"{upgrade.model}: {upgrade.reason}.")
         return ProviderChoice(choice.name, upgrade.model, choice.effort, choice.session_id, choice.resume)
+
+    def apply_tester_floor(self, stage: AdversarialStage, loop: dict[str, Any], choice):
+        """Keep a tester from running below the floor for following its rules.
+
+        Grading the stage relative to a small change is right for cost, but a
+        tester on the lightest model at low effort rewrote the first round's
+        protected tests. A tester runs on at least the provider's STANDARD-band
+        tier at medium effort, and no weaker than the first assessment's tester.
+        Fixers and started sessions are untouched.
+        """
+        from swarm_issue_worker import ProviderChoice, log
+        from dynamic_router import RouterError, default_routing_tiers, model_route_profile, tier_for_complexity
+
+        if loop["phase"] != "test" or choice.resume or self.config.dry_run:
+            return choice
+        ladder = sorted(
+            self.config.routing_tiers.get(choice.key) or default_routing_tiers().get(choice.key) or (),
+            key=lambda tier: tier.min_complexity,
+        )
+        baseline = loop.get("tester_baseline") or {}
+        model, effort = choice.model, choice.effort
+        try:
+            floor_tier = tier_for_complexity(tuple(ladder), TESTER_FLOOR_COMPLEXITY)
+        except RouterError:
+            floor_tier = None
+        floor = model_route_profile(choice.key, floor_tier.model, floor_tier.effort) if floor_tier else None
+        needed = max(floor[0] if floor else 0, int(baseline.get("capability") or 0))
+        current = model_route_profile(choice.key, model, effort)
+        if needed and current is not None and current[0] < needed:
+            profiles = [(tier, model_route_profile(choice.key, tier.model, tier.effort)) for tier in ladder]
+            profiles = [(tier, profile) for tier, profile in profiles if profile is not None]
+            capable = [tier for tier, profile in profiles if profile[0] >= needed]
+            target = capable[0] if capable else (max(profiles, key=lambda item: item[1][0])[0] if profiles else None)
+            if target is not None:
+                model = target.model
+        minimum = TESTER_MIN_EFFORT
+        if baseline.get("provider") == choice.name and baseline.get("model") == model:
+            minimum = max(minimum, str(baseline.get("effort") or ""), key=effort_rank)
+        if effort_rank(effort) < effort_rank(minimum):
+            effort = minimum
+        if (model, effort) != (choice.model, choice.effort):
+            log(f"{stage.label} for issue #{self.issue.number}: raising the tester from {choice.name} "
+                f"{choice.model} at {choice.effort} effort to {model} at {effort} effort "
+                "(testers keep to a minimum model and effort so they follow the edit rules).")
+        raised = ProviderChoice(choice.name, model, effort, choice.session_id, choice.resume)
+        if not baseline:
+            profile = model_route_profile(raised.key, raised.model, raised.effort)
+            loop["tester_baseline"] = {
+                "provider": raised.name, "model": raised.model, "effort": raised.effort,
+                "capability": profile[0] if profile else 0,
+            }
+        return raised
 
     def stage_scope_note(self, stage: AdversarialStage) -> str:
         """What the change under test is, so the router grades the stage against it.
@@ -1042,10 +1100,13 @@ class AdversarialStageMixin:
         rejected = loop.get("retry_rejection") or {}
         rejection_guidance = ""
         if rejected:
+            reason = str(rejected.get("reason", "invalid tester result"))
             rejection_guidance = (
                 "\nA prior tester result was rejected and its edits were rolled back. Do not repeat it.\n"
-                f"Rejection: {rejected.get('reason', 'invalid tester result')}\n"
+                f"Rejection: {reason}\n"
                 f"Rejected paths: {json.dumps(rejected.get('paths', []))}\n"
+                f"Rejected attempts so far: {int(rejected.get('attempts', 1))}\n"
+                f"{self.rejection_remedy(reason)}"
             )
         return (
             f"Issue #{self.issue.number}: {self.issue.title}\n\n{self.issue.body}\n\n"
@@ -1058,6 +1119,29 @@ class AdversarialStageMixin:
             self.adversarial_history_context(stage, loop) +
             "\nResulting patch:\n" + diff + "\n"
         )
+
+    @staticmethod
+    def rejection_remedy(reason: str) -> str:
+        """What to do differently, for the rule a rejected tester result broke."""
+        text = reason.lower()
+        if "revise or retire existing adversarial tests" in text:
+            return (
+                "Existing adversarial tests are protected. Leave every file that already exists under "
+                "tests/adversarial/ exactly as it is, and register only NEW test files with new names. If a "
+                "protected test looks wrong, report it in your findings instead of editing it. Do not add "
+                "summary or notes files; only test files and the suite definition may change.\n"
+            )
+        if "exactly one swarm_adversarial_result" in text:
+            return (
+                "End your reply with exactly one line that starts with SWARM_ADVERSARIAL_RESULT followed by "
+                "one JSON object, and print that marker nowhere else.\n"
+            )
+        if "changed product files" in text:
+            return (
+                "Do not modify product code, generated files or caches. Only files under tests/adversarial/ "
+                "and the suite definition may change.\n"
+            )
+        return ""
 
     def adversarial_history_context(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
         """What earlier rounds established, for a fresh agent with no transcript.
@@ -1624,7 +1708,10 @@ class AdversarialStageMixin:
                         active=False,
                         response=None,
                         retry_stage_base=loop["stage_base"],
-                        retry_rejection={"reason": str(error), "paths": rejected_paths, "patch": str(patch_path)},
+                        retry_rejection={
+                            "reason": str(error), "paths": rejected_paths, "patch": str(patch_path),
+                            "attempts": int((loop.get("retry_rejection") or {}).get("attempts", 0)) + 1,
+                        },
                     )
                     self.save_stage(stage, loop)
                     self.record_stage_failure(stage, loop, str(error))
