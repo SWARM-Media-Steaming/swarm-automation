@@ -235,8 +235,8 @@ class AdversarialSecurityTests(unittest.TestCase):
         self.assertEqual(loop["open_findings"], [])
         self.assertNotIn("ghp_", (self.repo / "service.py").read_text())
         self.assertIn("**Adversarial Cybersecurity:** FIXED", self.comments_posted[0])
-        self.assertIn("- In-scope discovered: 1", self.comments_posted[0])
-        self.assertIn("- High: 1", self.comments_posted[0])
+        self.assertIn("- **In-scope discovered:** 1", self.comments_posted[0])
+        self.assertIn("- **High:** 1", self.comments_posted[0])
 
     def test_history_records_security_rounds_beside_uat_rounds_of_the_same_issue(self):
         self.prepare(uat_enabled=True)
@@ -440,11 +440,11 @@ class AdversarialSecurityTests(unittest.TestCase):
         # and all of it is reported back on the originating issue
         body = self.comments_posted[0]
         self.assertIn("**Adversarial Cybersecurity:** FIXED", body)
-        self.assertIn("- In-scope discovered: 1", body)
-        self.assertIn("- In-scope fixed: 1", body)
-        self.assertIn("- Out-of-scope issues created: 1", body)
+        self.assertIn("- **In-scope discovered:** 1", body)
+        self.assertIn("- **In-scope fixed:** 1", body)
+        self.assertIn("- **Out-of-scope issues created:** 1", body)
         self.assertIn("https://example.invalid/issues/300", body)
-        self.assertIn("adversarial-security-278: passed", body)
+        self.assertIn("**adversarial-security-278:** passed", body)
         self.assertNotIn("SECRET implementer reasoning", body.split("<details>")[0])
 
     # -- out-of-scope findings -----------------------------------------------------
