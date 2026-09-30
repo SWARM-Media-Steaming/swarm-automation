@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -77,13 +79,42 @@ def sample_payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
+@contextlib.contextmanager
+def without_operator_calibration():
+    """Hide the host's activated Model Routing Calibration from the router.
+
+    The desktop app exports ``SWARM_MODEL_CALIBRATION_CATALOG`` into every
+    worker process, and an activated catalog replaces the bundled
+    ``models.yaml``. A test that runs under a live worker would then route
+    against whatever the operator activated last, not the bundled catalog it
+    asserts on. Tests that mean to exercise the override set the variable
+    themselves.
+    """
+    with mock.patch.dict(os.environ):
+        os.environ.pop("SWARM_MODEL_CALIBRATION_CATALOG", None)
+        yield
+
+
+_module_isolation = contextlib.ExitStack()
+
+
+def setUpModule() -> None:
+    _module_isolation.enter_context(without_operator_calibration())
+
+
+def tearDownModule() -> None:
+    _module_isolation.close()
+
+
 def resolve(payload, *keys, **kwargs):
     tools = kwargs.pop("candidates", None) or candidates(*keys)
     kwargs.setdefault("default_provider", tools[0].key)
     kwargs.setdefault("router_provider", tools[0].key)
     kwargs.setdefault("router_model", "router-model")
     kwargs.setdefault("router_effort", "low")
-    return resolve_routing_decision(payload, tools, **kwargs)
+    # Other suites import this helper without running this module's setUpModule.
+    with without_operator_calibration():
+        return resolve_routing_decision(payload, tools, **kwargs)
 
 
 class DynamicRouterTest(unittest.TestCase):
