@@ -734,6 +734,13 @@ def build_jev_request(kind: str, context: Mapping[str, Any]) -> tuple[dict[str, 
             "complete": bool(meta.get("complete")),
             "sections": [sanitize_text(item)[:40] for item in list(meta.get("sections") or [])[:12]],
             "excerpts": [sanitize_text(item)[:40] for item in list(meta.get("excerpts") or [])[:12]],
+            "summarySource": sanitize_text(meta.get("summarySource") or "")[:60],
+            "sentLength": len(summary),
+            "limits": {
+                str(key): value
+                for key, value in dict(meta.get("limits") or {}).items()
+                if isinstance(value, (int, float))
+            },
         }
     if kind in {DecisionType.TASK_CLASSIFICATION.value, DecisionType.ISSUE_TRIAGE.value}:
         routable = routable_models_for_jev()

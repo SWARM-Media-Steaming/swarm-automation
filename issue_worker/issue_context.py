@@ -210,30 +210,28 @@ def build_issue_context(
     else:
         summary, source = deterministic_summary(sections, cfg.max_summary_chars), "deterministic"
 
-    head = clean[:HEAD_TAIL_CHARS]
-    tail = clean[-HEAD_TAIL_CHARS:]
-    excerpts: list[tuple[str, str]] = [("beginning", head)]
-    for key in EXCERPT_KEYS:
-        if sections.get(key):
-            excerpts.append((key, sections[key]))
-    excerpts.append(("end", tail))
     budget = cfg.max_excerpt_chars
-    # Head and tail are reserved first so long sections cannot crowd them out.
-    reserved = len(head) + len(tail)
-    section_budget = max(0, budget - reserved)
-    chosen: list[str] = []
-    rendered: list[str] = []
-    for label, value in excerpts:
-        if label in {"beginning", "end"}:
-            piece = value
-        else:
-            remaining = section_budget
-            if remaining < 60:
-                continue
-            piece = _clip(value, min(remaining, max(60, section_budget // 2)))
-            section_budget -= len(piece)
-        chosen.append(label)
-        rendered.append(f"[{label}]\n{piece}")
+    # Head and tail are reserved first so long sections cannot crowd them out, but
+    # they shrink with the configured cap so it stays a real bound.
+    edge = min(HEAD_TAIL_CHARS, max(10, (budget - 30) // 4))
+    head = clean[:edge]
+    tail = clean[-edge:]
+    used = len("[beginning]\n") + len(head) + len("\n\n[end]\n") + len(tail)
+    chosen: list[str] = ["beginning"]
+    rendered: list[str] = [f"[beginning]\n{head}"]
+    sections_left = [key for key in EXCERPT_KEYS if sections.get(key)]
+    for index, key in enumerate(sections_left):
+        label_cost = len(key) + 4  # "\n\n[key]\n"
+        share = (budget - used) // (len(sections_left) - index)
+        limit = share - label_cost
+        if limit < 40:
+            continue
+        piece = _clip(sections[key], limit)
+        used += label_cost + len(piece)
+        chosen.append(key)
+        rendered.append(f"[{key}]\n{piece}")
+    chosen.append("end")
+    rendered.append(f"[end]\n{tail}")
 
     text = "\n\n".join(
         part

@@ -3159,11 +3159,14 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         record["latency_ms"] = result.latency_ms
         record["estimated_cost"] = result.estimated_cost
         record["error_type"] = result.error_type
+        package = payload.get("issue_context")
+        context_metadata = package.get("metadata", {}) if isinstance(package, dict) else None
+        if context_metadata is not None:
+            record["context_metadata"] = context_metadata
         self.history.record_jev_decision(record)
         outcome = result.as_dict()
-        package = payload.get("issue_context")
-        if isinstance(package, dict):
-            outcome["contextMetadata"] = package.get("metadata", {})
+        if context_metadata is not None:
+            outcome["contextMetadata"] = context_metadata
         return outcome
 
     def expand_partial_context(
