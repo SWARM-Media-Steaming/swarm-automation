@@ -2051,7 +2051,13 @@ fn routing_calculator_sees_what_the_worker_sees() {
     // Starting defaults are wanted for every known tool, even one that is disabled.
     let mut without_grok = config.clone();
     without_grok.provider_mut("grok").unwrap().enabled = false;
-    let defaults = routing_calculator_args(&PathBuf::from("x.py"), "defaults", &without_grok, "{}", None);
+    let defaults = routing_calculator_args(
+        &PathBuf::from("x.py"),
+        "defaults",
+        &without_grok,
+        "{}",
+        None,
+    );
     assert_eq!(defaults[1], "defaults");
     let providers = &defaults[defaults.iter().position(|a| a == "--providers").unwrap() + 1];
     assert_eq!(providers, "claude,codex,grok");

@@ -835,9 +835,9 @@ impl AppConfig {
     /// True while any provider still has no worker or router model, which the
     /// worker fills from the live catalog (see [`SuggestedModels`]).
     pub fn has_unset_models(&self) -> bool {
-        self.providers
-            .iter()
-            .any(|provider| provider.model.trim().is_empty() || provider.router_model.trim().is_empty())
+        self.providers.iter().any(|provider| {
+            provider.model.trim().is_empty() || provider.router_model.trim().is_empty()
+        })
     }
 
     /// Fill only the settings that are still empty from `suggested`. A model the
@@ -1449,7 +1449,10 @@ mod tests {
         config.normalize();
         // Nothing in the app names a model: a fresh config starts empty.
         assert!(config.has_unset_models());
-        assert!(config.providers.iter().all(|p| p.model.is_empty() && p.router_model.is_empty()));
+        assert!(config
+            .providers
+            .iter()
+            .all(|p| p.model.is_empty() && p.router_model.is_empty()));
 
         config.provider_mut("codex").unwrap().model = "my-chosen-model".into();
         config.provider_mut("codex").unwrap().effort = "high".into();
@@ -1463,10 +1466,16 @@ mod tests {
         let changes = config.apply_suggested_models(&suggested);
 
         let claude = config.provider("claude").unwrap();
-        assert_eq!((claude.model.as_str(), claude.effort.as_str()), ("w", "medium"));
+        assert_eq!(
+            (claude.model.as_str(), claude.effort.as_str()),
+            ("w", "medium")
+        );
         assert_eq!(claude.router_model, "r");
         let codex = config.provider("codex").unwrap();
-        assert_eq!((codex.model.as_str(), codex.effort.as_str()), ("my-chosen-model", "high"));
+        assert_eq!(
+            (codex.model.as_str(), codex.effort.as_str()),
+            ("my-chosen-model", "high")
+        );
         assert_eq!(codex.router_model, "r2");
         assert_eq!(changes.len(), 3);
         // Grok had no suggestion, so it stays unset for the worker's auto.
@@ -1605,7 +1614,10 @@ mod tests {
         });
         let mut legacy: AppConfig = serde_json::from_value(legacy).unwrap();
         legacy.normalize();
-        assert!(serde_json::to_value(&legacy).unwrap().get("routing_tiers").is_none());
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("routing_tiers")
+            .is_none());
 
         let mut older: AppConfig =
             serde_json::from_str(r#"{"dynamic_model_routing": false}"#).unwrap();
