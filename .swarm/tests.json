@@ -3557,6 +3557,35 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue322_sequential_discovery_isolation.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-322-sequential-discovery-isolation",
+      "name": "Issue #322: sequential unittest discovery keeps module origins isolated",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/test_engineering_knowledge.py",
+          "tests/adversarial/test_adversarial_engineering_knowledge.py",
+          "tests/adversarial/test_issue322_sequential_discovery_isolation.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
