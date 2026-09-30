@@ -1146,7 +1146,7 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(self.worker.routing["model_source"], "repository_complexity")
         self.assertTrue(self.worker.routing["cost_consideration_enabled"])
         self.assertEqual(self.worker.routing["routing_optimization"], "cost")
-        self.assertEqual(self.worker.choice.effort, "low")
+        self.assert_complexity_route()
 
     def test_best_fit_routing_handoff_uses_the_scored_grok_fallback(self):
         """A new cross-provider handoff uses the reusable scorer's Grok pick."""
