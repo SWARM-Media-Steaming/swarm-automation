@@ -4073,6 +4073,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue338_architecture_docs_redaction.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue338-architecture-docs-redaction",
+      "name": "Issue #338: architecture docs redact prefixed secrets and ignore symlinked README",
+      "origin": "adversarial-security",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/architecture_docs.py",
+          "tests/adversarial/security/test_issue338_architecture_docs_redaction.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
