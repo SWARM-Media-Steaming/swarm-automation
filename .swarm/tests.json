@@ -4157,6 +4157,33 @@
         ]
       },
       "timeoutSeconds": 1800
+    },
+    {
+      "id": "adversarial-369-complexity-contracts",
+      "name": "Issue #369 repository-aware complexity contracts",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3.13",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue369_complexity_contracts.py"
+      ],
+      "requirements": {
+        "executables": [
+          "python3.13",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/test_issue369_complexity_contracts.py"
+        ]
+      },
+      "timeoutSeconds": 600
     }
   ],
   "version": 1
