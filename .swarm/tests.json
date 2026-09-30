@@ -3642,6 +3642,34 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue323_checkout_yaml_forms.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue323-checkout-yaml-forms",
+      "name": "Issue #323: checkout pins remain visible across YAML scalar forms",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".github/workflows/ci.yml",
+          "tests/adversarial/test_issue323_checkout_yaml_forms.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
