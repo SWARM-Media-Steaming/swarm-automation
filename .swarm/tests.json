@@ -3614,6 +3614,34 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue323_all_workflows_checkout_runtime.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue323-all-workflows-checkout-runtime",
+      "name": "Issue #323: every Actions workflow checkout uses a supported Node runtime",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".github/workflows/ci.yml",
+          "tests/adversarial/test_issue323_all_workflows_checkout_runtime.py"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
