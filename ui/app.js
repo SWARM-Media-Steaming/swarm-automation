@@ -116,6 +116,7 @@
     repository: "Repository",
     ai: "AI Configuration",
     knowledge: "Knowledge",
+    architecture: "Architecture",
     feedback: "Feedback",
     guides: "Guides",
     debug: "Info & Debug",
@@ -290,6 +291,11 @@
       html: "<p>SWARM Engineering Knowledge is persistent, source-backed memory of the software systems you have connected: repositories, issues, pull requests, agent executions, adversarial findings, and the decisions they record.</p><p><strong>How does SWARM use my engineering data?</strong> SWARM uses this data locally on this Mac. It reuses the existing execution-history database rather than uploading your code. Agents receive a small relevant context pack automatically. You can also ask questions in Ask SWARM. Generated summaries are optional and spend extra AI tokens only when you turn them on.</p>",
       links: [],
     },
+    "architecture-docs": {
+      title: "Architecture documentation",
+      html: "<p>When <strong>Maintain interactive architecture documentation</strong> is on for a repository, SWARM reviews each completed issue for architectural impact. Only changes that touch modules, dependencies, APIs, schemas, security, deployment, CI or similar trigger an extra AI pass, which may use provider capacity.</p><p>The documentation is stored in SWARM's own application data, never in your repository. Changes that are not yet in the integration branch show as <em>pending</em> and are not presented as current architecture. Secrets, tokens, <code>.env</code> content and private URLs are filtered from prompts and output.</p>",
+      links: [],
+    },
     "ask-swarm": {
       title: "Ask SWARM",
       html: "<p>Ask natural-language questions about connected repositories, issues, executions, costs, and decisions. Scope defaults to the repository selected in the header; you can widen it to a project or all connected knowledge.</p><p>Answers cite their supporting sources. Cost estimates always include the sample size. Ask SWARM uses the same model router as the rest of SWARM when an AI synthesis is needed; retrieval itself is local and deterministic.</p>",
@@ -385,6 +391,7 @@
     }
     if (view === "guides") void refreshModelCalibration({ quiet: true });
     if (view === "ai") void refreshModelDataKeyStatus();
+    if (view === "architecture") void refreshArchitecture({ quiet: true });
     if (view === "knowledge") {
       renderKnowledgeScope();
       void refreshKnowledgeStatus({ quiet: true });
@@ -444,6 +451,89 @@
     document.querySelectorAll("#provider-cards .provider-card").forEach((card) => {
       window.SwarmDynamicRouting.applyRoutingControlState(card, enabled);
     });
+  }
+
+  // -- Architecture documentation (issue #338) -----------------------------
+  const architecture = { model: null, persona: "engineer", selectedId: "", flowId: "" };
+
+  function architectureApi() {
+    return window.SwarmArchitectureDocs || null;
+  }
+
+  function renderArchitecture() {
+    const api = architectureApi();
+    const page = byId("architecture-page");
+    if (!api || !page) return;
+    byId("architecture-personas").innerHTML = api.renderPersonaBar(architecture.persona);
+    page.innerHTML = api.renderPage(architecture.model, architecture.persona, architecture.selectedId, architecture.flowId);
+    byId("architecture-detail").innerHTML = api.renderDetail(architecture.model, architecture.selectedId, architecture.persona);
+  }
+
+  async function refreshArchitecture({ quiet = false } = {}) {
+    const repo = currentRepo();
+    if (!repo || !repo.github_repository) {
+      architecture.model = null;
+      renderArchitecture();
+      return;
+    }
+    try {
+      architecture.model = await invoke("get_architecture_docs", { repository: repo.github_repository });
+      if (architecture.model.enabled !== repo.architecture_docs_enabled) architecture.model.enabled = repo.architecture_docs_enabled;
+    } catch (error) {
+      architecture.model = null;
+      if (!quiet) showToast(String(error), "error");
+    }
+    renderArchitecture();
+  }
+
+  function selectArchitectureEntity(id) {
+    const api = architectureApi();
+    if (!api || !api.safeId(id)) return;
+    architecture.selectedId = id;
+    const entity = ((architecture.model && architecture.model.entities) || []).find((item) => item.id === id);
+    if (entity && entity.kind === "flow") architecture.flowId = id;
+    renderArchitecture();
+  }
+
+  function bindArchitecture() {
+    const view = byId("view-architecture");
+    if (!view) return;
+    view.addEventListener("click", (event) => {
+      const persona = event.target.closest("[data-persona]");
+      if (persona) {
+        architecture.persona = persona.dataset.persona;
+        renderArchitecture();
+        return;
+      }
+      const copy = event.target.closest("[data-copy-ref]");
+      if (copy) {
+        void navigator.clipboard?.writeText(copy.dataset.copyRef).then(() => showToast("Reference copied", "success"), () => {});
+        return;
+      }
+      const target = event.target.closest("[data-entity-id]");
+      if (target) selectArchitectureEntity(target.dataset.entityId);
+    });
+    view.addEventListener("keydown", (event) => {
+      const api = architectureApi();
+      if (!api) return;
+      const persona = event.target.closest("[data-persona]");
+      if (persona) {
+        const next = api.nextPersona(architecture.persona, event.key);
+        if (next) {
+          event.preventDefault();
+          architecture.persona = next;
+          renderArchitecture();
+          view.querySelector(`[data-persona="${next}"]`)?.focus();
+        }
+        return;
+      }
+      const node = event.target.closest(".diagram-node[data-entity-id]");
+      if (node && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        selectArchitectureEntity(node.dataset.entityId);
+      }
+    });
+    byId("refresh-architecture").addEventListener("click", () => void refreshArchitecture());
   }
 
   function knowledgeApi() {
@@ -672,6 +762,7 @@
       adversarial_security_enabled: false,
       adversarial_best_effort_merge: false,
       update_claude_assets_enabled: false,
+      architecture_docs_enabled: false,
       allow_environment_only_summary: false,
       repo_dir: "",
     };
@@ -4011,6 +4102,9 @@
     renderStatus();
     if (document.querySelector("#view-repository.active")) void refreshBotReadiness({ quiet: true });
     if (document.querySelector("#view-repository.active")) void refreshBranchPushAccess({ quiet: true });
+    architecture.selectedId = "";
+    architecture.flowId = "";
+    if (document.querySelector("#view-architecture.active")) void refreshArchitecture({ quiet: true });
   }
 
   // ----- Repository promotion queue -------------------------------------------
@@ -4628,6 +4722,7 @@
       void refreshExecutionHistory();
     });
     byId("refresh-model-data").addEventListener("click", () => void refreshModelData());
+    bindArchitecture();
     byId("refresh-knowledge").addEventListener("click", () => void refreshKnowledge("refresh"));
     byId("rebuild-knowledge").addEventListener("click", () => void refreshKnowledge("rebuild"));
     byId("ask-swarm-submit").addEventListener("click", () => void askSwarm());

@@ -76,6 +76,7 @@ from adversarial_security import AdversarialSecurityMixin, SECURITY_STAGE
 from adversarial_uat import (
     UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_LEGACY_NOTICE, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE,
 )
+from architecture_docs import ArchitectureDocsMixin
 from handoff_context import HandoffContextMixin
 from handoff_context import render_prompt_section as render_handoff_prompt_section
 from issue_images import (
@@ -578,6 +579,7 @@ class Config:
     # stage delivers the latest commit as a best-effort merge instead of
     # renewing strict-mode epochs. Explicit opt-in only; never inferred.
     adversarial_best_effort_merge: bool = False
+    architecture_docs_enabled: bool = False
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
@@ -627,6 +629,7 @@ class Config:
             adversarial_security_enabled=args.adversarial_security_enabled,
             adversarial_best_effort_merge=args.adversarial_best_effort_merge is True,
             update_claude_assets_enabled=args.update_claude_assets_enabled,
+            architecture_docs_enabled=bool(getattr(args, "architecture_docs_enabled", False)),
             allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
             base_branch=args.base_branch,
@@ -1084,7 +1087,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin):
+class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -6562,6 +6565,16 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin)
         atomic_write_json(self.pending_file, pending)
         pending = self.post_pending_comment(pending)
         pending = self.add_pending_label(pending)
+        # Documentation is best-effort and strictly after delivery: it can
+        # never change what was delivered, and a change that did not reach
+        # the integration branch (or was a best-effort cap-hit) stays pending.
+        self.run_architecture_docs_review(
+            base_sha=base_sha,
+            commit_sha=commit_sha,
+            merged=bool(self.last_promotion) and not adversarial_cap_hit,
+            pull_request_url=pr_url,
+            branch=branch,
+        )
         self.record_completed(self.issue.number)
         self.finish_execution_history(
             "completed",
@@ -7423,6 +7436,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--update-claude-assets-enabled",
         action=argparse.BooleanOptionalAction,
         default=env_bool("SWARM_UPDATE_CLAUDE_ASSETS_ENABLED", False),
+    )
+    parser.add_argument(
+        "--architecture-docs-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("SWARM_ARCHITECTURE_DOCS_ENABLED", False),
+        help="After completed issue work run a bounded documentation-impact review that keeps the "
+             "repository's interactive architecture documentation current. Off by default.",
     )
     parser.add_argument(
         "--allow-environment-only-summary",

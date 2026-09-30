@@ -17,7 +17,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW: &str = "main";
-const REQUIRED_WORKER_RESOURCES: [&str; 19] = [
+const REQUIRED_WORKER_RESOURCES: [&str; 20] = [
     "install_swarm_issue_cron.py",
     "swarm_issue_worker.py",
     "github_app_auth.py",
@@ -36,6 +36,7 @@ const REQUIRED_WORKER_RESOURCES: [&str; 19] = [
     // rather than invoked directly, matching the rest of this list.
     "model_calibration.py",
     "engineering_knowledge.py",
+    "architecture_docs.py",
     "jev_cli.py",
     "decision_engine.py",
     "available_models.py",
@@ -1146,6 +1147,12 @@ fn repo_worker_args(
             "--update-claude-assets-enabled"
         } else {
             "--no-update-claude-assets-enabled"
+        }
+        .into(),
+        if repo.architecture_docs_enabled {
+            "--architecture-docs-enabled"
+        } else {
+            "--no-architecture-docs-enabled"
         }
         .into(),
         if repo.allow_environment_only_summary {
@@ -2882,6 +2889,66 @@ fn run_knowledge<R: tauri::Runtime>(
     }
     serde_json::from_str(raw.trim())
         .map_err(|error| format!("{failure_context}: response could not be parsed: {error}"))
+}
+
+/// Per-repository interactive architecture documentation (issue #338). The
+/// snapshot lives beside the shared execution-history database, never in the
+/// monitored repository.
+fn architecture_docs_state_dir(config: &AppConfig) -> PathBuf {
+    PathBuf::from(&config.worker_state_dir).join("architecture_docs")
+}
+
+fn read_architecture_docs<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    repository: &str,
+) -> Result<serde_json::Value, String> {
+    let repo = config
+        .repositories
+        .iter()
+        .find(|repo| repo.github_repository == repository)
+        .ok_or_else(|| "That repository is not configured.".to_string())?;
+    let workspace = resolve_workspace(app, config, repo)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let payload = serde_json::json!({
+        "action": "view",
+        "repository": repo.github_repository,
+        "enabled": repo.architecture_docs_enabled,
+        "workspace": if repo.architecture_docs_enabled { workspace } else { String::new() },
+    });
+    let python = tools::configured_or_detected(&config.python_bin, "python3")?;
+    let script = worker_script_dir(app)?.join("architecture_docs.py");
+    let arguments = vec![
+        script.to_string_lossy().into_owned(),
+        "--state-dir".into(),
+        architecture_docs_state_dir(config)
+            .to_string_lossy()
+            .into_owned(),
+        "--action".into(),
+        "view".into(),
+    ];
+    let (ok, raw) = run_capture_with_input(&python, &arguments, &payload.to_string());
+    if !ok {
+        return Err(format!("Could not read architecture documentation: {raw}"));
+    }
+    serde_json::from_str(raw.trim()).map_err(|error| {
+        format!("Could not read architecture documentation: response could not be parsed: {error}")
+    })
+}
+
+#[tauri::command]
+async fn get_architecture_docs(
+    app: tauri::AppHandle,
+    repository: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let config = current_config(&state)?;
+        read_architecture_docs(&app, &config, &repository)
+    })
+    .await
+    .map_err(|error| format!("Could not read architecture documentation: {error}"))?
 }
 
 #[tauri::command]
@@ -5328,6 +5395,7 @@ fn main() {
             import_execution_history,
             import_execution_history_background,
             get_knowledge_status,
+            get_architecture_docs,
             get_knowledge_status_background,
             refresh_knowledge,
             refresh_knowledge_background,

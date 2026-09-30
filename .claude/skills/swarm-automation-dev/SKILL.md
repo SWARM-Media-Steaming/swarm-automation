@@ -629,3 +629,11 @@ GitHub CLI identity, not a worker GitHub App token, and must fail before the
 first push if the safeguard cannot be verified or created. Do not replace this
 with a broad branch-protection update, which could overwrite an existing
 repository policy.
+
+## Interactive architecture documentation
+
+Per-repository, off by default (`architecture_docs_enabled`, worker flag
+`--architecture-docs-enabled`). Logic: `issue_worker/architecture_docs.py`
+(tests: `test_architecture_docs.py`, run with `python3.13 -m unittest`);
+renderer: `ui/architecture-docs.js`; Tauri command `get_architecture_docs`.
+See `.claude/rules/architecture-docs.md` before changing it.

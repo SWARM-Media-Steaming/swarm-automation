@@ -274,6 +274,12 @@ pub struct RepoConfig {
     /// `CLAUDE.md` file in the repository that is relevant to the issue.
     #[serde(default)]
     pub update_claude_assets_enabled: bool,
+    /// Keep the interactive architecture documentation for this repository up
+    /// to date: after completed issue work the worker runs a bounded
+    /// documentation-impact review (which may use AI/provider capacity).
+    /// Repository-scoped and off by default.
+    #[serde(default)]
+    pub architecture_docs_enabled: bool,
     /// Let the AI return a summary without code when the issue is caused by
     /// local environment, credentials, services, or infrastructure state.
     pub allow_environment_only_summary: bool,
@@ -309,6 +315,7 @@ impl Default for RepoConfig {
             adversarial_security_enabled: false,
             adversarial_best_effort_merge: false,
             update_claude_assets_enabled: false,
+            architecture_docs_enabled: false,
             allow_environment_only_summary: false,
             repo_dir: String::new(),
         }
@@ -612,6 +619,8 @@ pub struct AppConfig {
     #[serde(default, skip_serializing)]
     pub update_claude_assets_enabled: bool,
     #[serde(default, skip_serializing)]
+    pub architecture_docs_enabled: bool,
+    #[serde(default, skip_serializing)]
     pub allow_environment_only_summary: bool,
     #[serde(default, skip_serializing)]
     pub branch_prefix: String,
@@ -699,6 +708,7 @@ impl Default for AppConfig {
             adversarial_security_enabled: false,
             adversarial_best_effort_merge: false,
             update_claude_assets_enabled: false,
+            architecture_docs_enabled: false,
             allow_environment_only_summary: false,
             branch_prefix: String::new(),
             claude_model: String::new(),
@@ -1074,6 +1084,7 @@ impl AppConfig {
             repo.adversarial_security_enabled = self.adversarial_security_enabled;
             repo.adversarial_best_effort_merge = self.adversarial_best_effort_merge;
             repo.update_claude_assets_enabled = self.update_claude_assets_enabled;
+            repo.architecture_docs_enabled = self.architecture_docs_enabled;
             repo.allow_environment_only_summary = self.allow_environment_only_summary;
             // A migrated config keeps whatever prefix it already used; a fresh
             // repo defaults to "ai".
@@ -1259,6 +1270,10 @@ mod tests {
             "best-effort adversarial merge stays off unless explicitly enabled"
         );
         assert!(!repo.update_claude_assets_enabled);
+        assert!(
+            !repo.architecture_docs_enabled,
+            "architecture documentation defaults off for migrated configs"
+        );
         assert!(!repo.allow_environment_only_summary);
         assert_eq!(config.provider("claude").unwrap().model, "claude-opus-5");
         assert_eq!(config.preferred_provider, "codex");
