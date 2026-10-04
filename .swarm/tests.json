@@ -4442,6 +4442,36 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue374_automatic_calibration_boundaries.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue374-automatic-calibration-boundaries",
+      "name": "Issue #374 automatic calibration provider, validation, transition, and threshold boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_lifecycle.py",
+          "issue_worker/available_models.py",
+          "tests/adversarial/test_issue374_automatic_calibration_boundaries.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
