@@ -1,4 +1,4 @@
-"""Issue #205 AC 13/18: retain benchmark updates even when the winner stays.
+"""Issue #205/#374: activate benchmark updates even when the winner stays.
 
 The benchmark data and measured task costs are calibration inputs, not just
 the three display scores. A single available model is intentional: its same
@@ -24,17 +24,17 @@ class EffortBenchmarkRetentionTests(CalibrationUAT):
         result = self.service.refresh(source="local", force=True, now=NOW + 1)
         self.assertEqual(result["diff"]["routing_changes"], [], "Fixture keeps the only available model and effort")
         self.assertEqual(result["status"], "changed", f"A changed {field} is meaningful even without a different route winner")
-        self.assertTrue(result["diff"]["benchmark_changes"], f"The review summary omitted {field}")
-        proposed = self.service.load_proposed()
-        self.assertIsNotNone(proposed)
-        self.assertEqual(proposed["models"][0]["benchmarks"]["high"][field], value)
-        self.assertEqual(self.active_bytes(), self.before, "Manual review must leave production unchanged")
+        self.assertTrue(result["diff"]["benchmark_changes"], f"The activation diff omitted {field}")
+        self.assertTrue(result["activated"])
+        active = self.service.load_active()
+        self.assertEqual(active["models"][0]["benchmarks"]["high"][field], value)
+        self.assertNotEqual(self.active_bytes(), self.before)
 
-    def test_terminal_benchmark_change_is_retained_for_review(self):
+    def test_terminal_benchmark_change_is_activated(self):
         self.assert_change_retained("terminal_bench", 95)
 
-    def test_measured_task_cost_change_is_retained_for_review(self):
+    def test_measured_task_cost_change_is_activated(self):
         self.assert_change_retained("benchmark_cost_per_task", 7)
 
-    def test_measured_runtime_change_is_retained_for_review(self):
+    def test_measured_runtime_change_is_activated(self):
         self.assert_change_retained("benchmark_runtime_minutes", 45)

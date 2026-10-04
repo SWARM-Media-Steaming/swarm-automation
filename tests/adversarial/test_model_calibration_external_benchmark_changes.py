@@ -3,9 +3,8 @@
 Expected behavior is derived from the issue, independently of the current
 implementation:
 
-* A refresh retrieves and normalizes current benchmark information, detects
-  meaningful changes, recalculates deterministic routing metrics, and creates
-  a proposed calibration when appropriate.
+* A configured refresh retrieves and normalizes benchmark information,
+  detects meaningful changes, and activates the validated calibration.
 * The result explicitly reports benchmark changes and routing impact
   (acceptance criteria 3 and 13).
 * A refresh must not claim that model data is current while silently throwing
@@ -36,10 +35,10 @@ import model_calibration as calib  # noqa: E402
 
 def model_entry() -> dict:
     return {
-        "provider": "fixture",
-        "agent": "fixture",
-        "model": "model-one",
-        "model_id": "model-one",
+        "provider": "openai",
+        "agent": "codex",
+        "model": "gpt-5.6-sol",
+        "model_id": "gpt-5.6-sol",
         "active": True,
         "recommended": True,
         "deprecated": False,
@@ -62,8 +61,8 @@ def source_response(score: float, version: str) -> tuple[list[dict], dict]:
     return (
         [
             {
-                "provider": "fixture",
-                "model": "model-one",
+                "provider": "openai",
+                "model": "gpt-5.6-sol",
                 "evaluations": {"coding_agent_index": score},
             }
         ],
@@ -88,9 +87,10 @@ class ExternalBenchmarkChangeTests(unittest.TestCase):
         *,
         now: float,
         version: str,
-        activation_policy: str = "manual",
+        activation_policy: str = "auto",
     ) -> dict:
         with (
+            mock.patch.dict("os.environ", {"ARTIFICIAL_ANALYSIS_API_KEY": "fixture-key"}),
             mock.patch("model_calibration.fetch_local_source", return_value=[model_entry()]),
             mock.patch(
                 "model_calibration._sources.fetch_source",
@@ -102,6 +102,7 @@ class ExternalBenchmarkChangeTests(unittest.TestCase):
                 force=True,
                 now=now,
                 activation_policy=activation_policy,
+                available_models={"codex": ["gpt-5.6-sol"]},
             )
 
     def test_large_external_benchmark_delta_is_reported_as_meaningful(self) -> None:
@@ -117,7 +118,7 @@ class ExternalBenchmarkChangeTests(unittest.TestCase):
             "evaluation values are fetched and copied to "
             "external_evaluations, yet the deterministic diff only compares "
             "the unchanged seed-catalog benchmark summary, so real benchmark "
-            "updates can never produce a proposed calibration.",
+            "updates can never produce an activated calibration diff.",
         )
         self.assertTrue(
             result["diff"]["benchmark_changes"],
@@ -126,23 +127,18 @@ class ExternalBenchmarkChangeTests(unittest.TestCase):
             "20 points but the result summary recorded zero changes.",
         )
 
-    def test_changed_external_benchmark_is_retained_for_review(self) -> None:
+    def test_changed_external_benchmark_is_retained_in_the_active_calibration(self) -> None:
         self.refresh_with_score(60.0, now=1.0, version="source-v1", activation_policy="auto")
         self.refresh_with_score(80.0, now=100.0, version="source-v2")
 
-        proposed = self.service.load_proposed()
-        self.assertIsNotNone(
-            proposed,
-            "A meaningful benchmark update must produce a proposed "
-            "calibration instead of being discarded as a no-change refresh.",
-        )
-        by_key = {entry["key"]: entry for entry in proposed["models"]}
+        active = self.service.load_active()
+        self.assertIsNotNone(active)
+        by_key = {entry["key"]: entry for entry in active["models"]}
         self.assertEqual(
-            by_key["fixture/model-one"]["external_evaluations"]["coding_agent_index"],
+            by_key["openai/gpt-5.6-sol"]["external_evaluations"]["coding_agent_index"],
             80.0,
             "The latest normalized benchmark value must be retained in the "
-            "proposal users inspect; the active last-known-good value should "
-            "remain untouched until activation.",
+            "automatically activated calibration.",
         )
 
 

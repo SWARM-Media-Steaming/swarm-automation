@@ -70,7 +70,7 @@ class CalibrationUAT(unittest.TestCase):
 
 
 def ui_snapshots():
-    """Real backend responses for the Node DOM integration suite."""
+    """Real automatically activated responses for the Node DOM integration suite."""
     with TemporaryDirectory() as tmp:
         service = calibration.ModelCalibrationService(Path(tmp))
         with mock.patch.object(calibration, "fetch_local_source", return_value=[model_entry()]):
@@ -81,12 +81,11 @@ def ui_snapshots():
             payload = {"models": [price_row(input_cost=5.25, output_cost=23.5, evaluations={"fixture_coding": 70.875}), price_row("newly-discovered")]}
             with mock.patch.object(sources, "fetch_json", return_value=(payload, "fixture-v2")):
                 result = service.refresh(source="json", source_url=SOURCE_URL, force=True, now=NOW + 2)
-            proposal = service.status_report()
-            service.activate(result["calibration_version"])
+            active = service.status_report()
             with mock.patch.object(sources, "fetch_json", side_effect=sources.SourceError("Fixture source unavailable")):
                 failure = service.refresh(source="json", source_url=SOURCE_URL, force=True, now=NOW + 3, initiated_by="STARTUP")
             failed_status = service.status_report()
-            return {"result": result, "proposal": proposal, "failure": failure, "failed_status": failed_status}
+            return {"result": result, "active": active, "failure": failure, "failed_status": failed_status}
 
 
 if __name__ == "__main__":

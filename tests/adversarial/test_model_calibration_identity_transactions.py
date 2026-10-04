@@ -2,7 +2,7 @@
 
 The trusted amendment requires rejection of contradictory established-model
 rows. AC 15-17 additionally require preserved active routing and rollback.
-Exercise aliases, real source adapters, pending review, and fresh readers;
+Exercise aliases, real source adapters, automatic activation, and fresh readers;
 only the offline catalog and HTTP transport are fixtures. Equal normalized
 observations, complementary measurements, and different providers are valid.
 """
@@ -25,9 +25,9 @@ class IdentityTransactionTests(CalibrationUAT):
         initial = self.remote({"models": [price_row()]}, now=NOW + 1,
                               activation_policy="auto")
         self.assertTrue(initial["activated"])
-        pending = self.remote({"models": [price_row(output_cost=9)]}, now=NOW + 2)
-        self.assertEqual(pending["status"], "changed")
-        self.assertFalse(pending["activated"])
+        updated = self.remote({"models": [price_row(output_cost=9)]}, now=NOW + 2)
+        self.assertEqual(updated["status"], "changed")
+        self.assertTrue(updated["activated"])
 
     def publications(self):
         paths = [self.service.active_path, self.service.catalog_override_path,
@@ -62,13 +62,13 @@ class IdentityTransactionTests(CalibrationUAT):
         self.assertEqual(status["active_version"], status_before["active_version"])
         self.assertEqual(status["proposed_version"], status_before["proposed_version"])
         self.assertTrue(status["healthy"])
-        self.assertTrue(status["has_newer_proposed"])
+        self.assertFalse(status["has_newer_proposed"])
         self.assertFalse(status["refresh_running"])
         self.assertFalse(self.service.lock_path.exists())
         after = router.route(request, catalog=router.load_model_catalog(reader.catalog_override_path))
         self.assertEqual((after.model, after.effort), (decision.model, decision.effort))
 
-    def test_conflicting_aliases_preserve_pending_review_for_every_initiator(self):
+    def test_conflicting_aliases_preserve_active_publication_for_every_initiator(self):
         # Intermediate aliases should not hide a conflict in a later row.
         for initiator, field, reverse in itertools.product(
             ("STARTUP", "USER", "SCHEDULED", "AI_AGENT"),
@@ -122,7 +122,6 @@ class IdentityTransactionTests(CalibrationUAT):
                 ))
 
     def test_valid_observations_coalesce_and_reordered_retry_is_no_change(self):
-        active_before = self.active_bytes()
         rows = [
             {"provider": "fixture", "model": "established", "input_cost": "2.0",
              "evaluations": {"coding": "70.0"}},
@@ -132,27 +131,33 @@ class IdentityTransactionTests(CalibrationUAT):
         ]
         result = self.remote({"models": rows}, now=NOW + 3)
         self.assertEqual(result["status"], "changed")
-        self.assertFalse(result["activated"])
-        proposed = self.service.load_proposed()
-        self.assertEqual(len(proposed["models"]), 1)
-        model = proposed["models"][0]
+        self.assertTrue(result["activated"])
+        active = self.service.load_active()
+        self.assertEqual(len(active["models"]), 1)
+        model = active["models"][0]
         self.assertEqual((model["input_cost"], model["output_cost"], model["speed"]), (2, 11, 0))
         self.assertEqual(model["external_evaluations"], {"coding": 70, "reasoning": 80})
-        before = self.publications()
+        active_before = self.active_bytes()
+        history_before = {
+            path.name: path.read_bytes() for path in self.service.history_dir.glob("*.json")
+        }
         for order in itertools.permutations(rows):
             retry = self.remote({"models": list(order)}, now=NOW + 4)
             self.assertEqual(retry["status"], "no_change")
-            self.assertEqual(self.publications(), before)
-        self.assertEqual(self.active_bytes(), active_before)
+            self.assertEqual(self.active_bytes(), active_before)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in self.service.history_dir.glob("*.json")},
+                history_before,
+            )
 
     def test_provider_namespace_separates_identical_model_slugs(self):
         result = self.remote({"models": [price_row(output_cost=4),
                             price_row(provider="another-provider", output_cost=40)]}, now=NOW + 3)
         self.assertEqual(result["status"], "changed")
-        document = self.service.load_proposed()
-        proposed = {m["key"]: m for m in document["models"] + document["discovered_models"]}
-        self.assertEqual(proposed["fixture/established"]["output_cost"], 4)
-        other = proposed["another-provider/established"]
+        document = self.service.load_active()
+        active = {m["key"]: m for m in document["models"] + document["discovered_models"]}
+        self.assertEqual(active["fixture/established"]["output_cost"], 4)
+        other = active["another-provider/established"]
         self.assertEqual(other["output_cost"], 40)
         self.assertEqual(other["status"], "DISCOVERED")
 
@@ -161,17 +166,15 @@ class IdentityTransactionTests(CalibrationUAT):
             {"models": [price_row(output_cost=4), price_row(output_cost=40)]},
             now=NOW + 3, activation_policy="auto",
         ))
-        # A new process must be able to apply the preserved, already-reviewed
-        # proposal and then restore the previous offline calibration.
+        # A new process must be able to read the preserved active publication
+        # and then restore the previous offline calibration.
         reader = calibration.ModelCalibrationService(self.service.state_dir)
-        pending = reader.load_proposed()
-        reader.activate(pending["version"])
         self.assertEqual(router.load_model_catalog(reader.catalog_override_path)[0].output_cost, 9)
         reader.activate(self.bootstrap_version)
         self.assertEqual(self.active_bytes(), self.bootstrap_bytes)
         corrected = self.remote({"models": [price_row(output_cost=11)]}, now=NOW + 4)
         self.assertEqual(corrected["status"], "changed")
-        self.assertFalse(corrected["activated"])
+        self.assertTrue(corrected["activated"])
 
     def test_local_catalog_rejects_conflicting_performance_rows(self):
         # "local" is a selectable source on the same public service. Its
@@ -194,9 +197,9 @@ class IdentityTransactionTests(CalibrationUAT):
         before = self.active_bytes()
         result = self.service.refresh(source="local", force=True, now=NOW + 3)
         self.assertEqual(result["status"], "changed")
-        self.assertFalse(result["activated"])
-        self.assertEqual(self.active_bytes(), before)
-        models = self.service.load_proposed()["models"]
+        self.assertTrue(result["activated"])
+        self.assertNotEqual(self.active_bytes(), before)
+        models = self.service.load_active()["models"]
         self.assertEqual(len(models), 1)
         self.assertEqual((models[0]["speed"], models[0]["latency_seconds"]), (20, 0.5))
         self.local.reverse()
