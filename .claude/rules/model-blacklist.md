@@ -9,6 +9,9 @@ it is dormant, the predecessor stays routable and saved selections stay intact.
 Python (`available_models.py`) and Rust (`src/tools.rs`) read the same JSON.
 Rust consumes the price and derived-retirement snapshot published atomically
 with the active calibration; both readers check current CLI availability.
+Keep price and availability evidence keyed by provider. A model name returned
+by a different provider's CLI cannot activate a retirement, including a
+derived one. Older snapshots recover price ownership from their model rows.
 Keep the cross-language dormancy test passing when changing this contract.
 
 `model_lifecycle.py` also derives retirements within the same provider and

@@ -182,6 +182,37 @@ class AutomaticCalibrationTests(unittest.TestCase):
             self.assertEqual(result['status'], 'failed')
             self.assertEqual(before, self.service.catalog_override_path.read_bytes())
 
+    def test_malformed_prices_fail_through_the_external_adapters(self):
+        self.refresh(['gpt-9-sol'], [{'provider': 'openai', 'model': 'gpt-9-sol',
+                                     'input_cost': 2, 'output_cost': 10}])
+        before = self.service.catalog_override_path.read_bytes()
+        for source in ('artificial_analysis', 'json'):
+            for field in ('input_cost', 'output_cost'):
+                for bad in ('two dollars', True, -1, float('inf'), float('nan'), {}, [2]):
+                    with self.subTest(source=source, field=field, bad=bad):
+                        row = {'provider': 'openai', 'model': 'gpt-9-sol', 'input_cost': 3, 'output_cost': 11}
+                        row[field] = bad
+                        payload = {'models': [row]} if source == 'json' else {'data': [{
+                            'model_creator': {'slug': 'openai'}, 'slug': row['model'],
+                            'pricing': {'price_1m_input_tokens': row['input_cost'],
+                                        'price_1m_output_tokens': row['output_cost']},
+                        }]}
+                        with mock.patch.object(calibration._sources, 'fetch_json', return_value=(payload, 'fixture')):
+                            result = self.service.refresh(source=source, source_url='https://example.invalid/models.json',
+                                available_models={'codex': ['gpt-9-sol']}, force=True)
+                        self.assertEqual(result['status'], 'failed', result)
+                        self.assertIn('invalid', result['error'])
+                        self.assertEqual(before, self.service.catalog_override_path.read_bytes())
+
+    def test_derived_retirement_uses_its_own_cli_and_remains_dormant_on_wrong_cli(self):
+        rows = [{'provider': 'openai', 'agent': 'codex', 'model': name, 'active': True,
+                 'input_cost': 2, 'output_cost': 10} for name in ('gpt-10-sol', 'gpt-10-1-sol')]
+        wrong_cli = {'codex': ['gpt-10-sol'], 'claude': ['gpt-10-1-sol']}
+        self.assertEqual(model_lifecycle.supersessions(rows, wrong_cli), {})
+        self.assertNotIn('gpt-10-sol', model_lifecycle.policy_snapshot(rows, wrong_cli)['retirements'])
+        correct_cli = {'codex': ['gpt-10-sol', 'gpt-10-1-sol'], 'claude': []}
+        self.assertEqual(model_lifecycle.supersessions(rows, correct_cli), {'gpt-10-sol': 'gpt-10-1-sol'})
+
     def test_all_blacklist_entries_require_an_offered_priced_successor(self):
         rows = calibration.fetch_local_source()
         for old, successor in available.listed_retirements().items():

@@ -417,13 +417,12 @@ def load_model_catalog(path: Path | None = None) -> tuple[ModelSpec, ...]:
     return with_discovered_models(tuple(catalog), _measured_evidence(data))
 
 
-def _cli_offers(slug: str) -> bool:
+def _cli_offers(agent: str, slug: str) -> bool:
     """Whether live or calibration-recorded CLI evidence includes ``slug``."""
     wanted = _available_models.canonical(slug)
     return any(
         _available_models.canonical(model.value) == wanted
-        for models in _available_models._discovered_rows().values()
-        for model in models
+        for model in _available_models._discovered_rows().get(agent, ())
     )
 
 
@@ -450,7 +449,7 @@ def _blacklisted(spec: ModelSpec) -> ModelSpec:
             superseded_by=retired or None,
         )
     listed = _available_models.canonical(spec.model) in _available_models.listed_retirements()
-    if listed and (not spec.active or spec.deprecated) and _cli_offers(spec.model):
+    if listed and (not spec.active or spec.deprecated) and _cli_offers(spec.agent, spec.model):
         return dataclasses.replace(spec, active=True, deprecated=False, superseded_by=None)
     return spec
 

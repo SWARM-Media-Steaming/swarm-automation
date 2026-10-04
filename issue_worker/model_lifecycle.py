@@ -78,20 +78,17 @@ def replaces(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
 
 def supersessions(rows: Iterable[Mapping[str, Any]], offered: Mapping[str, Collection[str]] | Collection[str]) -> dict[str, str]:
     """``derived_supersessions`` for a CLI report (``{agent: [models]}``) or a name list."""
-    if isinstance(offered, Mapping):
-        names: list[str] = []
-        for value in offered.values():
-            if isinstance(value, str):
-                names.append(value)
-            elif isinstance(value, Collection) and not isinstance(value, (str, bytes)):
-                names.extend(str(name) for name in value if isinstance(name, str))
-        offered_names: Collection[str] = names
-    else:
-        offered_names = offered
-    return derived_supersessions(rows, offered=offered_names)
+    return derived_supersessions(rows, offered=offered)
 
 
-def derived_supersessions(rows: Iterable[Mapping[str, Any]], *, offered: Collection[str]) -> dict[str, str]:
+def _offered(row: Mapping[str, Any], offered: Mapping[str, Collection[str]] | Collection[str]) -> bool:
+    names = offered.get(str(row.get("agent") or ""), ()) if isinstance(offered, Mapping) else offered
+    return _available.canonical(str(row.get("model") or "")) in {_available.canonical(name) for name in names}
+
+
+def derived_supersessions(
+    rows: Iterable[Mapping[str, Any]], *, offered: Mapping[str, Collection[str]] | Collection[str],
+) -> dict[str, str]:
     """``{old model: newest successor}`` among ``rows`` under the release rule.
 
     A successor must be offered (canonical name in ``offered``), active and not
@@ -99,9 +96,8 @@ def derived_supersessions(rows: Iterable[Mapping[str, Any]], *, offered: Collect
     never retires anything.
     """
     usable = [row for row in rows if isinstance(row, Mapping) and row.get("model") and row.get("agent")]
-    offered = {_available.canonical(name) for name in offered}
     successors = [row for row in usable
-                  if _available.canonical(str(row["model"])) in offered
+                  if _offered(row, offered)
                   and row.get("active", True) is True and not row.get("deprecated")]
     result: dict[str, str] = {}
     for old in usable:
@@ -112,14 +108,17 @@ def derived_supersessions(rows: Iterable[Mapping[str, Any]], *, offered: Collect
     return dict(sorted(result.items()))
 
 
-def priced_models(rows: Iterable[Mapping[str, Any]]) -> list[str]:
-    """Every model name with a price: the static catalog plus feed-priced rows."""
-    names = {name for entry in _pricing.PRICING_CATALOG
-             if _pricing.resolve_price(entry.model, provider=entry.provider).priced
-             for name in entry.model_names}
-    names.update(_available.canonical(str(row["model"])) for row in rows
-                 if isinstance(row, Mapping) and row.get("model") and row_price(row) is not None)
-    return sorted(names)
+def priced_models_by_agent(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
+    """Priced identities retain their provider so another CLI cannot activate them."""
+    names: dict[str, set[str]] = {}
+    for entry in _pricing.PRICING_CATALOG:
+        if _pricing.resolve_price(entry.model, provider=entry.provider).priced:
+            names.setdefault(entry.provider, set()).update(_available.canonical(name) for name in entry.model_names)
+    for row in rows:
+        if isinstance(row, Mapping) and row.get("model") and (price := row_price(row)) is not None:
+            names.setdefault(price.provider, set()).update(
+                _available.canonical(str(row[field])) for field in ("model", "model_id") if row.get(field))
+    return {agent: sorted(models) for agent, models in sorted(names.items())}
 
 
 def policy_snapshot(
@@ -138,20 +137,28 @@ def policy_snapshot(
     recorded = {str(agent): sorted({str(name) for name in names if isinstance(name, str) and name})
                 for agent, names in (available or {}).items()}
     # An explicit CLI report always wins over bundled metadata.
-    offered = {_available.canonical(name) for names in recorded.values() for name in names}
+    prices_by_agent = priced_models_by_agent(rows)
+    offered = dict(recorded)
     if available is None:
-        offered |= set(_available.bundled_releases())
-    prices = set(priced_models(rows))
+        bundled = _available.bundled_releases()
+        offered = {agent: [name for name in names if name in bundled] for agent, names in prices_by_agent.items()}
+    prices = {name for names in prices_by_agent.values() for name in names}
+
+    def price_provider(name: str) -> str:
+        owners = [agent for agent, names in prices_by_agent.items() if _available.canonical(name) in names]
+        return owners[0] if len(owners) == 1 else ""
+
     # Restore dormant listed peers before comparing releases. Otherwise their
     # checked-in deprecated flag would prevent them replacing an older release.
-    explicit = _available.active_retirements(offered=offered, priced=lambda name: _available.canonical(name) in prices, derived={})
+    explicit = _available.active_retirements(offered=offered, price_provider=price_provider, derived={})
     apply_retirements(rows, explicit, offered=offered)
     derived = derived_supersessions(rows, offered=offered)
     retirements = _available.active_retirements(
-        offered=offered, priced=lambda model: _available.canonical(model) in prices, derived=derived,
+        offered=offered, price_provider=price_provider, derived=derived,
     )
     policy: dict[str, Any] = {
         "priced_models": sorted(prices),
+        "priced_models_by_agent": prices_by_agent,
         "derived_supersessions": derived,
         "retirements": dict(sorted(retirements.items())),
     }
@@ -166,7 +173,8 @@ def snapshot(rows: Iterable[Mapping[str, Any]], available: Mapping[str, Collecti
 
 
 def apply_retirements(
-    rows: Iterable[dict[str, Any]], retirements: Mapping[str, str], *, offered: Collection[str] | None = None,
+    rows: Iterable[dict[str, Any]], retirements: Mapping[str, str], *,
+    offered: Mapping[str, Collection[str]] | Collection[str] | None = None,
 ) -> None:
     """Mark in-force retirements inactive, and restore a dormant listed one the CLI offers.
 
@@ -176,12 +184,11 @@ def apply_retirements(
     the CLI report only (not bundled releases). Unknown CLI evidence (``None``)
     restores nothing.
     """
-    cli = {_available.canonical(name) for name in (offered or ())}
     listed = set(_available.listed_retirements())
     for row in rows:
         name = _available.canonical(str(row.get("model") or ""))
         successor = retirements.get(name)
         if successor:
             row.update(active=False, recommended=False, deprecated=True, superseded_by=successor)
-        elif offered is not None and name in listed and name in cli:
+        elif offered is not None and name in listed and _offered(row, offered):
             row.update(active=True, deprecated=False, superseded_by=None)

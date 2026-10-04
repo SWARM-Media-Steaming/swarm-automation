@@ -185,19 +185,25 @@ def recorded_models() -> dict[str, tuple[str, ...]]:
     return result
 
 
-def offered_names() -> frozenset[str]:
+def offered_models() -> dict[str, set[str]]:
     """CLI evidence is authoritative once a filtered calibration is published.
 
     Bundled releases are only the legacy offline fallback, before any refresh
     has recorded a CLI report. They never override an explicit calibration list.
     """
-    names = {canonical(row.value) for rows in _discovered_rows().values() for row in rows}
+    names = {agent: {canonical(row.value) for row in rows} for agent, rows in _discovered_rows().items()}
     if "available_models" not in _calibration_policy():
-        names.update(bundled_releases())
-    return frozenset(names)
+        import model_pricing
+        for name in bundled_releases():
+            price = model_pricing.resolve_price(name)
+            if price.priced:
+                names.setdefault(price.price.provider, set()).add(name)
+    return names
 
 
-def retirement_in_force(successor: str, *, offered: Collection[str], priced: Callable[[str], bool]) -> bool:
+def retirement_in_force(
+    successor: str, *, offered: Mapping[str, Collection[str]], price_provider: Callable[[str], str],
+) -> bool:
     """Whether a listed or derived retirement applies now.
 
     It applies only once its successor is offered and priced (static catalog or feed). An entry naming no successor
@@ -205,38 +211,40 @@ def retirement_in_force(successor: str, *, offered: Collection[str], priced: Cal
     """
     if not successor:
         return True
-    return canonical(successor) in offered and priced(successor)
+    agent = price_provider(successor)
+    return bool(agent) and canonical(successor) in {canonical(name) for name in offered.get(agent, ())}
 
 
-def _priced(model: str) -> bool:
+def _price_provider(model: str) -> str:
     import model_pricing
 
-    return model_pricing.resolve_price(model).priced
+    price = model_pricing.resolve_price(model)
+    return price.price.provider if price.priced else ""
 
 
 def active_retirements(
     *,
-    offered: Collection[str] | None = None,
-    priced: Callable[[str], bool] | None = None,
+    offered: Mapping[str, Collection[str]] | None = None,
+    price_provider: Callable[[str], str] | None = None,
     derived: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """``{canonical model: successor}`` for every retirement in force.
 
     The shared JSON plus the active calibration's derived supersessions, each
     kept only while ``retirement_in_force``. A dormant entry leaves its model
-    fully routable. ``offered``/``priced``/``derived`` default to the live
+    fully routable. ``offered``/``price_provider``/``derived`` default to the live
     process state; the calibration passes the state it is about to publish.
     """
-    offered = offered_names() if offered is None else frozenset(canonical(name) for name in offered)
-    priced = priced or _priced
+    offered = offered_models() if offered is None else offered
+    price_provider = price_provider or _price_provider
     if derived is None:
         recorded = _calibration_policy().get("derived_supersessions")
         derived = recorded if isinstance(recorded, Mapping) else {}
     entries = {old: new for old, new in listed_retirements().items()
-               if retirement_in_force(new, offered=offered, priced=priced)}
+               if retirement_in_force(new, offered=offered, price_provider=price_provider)}
     for old, new in derived.items():
         if (isinstance(old, str) and isinstance(new, str) and old and new
-                and retirement_in_force(new, offered=offered, priced=priced)):
+                and retirement_in_force(new, offered=offered, price_provider=price_provider)):
             # A dormant explicit relationship cannot hide an eligible later
             # release derived from the feed (for example, a skipped release).
             entries.setdefault(canonical(old), new)

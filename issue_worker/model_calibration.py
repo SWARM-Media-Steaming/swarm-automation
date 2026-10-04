@@ -40,7 +40,7 @@ import model_router as _model_router
 import model_router_yaml as _model_router_yaml
 from ai_execution_history import sanitize_text
 
-ALGORITHM_VERSION = "1.3"
+ALGORITHM_VERSION = "1.4"
 DEFAULT_MIN_REFRESH_INTERVAL_HOURS = 6.0
 FAILED_RETRY_BACKOFF_HOURS = 0.25
 #: Retries after consecutive failures double from FAILED_RETRY_BACKOFF_HOURS up to this.
@@ -168,6 +168,16 @@ def _finite_float(value: Any) -> float | None:
     return number
 
 
+def _feed_number(row: Mapping[str, Any], field: str) -> float | None:
+    """Missing observations retain history; malformed supplied prices fail validation."""
+    raw = row.get(field)
+    value = _finite_float(raw)
+    if field in ("input_cost", "output_cost", "reasoning_cost") and raw is not None and value is None:
+        # Never interpolate an untrusted value (which could contain a secret).
+        raise CalibrationValidationError(f"Model source contains an invalid {field}.")
+    return value
+
+
 INTELLIGENCE_KEY = "artificial_analysis_intelligence_index"
 
 
@@ -194,7 +204,7 @@ def fold_benchmark_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         row = dict(raw, provider=provider, model=model)
         for field in ("input_cost", "output_cost", "reasoning_cost", "speed", "latency_seconds"):
             if field in row:
-                value = _finite_float(row[field])
+                value = _feed_number(row, field)
                 if value is None:
                     row.pop(field)
                 else:
@@ -359,7 +369,7 @@ def merge_overlay(
             continue
         observations: dict[str, Any] = {}
         for field in ("input_cost", "output_cost", "reasoning_cost", "speed", "latency_seconds"):
-            parsed = _finite_float(raw.get(field))
+            parsed = _feed_number(raw, field)
             if parsed is not None:
                 observations[field] = parsed
         evaluations = raw.get("evaluations")
@@ -1558,8 +1568,7 @@ class ModelCalibrationService:
         raw_lookup = {(raw.get("provider"), raw.get("model")): raw for raw in raw_entries if isinstance(raw, dict)}
         rows = [_calibration_model_entry(spec, raw_lookup.get((spec.provider, spec.model), {})) for spec in specs]
         model_policy = _lifecycle.policy_snapshot(rows, available)
-        cli_offered = None if available is None else [name for names in available.values() for name in names]
-        _lifecycle.apply_retirements(rows, model_policy["retirements"], offered=cli_offered)
+        _lifecycle.apply_retirements(rows, model_policy["retirements"], offered=available)
         for row in rows:
             if available is not None and not any(
                 _available_models.canonical(name) in {_available_models.canonical(row["model"]), _available_models.canonical(row.get("model_id") or "")}

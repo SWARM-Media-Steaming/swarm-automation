@@ -132,15 +132,55 @@ fn priced_name_set(policy: &serde_json::Value) -> std::collections::HashSet<Stri
     }
 }
 
-fn offered_name_set(
+fn priced_names_by_agent(
+    policy: &serde_json::Value,
+    fallback_agent: &str,
+) -> std::collections::BTreeMap<String, std::collections::HashSet<String>> {
+    if let Some(scoped) = policy["priced_models_by_agent"].as_object() {
+        return scoped
+            .iter()
+            .map(|(agent, names)| {
+                (
+                    agent.clone(),
+                    names
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|name| name.as_str())
+                        .map(canonical_model)
+                        .collect(),
+                )
+            })
+            .collect();
+    }
+    // Older snapshots carry names only. Recover ownership from the shared
+    // static catalog; feed ownership is supplied by calibration_policy below.
+    let mut result: std::collections::BTreeMap<String, std::collections::HashSet<String>> =
+        std::collections::BTreeMap::new();
+    for name in priced_name_set(policy) {
+        let owners: std::collections::HashSet<_> = static_prices()
+            .iter()
+            .filter(|row| price_names(row).contains(&name))
+            .filter_map(|row| row["provider"].as_str())
+            .collect();
+        let owner = if owners.len() == 1 {
+            *owners.iter().next().unwrap()
+        } else if owners.is_empty() {
+            fallback_agent
+        } else {
+            continue;
+        };
+        result.entry(owner.to_string()).or_default().insert(name);
+    }
+    result
+}
+
+fn offered_names_by_agent(
     models: &[ModelInfo],
     agent: &str,
     policy: &serde_json::Value,
-) -> std::collections::HashSet<String> {
-    let mut offered: std::collections::HashSet<String> = models
-        .iter()
-        .map(|model| canonical_model(&model.value))
-        .collect();
+) -> std::collections::BTreeMap<String, std::collections::HashSet<String>> {
+    let mut offered = std::collections::BTreeMap::new();
     if let Some(available) = policy
         .get("available_models")
         .and_then(|value| value.as_object())
@@ -150,12 +190,24 @@ fn offered_name_set(
                 continue;
             }
             if let Some(names) = names.as_array() {
-                for name in names.iter().filter_map(|name| name.as_str()) {
-                    offered.insert(canonical_model(name));
-                }
+                offered.insert(
+                    provider.clone(),
+                    names
+                        .iter()
+                        .filter_map(|name| name.as_str())
+                        .map(canonical_model)
+                        .collect(),
+                );
             }
         }
     }
+    offered.insert(
+        agent.to_string(),
+        models
+            .iter()
+            .map(|model| canonical_model(&model.value))
+            .collect(),
+    );
     offered
 }
 
@@ -191,12 +243,19 @@ fn active_retirements(
             }
         }
     }
-    let offered = offered_name_set(models, agent, policy);
-    let prices = priced_name_set(policy);
+    let offered = offered_names_by_agent(models, agent, policy);
+    let prices = priced_names_by_agent(policy, agent);
     let in_force = |new: &str| {
         new.is_empty() || {
             let successor = canonical_model(new);
-            offered.contains(&successor) && prices.contains(&successor)
+            let owners: Vec<_> = prices
+                .iter()
+                .filter(|(_, names)| names.contains(&successor))
+                .collect();
+            owners.len() == 1
+                && offered
+                    .get(if agent.is_empty() { "" } else { owners[0].0 })
+                    .is_some_and(|names| names.contains(&successor))
         }
     };
     entries.retain(|_, new| in_force(new));
@@ -231,17 +290,20 @@ fn active_retirements(
 }
 
 pub fn apply_model_policy(tools: &mut [ToolInfo], policy: &serde_json::Value) {
-    let prices = priced_name_set(policy);
     for tool in tools.iter_mut().filter(|tool| {
         crate::config::KNOWN_PROVIDERS.contains(&tool.id.as_str()) && tool.models_detected
     }) {
         let retired = active_retirements(&tool.models, &tool.id, policy);
+        let prices = priced_names_by_agent(policy, &tool.id);
         let kept: Vec<_> = tool
             .models
             .iter()
             .filter(|model| {
                 let name = canonical_model(&model.value);
-                !retired.contains_key(&name) && prices.contains(&name)
+                !retired.contains_key(&name)
+                    && prices
+                        .get(&tool.id)
+                        .is_some_and(|names| names.contains(&name))
             })
             .cloned()
             .collect();
@@ -258,12 +320,14 @@ pub fn calibration_policy(config: &AppConfig) -> serde_json::Value {
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .map(|data| {
             let calibration = &data["calibration"];
-            if calibration["model_policy"].is_object() {
+            if calibration["model_policy"]["priced_models_by_agent"].is_object()
+                || (calibration["model_policy"].is_object() && !calibration["models"].is_array())
+            {
                 return calibration["model_policy"].clone();
             }
             // A pre-#374 publication can already contain authoritative feed
             // prices. Keep those usable while the next refresh is pending.
-            let mut prices = statically_priced_models();
+            let mut scoped_prices = priced_names_by_agent(&serde_json::Value::Null, "");
             let catalogued: std::collections::HashSet<_> =
                 static_prices().iter().flat_map(price_names).collect();
             for row in calibration["models"].as_array().into_iter().flatten() {
@@ -275,11 +339,37 @@ pub fn calibration_policy(config: &AppConfig) -> serde_json::Value {
                             .is_some_and(|rate| rate.is_finite() && rate >= 0.0)
                     });
                     if valid && !catalogued.contains(&model) {
-                        prices.insert(model);
+                        let agent = row["agent"]
+                            .as_str()
+                            .or_else(|| row["provider"].as_str())
+                            .unwrap_or("");
+                        let agent = match agent {
+                            "anthropic" => "claude",
+                            "openai" => "codex",
+                            "xai" => "grok",
+                            other => other,
+                        };
+                        if !agent.is_empty() {
+                            let names = scoped_prices.entry(agent.to_string()).or_default();
+                            names.insert(model);
+                            if let Some(alias) = row["model_id"].as_str() {
+                                names.insert(canonical_model(alias));
+                            }
+                        }
                     }
                 }
             }
-            serde_json::json!({"priced_models": prices})
+            let mut policy = calibration["model_policy"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            let prices: std::collections::HashSet<_> = scoped_prices.values().flatten().collect();
+            policy.insert("priced_models".into(), serde_json::json!(prices));
+            policy.insert(
+                "priced_models_by_agent".into(),
+                serde_json::json!(scoped_prices),
+            );
+            serde_json::Value::Object(policy)
         })
         .unwrap_or_default()
 }
@@ -1837,6 +1927,80 @@ print(json.dumps({'cases': cases, 'static': sorted({a.canonical(n) for row in pr
             &serde_json::json!({"priced_models": []}),
         );
         assert!(tool.models.is_empty());
+    }
+
+    #[test]
+    fn provider_scoped_retirements_agree_with_python() {
+        let script = r#"
+import copy, json, os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+import available_models as a
+import model_calibration as calibration
+import model_lifecycle as lifecycle
+rows = calibration.fetch_local_source() + [
+    {'provider': 'openai', 'agent': 'codex', 'model': name, 'active': True,
+     'input_cost': 2, 'output_cost': 10} for name in ('gpt-10-sol', 'gpt-10-1-sol')]
+cases = []
+with tempfile.TemporaryDirectory() as directory:
+    path = os.path.join(directory, 'active_catalog.json')
+    os.environ['SWARM_MODEL_CALIBRATION_CATALOG'] = path
+    for correct in (False, True):
+        evidence = {'claude': ['claude-sonnet-5'], 'codex': ['gpt-10-sol'], 'grok': []}
+        evidence['claude' if correct else 'codex'].append('claude-sonnet-5-5')
+        evidence['codex' if correct else 'claude'].append('gpt-10-1-sol')
+        policy = lifecycle.snapshot(copy.deepcopy(rows), evidence)
+        with open(path, 'w') as stream:
+            json.dump({'calibration': {'models': rows, 'model_policy': policy}}, stream)
+        a.configure(evidence)
+        retired = a.blacklist()
+        assert ('claude-sonnet-5' in retired) == correct, retired
+        assert ('gpt-10-sol' in retired) == correct, retired
+        assert retired == policy['retirements'], (retired, policy)
+        cases.append({'policy': policy, 'retired': retired, 'correct': correct})
+print(json.dumps(cases))
+"#;
+        let output = Command::new("python3")
+            .args([
+                "-c",
+                script,
+                concat!(env!("CARGO_MANIFEST_DIR"), "/issue_worker"),
+            ])
+            .env_remove("SWARM_MODEL_CALIBRATION_CATALOG")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cases: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        for case in cases.as_array().unwrap() {
+            for agent in ["claude", "codex", "grok"] {
+                let models: Vec<_> = case["policy"]["available_models"][agent]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|name| model(name.as_str().unwrap()))
+                    .collect();
+                let retired = active_retirements(&models, agent, &case["policy"]);
+                assert_eq!(
+                    serde_json::to_value(&retired).unwrap(),
+                    case["retired"],
+                    "{agent}: {case}"
+                );
+            }
+            // A live withdrawal replaces the recorded list for that provider.
+            let retired =
+                active_retirements(&[model("claude-sonnet-5")], "claude", &case["policy"]);
+            assert!(!retired.contains_key("claude-sonnet-5"));
+        }
+        // Before calibration the static catalog also binds prices to a CLI.
+        let retired = active_retirements(
+            &[model("claude-sonnet-5-5")],
+            "codex",
+            &serde_json::Value::Null,
+        );
+        assert!(!retired.contains_key("claude-sonnet-5"));
     }
 
     #[test]

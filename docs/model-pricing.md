@@ -216,6 +216,13 @@ pinned and manual choices remain intact until an applicable retirement.
 Models absent from the CLI list never become routing candidates. Availability
 and retirement transitions are logged once per state change for Anthropic,
 OpenAI and xAI. Superseded rows remain in the catalogs and calibration history.
+Retirement requires a price and a CLI offer from the same provider; a name
+reported by another CLI is not evidence. This provider scope is preserved in
+the shared Python/Rust policy snapshot.
+
+A missing price observation can retain its previous value. A supplied price
+that cannot be parsed as a finite, nonnegative rate rejects the refresh and
+keeps the last good publication; it is never silently replaced with history.
 
 ### Test contract migration for #374
 
