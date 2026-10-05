@@ -2,7 +2,7 @@
 
 Oracles derive from AC 3, 13, 15, 18 and the model/performance detail contract:
 out-of-range source values must fail gracefully; substantial performance data
-must reach review; missing observations cannot explicitly re-enable a retired
+must reach the activated calibration; missing observations cannot explicitly re-enable a retired
 model; learning an unknown price is not a price decrease for unchanged work.
 All sources below use real adapters with deterministic JSON transport doubles.
 """
@@ -28,15 +28,15 @@ class ObservationContractTests(CalibrationUAT):
         self.assertEqual(status["last_attempted_status"], "failed")
         self.assertEqual(status["last_successful_refresh_at"], success)
 
-    def test_fourfold_speed_change_is_available_for_review(self):
+    def test_fourfold_speed_change_is_activated_and_recorded(self):
         self.remote({"models": [price_row(speed=40)]}, activation_policy="auto")
-        before = self.active_bytes()
         result = self.remote({"models": [price_row(speed=160)]}, now=NOW + 1)
         self.assertEqual(result["status"], "changed",
                          "The refreshed performance observation was silently discarded as no change")
-        self.assertEqual(self.active_bytes(), before)
-        proposed = self.service.load_proposed()
-        self.assertEqual(proposed["models"][0]["speed"], 160)
+        self.assertTrue(result["activated"])
+        active = self.service.load_active()
+        self.assertEqual(active["models"][0]["speed"], 160)
+        self.assertTrue(result["diff"]["performance_changes"])
         self.assertIsNotNone(result["simulation"])
 
     def test_price_only_overlay_does_not_resurrect_a_deprecated_model(self):

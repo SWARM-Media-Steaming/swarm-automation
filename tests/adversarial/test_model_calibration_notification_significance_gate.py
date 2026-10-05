@@ -1,55 +1,9 @@
-"""Issue #205 (Model Routing Calibration) — the startup notification gate
-fires on *any* recorded pricing change, however trivial, instead of only a
-"significant" one, so a refresh that provably changed nothing about routing
-still produces an intrusive notification on every affected startup.
+"""Issue #374 migration of the #205 notification-significance suite.
 
-Expected behaviour, derived from the issue before reading the implementation:
-
-- "Do not generate intrusive notifications for every startup refresh. Only
-  surface a meaningful notification when: a new model is discovered;
-  significant pricing changes occur; routing behavior materially changes; a
-  refresh repeatedly fails; manual review is required. Routine successful
-  startup checks should simply update the AI Configuration status."
-- This is specifically a *startup*-refresh concern: `ui/app.js`'s
-  `onModelCalibrationRefreshed` (the only caller that reads
-  `payload.notification` and calls `showToast`) is wired exclusively to the
-  `model-calibration-refreshed` event that `src/main.rs`'s
-  `spawn_startup_model_calibration_refresh` emits after every app launch — a
-  manual click never consults this gate, so this suite is squarely about the
-  "every restart" annoyance the requirement calls out.
-- "significant" is the operative word gating pricing changes, standing beside
-  "materially changes" for routing. A pricing change on a candidate that
-  affects zero routing decisions, by any amount, is the textbook case of an
-  *insignificant* change the requirement says must not page the user.
-
-What the implementation does: `notification_for` treats a non-empty
-`diff["pricing_changes"]` list as notification-worthy outright::
-
-    pricing = diff.get("pricing_changes") or []
-    if pricing:
-        reasons.append(f"{len(pricing)} pricing change...")
-
-and `diff_calibrations` populates that list from a bare inequality check with
-no magnitude threshold at all::
-
-    if any(prev.get(field) != model.get(field) for field in price_fields):
-        pricing_changes.append(...)
-
-Neither the size of the change nor its effect on any routing decision is
-considered. The test below constructs a refresh where every workload's
-routing decision is byte-for-byte identical before and after (asserted as a
-sanity check), and the only difference anywhere in the calibration is the
-smallest possible unit change to one candidate's ordinal cost rank
-(`relative_cost` incremented by 1, on a 1-5 scale). That refresh still
-reports `should_notify: True`.
-
-The assertion does not dictate a specific significance threshold or
-mechanism — filtering by magnitude, requiring the change to touch a model
-that is actually in some workload's routing decision, or something else
-would all satisfy it. It only requires that a refresh which changed no
-routing behavior at all, by the smallest representable pricing delta, does
-not by itself justify the notification the issue reserves for "significant"
-changes.
+#374 requirement 11 is more specific than the earlier suppression rule: every
+automatic activation is visible through ``notification_for``. A small change
+with no routing winner change must still be recorded and announced once when
+its validated calibration is activated.
 """
 
 from __future__ import annotations
@@ -99,7 +53,7 @@ class NotificationSignificanceGateTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.service = calib.ModelCalibrationService(Path(self._tmp.name))
 
-    def test_a_one_unit_price_rank_bump_with_zero_routing_impact_does_not_notify(
+    def test_a_one_unit_price_rank_bump_with_zero_routing_impact_notifies_activation(
         self,
     ) -> None:
         preferred = model_entry(
@@ -163,19 +117,9 @@ class NotificationSignificanceGateTests(unittest.TestCase):
         )
 
         notification = result["notification"]
-        self.assertFalse(
-            notification["should_notify"],
-            "A refresh that changed zero routing decisions, via the "
-            "smallest possible ordinal cost-rank bump on a model nothing "
-            "routes to, still triggered a startup notification "
-            f"({notification!r}). `notification_for` treats any non-empty "
-            "`pricing_changes` list as notification-worthy with no "
-            "magnitude or routing-relevance threshold, contradicting "
-            "'Do not generate intrusive notifications for every startup "
-            "refresh. Only surface a meaningful notification when ... "
-            "significant pricing changes occur ... routing behavior "
-            "materially changes.'",
-        )
+        self.assertTrue(notification["should_notify"], notification)
+        self.assertTrue(result["activated"])
+        self.assertIn("applied automatically", notification["message"])
 
 
 if __name__ == "__main__":

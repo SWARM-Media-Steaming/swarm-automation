@@ -1,49 +1,38 @@
-# Model Blacklist Rules
+# Model retirement rules
 
-`skills/model-router/model-blacklist.json` is the one list of models that must
-never be offered, chosen, or run. Every entry is an older release with a better
-successor that the operator has confirmed; it is not a place for models that are
-merely expensive, credit-billed (`USAGE_CREDIT_FAMILIES`), or unavailable to one
-account.
+`skills/model-router/model-blacklist.json` records explicit predecessor/successor
+relationships. An entry is dormant until its successor is both offered by that
+provider CLI and priced by the static catalog or active feed calibration.
+This rule applies to every entry, including GPT-6 Sol → GPT-6.1 Sol. While
+it is dormant, the predecessor stays routable and saved selections stay intact.
 
-## One list, two readers
+Python (`available_models.py`) and Rust (`src/tools.rs`) read the same JSON.
+Rust consumes the price and derived-retirement snapshot published atomically
+with the active calibration; both readers check current CLI availability.
+Keep price and availability evidence keyed by provider. A model name returned
+by a different provider's CLI cannot activate a retirement, including a
+derived one. Older snapshots recover price ownership from their model rows.
+Keep the cross-language dormancy test passing when changing this contract.
 
-- Python reads it through `issue_worker/available_models.py`
-  (`blacklist`, `is_blacklisted`, `blacklist_successor`, `replace_blacklisted`).
-- Rust embeds the same file at build time in `src/tools.rs`
-  (`MODEL_BLACKLIST_JSON`, `is_blacklisted`, `without_blacklisted`).
-- Never copy the list into code or a second file. Add or remove a model by
-  editing the JSON only. `tauri.conf.json` bundles `skills/model-router/*.json`
-  so a packaged app ships the same file.
+`model_lifecycle.py` also derives retirements within the same provider and
+family: a newer CLI-offered, priced release must cost no more than
+`UPGRADE_PRICE_TOLERANCE` and cannot lose more than `UPGRADE_SCORE_MARGIN`
+at any measured common effort. These thresholds are shared with
+`dynamic_router.latest_release`; do not duplicate them.
 
-## What a blacklisted model may and may not do
+Retired rows remain in `models.yaml`, `_MODEL_CATALOG`, and calibration history
+as inactive, deprecated peers with `superseded_by`. They supply inference
+metadata and historical provenance; never delete them to retire a model.
+A dormant row is restored when the CLI still offers it. Models with no price
+are excluded from fresh routing and option lists.
 
-- It is dropped from every option list and from CLI discovery
-  (`provider_models`, `available_models.configure`), so saved provider, router
-  and tier selections are repaired into the same-family successor by
-  `reconcile_config_models`.
-- It stays in `models.yaml` and `_MODEL_CATALOG` as an inactive, deprecated
-  peer so a newer discovered release can still infer its metadata from it.
-  `model_router.load_model_catalog` forces `active=false`; `model_catalog`
-  filters it out of the router prompt. Do not delete those rows.
-- It can never be a routing, upgrade, Jev-recommended or tier target
-  (`model_still_offered` is false for it and `ProviderSpec.from_args` swaps in
-  the successor; reference tiers are derived from the catalog, so it never
-  appears in them).
-- A started session pinned to one finishes on it; the next fresh session, tester
-  or fixer does not. `latest_release` moves a blacklisted model to its
-  successor without a price comparison, but only when the successor has a price.
+An active retirement removes the predecessor from fresh routing, upgrades,
+Jev's advisory list, and option lists, and repairs saved selections into the
+successor. Started sessions finish on their pinned model. Every retirement
+transition is logged once and included in the calibration diff/notification.
 
-## When you add a model
-
-- A release that supersedes another needs a `models.yaml` row and a
-  `_MODEL_CATALOG` row (seed its capability rank from the measured Intelligence
-  Index bands in `model_router.CAPABILITY_BANDS`), a price in
-  `model_pricing.py` from the provider's own pricing page, then a blacklist
-  entry for the release it replaces.
-- Nothing else needs a name: starting worker/router models
-  (`dynamic_router.suggested_defaults`) and the reference tiers are derived from
-  the catalog, which already excludes blacklisted models. See
-  `model-routing-no-static-tables.md`.
-- Add or update tests: the blacklist tests in `test_available_models.py` and
-  `src/tools.rs` should keep passing without edits when only the JSON changes.
+A new feed model needs no static catalog or pricing edit: validation, CLI
+availability and feed prices suffice. The explicit JSON list is an override
+for known successor relationships, not the only retirement mechanism.
+A dormant explicit entry does not prevent a derived retirement to a qualifying
+later release when the CLI skips the named successor.

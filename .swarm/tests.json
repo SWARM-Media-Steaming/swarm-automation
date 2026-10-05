@@ -1811,7 +1811,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-discovered-gate",
-      "name": "Issue #205: a DISCOVERED model must not silently age into routable status on the next unrelated refresh",
+      "name": "Issues #205/#374: valid new models onboard in one activated refresh with visible evidence",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -1865,7 +1865,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-notification-significance-gate",
-      "name": "Issue #205: startup refresh notifications must not fire on routing-irrelevant, trivial pricing changes",
+      "name": "Issues #205/#374: every automatic calibration activation emits a notification",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -1892,7 +1892,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-discovered-review-unreachable",
-      "name": "Issue #205: approving a discovered model must survive its own refresh and be reachable from the app",
+      "name": "Issue #374: approval state and approval UI/CLI surfaces are retired",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -1922,7 +1922,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-external-benchmark-changes",
-      "name": "Issue #205: external benchmark changes must produce reviewable calibration changes",
+      "name": "Issues #205/#374: configured external benchmark changes activate and remain visible",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2011,7 +2011,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-simulation-eligibility",
-      "name": "Issue #205: simulation and safe auto-activation enforce model review gates",
+      "name": "Issues #205/#374: simulation uses eligible models and regressions never gate activation",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2041,7 +2041,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-effort-benchmark-retention",
-      "name": "Issue #205: measured benchmark and task-cost changes remain reviewable",
+      "name": "Issues #205/#374: measured benchmark and task-cost changes activate without changing the winner",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2071,7 +2071,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-lifecycle-integration",
-      "name": "Issue #205: refresh intervals, outage recovery, concurrency, initiators and rollback",
+      "name": "Issues #205/#374: automatic refresh intervals, outage recovery, concurrency, initiators and rollback",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2095,7 +2095,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-review-ui",
-      "name": "Issue #205: real calibration responses expose discoveries, history and startup errors in AI Configuration",
+      "name": "Issues #205/#374: UI exposes automatic activation, unoffered discoveries, history and startup errors",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2128,7 +2128,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-live-activation-contract",
-      "name": "Issue #205: Activated model eligibility governs actual dynamic routing and rollback",
+      "name": "Issues #205/#374: Automatically activated eligibility governs dynamic routing and rollback",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2160,7 +2160,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-persistence-contract",
-      "name": "Issue #205: Failed publication, activation interleaving and rollback retention",
+      "name": "Issues #205/#374: Failed publication, activation interleaving and rollback retention",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2191,7 +2191,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-observation-contract",
-      "name": "Issue #205: Malformed prices, performance changes, retirement retention and comparable costs",
+      "name": "Issues #205/#374: Malformed prices, activated performance changes, retirement retention and comparable costs",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2255,7 +2255,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-status-coherence",
-      "name": "Issue #205: known-good calibration remains coherent when advisory status files are damaged",
+      "name": "Issues #205/#374: known-good automatic calibration remains coherent when advisory files are damaged",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2283,7 +2283,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-cold-start-contract",
-      "name": "Issue #205: First external startup preserves offline baseline and manual review",
+      "name": "Issues #205/#374: first external startup exposes baseline while fetching then activates automatically",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2340,7 +2340,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-review-transitions",
-      "name": "Issue #205: Review details survive unchanged checks and summaries reconcile activation",
+      "name": "Issues #205/#374: automatic activation details remain truthful across unchanged checks",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2375,7 +2375,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-catalog-removal",
-      "name": "Issue #205: authoritative catalog removals remain reviewable and govern routing",
+      "name": "Issues #205/#374: authoritative catalog removals activate automatically and remain rollbackable",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2405,7 +2405,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-immutable-versions",
-      "name": "Issue #205: History pruning cannot reuse review or rollback version handles",
+      "name": "Issues #205/#374: history pruning cannot reuse automatic-activation rollback handles",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2436,7 +2436,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-routing-input-fidelity",
-      "name": "Issue #205: Supported efforts and task fit changes survive refresh review and activation",
+      "name": "Issues #205/#374: supported efforts and task fit survive automatic activation and rollback",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -2589,7 +2589,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-205-model-calibration-identity-transactions",
-      "name": "Issue #205: Source aliases and catalog duplicates preserve review, routing and rollback on conflict",
+      "name": "Issues #205/#374: source aliases and duplicates preserve active routing and rollback on conflict",
       "origin": "adversarial",
       "requirements": {
         "executables": [
@@ -4439,6 +4439,129 @@
           "issue_worker/dynamic_router.py",
           "issue_worker/decision_engine.py",
           "tests/adversarial/test_issue373_conditional_label_matrix.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue374_automatic_calibration_boundaries.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue374-automatic-calibration-boundaries",
+      "name": "Issue #374 automatic calibration provider, validation, transition, and threshold boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_lifecycle.py",
+          "issue_worker/available_models.py",
+          "tests/adversarial/test_issue374_automatic_calibration_boundaries.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue374_feed_pricing_and_recovery_uat.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue374-feed-pricing-and-recovery-uat",
+      "name": "Issue #374 feed-only spend pricing, missing-key state, and last-known-good recovery",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/model_calibration.py",
+          "issue_worker/model_pricing.py",
+          "tests/adversarial/test_issue374_feed_pricing_and_recovery_uat.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue374_cross_language_retirement.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue374-cross-language-retirement",
+      "name": "Issue #374 Python and Rust retirement dormancy agreement plus GPT-6 static evidence",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "cargo"
+        ],
+        "files": [
+          "issue_worker/available_models.py",
+          "issue_worker/model_lifecycle.py",
+          "skills/model-router/model-blacklist.json",
+          "skills/model-router/models.yaml",
+          "src/tools.rs",
+          "tests/adversarial/test_issue374_cross_language_retirement.py"
+        ]
+      },
+      "timeoutSeconds": 1200
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue374_available_model_state_isolation.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue374-available-model-state-isolation",
+      "name": "Issue #374 sequential CLI refreshes cannot hide offered priced successors from routing or Jev",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/available_models.py",
+          "issue_worker/decision_engine.py",
+          "issue_worker/dynamic_router.py",
+          "issue_worker/test_available_models.py",
+          "tests/adversarial/test_issue374_available_model_state_isolation.py"
         ]
       },
       "timeoutSeconds": 300

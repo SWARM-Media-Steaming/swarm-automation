@@ -482,9 +482,8 @@ pub struct AppConfig {
     /// to a non-negative, sub-two-week range on normalize.
     #[serde(default = "default_model_data_min_refresh_interval_hours")]
     pub model_data_min_refresh_interval_hours: f64,
-    // Model data comes from fixed sources (models.dev, plus Artificial
-    // Analysis benchmarks when an API key is saved in the Keychain), and a
-    // clean refresh is always activated and applied to live routing. The
+    // Model data comes from Artificial Analysis when an API key is configured.
+    // Every validated refresh activates, including recorded regressions. The
     // former `model_data_source`, `model_data_source_url`,
     // `model_calibration_auto_activate` and `model_calibration_apply_to_routing`
     // settings are gone; older config files that still carry them load fine

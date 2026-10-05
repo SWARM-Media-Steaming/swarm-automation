@@ -1,8 +1,8 @@
 "use strict";
 
-/* Issue #205 AC 9, 12–13 and the review workflow: pending changes remain
- * inspectable after an unchanged check; after activation the summary must
- * describe the now-active version. Run the real UI controller against real
+/* Issue #374 migration of #205 UI transition coverage: activation details are
+ * inspectable immediately; unchanged checks do not resurrect review state.
+ * Run the real UI controller against real
  * backend snapshots. Only DOM and Tauri transport are doubles.
  */
 const { test } = require("node:test");
@@ -51,8 +51,7 @@ class Element {
   replaceChildren(...children) { this._text = ""; this.children = [...children]; }
 }
 
-function page(initialStatus, { lastResult = null, afterActivation = null } = {}) {
-  let backendStatus = initialStatus;
+function page(initialStatus, { lastResult = null } = {}) {
   const nodes = new Map();
   const byId = (id) => {
     if (!nodes.has(id)) nodes.set(id, new Element());
@@ -62,20 +61,14 @@ function page(initialStatus, { lastResult = null, afterActivation = null } = {})
     config: { dynamic_model_routing: true, routing_optimization: "best" },
     modelCalibration: {
       status: initialStatus, lastResult, analysis: null, refreshing: false,
-      analyzing: false, activating: false, approvingKeys: new Set(),
+      analyzing: false,
       sort: { column: "provider", direction: "asc" }, progressTimer: null,
     },
   };
   const calls = [], toasts = [];
   const invoke = async (command, args) => {
     calls.push({ command, args });
-    if (command === "get_model_calibration_status_background") return backendStatus;
-    if (command === "activate_model_calibration_background") {
-      assert.ok(afterActivation, "The test must supply a real post-activation response");
-      assert.equal(args.version, afterActivation.active_version);
-      backendStatus = afterActivation;
-      return afterActivation.active_calibration;
-    }
+    if (command === "get_model_calibration_status_background") return initialStatus;
     throw new Error(`Unexpected command ${command}`);
   };
   const document = {
@@ -85,42 +78,33 @@ function page(initialStatus, { lastResult = null, afterActivation = null } = {})
   const window = { SwarmModelCalibration: require(path.join(root, "ui/model-calibration-ui.js")) };
   const load = new Function("state", "window", "document", "byId", "invoke", "showToast", "formatIsoTimestamp", "errorText",
     `${source.slice(start, end)}
-     return { renderModelCalibrationFull, activateProposedCalibration };`);
+     return { renderModelCalibrationFull };`);
   const controller = load(state, window, document, byId, invoke,
     (...args) => toasts.push(args), (value) => value, String);
   return { controller, byId, calls, toasts };
 }
 
-test("a proposal retains its detailed changes after a no-change startup check", () => {
+test("an unchanged startup check keeps the automatically activated version current", () => {
   assert.equal(data.repeated.status, "no_change");
-  assert.equal(data.rechecked.proposed_version, data.proposed.proposed_version);
-  assert.ok(data.rechecked.proposed_calibration.diff.pricing_changes.length);
+  assert.equal(data.rechecked.active_version, data.active.active_version);
+  assert.equal(data.rechecked.has_newer_proposed, false);
   const app = page(data.rechecked);
   app.controller.renderModelCalibrationFull();
-  assert.equal(app.byId("model-calibration-activate").classList.contains("hidden"), false);
-  assert.equal(app.byId("model-calibration-changes").classList.contains("hidden"), false,
-    "An unchanged observation hid the detailed changes of the still-pending proposal");
-  assert.match(app.byId("model-calibration-changes-body").textContent, /23\.5/);
+  assert.match(app.byId("model-calibration-result").textContent, /No routing changes were required/);
 });
 
-test("activating after manual refresh reconciles the cached review summary", async () => {
-  const app = page(data.manual_proposed, {
-    lastResult: data.manual_refresh, afterActivation: data.manual_activated,
-  });
+test("automatic refresh summary describes the active version and detailed price", () => {
+  assert.equal(data.refresh.activated, true);
+  const app = page(data.active, { lastResult: data.refresh });
   app.controller.renderModelCalibrationFull();
-  assert.match(app.byId("model-calibration-result").textContent, /available for review/);
-  await app.controller.activateProposedCalibration();
-  assert.ok(app.calls.some((call) => call.command === "activate_model_calibration_background"));
-  assert.ok(app.toasts.some(([message]) => message.includes("Activated calibration")));
-  assert.equal(app.byId("model-calibration-activate").classList.contains("hidden"), true);
-  assert.doesNotMatch(app.byId("model-calibration-result").textContent, /available for review/i,
-    "The manual-refresh cache still says review is pending after this exact version was activated");
-});
-
-test("freshly opened configuration shows the newly proposed price details", () => {
-  const app = page(data.proposed);
-  app.controller.renderModelCalibrationFull();
+  assert.match(app.byId("model-calibration-result").textContent, /Active calibration/);
   assert.equal(app.byId("model-calibration-changes").classList.contains("hidden"), false);
   assert.match(app.byId("model-calibration-changes-body").textContent, /23\.5/);
-  assert.match(app.byId("model-calibration-changes-body").textContent, /Routing impact/);
+});
+
+test("freshly opened configuration shows the active calibrated price", () => {
+  const app = page(data.active);
+  app.controller.renderModelCalibrationFull();
+  assert.match(app.byId("model-routing-table").textContent, /23\.5/);
+  assert.doesNotMatch(source, /function activateProposedCalibration/);
 });

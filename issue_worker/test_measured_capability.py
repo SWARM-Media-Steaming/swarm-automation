@@ -113,24 +113,31 @@ class RefreshTests(unittest.TestCase):
         routed = next(m for m in published["models"] if m["model"] == "claude-sonnet-5")
         self.assertEqual(routed["relative_capability"], 5)
 
-    def test_without_a_model_list_every_feed_model_is_a_candidate(self) -> None:
+    def test_without_a_model_list_unmatched_feed_models_remain_unroutable_records(self) -> None:
         self.refresh(self.FEED)
         names = {d["model"] for d in self.service.load_active()["discovered_models"]}
         self.assertIn("claude-sonnet-5-5", names)
         self.assertIn("claude-fable-9", names)
+        self.assertTrue(all(row["status"] == "DISCOVERED" and not row["active"]
+                            for row in self.service.load_active()["discovered_models"]))
         self.assertNotIn("gpt-9", {d["model"] for d in self.service.load_active()["discovered_models"] if d["provider"] != "openai"})
 
     def test_only_models_a_cli_reports_become_candidates(self) -> None:
         self.refresh(self.FEED, available={"claude": ["claude-sonnet-5-5", "claude-sonnet-5"], "codex": []})
         discovered = self.service.load_active()["discovered_models"]
-        self.assertEqual([d["model"] for d in discovered], ["claude-sonnet-5-5"])
-        self.assertEqual(discovered[0]["intelligence_by_effort"], {"xhigh": 51.9, "max": 56.0})
+        self.assertEqual(discovered, [])
+        models = {row["model"]: row for row in self.service.load_active()["models"]}
+        self.assertIn(models["claude-sonnet-5-5"]["status"], calib.ROUTABLE_STATUSES)
+        self.assertEqual(models["claude-sonnet-5-5"]["intelligence_by_effort"], {"xhigh": 51.9, "max": 56.0})
+        self.assertNotIn("claude-fable-9", models)
+        self.assertNotIn("gpt-9", models)
 
     def test_available_models_json_is_parsed_defensively(self) -> None:
         parse = calib._available_from_json
         self.assertEqual(parse('{"Claude": [{"value": "a"}, "b", {"x": 1}], "codex": "nope"}'),
                          {"claude": ["a", "b"], "codex": []})
-        for bad in ("", "not json", "[]", "{}"):
+        self.assertEqual(parse("{}"), {})
+        for bad in ("", "not json", "[]"):
             self.assertIsNone(parse(bad))
 
 

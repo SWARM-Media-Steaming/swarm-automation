@@ -152,8 +152,8 @@ same missing-versus-zero distinction.
 
 Models the operator has ruled out are listed once in
 `skills/model-router/model-blacklist.json` and enforced in both languages (see
-`.claude/rules/model-blacklist.md`). Never re-add a blacklisted model to a
-dropdown or default, and keep its catalog rows as inactive peers.
+`.claude/rules/model-blacklist.md`). Only apply a retirement once its successor is priced and CLI offered; keep
+the predecessor catalog rows as inactive peers and restore dormant offers.
 The upgrade to a newer release (`latest_release`) also runs for every fresh
 adversarial tester/fixer session, and each stage's router prompt carries the
 implementation's graded complexity and diff size (`stage_scope_note`).
@@ -228,8 +228,8 @@ router prompt and folded into the stored `tier_explanation`, so they show up in
 AI execution history and the routing notice posted on the issue. Unlike the
 provider strengths, this table has no `config.rs` counterpart
 and nothing to keep in sync: it is never sent to the app or saved in
-`config.json`, only built into `dynamic_router.py`. A model missing from it
-cannot be routed to, so adding a model means adding it here.
+`config.json`, only built into `dynamic_router.py`. CLI-offered models absent from it are inferred automatically; a static or
+feed price is required before routing. No catalog edit is needed for onboarding.
 
 Adding a provider's tiers or strengths without a matching edit on the other
 side (Python vs. `config.rs`) is a real way to introduce drift — the router
@@ -260,64 +260,36 @@ cyber results never suppress a finding.
 
 ## Model Routing Calibration
 
-Optional, app-wide companion to Dynamic Model Routing (issue #205) that keeps
-the model/pricing/benchmark data the router scores against fresh, without ever
-making startup or routing depend on an external source being reachable.
-`issue_worker/model_calibration.py`'s `ModelCalibrationService` is the single
-implementation manual refresh (the Guides page's "Refresh Model Data"
-button), startup refresh, and any future scheduled/AI-triggered refresh all
-call — distinguished only by `initiated_by` (`USER`/`STARTUP`/`SCHEDULED`/
-`AI_AGENT`). `issue_worker/model_data_sources.py` holds the bounded,
-IP-pinned HTTPS adapters. The app's source is fixed: it always refreshes from
-`models.dev` (prices, lifecycle), and adds Artificial Analysis benchmarks
-(evaluations, speed, latency — never prices) only when an API key is saved.
-The key lives in the macOS Keychain (`src/secrets.rs`), reaches the refresh
-process only as `ARTIFICIAL_ANALYSIS_API_KEY` in its environment, and is
-redacted from any output. A benchmark failure is reported in the result's
-`source_warnings` and never fails the models.dev refresh. Every refresh
-result — failures included — is logged to Info & Debug under "Model data"
-(`describe_refresh` in `src/main.rs`). The bundled `"local"` source and the
-custom-JSON source remain in Python for tests only; the UI does not offer them.
+`model_calibration.py` is the app-wide refresh service. Artificial Analysis
+supplies prices and measurements, with the key from macOS Keychain or
+`ARTIFICIAL_ANALYSIS_API_KEY`; absent keys explicitly report not configured
+and skip external refreshes. HTTPS adapters remain bounded and IP-pinned.
+Keys never enter arguments, config files or logs.
 
-A refresh never replaces the active calibration on failure or on a
-no-meaningful-change result. Before fetching any external source, the shared
-refresh service loads or publishes the bundled offline baseline under its
-existing writer lock, then reloads state so bootstrap activation metadata
-cannot be overwritten. The first external update therefore follows the same
-manual review or safe automatic activation policy as later updates, even if
-AI Configuration has never been opened. A local or complete catalog can
-provide the initial offline baseline directly. `status_report()` also calls
-`ensure_bootstrap()` so data is visible before any refresh. Existing active
-calibrations are never rebuilt from the bundled catalog.
+Every validated refresh activates automatically. Simulation regressions are
+recorded and notified, never held for review. The approve command and manual
+activation policy are retired. Deterministic analysis is generated after
+activation; it makes no AI call and does not gate publication. Explicit
+historical activation is retained for rollback. Failed refreshes keep the last
+good calibration and retry with bounded exponential backoff; repeated failures
+only alert. The startup preference affects the first check only. Scheduled
+checks run every 15 minutes while the app process runs; closing the window
+hides it to the tray. Quitting stops refreshes.
 
-The live routing hook is `dynamic_router.active_calibration_catalog_path()`,
-gated by `SWARM_MODEL_CALIBRATION_CATALOG` — set by `start_issue_worker` in
-`src/main.rs` whenever an activated calibration's `active_catalog.json`
-exists. Clean refreshes are always activated (`--activation-policy auto`); one
-that regresses stays a proposal for review, and a failed refresh keeps the
-last good calibration. Unset or missing, every routing path falls back to the
-bundled `models.yaml` exactly as before this existed. The app refreshes at
-startup and then every `model_data_min_refresh_interval_hours` (6 by default,
-`SCHEDULED`) while it runs. The `AppConfig` fields
-(`model_data_refresh_on_startup`, `model_data_min_refresh_interval_hours`) are
-app-wide, not per-repository, matching `dynamic_model_routing`/
-`routing_optimization` above rather than the Feedback view's per-page filter
-pattern. The former `model_data_source`, `model_data_source_url`,
-`model_calibration_auto_activate` and `model_calibration_apply_to_routing`
-settings were removed; old config files that carry them still load.
+`--available-models` always carries raw CLI evidence, including empty lists.
+Unmatched feed models absent from that list stay out of every candidate and
+option list. Supported-provider availability changes log once per transition.
+The same calibrated prices are used for spend, tester floors, router prompts,
+upgrades and Jev's advisory model list; a static price wins when present.
 
-**Measured capability and latest-release upgrades.** When the Artificial
-Analysis feed is on, `fold_benchmark_rows` folds each `<model>-<effort>` row
-into its base model's `intelligence_by_effort`, and `_build_calibration` sets
-`relative_capability` from the Intelligence Index at `xhigh`
-(`model_router.CAPABILITY_BANDS`; the hand-set rank is kept as
-`catalog_capability`). The app passes the models each provider CLI reports as
-`refresh --available-models`, so only models that can actually run become
-DISCOVERED candidates. After routing, `dynamic_router.latest_release` moves a
-routed model to the newest release of its family (same provider and family,
-offered, credit-allowed, supports the effort, price no more than 5% higher, no
-clearly lower measured score); the worker applies it in
-`upgrade_to_latest_release` and records `upgraded_from` on the decision.
+`model_lifecycle.py` derives retirement from same-family release versions,
+CLI availability, prices and measured scores using the shared upgrade
+thresholds. The JSON blacklist is conditional on a priced, offered successor
+for every entry. Retired catalog rows remain as inactive deprecated peers;
+dormant predecessors stay routable. Python and Rust use the same JSON and
+atomic calibration policy snapshot. Activation repairs saved selections and
+refreshes the running scheduler's next-cycle CLI/model settings. Started
+sessions remain pinned. See `docs/model-pricing.md`.
 
 **Routing calculator ("Try the router").** AI Configuration's Dynamic Model
 Routing panel opens a dialog (`#routing-calculator-modal`, `ui/routing-calculator.js`
@@ -336,7 +308,7 @@ Activation publishes the full calibration and its filtered routing models in
 one atomic `active_catalog.json` document. `load_active()` reads that document
 first; `calibration_active.json` is a compatibility/recovery copy. Status uses
 the readable calibration's version, not the advisory state pointer. Refresh,
-activation, approval and bootstrap writes share an OS file lock; the separate
+activation and bootstrap writes share an OS file lock; the separate
 `refresh.lock` JSON is only a status marker. History pruning protects the
 active, proposed and immediately previous active versions for rollback.
 New version IDs advance past the newest retained version, including after a
@@ -347,8 +319,7 @@ Bootstrap validates the published document and its filtered model list,
 repairing missing or damaged publications from the last activated recovery
 copy under the same lock. Catalog removals, supported reasoning levels, task
 strengths/weaknesses, and other routing eligibility inputs are meaningful
-changes even when the five representative routes stay the same. The review
-UI keeps pending proposal details visible after unchanged checks. Refresh
+changes even when the five representative routes stay the same. The UI displays active changes without approval or activation controls. Refresh
 status stores the version that produced its diff separately from the
 active/proposed pointers, so both cached and reopened pages describe
 rolled-back changes as historical.
@@ -546,11 +517,15 @@ correcting the catalog never restates history. Updating a rate is always
 additive: close the old entry with `effective_to`, append a new one, bump the
 version. `docs/model-pricing.md` is the maintenance procedure.
 
-Do not reconnect cost reporting to `dynamic_router.model_cost` or to Model
-Routing Calibration's `input_cost`/`output_cost` observations. Those answer
-"which model is cheaper" for routing; this answers "what did this cost" for
-reporting, and two models can share a routing rank while being billed very
-differently.
+Do not derive dollars from `dynamic_router.model_cost` ranks. Valid feed
+`input_cost`/`output_cost` observations are authoritative fallback prices when
+a model has no static catalog entry; persist their calibration provenance and
+never rewrite stored estimates. See `docs/model-pricing.md`.
+
+`build.rs` uses Python 3 to export this catalog into the Rust binary for
+pre-calibration price eligibility. Never duplicate the table or scrape its
+Python source. The desktop uses the same effective windows; the shared
+retirement tests verify agreement with Python.
 
 ## Feedback's fourth tab reads usage through one query, server-side
 

@@ -2439,10 +2439,10 @@ class WorkerTestCase(unittest.TestCase):
 
     def _saved_attempt(self, number: int = 305, *, session_started: bool = True,
                        dirty: bool = False, commit: bool = False) -> ProviderChoice:
-        """A Claude attempt on claude-sonnet-5/medium, saved mid-run."""
+        """A Claude attempt on claude-haiku-4-5/medium (a non-retired model), saved mid-run."""
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=True)
         self.worker.issue = IssueContext(number, "Title", "body", [], f"https://example.invalid/{number}")
-        pinned = ProviderChoice("Claude", "claude-sonnet-5", "medium", "session-old")
+        pinned = ProviderChoice("Claude", "claude-haiku-4-5", "medium", "session-old")
         self.worker.choice = pinned
         self.git("switch", "-q", "-c", self.worker.expected_branch(), "ai-main")
         self.worker.save_new_state(self.worker.issue, pinned, self.base_sha)
@@ -2502,11 +2502,25 @@ class WorkerTestCase(unittest.TestCase):
 
     def test_an_unchanged_route_keeps_the_session(self) -> None:
         self._saved_attempt(dirty=True)
-        self._reroute("Claude", "claude-sonnet-5", "medium")
+        self._reroute("Claude", "claude-haiku-4-5", "medium")
         self.assertTrue(self.worker.choice.resume)
         self.assertEqual(self.worker.choice.session_id, "session-old")
         self.assertEqual(self.worker.read_state()["session_id"], "session-old")
         self.assertEqual(self.worker._reroute_note, "")
+
+    def test_a_retirement_preserves_the_started_session_and_routing_record(self) -> None:
+        self._saved_attempt(dirty=True)
+        self.worker.update_state(model="claude-sonnet-5", routing_decision={
+            "provider": "claude", "selected_model": "claude-sonnet-5", "reasoning_effort": "medium",
+        })
+        self.worker.choice = self.worker.choice_from_state(self.worker.read_state())
+        before = self.worker.read_state()
+        bundles = self._reroute("Claude", "claude-sonnet-5-5", "high")
+        after = self.worker.read_state()
+        for field in ("model", "effort", "session_id", "session_started", "routing_decision"):
+            self.assertEqual(after[field], before[field], field)
+        self.assertEqual(bundles, [])
+        self.assertTrue(self.worker.choice.resume)
 
     def test_a_different_provider_takes_over_with_a_handoff_bundle_once_work_exists(self) -> None:
         self._saved_attempt(dirty=True)
@@ -2522,7 +2536,7 @@ class WorkerTestCase(unittest.TestCase):
 
     def test_a_more_capable_model_replaces_the_saved_one_mid_work(self) -> None:
         self._saved_attempt(commit=True)
-        profiles = {("claude", "claude-sonnet-5"): (3, 0.03), ("claude", "claude-opus-5"): (4, 0.2)}
+        profiles = {("claude", "claude-haiku-4-5"): (3, 0.03), ("claude", "claude-opus-5"): (4, 0.2)}
         bundles = self._reroute("Claude", "claude-opus-5", "high", profiles=profiles)
         self.assertEqual(self.worker.read_state()["model"], "claude-opus-5")
         self.assertEqual(len(bundles), 1, "work exists, so the successor gets a handoff bundle")
@@ -2530,33 +2544,33 @@ class WorkerTestCase(unittest.TestCase):
 
     def test_a_materially_cheaper_model_replaces_the_saved_one_mid_work(self) -> None:
         self._saved_attempt(commit=True)
-        profiles = {("claude", "claude-sonnet-5"): (4, 0.20), ("claude", "claude-opus-5-5"): (4, 0.12)}
+        profiles = {("claude", "claude-haiku-4-5"): (4, 0.20), ("claude", "claude-opus-5-5"): (4, 0.12)}
         self._reroute("Claude", "claude-opus-5-5", "medium", profiles=profiles)
         self.assertEqual(self.worker.read_state()["model"], "claude-opus-5-5")
         self.assertIn("materially cheaper", self.worker._reroute_note)
 
     def test_a_marginally_cheaper_model_does_not_cost_the_session(self) -> None:
         self._saved_attempt(dirty=True)
-        profiles = {("claude", "claude-sonnet-5"): (4, 0.20), ("claude", "claude-opus-5-5"): (4, 0.19)}
+        profiles = {("claude", "claude-haiku-4-5"): (4, 0.20), ("claude", "claude-opus-5-5"): (4, 0.19)}
         bundles = self._reroute("Claude", "claude-opus-5-5", "medium", profiles=profiles)
         state = self.worker.read_state()
-        self.assertEqual((state["model"], state["effort"]), ("claude-sonnet-5", "medium"))
+        self.assertEqual((state["model"], state["effort"]), ("claude-haiku-4-5", "medium"))
         self.assertEqual(state["session_id"], "session-old")
         self.assertTrue(self.worker.choice.resume)
         self.assertEqual(bundles, [])
-        self.assertIn("kept Claude claude-sonnet-5 (medium)", self.worker._reroute_note)
+        self.assertIn("kept Claude claude-haiku-4-5 (medium)", self.worker._reroute_note)
 
     def _reroute_effort_only(self, new_effort: str, costs: dict[str, tuple[int, float]]):
         with mock.patch("swarm_issue_worker.model_route_profile",
                         side_effect=lambda agent, model, effort: costs[effort]):
-            return self._reroute("Claude", "claude-sonnet-5", new_effort)
+            return self._reroute("Claude", "claude-haiku-4-5", new_effort)
 
     def test_an_effort_only_downgrade_keeps_the_session_mid_work(self) -> None:
         self._saved_attempt(dirty=True)
         self._router_costs = {"medium": (3, 0.048), "low": (3, 0.028)}
         bundles = self._reroute_effort_only("low", self._router_costs)
         state = self.worker.read_state()
-        self.assertEqual((state["model"], state["effort"]), ("claude-sonnet-5", "medium"))
+        self.assertEqual((state["model"], state["effort"]), ("claude-haiku-4-5", "medium"))
         self.assertEqual(state["session_id"], "session-old")
         self.assertTrue(self.worker.choice.resume)
         self.assertEqual(bundles, [])
@@ -2579,7 +2593,7 @@ class WorkerTestCase(unittest.TestCase):
 
     def test_a_model_that_is_no_longer_offered_is_replaced(self) -> None:
         self._saved_attempt(dirty=True)
-        profiles = {("claude", "claude-sonnet-5"): (3, 0.03), ("claude", "claude-sonnet-5-5"): (3, 0.03)}
+        profiles = {("claude", "claude-haiku-4-5"): (3, 0.03), ("claude", "claude-sonnet-5-5"): (3, 0.03)}
         with mock.patch.object(self.worker, "model_still_offered", return_value=False):
             with self._router_picks("Claude", "claude-sonnet-5-5", "medium"), \
                     mock.patch.object(self.worker, "refresh_provider_usages", return_value=({}, {})), \
@@ -2655,6 +2669,7 @@ class WorkerTestCase(unittest.TestCase):
             "claude-sonnet-5", "claude-sonnet-5-5", "claude-opus-5", "claude-opus-5-5")]})
         self.addCleanup(available_models.reset)
         self._saved_attempt(session_started=session_started)
+        self.worker.update_state(model="claude-sonnet-5")
         self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=dynamic)
         if adversarial:
             self.worker.update_state(adversarial={"epoch": 1})
@@ -2697,7 +2712,7 @@ class WorkerTestCase(unittest.TestCase):
         available_models.configure({"claude": [{"value": "claude-sonnet-5"}, {"value": "claude-sonnet-5-5"}]})
         self.addCleanup(available_models.reset)
         self._saved_attempt(session_started=False)
-        self.worker.update_state(routing_decision={"provider": "grok", "selected_model": "grok-4.7"})
+        self.worker.update_state(model="claude-sonnet-5", routing_decision={"provider": "grok", "selected_model": "grok-4.7"})
         self.worker.choice = self.worker.choice_from_state(self.worker.read_state())
         self.worker.upgrade_resumed_choice()
         state = self.worker.read_state()
@@ -5595,7 +5610,7 @@ class WorkerTestCase(unittest.TestCase):
     def test_a_reroute_clears_the_previous_resumes_announcement(self) -> None:
         self._saved_attempt()
         self.worker.update_state(rerouted_from={"from": "a", "to": "b", "reason": "r", "at": "t"})
-        self._reroute("Claude", "claude-sonnet-5", "medium")
+        self._reroute("Claude", "claude-haiku-4-5", "medium")
         self.assertNotIn("rerouted_from", self.worker.read_state())
 
     def test_resume_comment_calls_out_comments_left_while_paused(self) -> None:

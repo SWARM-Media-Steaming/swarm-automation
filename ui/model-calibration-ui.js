@@ -18,10 +18,10 @@
   function healthPill(status) {
     const info = status || {};
     if (info.refresh_running) return { text: "Refreshing…", tone: "running" };
+    if (info.source_status === "not_configured") return { text: "Not configured", tone: "idle" };
     if (!info.active_version) return { text: "Not yet calibrated", tone: "idle" };
     if (!info.healthy) return { text: "Needs attention", tone: "error" };
     if (info.last_attempted_status === "failed") return { text: "Refresh failed", tone: "error" };
-    if (info.has_newer_proposed) return { text: "Update available", tone: "paused" };
     return { text: "Current", tone: "ok" };
   }
 
@@ -45,12 +45,14 @@
         label: "Models",
         value: `${info.active_model_count ?? 0} active · ${info.discovered_model_count ?? 0} discovered`,
       },
-      { label: "Proposed update", value: info.has_newer_proposed ? "Awaiting review" : "None" },
+      { label: "Activation", value: "Automatic" },
     ];
   }
 
   function refreshStatusLabel(value) {
     switch (value) {
+      case "not_configured":
+        return "Not configured";
       case "changed":
         return "Changed";
       case "no_change":
@@ -98,6 +100,7 @@
 
   function resultHeadline(result) {
     const status = (result || {}).status;
+    if (status === "not_configured") return "Artificial Analysis is not configured. External refresh skipped; retained data is not current.";
     if (status === "changed") return "Model data refreshed successfully";
     if (status === "no_change") return "Model data is current. No routing changes were required.";
     if (status === "failed") return "Model data refresh failed. Existing routing configuration remains active.";
@@ -133,9 +136,11 @@
           ? `Historical calibration (version ${info.calibration_version})`
           : info.activated
           ? `Active immediately (version ${info.calibration_version})`
-          : `New calibration available for review (version ${info.calibration_version})`,
+          : `Calibration version ${info.calibration_version}`,
       },
     ];
+    if (diff.regression) lines.push({ label: "Regression", value: "Recorded; activated automatically" });
+    if ((diff.supersessions || []).length) lines.push({ label: "Retirements", value: String(diff.supersessions.length) });
     if ((diff.removed_models || []).length) {
       lines.push({ label: "Removed models", value: String(diff.removed_models.length) });
     }

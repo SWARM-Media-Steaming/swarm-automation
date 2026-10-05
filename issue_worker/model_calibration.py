@@ -6,11 +6,13 @@ ever depending on an external source being reachable and without ever
 silently replacing what is already active.
 
 Pipeline (``ModelCalibrationService.refresh``): fetch -> validate -> normalize
--> diff against the active calibration -> recalculate routing metrics (via the
-real ``model_router.route`` engine) -> simulate a regression check -> store a
-*proposed* calibration. A proposed calibration only becomes active when a
-caller explicitly activates it (``activate``, used for promotion and rollback)
-or when ``activation_policy="auto"`` and the simulation reports no regression.
+-> apply retirements (``model_lifecycle``) -> diff against the active
+calibration -> recalculate routing metrics (via the real ``model_router.route``
+engine) -> simulate a regression check -> activate (issue #374). Every refresh
+that passes validation is activated: a regression is recorded in the diff and
+the notification, never held for review, and a feed model a provider CLI
+offers is onboarded without approval. ``activate`` remains for rollback to a
+historical version. A failed or unconfigured refresh changes nothing.
 
 Every entry point (manual refresh, startup refresh, scheduled job, or an
 AI-agent-triggered refresh) calls ``ModelCalibrationService.refresh`` with a
@@ -33,18 +35,24 @@ from typing import Any, Callable, Sequence
 
 import available_models as _available_models
 import model_data_sources as _sources
+import model_lifecycle as _lifecycle
 import model_router as _model_router
 import model_router_yaml as _model_router_yaml
 from ai_execution_history import sanitize_text
 
-ALGORITHM_VERSION = "1.1"
+ALGORITHM_VERSION = "1.4"
 DEFAULT_MIN_REFRESH_INTERVAL_HOURS = 6.0
 FAILED_RETRY_BACKOFF_HOURS = 0.25
+#: Retries after consecutive failures double from FAILED_RETRY_BACKOFF_HOURS up to this.
+MAX_RETRY_BACKOFF_HOURS = 6.0
+#: The only activation policy. ``manual`` was retired by issue #374.
+ACTIVATION_POLICY = "auto"
 MAX_ERROR_LENGTH = 2000
 MAX_HISTORY_ENTRIES = 30
 STALE_REFRESH_SECONDS = 30 * 60
 ALLOWED_INITIATORS = ("STARTUP", "USER", "SCHEDULED", "AI_AGENT")
 ALLOWED_SOURCES = ("local", "models_dev", "artificial_analysis", "json")
+SOURCE_LABELS = {"artificial_analysis": "Artificial Analysis", "models_dev": "models.dev"}
 ROUTER_FIELDS = (
     "provider",
     "agent",
@@ -160,6 +168,16 @@ def _finite_float(value: Any) -> float | None:
     return number
 
 
+def _feed_number(row: Mapping[str, Any], field: str) -> float | None:
+    """Missing observations retain history; malformed supplied prices fail validation."""
+    raw = row.get(field)
+    value = _finite_float(raw)
+    if field in ("input_cost", "output_cost", "reasoning_cost") and raw is not None and value is None:
+        # Never interpolate an untrusted value (which could contain a secret).
+        raise CalibrationValidationError(f"Model source contains an invalid {field}.")
+    return value
+
+
 INTELLIGENCE_KEY = "artificial_analysis_intelligence_index"
 
 
@@ -171,10 +189,33 @@ def fold_benchmark_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     folded into the base row's ``intelligence_by_effort`` rather than each
     becoming a separate candidate. Vendors that cannot be routed to are dropped.
     A base row is recorded as ``max`` when effort variants exist to compare it
-    with, else as ``base``.
+    with, else as ``base``. Rows naming the same model coalesce only when their
+    observations agree; a contradiction fails validation instead of letting
+    row order choose (``_merge_observations``).
     """
-    usable = [r for r in rows if isinstance(r, dict) and r.get("provider") in PROVIDER_AGENTS and r.get("model")]
-    by_key = {(r["provider"], r["model"]): r for r in usable}
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        provider = str(raw.get("provider") or "").strip().lower()
+        model = str(raw.get("model") or "").strip().lower()
+        if provider not in PROVIDER_AGENTS or not _TOKEN_RE.fullmatch(model):
+            continue
+        row = dict(raw, provider=provider, model=model)
+        for field in ("input_cost", "output_cost", "reasoning_cost", "speed", "latency_seconds"):
+            if field in row:
+                value = _feed_number(row, field)
+                if value is None:
+                    row.pop(field)
+                else:
+                    row[field] = value
+        if isinstance(row.get("evaluations"), dict):
+            row["evaluations"] = {
+                name: number for name, value in row["evaluations"].items()
+                if (number := _finite_float(value)) is not None
+            }
+        by_key[(provider, model)] = _merge_observations(by_key.get((provider, model), {}), row)
+    usable = list(by_key.values())
 
     def split(row: dict[str, Any]) -> tuple[str, str | None]:
         model = str(row["model"])
@@ -239,6 +280,7 @@ def merge_overlay(
     local_entries: Sequence[dict[str, Any]], overlay_rows: Sequence[dict[str, Any]],
     *, previous: dict[str, Any] | None = None,
     available: Mapping[str, Collection[str]] | None = None,
+    availability_observations: dict[str, bool] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Apply remote pricing/benchmark patches onto the bundled catalog.
 
@@ -249,17 +291,33 @@ def merge_overlay(
     the published prices, or which name a newly discovered model is published
     under. Two rows are the same identity if they share a key directly, if a
     third row ties their keys together (even transitively), or if either
-    resolves to the same existing catalog entry. Unmatched overlay rows become
-    DISCOVERED candidates and are never made routable by this merge alone.
+    resolves to the same existing catalog entry.
 
     ``available`` maps an agent (``claude``/``codex``/``grok``) to the canonical
-    names of the models its CLI reports. When given, an unmatched row only
-    becomes a candidate if a CLI actually offers that model, so a feed listing
-    hundreds of models does not bury the handful that can run. Without it,
-    every unmatched row is kept.
+    names of the models its CLI reports. When given, an unmatched row a CLI
+    offers is onboarded as a routable entry (metadata inferred from its closest
+    bundled relative, prices from the feed), and one no CLI offers is left out,
+    so a feed listing hundreds of models does not bury the handful that can
+    run. ``availability_observations`` then receives ``{"provider/model":
+    offered}`` for every unmatched identity of a supported provider. Without
+    ``available``, unmatched rows are kept as non-routable DISCOVERED records.
     """
     merged = [dict(entry) for entry in local_entries if isinstance(entry, dict)]
     previous_models = _calibration_models(previous)
+    retired_before = set(((previous or {}).get("model_policy") or {}).get("retirements") or {})
+    # Feed-onboarded rows remain peers even if a later feed omits them. Their
+    # last observations remain useful for retirement comparisons and history;
+    # the current CLI report still controls eligibility.
+    bundled_keys = {f"{entry.get('provider')}/{entry.get('model')}" for entry in merged}
+    for key, prior in previous_models.items():
+        if key not in bundled_keys and prior.get("agent") and prior.get("supported_efforts"):
+            entry = {field: prior[field] for field in ROUTER_FIELDS if field in prior}
+            for field in ("release_date", "speed", "latency_seconds", "external_evaluations"):
+                if field in prior:
+                    entry[field] = prior[field]
+            if _available_models.canonical(str(prior.get("model") or "")) in retired_before:
+                entry.update(active=True, deprecated=False, superseded_by=None)
+            merged.append(entry)
     lookup: dict[tuple[str, str], dict[str, Any]] = {}
     for entry in merged:
         prior = previous_models.get(f"{entry.get('provider')}/{entry.get('model')}", {})
@@ -267,13 +325,14 @@ def merge_overlay(
         # the last known value. Eligibility (active, deprecated, efforts) still
         # comes from the local definition, never from a public feed. Capability
         # is the one exception: a *measured* Intelligence Index sets the 1-5
-        # rank (see ``_build_calibration``), and that change goes through the
-        # same review and regression gate as any other calibration change.
+        # rank (see ``_build_calibration``), and that change is validated and
+        # activated like any other calibration change.
         for field in ("input_cost", "output_cost", "reasoning_cost", "external_evaluations", "intelligence_by_effort", "speed", "latency_seconds", "release_date"):
             if prior.get(field) is not None:
                 entry[field] = prior[field]
-        # A missing retirement observation is not permission to re-enable.
-        if prior.get("deprecated"):
+        # A missing retirement observation is not permission to re-enable. A
+        # retirement this app applied is re-evaluated every refresh instead.
+        if prior.get("deprecated") and _available_models.canonical(str(entry.get("model") or "")) not in retired_before:
             entry["deprecated"] = True
         for key in _overlay_keys(entry):
             lookup[key] = entry
@@ -310,7 +369,7 @@ def merge_overlay(
             continue
         observations: dict[str, Any] = {}
         for field in ("input_cost", "output_cost", "reasoning_cost", "speed", "latency_seconds"):
-            parsed = _finite_float(raw.get(field))
+            parsed = _feed_number(raw, field)
             if parsed is not None:
                 observations[field] = parsed
         evaluations = raw.get("evaluations")
@@ -362,12 +421,17 @@ def merge_overlay(
         if len(targets) > 1:
             raise CalibrationValidationError("Model source contains ambiguous model aliases.")
         target = next(iter(targets.values()), None)
-        if target is None and available is not None:
+        if available is not None:
             provider_key, model_key = min(keys)
-            offered = available.get(PROVIDER_AGENTS.get(provider_key, provider_key), ())
-            if _available_models.canonical(model_key) not in {
-                _available_models.canonical(name) for name in offered
-            }:
+            offered_names = {
+                _available_models.canonical(name)
+                for name in available.get(PROVIDER_AGENTS.get(provider_key, provider_key), ())
+            }
+            offered = any(_available_models.canonical(name) in offered_names for _, name in keys)
+            if (availability_observations is not None and provider_key in PROVIDER_AGENTS
+                    and _TOKEN_RE.fullmatch(model_key) and len(model_key) <= 120):
+                availability_observations[f"{provider_key}/{model_key}"] = offered
+            if target is None and not offered:
                 skipped_roots.add(root)
                 continue
         group_key = ("catalog", id(target)) if target is not None else ("new", root)
@@ -388,26 +452,77 @@ def merge_overlay(
             combined_by_group.get(group_key, {}), observations
         )
 
+    # Onboarded models infer from the bundled entries only, so which relative
+    # a new release borrows from never depends on feed row order.
+    local_specs = []
+    for entry in merged:
+        try:
+            local_specs.append(_model_router._parse_model(entry))
+        except _model_router.ModelRouterConfigError:
+            continue
     discovered: list[dict[str, Any]] = []
     for group_key, target in group_target.items():
         all_keys = group_all_keys[group_key]
-        if target is None:
-            canonical_provider, canonical_model = min(all_keys)
-            target = {
-                "provider": canonical_provider[:80],
-                "model": canonical_model[:120],
-                "status": STATUS_DISCOVERED,
-                "active": False,
-            }
-            discovered.append(target)
         combined = combined_by_group.get(group_key, {})
+        onboarded = False
+        if target is None:
+            offered_keys = {key for key in all_keys if available is not None and any(
+                _available_models.canonical(key[1]) == _available_models.canonical(name)
+                for name in available.get(PROVIDER_AGENTS.get(key[0], ""), ()))}
+            canonical_provider, canonical_model = min(offered_keys or all_keys)
+            agent = PROVIDER_AGENTS.get(canonical_provider)
+            if available is not None and agent and _TOKEN_RE.fullmatch(canonical_model):
+                target = _onboarded_entry(canonical_provider, canonical_model[:120], agent, local_specs, combined)
+                merged.append(target)
+                onboarded = True
+            else:
+                target = {
+                    "provider": canonical_provider[:80],
+                    "model": canonical_model[:120],
+                    "status": STATUS_DISCOVERED,
+                    "active": False,
+                }
+                discovered.append(target)
         for key in all_keys:
             lookup[key] = target
         # A public feed cannot re-enable a retired catalog model. Still compare
         # explicit false observations above so contradictory rows fail validation.
         target.update({field: value for field, value in combined.items()
                        if field != "deprecated" or value is True})
+        if onboarded or (target.get("agent") and f"{target.get('provider')}/{target.get('model')}" not in bundled_keys):
+            # Routable only once priced; spend must be recordable.
+            target["active"] = _lifecycle.row_price(target) is not None
     return merged, discovered
+
+
+def _onboarded_entry(
+    provider: str, model: str, agent: str,
+    local_specs: Sequence["_model_router.ModelSpec"], observations: dict[str, Any],
+) -> dict[str, Any]:
+    """A routable catalog entry for a feed model its provider CLI offers.
+
+    Capability, cost rank, efforts and task fit come from the closest bundled
+    relative (``available_models.closest_relative``), exactly as for a model
+    the CLI reports; a measured Intelligence Index outranks the relative's
+    capability, and prices come only from the feed observations.
+    """
+    known = [spec for spec in local_specs if spec.agent == agent]
+    relative = _available_models.closest_relative(model, ((spec.model, spec) for spec in known))
+    scores = observations.get("intelligence_by_effort") or {}
+    spec = _model_router._inferred_spec(
+        agent, _available_models.DiscoveredModel(agent, model), relative, known, scores,
+    )
+    entry = _model_spec_to_dict(spec)
+    peer = relative[0] if relative else None
+    basis = f"capability and cost inferred from {peer.model}" if peer else "no catalogued relative"
+    measured = "; capability ranked from measured Intelligence Index" if spec.intelligence_by_effort else ""
+    entry.update(
+        provider=provider, input_cost=None, output_cost=None, reasoning_cost=None,
+        deprecated=False, superseded_by=None,
+        notes=f"Onboarded automatically: reported by the model data feed and offered by the {agent} CLI; "
+              f"{basis}{measured}.",
+    )
+    return entry
 
 
 def _model_spec_to_dict(spec: "_model_router.ModelSpec") -> dict[str, Any]:
@@ -535,31 +650,17 @@ def _best_benchmark(entry: dict[str, Any], field: str) -> tuple[float | None, st
     return fallback, "HEURISTIC"
 
 
-def _status_for(
-    entry: dict[str, Any],
-    prev_by_key: dict[str, dict[str, Any]],
-    approved_keys: frozenset[str],
-    *,
-    has_previous: bool,
-) -> str:
-    """DISCOVERED is a review gate, not a one-refresh delay: once assigned it
-    is carried forward on every later refresh regardless of what else in the
-    calibration changes, until ``approve_discovered_model`` explicitly
-    approves that key. Without this, "present in the immediately preceding
-    calibration" reads as approval, so any unrelated refresh ages a
-    never-reviewed model straight into the live routing catalog.
+def _status_for(entry: dict[str, Any]) -> str:
+    """Eligibility alone decides status; there is no review gate (issue #374).
+
+    A newly seen, valid, active entry is ACTIVE or CANDIDATE on the refresh
+    that first sees it. DISCOVERED remains only for unmatched feed rows kept
+    without CLI evidence, which are never routable.
     """
     if entry["deprecated"]:
         return STATUS_DEPRECATED
     if not entry["active"]:
         return STATUS_DISABLED
-    if entry["key"] in approved_keys:
-        return STATUS_ACTIVE if entry["recommended"] else STATUS_CANDIDATE
-    prev = prev_by_key.get(entry["key"])
-    if has_previous and prev is None:
-        return STATUS_DISCOVERED
-    if prev is not None and prev.get("status") == STATUS_DISCOVERED:
-        return STATUS_DISCOVERED
     return STATUS_ACTIVE if entry["recommended"] else STATUS_CANDIDATE
 
 
@@ -693,31 +794,19 @@ def _calibration_models(calibration: dict[str, Any] | None) -> dict[str, dict[st
 def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
     prev_models = _calibration_models(previous)
     new_models = _calibration_models(new)
-    # Newly discovered *this round* -- drives has_meaningful_change and the
-    # notification gate, so a model that was already awaiting review before
-    # this refresh does not repeatedly count as "new" or re-trigger a notice.
+    # Newly seen *this round* (onboarded, or recorded without CLI evidence) --
+    # drives has_meaningful_change and the notification, once per model.
     newly_discovered = sorted(key for key in new_models if key not in prev_models)
     removed_models = sorted(key for key in prev_models if key not in new_models)
-    # Every model still sitting in DISCOVERED status, whether or not it was
-    # discovered this round -- so the change summary keeps surfacing an
-    # unreviewed model instead of only mentioning it once and then going
-    # silent about it forever.
-    pending_review = sorted(
-        key for key, model in new_models.items() if model.get("status") == STATUS_DISCOVERED
-    )
-    discovered = sorted(set(newly_discovered) | set(pending_review))
+    discovered = newly_discovered
 
     pricing_changes: list[dict[str, Any]] = []
     benchmark_changes: list[dict[str, Any]] = []
     performance_changes: list[dict[str, Any]] = []
     routing_input_changes: list[dict[str, Any]] = []
-    # A model already present last refresh whose `status` alone moves (most
-    # notably DISCOVERED -> ACTIVE/CANDIDATE right after approve_discovered_
-    # model) must count as meaningful on its own. Without this, the operator
-    # sequence of "review, approve, refresh" with nothing else changed
-    # computes has_meaningful_change=False, and _refresh_locked discards the
-    # correctly-recalculated new_calibration instead of ever persisting it --
-    # the approval silently never takes effect.
+    # A model already present last refresh whose `status` alone moves (an
+    # onboarded model becoming priced, a retirement taking effect or lifting)
+    # is meaningful on its own: the representative routes may not show it.
     status_changes: list[dict[str, Any]] = []
     for key, model in new_models.items():
         prev = prev_models.get(key)
@@ -824,7 +913,6 @@ def diff_calibrations(previous: dict[str, Any] | None, new: dict[str, Any]) -> d
         "discovered_models": discovered,
         "newly_discovered_models": newly_discovered,
         "removed_models": removed_models,
-        "pending_review_models": pending_review,
         "routed_model_keys": routed_model_keys,
         "pricing_changes": pricing_changes,
         "benchmark_changes": benchmark_changes,
@@ -994,13 +1082,17 @@ def notification_for(result: dict[str, Any], *, consecutive_failures: int = 0) -
     if status != "changed":
         return {"should_notify": False, "kind": "info", "message": ""}
     reasons = []
-    # Only models newly discovered *this* round page the user -- one already
-    # awaiting review from an earlier refresh does not re-notify every
-    # startup just because it is still unreviewed (see discovered_models'
-    # broader, non-notifying use in the diff for the ongoing summary).
+    # Only models first seen *this* round are reported, so an onboarded model
+    # is announced once rather than on every later refresh.
     discovered = diff.get("newly_discovered_models") or []
     if discovered:
         reasons.append(f"{len(discovered)} new model{'s' if len(discovered) != 1 else ''} discovered")
+    retired = diff.get("supersessions") or []
+    if retired:
+        reasons.append(f"{len(retired)} model{'s' if len(retired) != 1 else ''} retired")
+    reinstated = diff.get("reinstated") or []
+    if reinstated:
+        reasons.append(f"{len(reinstated)} retirement{'s' if len(reinstated) != 1 else ''} lifted")
     # A pricing change is only "significant" enough to notify about if it (a)
     # touches a model some workload is actually routed to, and (b) moves a
     # real published dollar price -- not just the catalog's 1-5 ordinal
@@ -1025,14 +1117,18 @@ def notification_for(result: dict[str, Any], *, consecutive_failures: int = 0) -
     routing = diff.get("routing_changes") or []
     if routing:
         reasons.append(f"{len(routing)} routing change{'s' if len(routing) != 1 else ''}")
-    if result.get("activated") is False and diff.get("has_meaningful_change"):
-        reasons.append("manual review is required")
+    if diff.get("regression"):
+        # Recorded and reported, never a reason to hold the update back.
+        reasons.append("routing regression recorded")
     if not reasons:
-        return {"should_notify": False, "kind": "info", "message": ""}
+        if not result.get("activated"):
+            return {"should_notify": False, "kind": "info", "message": ""}
+        reasons.append("calibration activated")
+    applied = " (applied automatically)" if result.get("activated") else ""
     return {
         "should_notify": True,
         "kind": "info",
-        "message": "Model routing update: " + "; ".join(reasons) + ".",
+        "message": f"Model routing update{applied}: " + "; ".join(reasons) + ".",
     }
 
 
@@ -1043,10 +1139,10 @@ def explain_update(active: dict[str, Any] | None, proposed: dict[str, Any] | Non
     for key in diff.get("removed_models") or []:
         answers.append({
             "question": f"Why is {key} absent from the updated catalog?",
-            "answer": "The model is no longer present in the refreshed catalog. Activating this calibration removes it from routing eligibility.",
+            "answer": "The model is no longer present in the refreshed catalog, so this calibration removes it from routing eligibility.",
         })
     routing_changes = diff.get("routing_changes") or []
-    proposed_routing = (proposed or {}).get("routing") or {}
+    proposed_routing = (proposed or active or {}).get("routing") or {}
     for change in routing_changes:
         category = change.get("category")
         decision = proposed_routing.get(category) or {}
@@ -1113,10 +1209,21 @@ def explain_update(active: dict[str, Any] | None, proposed: dict[str, Any] | Non
                 "answer": (
                     "Newly discovered models: "
                     + ", ".join(discovered[:8])
-                    + ". Discovery does not make a model available for routing until it is activated."
+                    + ". A model its provider CLI offers is routable once priced; one no CLI offers never is."
                 ),
             }
         )
+    for change in diff.get("supersessions") or []:
+        answers.append({
+            "question": f"Why was {change.get('model')} retired?",
+            "answer": f"{change.get('superseded_by')} replaces it: it is offered by its provider CLI and priced. "
+                      "Sessions already started finish on their pinned model.",
+        })
+    if diff.get("regression"):
+        answers.append({
+            "question": "Did the routing simulation regress?",
+            "answer": "Yes. The regression is recorded here and was reported; the calibration was still activated.",
+        })
     cost_delta = diff.get("estimated_cost_change_percent")
     if cost_delta is not None:
         direction = "decreased" if cost_delta < 0 else "increased"
@@ -1195,6 +1302,9 @@ class ModelCalibrationService:
             return {}
 
     def save_state(self, state: dict[str, Any]) -> None:
+        # The approval gate was retired (issue #374); drop its leftovers.
+        for obsolete in ("approved_models", "last_approved_at", "last_approved_by"):
+            state.pop(obsolete, None)
         _atomic_write_json(self.state_path, state)
 
     def _load_published_active(self) -> dict[str, Any] | None:
@@ -1354,9 +1464,18 @@ class ModelCalibrationService:
         raise CalibrationError(f"no calibration found for version {version}")
 
     def _router_models(self, calibration: dict[str, Any]) -> list[dict[str, Any]]:
+        """Routable rows, plus retired rows as inactive, deprecated peers.
+
+        A retired release is never routed, but it stays in the routing catalog
+        so a later release can infer from it and a started session pinned to it
+        can still be described.
+        """
+        retired = set(((calibration.get("model_policy") or {}).get("retirements")) or {})
         models = []
         for entry in calibration.get("models") or []:
-            if entry.get("status") not in ROUTABLE_STATUSES:
+            peer = (entry.get("status") == STATUS_DEPRECATED
+                    and _available_models.canonical(str(entry.get("model") or "")) in retired)
+            if entry.get("status") not in ROUTABLE_STATUSES and not peer:
                 continue
             models.append({field: entry.get(field) for field in ROUTER_FIELDS})
         return models
@@ -1409,33 +1528,6 @@ class ModelCalibrationService:
             raise
         return calibration
 
-    def approve_discovered_model(self, key: str, *, initiated_by: str = "USER") -> dict[str, Any]:
-        """Explicitly clear a model out of DISCOVERED so the next refresh can
-        assign it a normal ACTIVE/CANDIDATE status. Discovery alone never
-        does this -- see `_status_for`'s docstring and issue #205's "does not
-        automatically make it available for routing". Takes effect on the
-        next refresh, matching how a whole calibration version's `activate`
-        already works -- there is no separate instant-apply path.
-        """
-        self.acquire_lock()
-        try:
-            return self._approve_discovered_locked(key, initiated_by=initiated_by)
-        finally:
-            self.release_lock()
-
-    def _approve_discovered_locked(self, key: str, *, initiated_by: str) -> dict[str, Any]:
-        key = str(key or "").strip()
-        if "/" not in key or _UNSAFE_TEXT_RE.search(key):
-            raise CalibrationError(f"invalid model key {key!r}")
-        state = self.load_state()
-        approved = set(state.get("approved_models") or [])
-        approved.add(key)
-        state["approved_models"] = sorted(approved)
-        state["last_approved_at"] = iso_now()
-        state["last_approved_by"] = _normalize_initiator(initiated_by)
-        self.save_state(state)
-        return {"approved_models": state["approved_models"]}
-
     def _record_failure(
         self, state: dict[str, Any], attempted_at: str, source_status: str, error: Any, initiated_by: str
     ) -> dict[str, Any]:
@@ -1468,10 +1560,24 @@ class ModelCalibrationService:
         routing_optimization: str,
         existing_versions: set[str],
         discovered_models: list[dict[str, Any]] | None = None,
+        available: Mapping[str, Collection[str]] | None = None,
     ) -> dict[str, Any]:
+        # Validate identities before lifecycle mutations, which must never hide
+        # contradictory source rows or publish prices from invalid entries.
         specs, warnings = _validate_and_parse(raw_entries)
+        raw_lookup = {(raw.get("provider"), raw.get("model")): raw for raw in raw_entries if isinstance(raw, dict)}
+        rows = [_calibration_model_entry(spec, raw_lookup.get((spec.provider, spec.model), {})) for spec in specs]
+        model_policy = _lifecycle.policy_snapshot(rows, available)
+        _lifecycle.apply_retirements(rows, model_policy["retirements"], offered=available)
+        for row in rows:
+            if available is not None and not any(
+                _available_models.canonical(name) in {_available_models.canonical(row["model"]), _available_models.canonical(row.get("model_id") or "")}
+                for name in available.get(row["agent"], ())
+            ):
+                row["active"] = False
+        raw_entries = rows
+        specs = [_model_router._parse_model(row) for row in rows]
         prev_by_key = _calibration_models(previous)
-        approved_keys = frozenset(self.load_state().get("approved_models") or [])
         models: list[dict[str, Any]] = []
         raw_by_key = {}
         for raw in raw_entries:
@@ -1489,9 +1595,7 @@ class ModelCalibrationService:
                 entry["relative_capability"] = measured
                 entry["capability_source"] = "measured"
             entry["key"] = f"{entry['provider']}/{entry['model']}"
-            entry["status"] = _status_for(
-                entry, prev_by_key, approved_keys, has_previous=previous is not None
-            )
+            entry["status"] = _status_for(entry)
             entry["cost_efficiency"] = _cost_efficiency(entry)
             coding, coding_quality = _best_benchmark(entry, "coding_agent_index")
             agentic, _agentic_quality = _best_benchmark(entry, "deep_swe")
@@ -1531,6 +1635,7 @@ class ModelCalibrationService:
             "initiated_by": initiated_by,
             "algorithm_version": ALGORITHM_VERSION,
             "source": source,
+            "model_policy": model_policy,
             "routing_optimization": routing_optimization,
             "routing_mode": routing_mode_label(routing_optimization),
             "models": models,
@@ -1583,7 +1688,16 @@ class ModelCalibrationService:
         now_ts: float,
         min_interval_hours: float,
         force: bool,
+        availability_changed: bool = False,
     ) -> dict[str, Any] | None:
+        """Why this refresh should not run now, or ``None`` to run it.
+
+        After a failure, retries back off exponentially (doubling from
+        ``FAILED_RETRY_BACKOFF_HOURS`` up to ``MAX_RETRY_BACKOFF_HOURS``) and
+        are not held to the success interval. A changed CLI report also skips
+        the success interval, so a model a CLI starts offering is picked up on
+        the next scheduled check.
+        """
         if force:
             return None
         last_attempt = state.get("last_attempted_at")
@@ -1593,13 +1707,20 @@ class ModelCalibrationService:
                 failed_hours = (now_ts - _parse_iso(last_attempt)) / 3600.0
             except ValueError:
                 failed_hours = None
-            if failed_hours is not None and failed_hours < FAILED_RETRY_BACKOFF_HOURS:
+            try:
+                failures = max(1, int(state.get("consecutive_failures") or 1))
+            except (TypeError, ValueError):
+                failures = 1
+            backoff = min(MAX_RETRY_BACKOFF_HOURS, FAILED_RETRY_BACKOFF_HOURS * 2 ** min(failures - 1, 8))
+            if failed_hours is not None and failed_hours < backoff:
                 return {
                     "status": "skipped_interval",
                     "attempted_at": iso_now(now_ts),
                     "last_attempted_at": last_attempt,
                     "reason": "retry_backoff",
                 }
+        if last_status in ("failed", "not_configured") or availability_changed:
+            return None
         last_success = state.get("last_successful_at")
         # Data built by an older algorithm (before per-effort scores were folded
         # into one row per model) cannot rank a new release, so the interval
@@ -1642,9 +1763,15 @@ class ModelCalibrationService:
             raise CalibrationSourceError(str(error)) from error
         if kind == "models_dev":
             overlay = list(overlay) + self._benchmark_overlay(meta)
+        elif kind == "artificial_analysis":
+            # Effort variants are one model; prices and scores are taken as published.
+            overlay = fold_benchmark_rows(overlay)
+        observations: dict[str, bool] = {}
         merged, discovered = merge_overlay(
-            local_entries, overlay, previous=previous, available=available
+            local_entries, overlay, previous=previous, available=available,
+            availability_observations=observations,
         )
+        meta["availability_observations"] = dict(sorted(observations.items()))
         return merged, discovered, meta
 
     @staticmethod
@@ -1678,9 +1805,8 @@ class ModelCalibrationService:
         source: str = "local",
         source_url: str | None = None,
         force: bool = False,
-        run_calibration: bool = True,
         run_simulation_flag: bool = True,
-        activation_policy: str = "manual",
+        activation_policy: str = ACTIVATION_POLICY,
         initiated_by: str = "USER",
         min_interval_hours: float = DEFAULT_MIN_REFRESH_INTERVAL_HOURS,
         routing_optimization: str = "cost",
@@ -1690,8 +1816,11 @@ class ModelCalibrationService:
     ) -> dict[str, Any]:
         """One calibration refresh shared by manual, startup, scheduled, and AI callers.
 
-        ``available_models`` (agent -> model names the provider CLIs report)
-        limits new DISCOVERED candidates to models that can actually run."""
+        Every initiator activates a validated result (``activation_policy`` is
+        accepted for older callers and is always ``auto``). ``available_models``
+        (agent -> model names the provider CLIs report) decides which feed
+        models are onboarded: only ones a CLI offers can ever be routed."""
+        del activation_policy  # Always ACTIVATION_POLICY; manual review was retired (issue #374).
         now_ts = now if now is not None else time.time()
         initiated_by = _normalize_initiator(initiated_by)
         try:
@@ -1708,9 +1837,7 @@ class ModelCalibrationService:
                 source=source,
                 source_url=source_url,
                 force=force,
-                run_calibration=run_calibration,
                 run_simulation_flag=run_simulation_flag,
-                activation_policy=activation_policy,
                 initiated_by=initiated_by,
                 min_interval_hours=min_interval_hours,
                 routing_optimization=routing_optimization,
@@ -1734,9 +1861,7 @@ class ModelCalibrationService:
         source: str,
         source_url: str | None,
         force: bool,
-        run_calibration: bool,
         run_simulation_flag: bool,
-        activation_policy: str,
         initiated_by: str,
         min_interval_hours: float,
         routing_optimization: str,
@@ -1752,8 +1877,12 @@ class ModelCalibrationService:
         if source in ("models_dev", "artificial_analysis", "json"):
             self._bootstrap_locked(routing_optimization=routing_optimization, now=now_ts)
         state = self.load_state()
+        if source == "artificial_analysis" and fetch_fn is None and not os.environ.get(_sources.ARTIFICIAL_ANALYSIS_KEY_ENV):
+            return self._not_configured(state, now_ts=now_ts, initiated_by=initiated_by, force=force)
+        evidence = _normalized_available(available_models)
         skipped = self._should_skip_interval(
-            state, now_ts=now_ts, min_interval_hours=min_interval_hours, force=force
+            state, now_ts=now_ts, min_interval_hours=min_interval_hours, force=force,
+            availability_changed=evidence is not None and evidence != state.get("available_models"),
         )
         if skipped:
             skipped["initiated_by"] = initiated_by
@@ -1767,24 +1896,11 @@ class ModelCalibrationService:
         except CalibrationError as error:
             return self._record_failure(state, iso_now(now_ts), "error", error, initiated_by)
 
-        # A pending proposal is already-observed data, even though routing
-        # still uses the active version. Repeated checks must not mint the
-        # same proposal or rediscover its models. Tie it to its active base so
-        # a rollback cannot reuse an unrelated proposal as the baseline.
-        proposed = self.load_proposed()
-        comparison = previous
-        if (
-            proposed
-            and state.get("proposed_version") == proposed.get("version")
-            and proposed.get("base_version") == (previous or {}).get("version")
-        ):
-            comparison = proposed
-
         attempted_at = iso_now(now_ts)
         self._set_progress(*PROGRESS_STAGES[0])
         try:
             raw_entries, discovered, source_meta = self._fetch_entries(
-                source=source, source_url=source_url, fetch_fn=fetch_fn, previous=comparison,
+                source=source, source_url=source_url, fetch_fn=fetch_fn, previous=previous,
                 available=available_models,
             )
         except CalibrationSourceError as error:
@@ -1796,30 +1912,44 @@ class ModelCalibrationService:
         try:
             new_calibration = self._build_calibration(
                 raw_entries,
-                previous=comparison,
+                previous=previous,
                 initiated_by=initiated_by,
                 now_ts=now_ts,
                 source=source_meta,
                 routing_optimization=routing_optimization,
                 existing_versions=self._existing_versions(),
                 discovered_models=discovered,
+                available=available_models,
             )
         except CalibrationValidationError as error:
             return self._record_failure(state, attempted_at, "error", error, initiated_by)
 
         self._set_progress(*PROGRESS_STAGES[2])
         diff = diff_calibrations(previous, new_calibration)
-        observed_diff = diff_calibrations(comparison, new_calibration)
-        diff["newly_discovered_models"] = observed_diff["newly_discovered_models"]
+        retired_now = new_calibration["model_policy"]["retirements"]
+        retired_before = ((previous or {}).get("model_policy") or {}).get("retirements") or {}
+        diff["supersessions"] = [{"model": old, "superseded_by": new} for old, new in retired_now.items()
+                                 if retired_before.get(old) != new]
+        diff["reinstated"] = sorted(old for old in retired_before if old not in retired_now)
+        if diff["supersessions"] or diff["reinstated"] or new_calibration["model_policy"] != (previous or {}).get("model_policy"):
+            diff["has_meaningful_change"] = True
         simulation = None
-        if run_calibration and run_simulation_flag:
+        if run_simulation_flag:
             self._set_progress(*PROGRESS_STAGES[3])
             self._set_progress(*PROGRESS_STAGES[4])
             simulation = run_simulation(previous, new_calibration, diff)
             new_calibration["regression_ok"] = simulation["regression_ok"]
         else:
             new_calibration["regression_ok"] = True
+        # A regression is evidence for the operator, never a gate (issue #374).
+        diff["regression"] = not new_calibration["regression_ok"]
+        if previous and previous.get("regression_ok") != new_calibration["regression_ok"]:
+            diff["has_meaningful_change"] = True
 
+        # Transition observations commit only with a successful publication.
+        # Otherwise a failed write would swallow the next retry's event.
+        observed_state = dict(state)
+        log_lines = self._transition_logs(observed_state, source, source_meta, diff, new_calibration)
         state["last_attempted_at"] = attempted_at
         state["last_successful_at"] = attempted_at
         state["refreshed_algorithm_version"] = ALGORITHM_VERSION
@@ -1827,41 +1957,16 @@ class ModelCalibrationService:
         state["last_error"] = None
         state["last_diff"] = diff
         state["consecutive_failures"] = 0
+        if evidence is not None:
+            state["available_models"] = evidence
 
-        if previous is None:
-            # Nothing was active yet, so there is no production calibration
-            # to protect from a silent replacement: this successfully
-            # fetched and validated data becomes the active baseline
-            # immediately, regardless of activation_policy. Persist refresh
-            # metadata before activation so publication is the final write.
-            self._write_history(new_calibration)
-            state["last_attempted_status"] = "changed"
-            state["last_refresh_calibration_version"] = new_calibration["version"]
-            self.save_state(state)
-            self._activate_locked(new_calibration["version"], initiated_by=initiated_by)
-            self._set_progress(*PROGRESS_STAGES[5])
-            result = {
-                "status": "changed",
-                "initiated_by": initiated_by,
-                "source_status": source_meta.get("status"),
-                "source_warnings": list(source_meta.get("warnings") or []),
-                "attempted_at": attempted_at,
-                "diff": diff,
-                "simulation": simulation,
-                "calibration_version": new_calibration["version"],
-                "activated": True,
-                "models_checked": len(new_calibration["models"]),
-            }
-            result["notification"] = notification_for(result)
-            return result
-
-        if not run_calibration or not observed_diff["has_meaningful_change"] or not diff["has_meaningful_change"]:
-            if run_calibration and not diff["has_meaningful_change"]:
-                # The source returned to the active data; an older proposal
-                # is no longer an update to offer. Its history remains intact.
-                state["proposed_version"] = None
-                self.proposed_path.unlink(missing_ok=True)
+        if previous is not None and not diff["has_meaningful_change"]:
+            # Nothing to publish; obsolete proposal metadata is cleared.
+            # Immutable history remains intact.
+            state["proposed_version"] = None
+            self.proposed_path.unlink(missing_ok=True)
             state["last_attempted_status"] = "no_change"
+            state["availability_observations"] = observed_state["availability_observations"]
             self.save_state(state)
             self._set_progress(*PROGRESS_STAGES[5])
             result = {
@@ -1873,40 +1978,131 @@ class ModelCalibrationService:
                 "diff": diff,
                 "simulation": simulation,
                 "models_checked": len(new_calibration["models"]),
+                "log_lines": log_lines,
             }
             result["notification"] = notification_for(result)
             return result
 
+        # Validated data is activated whatever the simulation says. Persist the
+        # refresh metadata first so publication is the final write.
+        diff["activation"] = {
+            "policy": ACTIVATION_POLICY,
+            "previous_version": (previous or {}).get("version"),
+            "version": new_calibration["version"],
+            "initiated_by": initiated_by,
+        }
         state["last_attempted_status"] = "changed"
         state["last_refresh_calibration_version"] = new_calibration["version"]
         new_calibration["base_version"] = (previous or {}).get("version")
         new_calibration["diff"] = diff
         new_calibration["simulation"] = simulation
         self._write_history(new_calibration)
-        _atomic_write_json(self.proposed_path, new_calibration)
-        state["proposed_version"] = new_calibration["version"]
+        if previous is not None:
+            _atomic_write_json(self.proposed_path, new_calibration)
+            state["proposed_version"] = new_calibration["version"]
         self.save_state(state)
-
-        activated = False
-        if activation_policy == "auto" and simulation is not None and simulation["regression_ok"]:
-            self._activate_locked(new_calibration["version"], initiated_by=initiated_by)
-            activated = True
+        self._activate_locked(new_calibration["version"], initiated_by=initiated_by)
+        # Availability logs are advisory metadata; the routing publication is
+        # already committed. A metadata error must not misreport activation.
+        try:
+            committed = self.load_state()
+            committed["availability_observations"] = observed_state["availability_observations"]
+            self.save_state(committed)
+        except (OSError, CalibrationError):
+            pass
 
         self._set_progress(*PROGRESS_STAGES[5])
         result = {
             "status": "changed",
             "initiated_by": initiated_by,
             "source_status": source_meta.get("status"),
-                "source_warnings": list(source_meta.get("warnings") or []),
+            "source_warnings": list(source_meta.get("warnings") or []),
             "attempted_at": attempted_at,
             "diff": diff,
             "simulation": simulation,
             "calibration_version": new_calibration["version"],
-            "activated": activated,
+            "activated": True,
             "models_checked": len(new_calibration["models"]),
+            "log_lines": log_lines,
+            # The grounded explanation runs after activation and never gates it.
+            "analysis": self._analysis_after_activation(),
         }
         result["notification"] = notification_for(result)
         return result
+
+    def _analysis_after_activation(self) -> dict[str, Any]:
+        try:
+            return self.analyze()
+        except Exception:  # Advisory analysis must never misreport a committed activation.
+            return {"summary": "Calibration activated; its explanation is temporarily unavailable."}
+
+    def _not_configured(
+        self, state: dict[str, Any], *, now_ts: float, initiated_by: str, force: bool,
+    ) -> dict[str, Any]:
+        """No Artificial Analysis key: say so and skip the external refresh.
+
+        The last known-good calibration stays active and the status reports the
+        source as not configured rather than current. Logged once per state
+        change (or on an explicit request), not on every scheduled check.
+        """
+        line = ("Model data: Artificial Analysis is not configured; external refresh skipped. "
+                "The last known-good calibration remains active and is not current.")
+        report = force or state.get("last_attempted_status") != "not_configured"
+        if report:
+            state["last_attempted_at"] = iso_now(now_ts)
+            state["last_attempted_status"] = "not_configured"
+            state["last_source_status"] = "not_configured"
+            state["last_error"] = None
+            self.save_state(state)
+        result = {
+            "status": "not_configured",
+            "source_status": "not_configured",
+            "initiated_by": initiated_by,
+            "attempted_at": iso_now(now_ts),
+            "log_lines": [line] if report else [],
+        }
+        result["notification"] = notification_for(result)
+        return result
+
+    @staticmethod
+    def _transition_logs(
+        state: dict[str, Any], source: str, source_meta: dict[str, Any],
+        diff: dict[str, Any], calibration: dict[str, Any],
+    ) -> list[str]:
+        """One line per CLI-availability or retirement transition, never repeated.
+
+        Availability is tracked per feed identity in the state, so a model no
+        CLI offers is logged once, and once more when a CLI starts offering it.
+        """
+        lines: list[str] = []
+        label = SOURCE_LABELS.get(source, "the model data feed")
+        observed = source_meta.get("availability_observations") or {}
+        known = state.get("availability_observations")
+        known = dict(known) if isinstance(known, dict) else {}
+        for key, offered in sorted(observed.items()):
+            before = known.get(key)
+            known[key] = offered
+            if before is offered:
+                continue
+            provider = key.split("/", 1)[0]
+            cli = PROVIDER_AGENTS.get(provider)
+            if not cli:
+                continue
+            if offered and before is False:
+                lines.append(f"Model data: {key} is now available from the {cli} CLI; it is a routing candidate.")
+            elif not offered:
+                lines.append(f"Model data: {key} is reported by {label} but not offered by the {cli} CLI; "
+                             "not a routing candidate.")
+        state["availability_observations"] = known
+        agents = {_available_models.canonical(str(row.get("model"))): row.get("agent")
+                  for row in calibration.get("models") or []}
+        for change in diff.get("supersessions") or []:
+            cli = agents.get(change["model"]) or "provider"
+            lines.append(f"Model data: {change['model']} retired; superseded by {change['superseded_by']}, "
+                         f"now offered by the {cli} CLI.")
+        for model in diff.get("reinstated") or []:
+            lines.append(f"Model data: {model} retirement is dormant; its successor is no longer offered or priced.")
+        return lines
 
     def analyze(self) -> dict[str, Any]:
         """Explain the latest stored diff using only stored calibration data."""
@@ -1980,11 +2176,23 @@ def _normalize_initiator(value: str) -> str:
     return text if text in ALLOWED_INITIATORS else "USER"
 
 
+def _normalized_available(available: Mapping[str, Collection[str]] | None) -> dict[str, list[str]] | None:
+    """CLI evidence as ``{agent: sorted names}`` for comparison and storage."""
+    if available is None:
+        return None
+    return {
+        str(agent): sorted({str(name) for name in names if isinstance(name, str) and name})
+        for agent, names in sorted(available.items(), key=lambda item: str(item[0]))
+        if isinstance(names, Collection) and not isinstance(names, (str, bytes))
+    }
+
+
 def _available_from_json(raw: str) -> dict[str, list[str]] | None:
     """Model names per agent from the app's ``--available-models`` JSON.
 
     ``None`` (no filtering) when the value is absent or unusable; a bad value
-    must never stop a refresh."""
+    must never stop a refresh. A valid report is authoritative even when it
+    is empty: no CLI offers anything, so no feed model is onboarded."""
     if not str(raw or "").strip():
         return None
     try:
@@ -2000,7 +2208,7 @@ def _available_from_json(raw: str) -> dict[str, list[str]] | None:
             for row in (rows if isinstance(rows, list) else [])
         ]
         available[str(agent).strip().lower()] = [name for name in names if name]
-    return available or None
+    return available
 
 
 def build_calibration_parser() -> argparse.ArgumentParser:
@@ -2016,25 +2224,19 @@ def build_calibration_parser() -> argparse.ArgumentParser:
     refresh.add_argument("--initiated-by", default="USER", choices=list(ALLOWED_INITIATORS))
     refresh.add_argument("--source", default="local", choices=list(ALLOWED_SOURCES))
     refresh.add_argument("--source-url", default=None)
-    refresh.add_argument("--activation-policy", default="manual", choices=["manual", "auto"])
+    # Retained for older callers; activation is always automatic (issue #374).
+    refresh.add_argument("--activation-policy", default=ACTIVATION_POLICY, choices=[ACTIVATION_POLICY])
     refresh.add_argument("--min-interval-hours", type=float, default=DEFAULT_MIN_REFRESH_INTERVAL_HOURS)
     refresh.add_argument("--routing-optimization", default="cost", choices=["best", "cost"])
     refresh.add_argument(
         "--available-models", default="",
-        help="JSON of the models each provider CLI reports; limits new candidates to those.",
+        help="JSON of the models each provider CLI reports; only those feed models are onboarded.",
     )
     refresh.add_argument("--no-simulation", action="store_true")
-    refresh.add_argument("--no-calibration", action="store_true")
 
     activate = sub.add_parser("activate", help="Promote a calibration version to active.")
     activate.add_argument("version")
     activate.add_argument("--initiated-by", default="USER")
-
-    approve = sub.add_parser(
-        "approve", help="Approve a DISCOVERED model so the next refresh can make it routable."
-    )
-    approve.add_argument("key")
-    approve.add_argument("--initiated-by", default="USER")
 
     history = sub.add_parser("history", help="List recent calibration versions.")
     history.add_argument("--limit", type=int, default=20)
@@ -2055,7 +2257,6 @@ def main(argv: list[str] | None = None) -> int:
                 source=args.source,
                 source_url=args.source_url,
                 force=args.force,
-                run_calibration=not args.no_calibration,
                 run_simulation_flag=not args.no_simulation,
                 activation_policy=args.activation_policy,
                 initiated_by=args.initiated_by,
@@ -2065,8 +2266,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.action == "activate":
             result = service.activate(args.version, initiated_by=args.initiated_by)
-        elif args.action == "approve":
-            result = service.approve_discovered_model(args.key, initiated_by=args.initiated_by)
         elif args.action == "analyze":
             result = service.analyze()
         else:
