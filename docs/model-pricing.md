@@ -182,3 +182,14 @@ deliberately separate, and a change to one is not a change to the other. The
 dashboard used to derive cost from the routing rank, which could not
 distinguish two differently-billed models that happened to share a rank;
 issue #295 replaced that.
+
+
+## Native-cache reporting (#381)
+
+`token_usage.cache_metrics` uses the invocation's effective-dated rates to compute
+net API-equivalent cache savings: the read discount minus any cache-write premium.
+It persists that estimate with existing provenance; historical rows are never
+repriced. A missing counter or rate means unavailable, not zero. Claude's
+`total_cost_usd`, when present, is stored separately as provider-reported usage
+cost, not verified subscription charges. Estimated savings do not establish any
+realized subscription savings. See [native caching](prompt-caching.md).

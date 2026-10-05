@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import json
+import math
 from typing import Any, Iterable
 
 import model_pricing
@@ -109,15 +110,28 @@ class NormalizedUsage:
     cache_write_tokens: int | None = None
     total_tokens: int | None = None
     cached_tokens_included_in_input: bool = False
+    reported_cost: float | None = None
+    usage_scope: str = "invocation"
     raw: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 def _as_int(value: Any) -> int | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        number = int(value)
+        return number if 0 <= number <= 2**63 - 1 and number == float(value) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _as_cost(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return number if math.isfinite(number) and number >= 0 else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -171,11 +185,14 @@ def normalize_claude_usage(raw: str) -> NormalizedUsage | None:
     is only computed when the provider did not report one.
     """
     usage_payload: dict[str, Any] | None = None
+    reported_cost = None
     for event in _iter_json_events(raw):
-        if event.get("type") == "result" and isinstance(event.get("usage"), dict):
-            usage_payload = event["usage"]
+        if event.get("type") == "result":
+            reported_cost = _as_cost(event.get("total_cost_usd"))
+            if isinstance(event.get("usage"), dict):
+                usage_payload = event["usage"]
     if usage_payload is None:
-        return None
+        return NormalizedUsage(reported_cost=reported_cost) if reported_cost is not None else None
     input_tokens = _as_int(usage_payload.get("input_tokens"))
     output_tokens = _as_int(usage_payload.get("output_tokens"))
     cache_read = _as_int(usage_payload.get("cache_read_input_tokens"))
@@ -190,11 +207,12 @@ def normalize_claude_usage(raw: str) -> NormalizedUsage | None:
     return NormalizedUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        reasoning_tokens=None,
+        reasoning_tokens=_as_int(usage_payload.get("reasoning_tokens")),
         cached_input_tokens=cached_input_tokens,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_creation,
         total_tokens=total_tokens,
+        reported_cost=reported_cost,
         raw={"usage": usage_payload},
     )
 
@@ -265,21 +283,27 @@ def normalize_codex_usage(raw: str) -> NormalizedUsage | None:
     turn); falls back to a bare top-level ``usage`` key for robustness
     against CLI version differences.
     """
-    usage_payload: dict[str, Any] | None = None
+    usage_payload = None
+    cumulative = None
+    # turn.completed is authoritative for this invocation; token_count totals
+    # may cover the *whole resumed session*, not just this new CLI process.
     for event in _iter_json_events(raw):
         if event.get("type") == "token_count":
             info = event.get("info")
             candidate = info.get("total_token_usage") if isinstance(info, dict) else None
             if isinstance(candidate, dict):
-                usage_payload = candidate
-                continue
-            if isinstance(event.get("usage"), dict):
+                cumulative = candidate
+            elif isinstance(event.get("usage"), dict):
                 usage_payload = event["usage"]
         elif isinstance(event.get("usage"), dict):
             usage_payload = event["usage"]
-    if usage_payload is None:
-        return None
-    return _openai_style_usage(usage_payload)
+    if usage_payload is not None:
+        return _openai_style_usage(usage_payload)
+    if cumulative is not None:
+        usage = _openai_style_usage(cumulative)
+        usage.usage_scope = "session"
+        return usage
+    return None
 
 
 def normalize_grok_usage(raw: str) -> NormalizedUsage | None:
@@ -391,6 +415,52 @@ def estimate_cost(
     return estimate_cost_detailed(model, usage, provider=provider, at=at).cost
 
 
+def cache_metrics(usage: NormalizedUsage | None, estimate: model_pricing.CostEstimate) -> dict[str, Any]:
+    """Provider-aware denominator and net API-equivalent cache discount.
+
+    Cache write premiums count against savings. Missing rates/counters stay
+    unavailable; these figures never claim realized subscription savings.
+    """
+    result = {"cache_input_tokens": None, "cache_savings_estimate": None}
+    if usage is None or usage.input_tokens is None or usage.cache_read_tokens is None:
+        return result
+    read, write = usage.cache_read_tokens, usage.cache_write_tokens
+    if usage.cached_tokens_included_in_input:
+        total = usage.input_tokens
+        write = 0  # OpenAI does not expose a separately metered cache write.
+    elif write is not None:
+        total = usage.input_tokens + read + write
+    else:
+        return result
+    if read > total:
+        return result
+    result["cache_input_tokens"] = total
+    rate, cached_rate, write_rate = (estimate.input_rate_per_million,
+                                    estimate.cached_input_rate_per_million,
+                                    estimate.cache_write_rate_per_million)
+    if rate is not None and cached_rate is not None and (not write or write_rate is not None):
+        result["cache_savings_estimate"] = (
+            read * (rate - cached_rate) + (write or 0) * (rate - (write_rate or rate))
+        ) / 1_000_000
+    return result
+
+
+_USAGE_COUNTERS = ("input_tokens", "output_tokens", "reasoning_tokens", "cached_input_tokens",
+                   "cache_read_tokens", "cache_write_tokens", "total_tokens")
+
+
+def invocation_usage(usage: NormalizedUsage | None, resumed: bool,
+                     baseline: dict[str, Any] | None) -> NormalizedUsage | None:
+    if usage is None or usage.usage_scope != "session" or not resumed:
+        return usage
+    values = {}
+    for name in _USAGE_COUNTERS:
+        current, previous = getattr(usage, name), (baseline or {}).get(name)
+        values[name] = (current - previous if isinstance(previous, int) and current is not None
+                        and current >= previous else None)
+    return dataclasses.replace(usage, **values)
+
+
 @dataclasses.dataclass
 class UsageRecord:
     """One AI model invocation's telemetry — the row shape used for the
@@ -430,6 +500,11 @@ class UsageRecord:
     #: silently restates a historical cost: nothing recomputes these.
     #: ``pricing_status`` is ``priced`` or the reason there is no money on
     #: this row — an unpriced invocation still keeps all of its tokens.
+    session_reused: bool | None = None
+    session_role: str = ""
+    cache_input_tokens: int | None = None
+    cache_savings_estimate: float | None = None
+    reported_cost: float | None = None
     pricing_status: str = ""
     pricing_version: str = ""
     pricing_rate_id: str = ""
@@ -507,6 +582,23 @@ def render_ai_usage_markdown(events: Iterable[dict[str, Any]]) -> str:
     lines.append(f"**Total Tokens:** {_format_int(total_tokens)}  ")
     lines.append(f"**Estimated Cost:** {_format_cost(total_cost) if any_cost else '—'}  ")
     lines.append(f"**AI Invocations:** {len(records)}")
+    read = _sum_optional(*(r.cache_read_tokens for r in records))
+    write = _sum_optional(*(r.cache_write_tokens for r in records))
+    measured = [r for r in records if r.cache_input_tokens is not None and r.cache_read_tokens is not None]
+    denominator = sum(r.cache_input_tokens for r in measured)
+    efficiency = f"{sum(r.cache_read_tokens for r in measured) / denominator:.1%}" if denominator else "—"
+    savings = _sum_optional(*(r.cache_savings_estimate for r in records))
+    reported = _sum_optional(*(r.reported_cost for r in records))
+    known = [r for r in records if r.session_reused is not None]
+    reuse = f"{sum(bool(r.session_reused) for r in known)} / {len(known)}" if known else "—"
+    lines.extend(["", "**Cache efficiency**", "",
+                  f"**Cache read / write tokens:** {_format_int(read)} / {_format_int(write)}  ",
+                  f"**Cache hit efficiency:** {efficiency} ({len(measured)} measured invocations)  ",
+                  f"**Session reuse:** {reuse}  ",
+                  f"**Provider-reported cost:** {_format_cost(reported)}  ",
+                  f"**Estimated API-equivalent cache savings:** {_format_cost(savings)}  ",
+                  "Reported costs are CLI usage figures, not verified subscription charges. "
+                  "Estimated savings are not realized billing savings. — means unavailable."])
     return "\n".join(lines) + "\n"
 
 

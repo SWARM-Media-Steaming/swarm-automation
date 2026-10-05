@@ -1127,6 +1127,29 @@ def build_model_correction_prompt(
     ) + "\n"
 
 
+def cache_adjusted_cost(cost: float | None, provider: str, model: str, effort: str,
+                        evidence: Sequence[dict[str, Any]]) -> float | None:
+    """Apply only qualified exact-route observations to an existing estimate.
+
+    Capability/effort eligibility remains the caller's responsibility. A missing
+    or non-finite measurement cannot change a routing/fallback decision.
+    """
+    from usage_report import CACHE_MIN_SAMPLES, CACHE_MIN_ISSUES, CACHE_MIN_SUCCESS_RATE
+    if cost is None:
+        return None
+    for row in evidence:
+        if (row.get("provider"), row.get("model"), row.get("effort")) != (provider, model, effort):
+            continue
+        try:
+            discount = float(row["api_cost_discount"])
+            if (int(row["samples"]) >= CACHE_MIN_SAMPLES and int(row["issues"]) >= CACHE_MIN_ISSUES
+                    and float(row["success_rate"]) >= CACHE_MIN_SUCCESS_RATE and 0 < discount <= .5):
+                return cost * (1 - discount)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+    return cost
+
+
 def build_router_prompt(
     *,
     title: str,
@@ -1140,6 +1163,7 @@ def build_router_prompt(
     routing_optimization: str = DEFAULT_ROUTING_OPTIMIZATION,
     allow_usage_credit_models: bool = False,
     historical_signals: str = "",
+    cache_evidence: Sequence[dict[str, Any]] = (),
 ) -> str:
     """Ask for a grade of the original issue. The issue text is quoted only.
 
@@ -1209,6 +1233,17 @@ def build_router_prompt(
             "Historical SWARM engineering knowledge (sample-backed; not a rule you must follow):",
             signals,
         ]
+    if cache_evidence:
+        history_lines.extend([
+            "", "Measured native-cache cost evidence (same repository, model, effort and agent role):",
+            json.dumps(list(cache_evidence), sort_keys=True),
+            "For execution-cost comparisons, multiply the existing API-equivalent estimate by "
+            "(1 - api_cost_discount) only for the exact measured provider/model/effort/role. "
+            "These are historical estimates, not subscription billing savings or guaranteed hits. "
+            "Preserve capability, expected-success, reasoning, safety, context-fit and independence gates. "
+            "Do not infer cache savings for unmeasured candidates. Keep an existing session when the "
+            "selected model and execution requirements are unchanged.",
+        ])
     return "\n".join(
         [
             "You are the SWARM dynamic AI router.",

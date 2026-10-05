@@ -88,7 +88,7 @@ class EpochHistoryTests(unittest.TestCase):
         ), when)
 
     def test_schema_nine_records_epochs_rounds_and_merge_filters(self):
-        self.assertEqual(SCHEMA_VERSION, 9)
+        self.assertEqual(SCHEMA_VERSION, 10)
         clean = self._start(1, "2026-09-29T00:00:01+00:00")
         legacy_cap = self._start(2, "2026-09-29T00:00:02+00:00")
         best = self._start(3, "2026-09-29T00:00:03+00:00")

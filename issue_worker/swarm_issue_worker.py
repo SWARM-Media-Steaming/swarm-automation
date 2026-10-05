@@ -65,6 +65,8 @@ from token_usage import (
     PromptType,
     UsageRecord,
     estimate_cost_detailed,
+    cache_metrics,
+    invocation_usage,
     format_usage_log_line,
     normalize_usage,
     render_ai_usage_markdown,
@@ -78,6 +80,8 @@ from adversarial_uat import (
 )
 from architecture_docs import ArchitectureDocsMixin
 from complexity_worker import ComplexityWorkerMixin
+from prompt_sessions import PromptSessionMixin, resume_failure, valid_session_id
+from dynamic_router import cache_adjusted_cost
 from repository_complexity import format_analysis
 from handoff_context import HandoffContextMixin
 from handoff_context import render_prompt_section as render_handoff_prompt_section
@@ -1089,7 +1093,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin, ComplexityWorkerMixin):
+class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin, ComplexityWorkerMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -2548,10 +2552,20 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         old = model_route_profile(pinned.key, pinned.model, pinned.effort)
         new = model_route_profile(fresh.key, fresh.model, fresh.effort)
         if old and new:
+            # Only execution-cost estimates change; capability and mandatory
+            # effort checks below still take precedence over cache continuity.
+            role, _ = self.session_role()
+            role = ":".join(role.split(":")[:2])
+            evidence = self.cache_routing_evidence(role)
+            old = (old[0], cache_adjusted_cost(old[1], pinned.key, pinned.model, pinned.effort, evidence))
+            new = (new[0], cache_adjusted_cost(new[1], fresh.key, fresh.model, fresh.effort, evidence))
             if new[0] > old[0]:
                 return True, f"routing now needs a more capable model than {pinned.model}"
             if pinned.model == fresh.model:
-                # Effort alone is routing noise worth less than the session.
+                efforts = ("low", "medium", "high", "xhigh", "max")
+                if (pinned.effort in efforts and fresh.effort in efforts
+                        and efforts.index(fresh.effort) > efforts.index(pinned.effort)):
+                    return True, "routing requires higher reasoning effort"
                 return False, "the saved session is kept because only the effort differs"
             if new[0] >= old[0] and old[1] and new[1] is not None and new[1] <= old[1] * self.REROUTE_COST_MARGIN:
                 return True, (
@@ -2758,6 +2772,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 routing_optimization=self.config.routing_optimization,
                 allow_usage_credit_models=self.config.allow_usage_credit_models,
                 historical_signals=self.knowledge_routing_signals(),
+                cache_evidence=self.cache_routing_evidence(),
             )
             prompt += self.complexity_prompt_note()
             raw = self.run_router(host, prompt, images)
@@ -4290,7 +4305,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 f"work — do not write code. Provide the requested summary and put {ENVIRONMENT_ONLY_MARKER} "
                 "on its own final line."
             )
-        knowledge_section = self.knowledge_context_section()
+        knowledge_section = "" if self.choice.resume else self.knowledge_context_section()
         if knowledge_section:
             lines.extend(["", knowledge_section])
         if question_issue:
@@ -4623,6 +4638,14 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         independent attempt, including a retry after a rejected model.
         """
         assert self.choice
+        if self.prepare_cli_session():
+            prompt = self.fresh_session_prompt(prompt)
+        elif self.choice.resume:
+            for stage in ADVERSARIAL_STAGES:
+                loop = self.read_state().get(stage.key)
+                if isinstance(loop, dict) and loop.get("active") and loop.get("phase") == "fix":
+                    prompt = self.adversarial_prompt(stage, loop)
+                    break
         self.ai_output_file.write_text("", encoding="utf-8")
         self.ai_diagnostic_file.write_text("", encoding="utf-8")
         env = os.environ.copy()
@@ -4639,7 +4662,9 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         )
         self._last_ai_raw_output = ""
         started_at = iso_timestamp()
+        timer = time.monotonic()
         status = runner(prompt, env, activity)
+        self._last_ai_duration_ms = int((time.monotonic() - timer) * 1000)
         self.record_ai_usage(
             attempt_number=1,
             started_at=started_at,
@@ -4647,7 +4672,25 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
             error_type="" if status == 0 else "provider_exit_nonzero",
         )
         self.record_handoff_event("ai_invocation_finished", provider=self.choice.name, status=status)
+        attempt = 1
+        if (status != 0 and self.choice.resume and self.choice.key in {"claude", "codex"}
+                and resume_failure(self._last_ai_raw_output)):
+            # One fresh retry, with full current requirements. No --last and
+            # no transcript import; worktree changes remain authoritative.
+            self.fresh_cli_session()
+            prompt = self.fresh_session_prompt(prompt)
+            self.ai_output_file.write_text("", encoding="utf-8")
+            self._last_ai_raw_output = ""
+            started_at = iso_timestamp()
+            attempt += 1
+            timer = time.monotonic()
+            status = runner(prompt, env, activity)
+            self._last_ai_duration_ms = int((time.monotonic() - timer) * 1000)
+            self.record_ai_usage(attempt_number=attempt, started_at=started_at,
+                                 success=status == 0,
+                                 error_type="" if status == 0 else "session_recovery_failed")
         if status != 0 and self.recover_from_rejected_model():
+            prompt = self.fresh_session_prompt(prompt)
             runner = {
                 "claude": self._run_claude,
                 "codex": self._run_codex,
@@ -4659,13 +4702,16 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
             env.update(self.provider_environment())
             self._last_ai_raw_output = ""
             started_at = iso_timestamp()
+            timer = time.monotonic()
             status = runner(prompt, env, activity)
+            self._last_ai_duration_ms = int((time.monotonic() - timer) * 1000)
             self.record_ai_usage(
-                attempt_number=2,
+                attempt_number=attempt + 1,
                 started_at=started_at,
                 success=status == 0,
                 error_type="" if status == 0 else "provider_exit_nonzero",
             )
+        self.remember_cli_session(status == 0)
         return status
 
     def infer_ai_agent_context(self, attempt_number: int) -> tuple[str, str]:
@@ -4713,6 +4759,10 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         """
         assert self.choice
         inferred_agent, inferred_prompt = self.infer_ai_agent_context(attempt_number)
+        raw_usage = normalize_usage(self.choice.key, self._last_ai_raw_output)
+        if raw_usage and raw_usage.usage_scope == "session":
+            self._cli_usage_totals = dataclasses.asdict(raw_usage)
+        usage = invocation_usage(raw_usage, self.choice.resume, getattr(self, "_cli_usage_baseline", None))
         self._record_usage_event(
             agent_type=agent_type or inferred_agent,
             prompt_type=prompt_type or inferred_prompt,
@@ -4721,7 +4771,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
             model=self.choice.model,
             effort=self.choice.effort,
             attempt_number=attempt_number,
-            usage=normalize_usage(self.choice.key, self._last_ai_raw_output),
+            usage=usage,
             started_at=started_at,
             success=success,
             error_type=error_type,
@@ -4835,11 +4885,15 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 output_rate_per_million=estimate.output_rate_per_million,
                 started_at=started_at,
                 completed_at=completed_at,
-                duration_ms=duration_ms,
+                duration_ms=getattr(self, "_last_ai_duration_ms", duration_ms) if agent_type != AgentType.ROUTER.value else duration_ms,
                 success=success,
                 error_type=error_type,
                 workflow_run_id=self.history.execution_id,
-                agent_run_id=self.choice.session_id if self.choice else "",
+                agent_run_id=self.choice.session_id if self.choice and agent_type != AgentType.ROUTER.value else "",
+                session_reused=self.choice.resume if self.choice and agent_type != AgentType.ROUTER.value else False,
+                session_role=getattr(self, "_cli_session_role", "") if agent_type != AgentType.ROUTER.value else "router",
+                reported_cost=usage.reported_cost if usage else None,
+                **cache_metrics(usage, estimate),
                 prompt_id=str(uuid.uuid4()),
             )
             self._append_token_usage_event(record.to_dict())
@@ -5068,15 +5122,19 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
             stderr=subprocess.STDOUT,
             text=True,
         )
-        # The process now genuinely owns self.choice.session_id (created
-        # via --session-id, or attached via --resume) — from here on a
-        # retry may legitimately --resume it. See choice_from_state.
-        self.update_state(session_started=True)
         assert process.stdin and process.stdout
         process.stdin.write(stdin_text if stdin_text is not None else prompt)
         process.stdin.close()
         raw = "".join(process.stdout)
         self._last_ai_raw_output = raw
+        for line in raw.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (isinstance(event, dict) and event.get("type") in {"system", "result"}
+                    and event.get("session_id") == self.choice.session_id):
+                self.update_state(session_started=True)
         self.ai_diagnostic_file.write_text(raw, encoding="utf-8")
         text = assistant_result_text(raw)
         if text and not text.endswith("\n"):
@@ -5209,7 +5267,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("type") == "thread.started" and event.get("thread_id"):
+            if (isinstance(event, dict) and event.get("type") == "thread.started"
+                    and valid_session_id(event.get("thread_id"))):
                 self.choice.session_id = str(event["thread_id"])
                 self.update_state(session_id=self.choice.session_id, session_started=True)
                 break

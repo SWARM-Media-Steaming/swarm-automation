@@ -378,3 +378,13 @@ platform-specific work before Linux or Windows releases.
 ```bash
 cargo test
 ```
+
+
+### Automatic native prompt caching
+
+Claude Code and Codex worker/fixer sessions now continue automatically when their
+issue, repository, role, model, effort and context remain compatible. Each new
+adversarial review stays independent. Feedback's Usage & cost report and GitHub
+completion reports include cache efficiency and API-equivalent savings, separately
+from provider-reported costs. No configuration toggle or API migration is needed.
+See [session lifecycle, recovery, telemetry and benchmarking](docs/prompt-caching.md).

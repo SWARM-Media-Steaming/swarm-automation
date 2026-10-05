@@ -465,7 +465,7 @@ CLI `--adversarial-best-effort-merge`):
   `auto_approve` are on. The stage outcome stays `cap_hit` / `FAILED`. The
   follow-up issue still carries the notes.
 
-History is schema 9: epoch rows, round fingerprints, merge policy, delivery,
+History schema 9 added epoch rows, round fingerprints, merge policy, delivery,
 unresolved-at-merge, and promotion. The Feedback **Merge result** filter
 separates `verified_clean` from `best_effort`. A pre-#305 `cap_hit` with an
 empty delivery column counts as best-effort; a clean outcome with an empty
@@ -522,6 +522,27 @@ other execution-history table (`adversarial_rounds` included); the GitHub
 report itself is not — it renders from the in-memory/state event list
 regardless of that setting, the same way `render_usage_report`'s quota lines
 already do.
+
+## Native prompt caching and session continuity
+
+Issue #381 extends the existing worker/session and token-usage paths; see
+[the lifecycle and reporting contract](../../../docs/prompt-caching.md) and
+[the cache rule](../../rules/prompt-caching.md). `PromptSessionMixin` selects
+compatible explicit UUID sessions at `Worker.run_ai` after routing. Primary,
+UAT fixes and security fixes have separate scopes; each new adversarial review
+is fresh. Legacy/missing/stale metadata, model/effort changes, instruction
+changes, history rewinds and failed resumes restart safely with current context.
+Successful native compaction is left alone. Never persist source snapshots.
+
+History schema 10 adds nullable cache/reuse/cost fields to `ai_token_usage`;
+`agent_run_id` remains the native session ID. Reused Codex cumulative counters
+need a prior-session baseline; unknown baselines stay unavailable. GitHub and
+Feedback show token-weighted cache efficiency and net API-equivalent savings,
+including cache-write premiums. CLI-reported costs are not verified subscription
+charges. Routing uses only recent, exact-role/model/effort evidence after the
+sample/diversity/success gates in `usage_report.py`. No settings or dependencies
+are added. `benchmark_prompt_caching.py` is an opt-in developer benchmark using
+disposable repositories, native CLIs and correctness checks.
 
 ## Pricing is versioned and dated, and routing rank is not pricing
 

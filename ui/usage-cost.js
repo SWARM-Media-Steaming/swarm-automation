@@ -56,6 +56,9 @@
     { key: "outputTokens", label: "Output", sort: "output", numeric: true },
     { key: "totalTokens", label: "Total", sort: "total", numeric: true },
     { key: "estimatedCost", label: "Estimated cost", sort: "cost", numeric: true, cost: true },
+    { key: "cacheHitEfficiency", label: "Cache hit efficiency", numeric: true },
+    { key: "sessionReused", label: "Sessions reused", numeric: true },
+    { key: "cacheSavingsEstimate", label: "API-equivalent cache savings", numeric: true, cost: true },
     { key: "coverage", label: "Coverage", sort: "", numeric: false },
   ];
 
@@ -66,11 +69,17 @@
     { key: "reasoningEffort", label: "Effort" },
     { key: "attemptNumber", label: "Attempt", numeric: true, plain: true },
     { key: "inputTokens", label: "Input", numeric: true },
+    { key: "cacheReadTokens", label: "Cache read", numeric: true },
+    { key: "cacheWriteTokens", label: "Cache write", numeric: true },
     { key: "cachedInputTokens", label: "Cached", numeric: true },
     { key: "reasoningTokens", label: "Reasoning", numeric: true },
     { key: "outputTokens", label: "Output", numeric: true },
     { key: "totalTokens", label: "Total", numeric: true },
     { key: "estimatedCost", label: "Estimated cost", numeric: true, cost: true },
+    { key: "reportedCost", label: "Reported cost", numeric: true, cost: true },
+    { key: "cacheSavingsEstimate", label: "API-equivalent cache savings", numeric: true, cost: true },
+    { key: "sessionId", label: "Session" },
+    { key: "sessionReused", label: "Session reused", numeric: true, plain: true },
     { key: "durationMs", label: "Duration", numeric: true },
     { key: "result", label: "Result" },
   ];
@@ -151,6 +160,12 @@
     if (isMissing(value)) return UNAVAILABLE;
     const number = Number(value);
     return Number.isFinite(number) ? number.toLocaleString() : UNAVAILABLE;
+  }
+
+  function formatEfficiency(value) {
+    if (isMissing(value)) return UNAVAILABLE;
+    const ratio = Number(value);
+    return Number.isFinite(ratio) && ratio >= 0 && ratio <= 1 ? `${(ratio * 100).toFixed(1)}%` : UNAVAILABLE;
   }
 
   function formatCount(value) {
@@ -336,6 +351,7 @@
     dominantCoverage,
     formatTokens,
     formatCount,
+    formatEfficiency,
     formatCost,
     formatDurationMs,
     pricedLabel,
