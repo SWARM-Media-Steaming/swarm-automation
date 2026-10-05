@@ -22,11 +22,10 @@ are actually available, which one should run it.
   benchmark data (Coding Agent Index, DeepSWE, Terminal-Bench, SWE-Atlas-QnA,
   cost/tokens/runtime per task). `model` slugs must match the exact strings
   the app already invokes providers with (`issue_worker/dynamic_router.py`'s
-  `_MODEL_CATALOG`); a model
-  missing here cannot be routed to. Adding a model needs no code change — add
-  an entry and, once it has real usage, fill in its benchmark numbers.
-- `model-blacklist.json` — models that are never offered or routed to: older
-  releases with a better successor, confirmed by the operator. Read by
+  `_MODEL_CATALOG`); feed and CLI discovery can add models without a row here. Metadata is inferred
+  from the closest same-family peer and refined by feed measurements.
+- `model-blacklist.json` — explicit retirements that take effect when their successor is CLI offered and
+  priced. Same-family retirements can also be derived from measurements. Read by
   `issue_worker/available_models.py` and embedded in `src/tools.rs`; see
   "Model blacklist" below.
 - `routing-rules.yaml` — complexity bands (`TRIVIAL` through `EXTREME`), task
@@ -81,17 +80,20 @@ Both YAML files are bundled into the packaged app as a sibling of
 / "skills" / "model-router"` — resolves correctly both in a source checkout
 and inside the installed app.
 
-## Calibration refresh and review (issue #205)
+## Automatic calibration (issues #205 and #374)
 
 `issue_worker/model_calibration.py` provides the shared refresh service for
-AI Configuration, startup, and scheduled/AI callers. External data overlays
-the local catalog; discovered models require review before routing eligibility.
+AI Configuration, startup, and scheduled/AI callers. Artificial Analysis overlays
+the local catalog. Every validated refresh activates automatically; CLI-offered,
+priced models become ACTIVE or CANDIDATE without approval. Regressions are
+recorded in the diff and notification and never block activation. Missing keys
+report not configured; failures keep the last good data and retry with backoff.
 Contradictory observations for the same provider/model (including API aliases)
 fail the entire refresh without publishing a proposal or changing active data.
 Equal normalized observations and complementary fields can be combined.
 
 Changes to supported efforts, strengths, weaknesses, and eligibility remain
-reviewable even when representative routing examples do not change. These
+visible in the diff even when representative routing examples do not change. These
 inputs affect requests outside the simulation sample. Calibration version IDs
 are never recycled after history pruning or rollback, and refresh summaries
 retain their originating version independently of which version is active.
@@ -102,10 +104,11 @@ defaults`) returns the scoring router's pick for a simple and a trivial task. An
 unset model means "auto" to the worker, and the desktop fills only empty
 settings from it.
 
-A model with no price in the pricing catalog is excluded from routing, the router
-prompt, derived tiers, Jev's model list and upgrades until it is priced.
+A model with no static or feed input/output price is excluded from routing,
+the router prompt, derived tiers, Jev's model list and upgrades. Static prices
+win; feed rates also record spend with calibration provenance.
 
-Refresh cadence: the app re-checks at least hourly, and the service refreshes
+Refresh cadence: the app re-checks every 15 minutes, and the service refreshes
 once `model_data_min_refresh_interval_hours` has passed since the last success.
 Data built by an older `ALGORITHM_VERSION` (before per-effort Intelligence Index
 scores were folded into one row per model) is rebuilt regardless of the
@@ -116,8 +119,8 @@ through `latest_release`: a model routed from a fallback tier or the
 configured default moves to the newest release of its family when that is no
 dearer and not measurably weaker. A session already started keeps its model.
 This is not a separate scoring bonus; measured capability and cost still decide
-which candidate wins. The upgrade only lands on a model with a price in the
-pricing catalog, so its spend is recorded.
+which candidate wins. The upgrade only lands on a CLI-offered model with a static or feed price,
+so its spend is recorded.
 
 Each adversarial stage's router prompt also carries the graded complexity and
 diff size of the change under test, and the stage logs the complexity it was
@@ -234,14 +237,13 @@ enough metadata exists" requirement. If nothing is eligible after filtering,
 
 ## Model blacklist
 
-A model listed in `model-blacklist.json` (currently Sonnet 4.6 and 5, Opus 4.6,
-4.7, 4.8 and 5, and Fable 5) is never offered in the app, never discovered from a
-provider CLI, and never chosen by the scorer, the router prompt, Jev, a tier
-table or an upgrade. Its catalog rows stay as inactive, deprecated peers so a
-newer discovered release still infers its metadata from the release it replaced.
-A saved provider, router or tier selection naming one is repaired into its
-successor. A session already started keeps running on its model. The list is
-edited by hand; see `.claude/rules/model-blacklist.md`.
+A retirement in `model-blacklist.json` is dormant until its successor is offered
+by the provider CLI and priced. `model_lifecycle.py` additionally derives
+same-provider, same-family retirements under the shared price tolerance and
+score margin. Retired rows stay as inactive, deprecated peers with
+`superseded_by`; dormant predecessors remain usable. Fresh selections are
+repaired only after retirement takes effect. Started sessions finish pinned.
+See `.claude/rules/model-blacklist.md` and `docs/model-pricing.md`.
 
 ## Repository-aware complexity (always on)
 

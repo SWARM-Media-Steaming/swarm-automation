@@ -1,9 +1,9 @@
 //! Credentials the app keeps for third-party data sources.
 //!
-//! The Artificial Analysis API key is optional: with it, model-data refreshes
-//! also collect benchmark scores, speed and latency. It lives in the macOS
-//! Keychain — never in `config.json`, on a command line, or in a log. The
-//! refresh hands it to the Python process through its environment only.
+//! The Artificial Analysis API key enables external prices and benchmarks.
+//! Without it, refreshes explicitly report not configured. The key comes from
+//! the environment or macOS Keychain — never `config.json`, a command line,
+//! or a log. Refresh passes it to Python through the environment only.
 
 const SERVICE: &str = "app.swarm.automation";
 const ARTIFICIAL_ANALYSIS_ACCOUNT: &str = "artificial-analysis-api-key";
@@ -79,9 +79,12 @@ mod store {
 }
 
 /// The saved key, if any. A Keychain that cannot be read counts as "no key":
-/// refreshes then simply run without benchmarks.
+/// external refreshes then report not configured and retain the last good data.
 pub fn artificial_analysis_key() -> Option<String> {
-    store::get().ok().flatten()
+    std::env::var(ARTIFICIAL_ANALYSIS_ENV)
+        .ok()
+        .and_then(|key| validate_key(&key).ok())
+        .or_else(|| store::get().ok().flatten())
 }
 
 pub fn store_artificial_analysis_key(raw: &str) -> Result<(), String> {

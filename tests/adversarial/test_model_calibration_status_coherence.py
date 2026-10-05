@@ -3,7 +3,7 @@
 The issue requires the last known-good calibration to remain immediately
 usable and separately visible from refresh state.  Status metadata and the
 short-lived progress snapshot are advisory files; damage to either must not
-hide a valid active calibration, invent a reviewable proposal, or make the
+hide a valid active calibration, invent a pending approval, or make the
 desktop command fail.  These tests exercise the production CLI boundary that
 the Rust commands invoke, using only deterministic local fixtures.
 """
@@ -104,24 +104,25 @@ class CalibrationStatusCoherenceTests(unittest.TestCase):
         self.assertEqual(status["active_version"], self.active_version)
         self.assertFalse(status["refresh_running"])
 
-    def test_damaged_proposal_cannot_advertise_a_phantom_update(self) -> None:
-        proposed = self.service.refresh(
+    def test_damaged_legacy_proposal_cannot_advertise_a_phantom_update(self) -> None:
+        activated = self.service.refresh(
             fetch_fn=lambda: [model_entry(relative_cost=5)],
             now=1_800_000_100.0,
             force=True,
         )
-        self.assertEqual(proposed["status"], "changed")
-        self.assertFalse(proposed["activated"])
+        self.assertEqual(activated["status"], "changed")
+        self.assertTrue(activated["activated"])
+        active_version = self.service.load_active()["version"]
         self.service.proposed_path.write_text("{truncated", encoding="utf-8")
 
         completed, status = self.cli_status()
 
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
-        self.assertEqual(status["active_version"], self.active_version)
+        self.assertEqual(status["active_version"], active_version)
         self.assertIsNone(status["proposed_calibration"])
         self.assertFalse(
             status["has_newer_proposed"],
-            "The UI must not offer activation when no readable proposal exists.",
+            "The UI must not resurrect the retired activation gate from a damaged legacy file.",
         )
 
 

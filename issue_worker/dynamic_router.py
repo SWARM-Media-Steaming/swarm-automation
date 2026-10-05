@@ -60,6 +60,7 @@ from issue_images import (
     inlined_images,
 )
 import available_models as _available_models
+import model_lifecycle as _model_lifecycle
 import model_pricing as _model_pricing
 import model_router as _model_router
 
@@ -246,6 +247,13 @@ _MODEL_CATALOG: tuple[CatalogModel, ...] = (
     ),
     CatalogModel(
         "codex",
+        "gpt-6-sol",
+        4,
+        "An earlier Codex Sol release, kept as an inactive deprecated peer of "
+        "GPT-6.1 Sol. It stays routable until the CLI offers that priced successor.",
+    ),
+    CatalogModel(
+        "codex",
         "gpt-6-astra",
         5,
         "Codex's most capable model. Reserved for sweeping, high-risk, or deeply "
@@ -308,7 +316,7 @@ def _catalog_with_discovered() -> tuple[CatalogModel, ...]:
                 found.value, ((row.model, row) for row in known)
             )
             peer, older = relative if relative else (None, False)
-            if older:
+            if older and "available_models" not in _available_models._calibration_policy():
                 continue
             fallback = min(known, key=lambda row: row.cost, default=None) if peer is None else None
             label = _available_models.display_label(found)
@@ -366,12 +374,25 @@ def model_catalog(
             if entry.provider not in seen:
                 seen.append(entry.provider)
         keys = seen
+    calibrated = _active_calibration_catalog()
+    eligible = None if calibrated is None else {
+        (spec.agent, _available_models.canonical(name)): spec.model
+        for spec in calibrated if spec.active and not spec.deprecated
+        for name in (spec.model, spec.model_id or spec.model)
+    }
     catalog: list[CatalogModel] = []
     for key in keys:
         rows = [entry for entry in _catalog_with_discovered() if entry.provider == key]
         # Blacklisted rows stay in the catalog so a newer release can infer
         # from them; they are never offered or named by the router.
-        rows = [entry for entry in rows if not _available_models.is_blacklisted(entry.model)]
+        rows = [entry for entry in rows if not _available_models.is_blacklisted(entry.model)
+                and _available_models.cli_offers(entry.provider, entry.model)
+                and (eligible is None or (entry.provider, _available_models.canonical(entry.model)) in eligible)]
+        if eligible is not None:
+            # CLI dated aliases and feed identities name the same model. Use
+            # the scoring catalog's identity in prompts and subsequent gates.
+            rows = [dataclasses.replace(entry, model=eligible[(entry.provider, _available_models.canonical(entry.model))])
+                    for entry in rows]
         # A model with no price would run with its spend unrecorded, so the
         # router is not offered it until it is priced.
         rows = [entry for entry in rows if _model_pricing.resolve_price(entry.model, provider=entry.provider).priced]
@@ -428,13 +449,9 @@ class ReleaseUpgrade:
     reason: str
 
 
-# A newer release may cost at most this much more per token than the one it
-# replaces. Zero would forbid a rounding difference; a real price increase is
-# a different decision than "use the latest".
-UPGRADE_PRICE_TOLERANCE = 1.05
-# A measured score this far below the older release's blocks the upgrade: the
-# default is "newer is better", and only evidence overrides it.
-UPGRADE_SCORE_MARGIN = 1.0
+# The upgrade thresholds are the derived-retirement thresholds: one policy.
+UPGRADE_PRICE_TOLERANCE = _model_lifecycle.UPGRADE_PRICE_TOLERANCE
+UPGRADE_SCORE_MARGIN = _model_lifecycle.UPGRADE_SCORE_MARGIN
 
 
 def latest_release(
@@ -455,7 +472,8 @@ def latest_release(
     * same provider and same family only (Sonnet stays Sonnet, Opus stays Opus);
     * the release must be active, offered by the provider CLI, allowed by the
       usage-credit setting, support the chosen effort, and not be excluded;
-    * it must have a price in the pricing catalog, so its spend is recorded;
+    * it must have a price (pricing catalog, else the model data feed), so its
+      spend is recorded;
     * it must not cost meaningfully more per token than the model it replaces;
     * a measured Intelligence Index that is clearly *lower* at the same effort
       vetoes it.
@@ -481,7 +499,7 @@ def latest_release(
         and (key, spec.model) not in barred
     ]
     # An upgrade must land on a model whose spend the app can record: a model
-    # with no price in the pricing catalog would run with its cost unknown.
+    # with no catalog or feed price would run with its cost unknown.
     newer = [spec for spec in newer if _model_pricing.resolve_price(spec.model, provider=key).priced]
     if not newer:
         return None
@@ -489,9 +507,11 @@ def latest_release(
 
     # Price: compare per-token prices when both are known, else the relative rank.
     if current is not None:
-        if None not in (current.input_cost, current.output_cost, best.input_cost, best.output_cost):
-            if (best.input_cost > current.input_cost * UPGRADE_PRICE_TOLERANCE
-                    or best.output_cost > current.output_cost * UPGRADE_PRICE_TOLERANCE):
+        old_price = _model_lifecycle.row_price(dataclasses.asdict(current))
+        new_price = _model_lifecycle.row_price(dataclasses.asdict(best))
+        if old_price is not None and new_price is not None:
+            if (new_price.input_per_million > old_price.input_per_million * UPGRADE_PRICE_TOLERANCE
+                    or new_price.output_per_million > old_price.output_per_million * UPGRADE_PRICE_TOLERANCE):
                 return None
         elif best.relative_cost > current.relative_cost:
             return None
@@ -688,6 +708,14 @@ def derived_routing_tiers(
     """
     catalog = _routing_catalog()
     skipped = set(excluded)
+    # The built-in providers must never route an unpriced configured fallback.
+    # Preserve this utility's offline fallback for callers describing a provider
+    # outside the app's catalog (which cannot be selected by the live router).
+    if agent in {entry.provider for entry in _MODEL_CATALOG} and fallback and not any(spec.agent == agent and spec.model == fallback[0]
+                            and spec.active and not spec.deprecated and _model_router.is_priced(spec)
+                            and (allow_usage_credit_models or not requires_usage_credits(spec.model))
+                            for spec in catalog):
+        fallback = None
     picks: list[tuple[int, tuple[str, str] | None]] = []
     for complexity in range(1, COMPLEXITY_SCALE_TOP + 1):
         picked = scored_floor(

@@ -20,6 +20,9 @@ What replaces it:
   catalog is later corrected, because nothing recomputes a stored estimate.
 * Resolution **by invocation timestamp**, not by "now": a call made in March
   is priced with March's rates even after an April price change lands.
+* A **feed fallback**: a model with no catalog entry is priced from the input
+  and output prices its active calibration row carries (Artificial Analysis).
+  The calibration version is persisted as that estimate's pricing version.
 
 Two rules this module exists to enforce:
 
@@ -39,7 +42,11 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import functools
+import json
 import math
+import os
+from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
@@ -143,7 +150,9 @@ class ModelPrice:
 # live when it ran. Editing an existing entry's numbers in place is a bug —
 # it rewrites history for anything recosted later.
 #
-# A model with no entry here is deliberately unpriced rather than approximated.
+# A model with no entry here is priced from its feed observation in the active
+# calibration (``_feed_price``), and is otherwise unpriced rather than
+# approximated. A static entry here always wins over the feed.
 # ---------------------------------------------------------------------------
 _ANTHROPIC_PRICING = "https://www.anthropic.com/pricing"
 _OPENAI_PRICING = "https://openai.com/api/pricing/"
@@ -436,17 +445,100 @@ def _candidates(model: str, provider: str) -> list[ModelPrice]:
     return matches
 
 
-def resolve_price(model: str, *, provider: str = "", at: str = "") -> PriceResolution:
+#: Set by the desktop app to the activated calibration's ``active_catalog.json``.
+CALIBRATION_CATALOG_ENV = "SWARM_MODEL_CALIBRATION_CATALOG"
+
+
+@functools.lru_cache(maxsize=4)
+def _read_publication(path: str, stamp: tuple[int, int, int]) -> dict:
+    del stamp  # Part of the cache key only: a republished file is reread.
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    calibration = data.get("calibration") if isinstance(data, dict) else None
+    return calibration if isinstance(calibration, dict) else {}
+
+
+def calibration_document() -> dict:
+    """The active calibration the desktop app published, or ``{}``.
+
+    Read without importing the routing engine. Missing, unreadable or
+    malformed publications are simply absent: pricing never raises.
+    """
+    path = os.environ.get(CALIBRATION_CATALOG_ENV, "").strip()
+    if not path:
+        return {}
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return {}
+    return _read_publication(path, (stat.st_ino, stat.st_mtime_ns, stat.st_size))
+
+
+def valid_rate(value: Any) -> bool:
+    """A usable per-million price: a finite, non-negative number (not a bool)."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
+
+
+def _feed_price(model: str, provider: str, entry: Any = None) -> PriceResolution:
+    """The feed price for a model with no static catalog entry.
+
+    ``entry`` is one calibration row; without it the active calibration's rows
+    are searched. Both the input and the output price must be valid, and one
+    row must match, or the model stays unpriced. The feed publishes no cache
+    rate, so cache-billed tokens are charged at its published input rate (an
+    upper bound) rather than at an invented discount.
+    """
+    from available_models import canonical
+
+    document = calibration_document() if entry is None else {}
+    rows = [entry] if entry is not None else document.get("models")
+    slug, key = canonical(normalize_model(model)), normalize_provider(provider)
+    matches = [
+        row for row in rows if isinstance(rows, list) and isinstance(row, dict)
+        and slug in {canonical(normalize_model(row.get("model"))), canonical(normalize_model(row.get("model_id")))} - {""}
+        and (not key or normalize_provider(row.get("agent") or row.get("provider")) == key)
+    ] if isinstance(rows, list) else []
+    if len(matches) != 1:
+        return PriceResolution(PRICING_STATUS_AMBIGUOUS if matches else PRICING_STATUS_UNKNOWN_MODEL)
+    row = matches[0]
+    if not all(valid_rate(row.get(field)) for field in ("input_cost", "output_cost")):
+        return PriceResolution(PRICING_STATUS_UNKNOWN_MODEL)
+    version = str(document.get("version") or "feed")
+    name = normalize_model(row.get("model"))
+    return PriceResolution(PRICING_STATUS_PRICED, ModelPrice(
+        rate_id=f"calibration/{version}/{name}",
+        provider=normalize_provider(row.get("agent") or row.get("provider")) or key,
+        model=name,
+        input_per_million=float(row["input_cost"]),
+        output_per_million=float(row["output_cost"]),
+        cached_input_per_million=float(row["input_cost"]),
+        effective_from=str(document.get("created_at") or "1970-01-01T00:00:00Z"),
+        source=f"Model data feed (calibration {version})",
+    ))
+
+
+def resolve_price(model: str, *, provider: str = "", at: str = "", calibration_entry: Any = None) -> PriceResolution:
     """The rate in force for ``model`` at ``at`` (an ISO timestamp).
 
     ``at`` is the invocation's own start time, not "now": re-reading an old
     record must reproduce the rate that was live when the call ran. An empty
     or unparseable ``at`` falls back to the present, which is the right answer
     for a call being priced as it happens.
+
+    A static catalog entry always wins. A model with none is priced from its
+    feed observation: ``calibration_entry`` when given, else the active
+    calibration (``_feed_price``). Neither source means unpriced.
     """
     candidates = _candidates(model, provider)
     if not candidates:
-        return PriceResolution(PRICING_STATUS_UNKNOWN_MODEL)
+        return _feed_price(model, provider, calibration_entry)
     slugs = {normalize_model(entry.model) for entry in candidates}
     if len(slugs) > 1:
         # The same name is claimed by two different canonical models and the
@@ -598,7 +690,8 @@ def estimate_invocation_cost(
         cost=round(cost, 6),
         status=PRICING_STATUS_PRICED,
         currency=price.currency,
-        catalog_version=PRICING_CATALOG_VERSION,
+        # A feed rate is versioned by the calibration that published it.
+        catalog_version=price.rate_id.split("/")[1] if price.rate_id.startswith("calibration/") else PRICING_CATALOG_VERSION,
         rate_id=price.rate_id,
         source=price.source,
         input_rate_per_million=price.input_per_million,

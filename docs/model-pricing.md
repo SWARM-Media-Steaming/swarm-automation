@@ -49,6 +49,11 @@ Each entry is a `ModelPrice`:
 
 The catalog as a whole carries `PRICING_CATALOG_VERSION`.
 
+The Rust build exports this same catalog through Python 3 and embeds the result
+for price eligibility before the first calibration. There is no second table
+to maintain; the desktop checks its effective windows as well. Rust builds
+therefore require `python3`, as do the app's worker and cross-language tests.
+
 ## How a rate is chosen
 
 `resolve_price(model, provider=…, at=…)` picks the single entry whose
@@ -61,7 +66,7 @@ Four situations deliberately produce **no price** rather than a guess. The
 invocation still keeps all of its token counts and appears in the report
 under *Tokens only*:
 
-- the model is not in the catalog;
+- the model has neither a static catalog rate nor valid feed input/output rates;
 - a name resolves to two different canonical models;
 - two entries for one model overlap at that instant;
 - no entry covers that instant (the call predates every rate, or the only
@@ -81,9 +86,11 @@ restates history for anything recosted later. Instead:
 4. Bump `PRICING_CATALOG_VERSION`.
 5. Run the validator.
 
-Adding a brand-new model is just step 3 plus step 4. The automatic upgrade to a
-newer release only lands on a model that has a price here, so a release stays
-out of that path until its provider-page rate is added.
+Adding a static price follows steps 3 and 4. A CLI-offered feed model needs no
+manual pricing row: its validated input/output rates automatically price both
+routing and recorded spend. Static rates take precedence, including their
+effective windows and ambiguity checks. A missing or contradictory static
+rate window is not silently replaced by feed data.
 
 ### Corrections
 
@@ -172,24 +179,74 @@ cannot price them.
 
 ## Relationship to model routing calibration
 
-Dynamic Model Routing scores models against a 1–5 *relative* cost rank
-(`dynamic_router.model_cost`), and Model Routing Calibration keeps that rank
-and other routing inputs fresh from external sources. That is a routing
-concern: "which of these is cheaper".
+Artificial Analysis input/output prices are authoritative fallback rates for
+models absent from the static catalog. `resolve_price` reads the atomic active
+calibration; routing, upgrades, tester floors, router prompts and Jev use the
+same price eligibility. A model without either price source cannot route.
+Feed estimates retain the calibration version, rate identifier, source and
+actual per-million rates. Feed estimates use the calibration active when usage is recorded; stored
+estimates and their recorded rates are never rewritten.
 
-This catalog is a reporting concern: "what did this cost". They are
-deliberately separate, and a change to one is not a change to the other. The
-dashboard used to derive cost from the routing rank, which could not
-distinguish two differently-billed models that happened to share a rank;
-issue #295 replaced that.
-
+The feed supplies no cache discount. Its input rate applies to all input
+classes, with cached tokens counted once. Static catalog entries retain their
+explicit cache read/write rates. Routing cost ranks never become dollar rates.
 
 ## Native-cache reporting (#381)
 
-`token_usage.cache_metrics` uses the invocation's effective-dated rates to compute
-net API-equivalent cache savings: the read discount minus any cache-write premium.
-It persists that estimate with existing provenance; historical rows are never
-repriced. A missing counter or rate means unavailable, not zero. Claude's
-`total_cost_usd`, when present, is stored separately as provider-reported usage
-cost, not verified subscription charges. Estimated savings do not establish any
-realized subscription savings. See [native caching](prompt-caching.md).
+`token_usage.cache_metrics` uses the invocation's effective-dated rates to
+compute net API-equivalent cache savings: the read discount minus any
+cache-write premium. It persists that estimate with existing provenance;
+historical rows are never repriced. A missing counter or rate means unavailable,
+not zero. Claude's `total_cost_usd`, when present, is stored separately as
+provider-reported usage cost, not verified subscription charges. Estimated
+savings do not establish any realized subscription savings. See
+[native caching](prompt-caching.md).
+
+## Automatic refresh operation
+
+The app refreshes from Artificial Analysis at startup (when enabled) and on a
+schedule. `ARTIFICIAL_ANALYSIS_API_KEY` or the macOS Keychain supplies the key;
+without it, the source reports **not configured** and skips external refreshes.
+The last good calibration remains usable but is not presented as fresh data.
+
+Every validated change activates automatically, even if simulation reports a
+regression. The diff, notification and automatic deterministic explanation
+record that regression. There is no approve command or manual activation
+policy. Explicit historical activation remains available for rollback.
+
+Scheduled checks run every 15 minutes; successful refreshes observe the
+configured minimum interval. CLI-list changes trigger a refresh without waiting
+out that interval. Failures retain the live publication and retry after 15,
+30, 60, 120, 240 and then 360 minutes; repeated failures alert and keep retrying.
+Window close hides the app to its tray and leaves this thread running. **Quit,
+process termination, or host shutdown stops refreshes**; the app must remain
+running. The next launch resumes from persisted data. Activation updates the
+running scheduler's model evidence for its next cycle. Started sessions remain
+pinned and manual choices remain intact until an applicable retirement.
+
+Models absent from the CLI list never become routing candidates. Availability
+and retirement transitions are logged once per state change for Anthropic,
+OpenAI and xAI. Superseded rows remain in the catalogs and calibration history.
+Retirement requires a price and a CLI offer from the same provider; a name
+reported by another CLI is not evidence. This provider scope is preserved in
+the shared Python/Rust policy snapshot.
+
+A missing price observation can retain its previous value. A supplied price
+that cannot be parsed as a finite, nonnegative rate rejects the refresh and
+keeps the last good publication; it is never silently replaced with history.
+
+### Test contract migration for #374
+
+The unit tests now assert immediate onboarding and activation, including
+regressions, while preserving identity validation, atomic publication, rollback
+and failure recovery. Existing blacklist tests are unchanged; additional tests
+exercise dormant and active retirements and Python/Rust agreement.
+
+Protected adversarial tests written for #205 still require the removed approval
+command, `manual` policy, sticky `DISCOVERED` status, unchanged production until
+review, and notification suppression for some activations. These expectations
+conflict with #374 requirements 1–3 and 11. The old Artificial Analysis benchmark
+fixture also expects external refresh without a configured key, contrary to
+requirement 6. They remain unedited for the independent tester to adjudicate;
+their failures must not be resolved by restoring those gates. New coverage is in
+`issue_worker/test_automatic_calibration.py` and the Rust shared-lifecycle tests.

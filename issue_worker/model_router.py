@@ -402,24 +402,63 @@ def load_model_catalog(path: Path | None = None) -> tuple[ModelSpec, ...]:
         raise ModelRouterConfigError("models.yaml must contain a top-level 'models' list")
     catalog: list[ModelSpec] = []
     for entry in data["models"]:
-        catalog.append(_blacklisted(_parse_model(entry)))
+        spec = _blacklisted(_parse_model(entry))
+        if "available_models" in _available_models._calibration_policy() and not _available_models.cli_offers(spec.agent, spec.model):
+            spec = dataclasses.replace(spec, active=False)
+        catalog.append(spec)
+    # Keep excluded calibration rows as inactive metadata. CLI discovery must
+    # not resurrect a row explicitly disabled by the active publication.
+    full = data.get("calibration")
+    if isinstance(full, dict):
+        included = {(spec.provider, spec.model) for spec in catalog}
+        for entry in full.get("models") or []:
+            if isinstance(entry, dict) and (entry.get("provider"), entry.get("model")) not in included:
+                spec = _parse_model(entry)
+                # A DISCOVERED row is a pre-#374 review gate, not a disablement:
+                # that gate is retired, so a priced, CLI-offered row stays
+                # eligible while the next refresh republishes it.
+                if entry.get("status") == "DISCOVERED" and spec.active and not spec.deprecated:
+                    catalog.append(dataclasses.replace(spec, recommended=False))
+                else:
+                    catalog.append(dataclasses.replace(spec, active=False, recommended=False))
     return with_discovered_models(tuple(catalog), _measured_evidence(data))
 
 
-def _blacklisted(spec: ModelSpec) -> ModelSpec:
-    """A blacklisted model stays in the catalog but can never be chosen.
-
-    Kept, not dropped, because a newer discovered release infers its numbers
-    from the closest catalogued relative, and that is usually the model it
-    replaced. Inactive and deprecated, it is skipped by every routing path.
-    """
-    if not (_available_models.is_blacklisted(spec.model)
-            or (spec.model_id and _available_models.is_blacklisted(spec.model_id))):
-        return spec
-    return dataclasses.replace(
-        spec, active=False, recommended=False, deprecated=True,
-        superseded_by=spec.superseded_by or _available_models.blacklist_successor(spec.model) or None,
+def _cli_offers(agent: str, slug: str) -> bool:
+    """Whether live or calibration-recorded CLI evidence includes ``slug``."""
+    wanted = _available_models.canonical(slug)
+    return any(
+        _available_models.canonical(model.value) == wanted
+        for model in _available_models._discovered_rows().get(agent, ())
     )
+
+
+def _blacklisted(spec: ModelSpec) -> ModelSpec:
+    """Apply the retirement that is in force, and lift one that is not.
+
+    A blacklisted model stays in the catalog but can never be chosen. Kept,
+    not dropped, because a newer discovered release infers its numbers from
+    the closest catalogued relative, and that is usually the model it
+    replaced. Inactive and deprecated, it is skipped by every routing path.
+
+    A listed retirement whose successor is not offered and priced does not
+    stick. The checked-in row may already say deprecated; when the CLI still
+    offers the predecessor, that row is routable again.
+    """
+    in_force = _available_models.blacklist()
+    names = {_available_models.canonical(spec.model)}
+    if spec.model_id:
+        names.add(_available_models.canonical(spec.model_id))
+    retired = next((in_force[name] for name in names if name in in_force), None)
+    if retired is not None:
+        return dataclasses.replace(
+            spec, active=False, recommended=False, deprecated=True,
+            superseded_by=retired or None,
+        )
+    listed = _available_models.canonical(spec.model) in _available_models.listed_retirements()
+    if listed and (not spec.active or spec.deprecated) and _cli_offers(spec.agent, spec.model):
+        return dataclasses.replace(spec, active=True, deprecated=False, superseded_by=None)
+    return spec
 
 
 def _measured_evidence(data: dict[str, Any]) -> dict[str, tuple[tuple[str, float], ...]]:
@@ -491,22 +530,26 @@ def with_discovered_models(
 
 def _inferred_spec(agent, found, relative, known, measured=()) -> ModelSpec:
     peer, older = relative if relative else (None, False)
+    if "available_models" in _available_models._calibration_policy():
+        older = False  # Retirement now comes from validated lifecycle evidence.
     if peer is None and known:
         peer = min(known, key=lambda spec: (spec.relative_capability, spec.relative_cost))
     efforts = tuple(found.efforts) or (peer.supported_efforts if peer else ("low", "medium", "high"))
     unmeasured = BenchmarkEntry(None, None, None, None, None, None, None, "HEURISTIC")
     basis = f"inferred from {peer.model}" if peer else "assumed from defaults (no catalogued relative)"
-    # Dollar prices come from the versioned pricing catalog, not from the
-    # relative: a model with no price is scored as if it were expensive, so a
-    # cheaper new release would otherwise lose to the older, priced one.
+    # Dollar prices come from the versioned pricing catalog (else the active
+    # calibration's feed), not from the relative: a model with no price is
+    # scored as if it were expensive, so a cheaper new release would otherwise
+    # lose to the older, priced one.
     resolution = _model_pricing.resolve_price(found.value, provider=agent)
     price = resolution.price if resolution.priced else None
     input_cost = price.input_per_million if price else None
     output_cost = price.output_per_million if price else None
     reasoning_cost = price.reasoning_per_million if price else None
     price_note = (
-        f"Priced from the pricing catalog ({price.rate_id})."
-        if price else "Unpriced until a price is catalogued."
+        "Unpriced until the pricing catalog or the model data feed prices it." if not price
+        else f"Priced from the model data feed ({price.rate_id})." if price.rate_id.startswith("calibration/")
+        else f"Priced from the pricing catalog ({price.rate_id})."
     )
     return ModelSpec(
         provider=peer.provider if peer else agent,
@@ -815,11 +858,13 @@ def estimated_dollar_cost(model: ModelSpec, effort: str) -> float | None:
     entry = _measured_entry(model, effort)
     if entry is not None and entry.benchmark_cost_per_task is not None:
         return entry.benchmark_cost_per_task
-    if model.input_cost is None or model.output_cost is None:
+    resolved = _model_pricing.resolve_price(model.model, provider=model.agent, calibration_entry=dataclasses.asdict(model))
+    if not resolved.priced:
         return None
+    price = resolved.price
     reasoning_tokens = {"low": 0, "medium": 1000, "high": 3000, "xhigh": 6000, "max": 10000}.get(effort, 0)
-    reasoning_price = model.reasoning_cost if model.reasoning_cost is not None else model.output_cost
-    return (4000 * model.input_cost + 1000 * model.output_cost + reasoning_tokens * reasoning_price) / 1_000_000
+    reasoning_price = price.reasoning_per_million if price.reasoning_per_million is not None else price.output_per_million
+    return (4000 * price.input_per_million + 1000 * price.output_per_million + reasoning_tokens * reasoning_price) / 1_000_000
 
 
 def estimated_tokens_per_task(model: ModelSpec, effort: str) -> float | None:
@@ -967,10 +1012,10 @@ def _score_candidate(
 
 def is_priced(spec: ModelSpec) -> bool:
     """Whether the model's spend can be recorded: it has a price in the pricing
-    catalog or its own input and output prices."""
-    if spec.input_cost is not None and spec.output_cost is not None:
-        return True
-    return _model_pricing.resolve_price(spec.model, provider=spec.agent).priced
+    catalog, or valid input and output prices of its own (a calibration row
+    carries the feed's)."""
+    entry = dataclasses.asdict(spec) if (spec.input_cost is not None or spec.output_cost is not None) else None
+    return _model_pricing.resolve_price(spec.model, provider=spec.agent, calibration_entry=entry).priced
 
 
 def _eligible_models(catalog: Sequence[ModelSpec], availability: RoutingAvailability) -> list[ModelSpec]:

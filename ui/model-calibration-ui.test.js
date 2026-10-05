@@ -38,10 +38,10 @@ test("health pill flags an unhealthy active calibration", () => {
   });
 });
 
-test("health pill surfaces a newer proposed calibration awaiting review", () => {
+test("health pill ignores obsolete review state", () => {
   assert.deepEqual(
     healthPill({ active_version: "2026-01-01-001", healthy: true, has_newer_proposed: true }),
-    { text: "Update available", tone: "paused" },
+    { text: "Current", tone: "ok" },
   );
 });
 
@@ -77,7 +77,7 @@ test("status fields cover every plain-language item the issue calls for", () => 
   assert.equal(byLabel["Dynamic routing"], "Enabled");
   assert.equal(byLabel["Active calibration"], "2026-01-01-001");
   assert.equal(byLabel["Models"], "12 active · 2 discovered");
-  assert.equal(byLabel["Proposed update"], "Awaiting review");
+  assert.equal(byLabel["Activation"], "Automatic");
   assert.equal(fields.length, 7);
 });
 
@@ -89,7 +89,7 @@ test("status fields fall back to honest defaults before anything has run", () =>
   assert.equal(byLabel["Last successful refresh"], "Never");
   assert.equal(byLabel["Refresh status"], "Not yet run");
   assert.equal(byLabel["Models"], "0 active · 0 discovered");
-  assert.equal(byLabel["Proposed update"], "None");
+  assert.equal(byLabel["Activation"], "Automatic");
 });
 
 test("refresh status label covers every value the service returns", () => {
@@ -144,7 +144,7 @@ test("result summary lines cover models/new/pricing/benchmark/routing/cost/calib
   assert.equal(byLabel["Benchmark changes"], "7");
   assert.equal(byLabel["Routing changes"], "3 workload categories");
   assert.equal(byLabel["Estimated cost impact"], "-8.4%");
-  assert.match(byLabel["Calibration"], /available for review/);
+  assert.match(byLabel["Calibration"], /Calibration version/);
 });
 
 test("an auto-activated result says the calibration is already active", () => {
@@ -316,4 +316,12 @@ test("example routing decisions are read from the active calibration, not hard-c
   assert.equal(examples.length, 2);
   assert.equal(examples[0].text, "claude/claude-haiku-4-5 · low reasoning");
   assert.match(examples[1].text, /No eligible model/);
+});
+
+test("missing configuration is explicit and regressions are informational", () => {
+  assert.deepEqual(healthPill({ source_status: "not_configured", active_version: "v1", healthy: true }),
+    { text: "Not configured", tone: "idle" });
+  assert.match(resultHeadline({ status: "not_configured" }), /External refresh skipped/);
+  assert.ok(resultSummaryLines({ status: "changed", diff: { regression: true, supersessions: [{}] } })
+    .some(line => line.label === "Regression" && line.value.includes("activated automatically")));
 });

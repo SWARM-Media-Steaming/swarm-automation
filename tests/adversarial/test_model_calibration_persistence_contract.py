@@ -1,8 +1,8 @@
 """Issue #205 AC 6, 15-17: retain one coherent, usable active calibration.
 
 Oracles: failed refreshes must not replace active data; a refresh cannot undo
-an operator's activation/rollback; the version active immediately before a
-promotion must remain available for rollback even after many pending updates.
+an explicit rollback; the version active immediately before an automatic
+promotion remains available for rollback after history churn.
 Faults/interleavings are injected at I/O boundaries, without scheduling sleeps.
 """
 
@@ -73,19 +73,17 @@ class PersistenceContractTests(CalibrationUAT):
         catalog = router.load_model_catalog(second_client.catalog_override_path)
         self.assertEqual(catalog[0].output_cost, active_price)
 
-    def test_recently_replaced_active_version_survives_pending_history_churn(self):
-        original = self.service.load_active()["version"]
-        before = self.active_bytes()
-        # A month of unreviewed updates must not make the version still in use
-        # impossible to roll back to immediately after the eventual promotion.
+    def test_immediately_previous_active_version_survives_history_churn(self):
+        previous_version = self.service.load_active()["version"]
+        previous_bytes = self.active_bytes()
         for index in range(1, 36):
+            previous_version = self.service.load_active()["version"]
+            previous_bytes = self.active_bytes()
             result = self.remote({"models": [price_row(output_cost=8 + index)]}, now=NOW + index)
             self.assertEqual(result["status"], "changed")
-            self.assertFalse(result["activated"])
-        self.assertEqual(self.active_bytes(), before)
-        self.service.activate(result["calibration_version"])
+            self.assertTrue(result["activated"])
         try:
-            self.service.activate(original)
+            self.service.activate(previous_version)
         except calibration.CalibrationError as error:
             self.fail(f"The immediately previous active version was pruned before it could be rolled back: {error}")
-        self.assertEqual(self.active_bytes(), before)
+        self.assertEqual(self.active_bytes(), previous_bytes)

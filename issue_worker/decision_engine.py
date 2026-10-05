@@ -706,16 +706,16 @@ def routable_models_for_jev() -> dict[str, list[dict[str, Any]]]:
     """
     try:
         import model_router
-        from dynamic_router import requires_usage_credits
+        from dynamic_router import requires_usage_credits, _routing_catalog
 
-        catalog = model_router.load_model_catalog()
+        catalog = _routing_catalog()
     except Exception:  # noqa: BLE001 - a broken catalog must never block a decision
         return {}
     allow_credit = _available_models.allow_usage_credit_models()
     models: dict[str, list[dict[str, Any]]] = {}
     total = 0
     for spec in catalog:
-        if (not spec.active or not model_router.is_priced(spec)
+        if (not spec.active or spec.deprecated or not model_router.is_priced(spec)
                 or (not allow_credit and requires_usage_credits(spec.model))):
             continue
         if total >= MAX_JEV_MODELS:

@@ -168,7 +168,7 @@
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">REFRESH SETTINGS</p><h3>Model data schedule &amp; benchmarks <span class="opt">optional</span> <button class="help-dot" data-help="model-data-refresh-settings" aria-label="About refresh settings">?</button></h3></div></div>
               <div class="stacked-form">
-                <label class="toggle policy-toggle"><input type="checkbox" data-config="model_data_refresh_on_startup" /><span></span><div><strong>Refresh model data on startup and every few hours</strong><small>Runs in the background once the app is already usable. The last known-good calibration always loads first, whether or not a refresh succeeds. A clean refresh is applied to routing automatically.</small></div></label>
+                <label class="toggle policy-toggle"><input type="checkbox" data-config="model_data_refresh_on_startup" /><span></span><div><strong>Refresh model data on startup</strong><small>Runs in the background once the app is already usable. The last known-good calibration always loads first, whether or not a refresh succeeds. Every validated refresh activates automatically. Scheduled refresh continues while the app runs, including when the window is closed.</small></div></label>
                 <div class="form-grid">
                   <label>Minimum hours between refreshes<input type="number" min="0" max="336" step="0.5" data-config="model_data_min_refresh_interval_hours" /></label>
                   <div class="secret-field">
@@ -179,7 +179,7 @@
                       <button id="model-data-key-clear" type="button" class="text-button compact hidden">Remove key</button>
                     </div>
                     <small id="model-data-key-status" class="panel-copy" aria-live="polite"></small>
-                    <small class="panel-copy">Benchmark data by <button type="button" class="text-button compact" data-external="https://artificialanalysis.ai/">Artificial Analysis</button>. Prices always come from models.dev. The key is stored in the macOS Keychain, never in the config file.</small>
+                    <small class="panel-copy">Benchmark data by <button type="button" class="text-button compact" data-external="https://artificialanalysis.ai/">Artificial Analysis</button>. Feed prices are used when no static catalog price exists. The key is stored in the macOS Keychain, never in the config file.</small>
                   </div>
                 </div>
               </div>
@@ -336,7 +336,7 @@
               <p id="model-calibration-strategy" class="panel-copy"></p>
               <div id="model-calibration-result" class="verification-results hidden" aria-live="polite"></div>
               <details id="model-calibration-changes" class="hidden"><summary>View detailed changes</summary><div id="model-calibration-changes-body" class="verification-results"></div></details>
-              <div class="control-row"><button id="refresh-model-data" class="secondary-button">Refresh Model Data</button><button id="model-calibration-analyze" class="secondary-button">Analyze Routing Update</button><button id="model-calibration-activate" class="secondary-button hidden">Activate proposed calibration</button></div>
+              <div class="control-row"><button id="refresh-model-data" class="secondary-button">Refresh Model Data</button><button id="model-calibration-analyze" class="secondary-button">Analyze Routing Update</button></div>
               <div id="model-calibration-analysis" class="stacked-form hidden"></div>
               <details id="model-calibration-technical"><summary>Technical details</summary><div id="model-calibration-technical-body" class="verification-results"></div></details>
             </article>
@@ -349,7 +349,7 @@
 
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">MODELS</p><h3>Model routing table <button class="help-dot" data-help="model-routing-table" aria-label="About the model routing table">?</button></h3></div><span id="model-calibration-model-count" class="availability">0 models</span></div>
-              <p class="panel-copy">Only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routed to. Select a column to sort (select it again to reverse), or a row for detail and to approve a DISCOVERED model.</p>
+              <p class="panel-copy">Only <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routed to. Select a column to sort (select it again to reverse), or a row for detail.</p>
               <div class="control-row model-table-controls">
                 <label class="execution-search">Search models<input id="model-routing-search" type="search" placeholder="Provider, model, or status" autocomplete="off" /></label>
                 <label class="model-page-size">Per page<select id="model-routing-page-size" aria-label="Models per page"><option value="10" selected>10</option><option value="25">25</option><option value="50">50</option></select></label>

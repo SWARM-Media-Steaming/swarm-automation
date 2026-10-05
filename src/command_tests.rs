@@ -2058,7 +2058,7 @@ fn model_data_refresh_uses_fixed_sources_and_always_activates_clean_refreshes() 
             .position(|argument| argument == flag)
             .map(|index| arguments[index + 1].as_str())
     };
-    assert_eq!(after("--source"), Some("models_dev"));
+    assert_eq!(after("--source"), Some("artificial_analysis"));
     assert_eq!(after("--activation-policy"), Some("auto"));
     assert_eq!(after("--initiated-by"), Some("STARTUP"));
     assert!(!arguments.iter().any(|argument| argument == "--source-url"));
@@ -2087,12 +2087,12 @@ fn model_data_refresh_outcomes_are_described_for_info_and_debug() {
     assert!(activated[0].1.contains("12 models checked"));
     assert!(activated[0].1.contains("activated and applied to routing"));
 
-    let held = describe_refresh(&serde_json::json!({
-        "status": "changed", "activated": false, "models_checked": 12,
-        "calibration_version": "v9"
+    let regression = describe_refresh(&serde_json::json!({
+        "status": "changed", "activated": true, "models_checked": 12,
+        "calibration_version": "v9", "notification": {"should_notify": true, "message": "regression recorded; activation completed"}
     }));
-    assert_eq!(held[0].0, "stderr");
-    assert!(held[0].1.contains("needs review"));
+    assert!(regression[0].1.contains("activated"));
+    assert!(regression[1].1.contains("regression"));
 
     let warned = describe_refresh(&serde_json::json!({
         "status": "no_change", "models_checked": 5,

@@ -101,8 +101,6 @@
       analysis: null,
       refreshing: false,
       analyzing: false,
-      activating: false,
-      approvingKeys: new Set(),
       sort: { column: "provider", direction: "asc" },
       search: "",
       page: 0,
@@ -268,7 +266,7 @@
     },
     "model-calibration": {
       title: "Model data refresh",
-      html: "<p>Dynamic Routing scores models on pricing and benchmark data. This page controls how that data stays current; a clean refresh is applied to routing automatically, and one that would make routing worse is held for review. See <strong>Guides</strong> for the current status, strategy and model table.</p>",
+      html: "<p>Dynamic Routing scores models on pricing and benchmark data. This page controls how that data stays current; every validated refresh is applied automatically; regressions are recorded and reported. See <strong>Guides</strong> for the current status, strategy and model table.</p>",
       links: [],
     },
     "routing-algorithm": {
@@ -278,12 +276,12 @@
     },
     "model-routing-table": {
       title: "Model routing table",
-      html: "<p>One row per model in the active calibration. <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routable; <strong>DISCOVERED</strong> ones await your approval; <strong>DEPRECATED</strong> and <strong>DISABLED</strong> are excluded. Benchmarks are comparative, not a guarantee of quality.</p>",
+      html: "<p>One row per model in the active calibration. <strong>ACTIVE</strong> and <strong>CANDIDATE</strong> models are routable; <strong>DEPRECATED</strong> and <strong>DISABLED</strong> are excluded. Benchmarks are comparative, not a guarantee of quality.</p>",
       links: [],
     },
     "model-data-refresh-settings": {
       title: "Model data schedule & benchmarks",
-      html: "<p>Prices and model lifecycle come from <strong>models.dev</strong>, which needs no account. The app refreshes at startup and every few hours; a clean change is applied to routing, a regression is held for review, and a failure keeps the last good data. Results, failures included, are logged in <strong>Info &amp; Debug</strong> under <em>Model data</em>.</p><p><strong>Benchmarks</strong> (coding scores, speed, latency) are optional and come from <strong>Artificial Analysis</strong> with a free API key, kept in the macOS Keychain. Please credit artificialanalysis.ai. Without a key, routing uses prices and its built-in capability ranks.</p>",
+      html: "<p>Artificial Analysis supplies model measurements and prices. Every validated refresh activates automatically, including regressions, which remain visible in the change summary. A failure keeps the last good data and retries with backoff. Results are logged under <em>Model data</em>.</p><p>The API key is stored in the macOS Keychain or supplied through the environment. Without a key, the source is explicitly not configured and external refreshes are skipped. Only models offered by a provider CLI and carrying a catalog or feed price can route.</p><p>Scheduled refresh continues when the window is closed to the tray. The app must remain running; Quit stops refreshes.</p>",
       links: [{ label: "Artificial Analysis", url: "https://artificialanalysis.ai/" }],
     },
     "engineering-knowledge": {
@@ -1039,7 +1037,7 @@
         option.textContent = entry.label;
         modelInput.appendChild(option);
       });
-      if (provider.model && !knownModels.some((entry) => entry.value === provider.model)) {
+      if (!tool?.modelsDetected && provider.model && !knownModels.some((entry) => entry.value === provider.model)) {
         const option = document.createElement("option");
         option.value = provider.model;
         option.textContent = `${provider.model} (saved)`;
@@ -1078,7 +1076,7 @@
         option.textContent = entry.label;
         routerModelInput.appendChild(option);
       });
-      if (provider.router_model && !knownModels.some((entry) => entry.value === provider.router_model)) {
+      if (!tool?.modelsDetected && provider.router_model && !knownModels.some((entry) => entry.value === provider.router_model)) {
         const option = document.createElement("option");
         option.value = provider.router_model;
         option.textContent = `${provider.router_model} (saved)`;
@@ -4774,7 +4772,6 @@
         void saveModelDataKey();
       }
     });
-    byId("model-calibration-activate").addEventListener("click", () => void activateProposedCalibration());
     byId("model-calibration-analyze").addEventListener("click", () => void analyzeModelCalibrationUpdate());
     byId("model-routing-table-head").addEventListener("click", (event) => {
       const button = event.target.closest("[data-sort-column]");
@@ -4803,11 +4800,6 @@
     byId("model-routing-next")?.addEventListener("click", () => {
       state.modelCalibration.page = (state.modelCalibration.page || 0) + 1;
       renderModelRoutingTable();
-    });
-    byId("model-routing-table").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-approve-model]");
-      if (!button) return;
-      void approveDiscoveredModel(button.dataset.approveModel);
     });
     byId("feedback-repo-chips").addEventListener("change", (event) => {
       const input = event.target.closest("[data-feedback-repo]");
@@ -5278,9 +5270,9 @@
     const api = window.SwarmModelCalibration;
     const status = modelCalibrationStatus();
     const result = api.refreshResult(status, state.modelCalibration.lastResult);
-    const pending = status.has_newer_proposed && status.proposed_calibration;
+
     box.replaceChildren();
-    if (!result && !pending) {
+    if (!result) {
       box.classList.add("hidden");
       changesBox.classList.add("hidden");
       return;
@@ -5288,22 +5280,15 @@
     box.classList.remove("hidden");
     const headline = document.createElement("p");
     headline.className = "panel-copy";
-    headline.textContent = pending && (!result || result.status === "no_change")
-      ? "Model data is current. A proposed calibration is still awaiting review."
-      : api.resultHeadline(result);
+    headline.textContent = api.resultHeadline(result);
     box.appendChild(headline);
     const detail = api.failureDetail(result);
     if (detail) box.appendChild(labeledCell("Detail", detail, { tone: "invalid" }));
-    const summary = pending ? {
-      status: "changed", diff: pending.diff, calibration_version: pending.version, activated: false,
-    } : result;
-    api.resultSummaryLines(summary).forEach(({ label, value }) => box.appendChild(labeledCell(label, value)));
-
-    // An unchanged check or a source failure does not dismiss a proposal.
-    const diff = (pending && pending.diff) || (result && result.diff) || {};
+    api.resultSummaryLines(result).forEach(({ label, value }) => box.appendChild(labeledCell(label, value)));
+    const diff = (result && result.diff) || {};
     const changeLines = api.changeDetailLines(diff);
     const impactLines = api.routingImpactLines(diff);
-    if (pending || (result && result.status === "changed")) {
+    if (result && result.status === "changed") {
       changesBox.classList.remove("hidden");
       changesBody.replaceChildren();
       changesBody.appendChild(Object.assign(document.createElement("strong"), { textContent: "What changed" }));
@@ -5447,51 +5432,14 @@
       benchmarks.appendChild(history);
     });
     body.appendChild(benchmarks);
-    if (model.status === "DISCOVERED") {
-      const approveRow = document.createElement("div");
-      approveRow.className = "control-row";
-      const approveButton = document.createElement("button");
-      approveButton.type = "button";
-      approveButton.className = "secondary-button compact";
-      approveButton.dataset.approveModel = model.key;
-      const busy = state.modelCalibration.approvingKeys.has(model.key);
-      const supported = Boolean(model.agent && (model.supported_efforts || []).length);
-      approveButton.disabled = busy || !supported;
-      approveButton.textContent = busy ? "Approving…" : "Approve for routing";
-      approveRow.appendChild(approveButton);
-      const note = document.createElement("small");
-      note.textContent = supported
-        ? "Approval allows this model into the next calibration proposal. Activate that calibration to use it for routing."
-        : "Pricing data is available for review. Routing requires a supported model definition with capability and reasoning levels before approval.";
-      approveRow.appendChild(note);
-      body.appendChild(approveRow);
-    }
     item.appendChild(body);
     return item;
-  }
-
-  async function approveDiscoveredModel(key) {
-    if (!key || state.modelCalibration.approvingKeys.has(key)) return;
-    state.modelCalibration.approvingKeys.add(key);
-    renderModelRoutingTable();
-    try {
-      await invoke("approve_discovered_model_background", { key });
-      showToast(`Approved ${key} for routing. It becomes ACTIVE or CANDIDATE on the next refresh.`);
-    } catch (error) {
-      showToast(errorText(error), "error");
-    } finally {
-      state.modelCalibration.approvingKeys.delete(key);
-      await refreshModelCalibration({ quiet: true });
-    }
   }
 
   function renderModelRoutingTable() {
     const api = window.SwarmModelCalibration;
     const status = modelCalibrationStatus();
     const groups = [{ label: "Active calibration", calibration: status.active_calibration }];
-    if (status.has_newer_proposed) {
-      groups.push({ label: "Proposed calibration — awaiting review", calibration: status.proposed_calibration });
-    }
     const modelGroups = groups.filter(({ calibration }) => calibration).map(({ label, calibration }) => ({
       label,
       calibration,
@@ -5620,14 +5568,6 @@
       refreshButton.disabled = busy;
       refreshButton.textContent = busy ? "Refreshing…" : "Refresh Model Data";
     }
-    const activateButton = byId("model-calibration-activate");
-    if (activateButton) {
-      activateButton.classList.toggle("hidden", !status.has_newer_proposed);
-      activateButton.disabled = state.modelCalibration.activating;
-      activateButton.textContent = state.modelCalibration.activating
-        ? "Activating…"
-        : `Activate proposed calibration (${status.proposed_version || ""})`;
-    }
     const analyzeButton = byId("model-calibration-analyze");
     if (analyzeButton) analyzeButton.disabled = state.modelCalibration.analyzing;
   }
@@ -5686,16 +5626,16 @@
     const status = byId("model-data-key-status");
     if (status) {
       status.textContent = saved
-        ? "Key saved in the macOS Keychain. Refreshes include benchmark data."
-        : "No key saved. Refreshes use models.dev prices only.";
+        ? "Key configured through the macOS Keychain or environment. Refreshes include prices and benchmarks."
+        : "Not configured. External refreshes are skipped until a key is available.";
     }
     const clear = byId("model-data-key-clear");
     if (clear) clear.classList.toggle("hidden", !saved);
     const input = byId("model-data-key");
     if (input) {
       input.placeholder = saved
-        ? "Key saved. Paste a new one to replace it"
-        : "Paste a key to add benchmark data";
+        ? "Key configured. Paste a key to save it in Keychain"
+        : "Paste a key to enable model data refresh";
     }
   }
 
@@ -5721,9 +5661,10 @@
   async function clearModelDataKey() {
     try {
       await invoke("clear_model_data_key");
-      state.modelDataKeySaved = false;
-      renderModelDataKey();
-      showToast("API key removed. Refreshes will use models.dev prices only.");
+      await refreshModelDataKeyStatus();
+      showToast(state.modelDataKeySaved
+        ? "Keychain key removed. The environment key remains configured."
+        : "API key removed. External refreshes will be skipped.");
     } catch (error) {
       showToast(errorText(error), "error");
     }
@@ -5748,6 +5689,9 @@
     }, 700);
     try {
       state.modelCalibration.lastResult = await invoke("refresh_model_data_background", { force: true });
+      state.modelCalibration.analysis = state.modelCalibration.lastResult.analysis || null;
+      renderModelCalibrationAnalysis();
+      if (state.modelCalibration.lastResult.activated) await refreshTools({ quiet: true });
     } catch (error) {
       state.modelCalibration.lastResult = { status: "failed", error: errorText(error) };
       showToast(`Model data refresh failed: ${errorText(error)}`, "error");
@@ -5755,22 +5699,6 @@
       window.clearInterval(state.modelCalibration.progressTimer);
       state.modelCalibration.progressTimer = null;
       state.modelCalibration.refreshing = false;
-      await refreshModelCalibration({ quiet: true });
-    }
-  }
-
-  async function activateProposedCalibration() {
-    const version = modelCalibrationStatus().proposed_version;
-    if (!version || state.modelCalibration.activating) return;
-    state.modelCalibration.activating = true;
-    renderModelCalibrationButtons();
-    try {
-      await invoke("activate_model_calibration_background", { version });
-      showToast(`Activated calibration ${version}.`);
-    } catch (error) {
-      showToast(errorText(error), "error");
-    } finally {
-      state.modelCalibration.activating = false;
       await refreshModelCalibration({ quiet: true });
     }
   }
@@ -5794,7 +5722,10 @@
     if (payload && payload.status !== "skipped_interval" && payload.status !== "already_running") {
       state.modelCalibration.lastResult = payload;
     }
+    state.modelCalibration.analysis = (payload || {}).analysis || state.modelCalibration.analysis;
+    renderModelCalibrationAnalysis();
     void refreshModelCalibration({ quiet: true });
+    if ((payload || {}).activated) void refreshTools({ quiet: true });
     const notification = (payload || {}).notification;
     if (notification && notification.should_notify) {
       showToast(notification.message, notification.kind === "error" ? "error" : "");
