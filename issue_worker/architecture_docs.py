@@ -857,6 +857,7 @@ class ArchitectureDocsMixin:
         assert self.choice
         original = self.choice
         self.choice = dataclasses.replace(original, session_id=str(uuid.uuid4()), resume=False)
+        self._independent_ai_pass = True
         try:
             self.issue_images = []
             status = self.run_ai(prompt, activity="reviewing architecture documentation impact")
@@ -866,6 +867,7 @@ class ArchitectureDocsMixin:
             if status != 0 or not output.strip():
                 raise WorkerError("the documentation review session did not produce a result")
         finally:
+            self._independent_ai_pass = False
             self.choice = original
         if self.worktree_status():
             self.git("checkout", "--", ".", check=False)

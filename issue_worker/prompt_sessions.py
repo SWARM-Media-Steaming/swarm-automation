@@ -58,6 +58,10 @@ class PromptSessionMixin:
             return []
 
     def session_role(self) -> tuple[str, bool]:
+        # A one-off AI pass (architecture documentation review) is its own
+        # fresh conversation: never resumed, never remembered.
+        if getattr(self, "_independent_ai_pass", False):
+            return "documentation", False
         from swarm_issue_worker import ADVERSARIAL_STAGES
         try:
             state = self.read_state()
@@ -106,6 +110,11 @@ class PromptSessionMixin:
         """
         self._cli_session_role = ""
         if not self.issue:
+            return False
+        if getattr(self, "_independent_ai_pass", False):
+            self._cli_session_role = "documentation"
+            self._cli_usage_baseline = None
+            self._cli_usage_totals = None
             return False
         if self.choice.key not in {"claude", "codex"}:
             self.forget_cli_session()
@@ -167,6 +176,8 @@ class PromptSessionMixin:
 
     def remember_cli_session(self, success: bool) -> None:
         role = getattr(self, "_cli_session_role", "")
+        if getattr(self, "_independent_ai_pass", False):
+            return
         if self.choice.key not in {"claude", "codex"}:
             self.forget_cli_session()
             return
@@ -197,6 +208,8 @@ class PromptSessionMixin:
         if not self.issue:
             return prompt
         role, _ = self.session_role()
+        if role == "documentation":
+            return prompt
         if role == "primary":
             # Rebuild current issue/conventions/handoff, never replay a saved
             # source snapshot. A normal first-attempt prompt may already be the

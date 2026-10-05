@@ -537,6 +537,8 @@ def _format_cost(value: float | None) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return "—"
     sign = "-" if value < 0 else ""
+    if value != 0 and abs(value) < 0.01:
+        return f"{sign}${abs(value):.4f}"
     return f"{sign}${abs(value):,.2f}"
 
 

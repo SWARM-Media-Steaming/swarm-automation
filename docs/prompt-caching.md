@@ -18,7 +18,9 @@ A compatible successful session is reused for primary work or successive fixes
 within the same UAT/security epoch. UAT fixers, security fixers and primary workers
 have separate identities. Every new UAT or cybersecurity assessment gets a fresh
 session, even if the provider and model match the implementer. Only an interrupted
-assessment may resume its own exact stage/epoch/round. A rejected report starts a
+assessment may resume its own exact stage/epoch/round. The post-delivery
+architecture-documentation review is likewise always one fresh session that is
+never remembered or resumed, and its usage rows carry the `documentation` role. A rejected report starts a
 fresh assessment. Epoch escalation discards old fixer continuity.
 
 Compatibility requires the same resolved checkout, GitHub repository, issue
@@ -122,8 +124,7 @@ This developer benchmark is not a product configuration toggle.
 
 One small benchmark does not establish causal savings: native caches may also hit
 on fresh sessions, tooling/compaction can dominate, and providers vary. Do not feed
-synthetic results or the six-call benchmark into the routing history. See the
-validation observations below for this patch's actual measurements.
+synthetic results or the six-call benchmark into the routing history.
 
 Deploy with the normal app/worker update and restart the worker to load the new
 Python code. The additive SQLite migration runs automatically when history opens;
