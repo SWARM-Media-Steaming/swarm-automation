@@ -22,6 +22,33 @@ from typing import Any, Iterable, Mapping, Sequence
 import usage_report
 
 
+class ClosingConnection(sqlite3.Connection):
+    """SQLite connection that closes when a ``with`` block exits.
+
+    ``sqlite3.Connection.__exit__`` only commits or rolls back. Callers of
+    ``ExecutionHistoryRepository.connect`` (and the sibling app-wide stores)
+    use ``with``, which left handles open. Python 3.13 then prints
+    ``ResourceWarning: unclosed database`` on stderr, and unittest ``-v``
+    interleaves that warning with the test-name line.
+    """
+
+    def __exit__(self, exc_type, exc_value, traceback):  # type: ignore[override]
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
+def connect_sqlite(database_path: Path, *, foreign_keys: bool = True) -> sqlite3.Connection:
+    """Open a WAL SQLite handle that closes on context-manager exit."""
+    connection = sqlite3.connect(database_path, timeout=10, factory=ClosingConnection)
+    connection.row_factory = sqlite3.Row
+    if foreign_keys:
+        connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    return connection
+
+
 SCHEMA_VERSION = 10
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
@@ -513,11 +540,7 @@ class ExecutionHistoryRepository:
         self.migrate()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        return connect_sqlite(self.database_path)
 
     def migrate(self) -> None:
         with self.connect() as database:
