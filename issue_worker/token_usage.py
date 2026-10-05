@@ -35,6 +35,7 @@ class AgentType(str, enum.Enum):
     ADVERSARIAL_UAT = "adversarial_uat"
     ADVERSARIAL_CYBERSECURITY = "adversarial_cybersecurity"
     REVIEW = "review"
+    DOCUMENTATION = "documentation"
     REMEDIATION = "remediation"
     SUMMARIZER = "summarizer"
     OTHER = "other"
@@ -61,6 +62,7 @@ AGENT_LABELS: dict[str, str] = {
     AgentType.ADVERSARIAL_UAT.value: "UAT Adversarial",
     AgentType.ADVERSARIAL_CYBERSECURITY.value: "Cyber Adversarial",
     AgentType.REVIEW.value: "Review",
+    AgentType.DOCUMENTATION.value: "Documentation",
     AgentType.REMEDIATION.value: "Remediation",
     AgentType.SUMMARIZER.value: "Summarizer",
     AgentType.OTHER.value: "Other",

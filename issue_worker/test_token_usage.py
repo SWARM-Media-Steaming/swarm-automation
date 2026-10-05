@@ -311,6 +311,19 @@ class RenderAiUsageMarkdownTests(unittest.TestCase):
             ),
             _record(
                 sequence=3,
+                agent_type=AgentType.DOCUMENTATION.value,
+                prompt_type=PromptType.REVIEW.value,
+                provider="Claude",
+                model="claude-sonnet-5",
+                input_tokens=50,
+                output_tokens=10,
+                cached_input_tokens=0,
+                reasoning_tokens=None,
+                total_tokens=60,
+                estimated_cost=0.001,
+            ),
+            _record(
+                sequence=4,
                 agent_type=AgentType.ADVERSARIAL_CYBERSECURITY.value,
                 prompt_type=PromptType.REMEDIATION.value,
                 provider="Grok",
@@ -327,12 +340,14 @@ class RenderAiUsageMarkdownTests(unittest.TestCase):
         self.assertIn("### AI Usage", markdown)
         self.assertIn("Router", markdown)
         self.assertIn("UAT Adversarial", markdown)
+        self.assertIn("Documentation", markdown)
         self.assertIn("Cyber Adversarial", markdown)
         # UAT and cybersecurity must be independently identifiable, never
         # merged under one generic "Adversarial" label (issue #280 item 9).
         self.assertNotIn("| Adversarial |", markdown)
-        self.assertIn("3,000", markdown)  # total input across the three rows
-        self.assertIn("**AI Invocations:** 3", markdown)
+        self.assertNotIn("| Primary |", markdown)
+        self.assertIn("3,050", markdown)  # total input across the four rows
+        self.assertIn("**AI Invocations:** 4", markdown)
         self.assertIn("—", markdown)  # the row with no captured usage
 
     def test_totals_sum_every_row(self) -> None:

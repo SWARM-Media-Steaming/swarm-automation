@@ -97,6 +97,8 @@ estimated savings, with provider/model/agent filters and groupings. Invocation
 rows (also in execution history) show session IDs, cache reads/writes and costs.
 The existing GitHub AI Usage report adds a cache-efficiency summary next to its
 per-agent token/cost breakdown; no extra comment/reporting service is created.
+Architecture documentation review is the `documentation` agent bucket, not
+Primary; `session_role` and `agent_type` must agree.
 
 ## Measurement-driven routing
 
