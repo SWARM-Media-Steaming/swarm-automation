@@ -3901,7 +3901,10 @@ class WorkerTestCase(unittest.TestCase):
         worker = self.pr_worker()
         worker.issue = IssueContext(413, "Conflicting parity", "", [], "https://example.invalid/413")
         worker.choice = ProviderChoice("Claude", "test", "high", "session")
-        with self.assertRaisesRegex(WorkerError, "refusing to create an issue branch"):
+        # A conflicting main sync is handed to the AI; if it cannot resolve the
+        # merge the checkpoint is kept and no issue branch is cut.
+        with mock.patch.object(Worker, "run_ai", return_value=1), \
+                self.assertRaisesRegex(WorkerError, "AI integration conflict resolution failed"):
             worker.prepare_repository()
         self.assertEqual(self.git("branch", "--show-current"), "ai-main")
         self.assertNotIn(
