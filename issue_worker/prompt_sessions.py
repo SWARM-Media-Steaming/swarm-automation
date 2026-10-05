@@ -21,6 +21,20 @@ _RESUME_FAILURE_CODES = frozenset({
     "session_not_found",
     "thread_not_found",
 })
+_SUCCESSFUL_COMPACTION = re.compile(
+    r"compact_boundary|successfully\s+compact(?:ed|ion)|"
+    r"compacted\s+(?:the\s+)?conversation|compacted\s+successfully",
+    re.IGNORECASE,
+)
+_RESUME_FAILURE_TEXT = re.compile(
+    r"(?:session|thread|conversation)[^\n]{0,120}(?:not found|does not exist|expired|corrupt|invalid)|"
+    r"(?:failed|unable|cannot) to (?:resume|load session|load thread)|"
+    r"no (?:conversation|session|thread) found|"
+    r"context (?:window|length)[^\n]{0,60}(?:exceed|full)|"
+    r"no rollout found for thread id|"
+    r"prompt is too long",
+    re.IGNORECASE,
+)
 
 
 def valid_session_id(value: object) -> bool:
@@ -51,21 +65,21 @@ def resume_failure(raw: str) -> bool:
         try:
             event = json.loads(line)
         except ValueError:
-            diagnostics.append(line)
+            if not _SUCCESSFUL_COMPACTION.search(line):
+                diagnostics.append(line)
             continue
-        if isinstance(event, dict) and (event.get("type") in {"error", "turn.failed"} or event.get("is_error")):
+        if not isinstance(event, dict):
+            continue
+        if event.get("subtype") == "compact_boundary" and not event.get("is_error"):
+            continue
+        if event.get("type") in {"error", "turn.failed"} or event.get("is_error"):
             collect_codes(event)
-            diagnostics.append(json.dumps(event))
+            blob = json.dumps(event)
+            if not _SUCCESSFUL_COMPACTION.search(blob):
+                diagnostics.append(blob)
     if codes & _RESUME_FAILURE_CODES:
         return True
-    return bool(re.search(
-        r"(?:session|thread|conversation)[^\n]{0,120}(?:not found|does not exist|expired|corrupt|invalid)|"
-        r"(?:failed|unable|cannot) to (?:resume|load session|load thread)|"
-        r"no (?:conversation|session|thread) found|context (?:window|length)[^\n]{0,60}(?:exceed|full)|"
-        r"no rollout found for thread id|"
-        r"prompt is too long",
-        "\n".join(diagnostics), re.IGNORECASE,
-    ))
+    return bool(_RESUME_FAILURE_TEXT.search("\n".join(diagnostics)))
 
 
 class PromptSessionMixin:
@@ -149,9 +163,15 @@ class PromptSessionMixin:
         if not self.issue:
             return False
         if getattr(self, "_independent_ai_pass", False):
+            # Fail closed even if the caller left resume=True and the
+            # implementer's UUID in place. Do not persist this identity.
             self._cli_session_role = "documentation"
             self._cli_usage_baseline = None
             self._cli_usage_totals = None
+            self.choice.resume = False
+            self.choice.session_id = (
+                str(uuid.uuid4()) if self.choice.key in {"claude", "grok"} else ""
+            )
             return False
         if self.choice.key not in {"claude", "codex"}:
             self.forget_cli_session()

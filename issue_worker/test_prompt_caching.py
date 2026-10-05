@@ -183,6 +183,41 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.worker.choice.session_id, previous)
         self.assertTrue(self.worker.choice.resume)
 
+    def test_successful_compaction_diagnostics_are_not_resume_failures(self):
+        for text in (
+            json.dumps({"type": "system", "subtype": "compact_boundary"}),
+            json.dumps({
+                "type": "system", "subtype": "compact_boundary",
+                "message": "context window was full; compacted successfully",
+            }),
+            "Compacted conversation to 12% of the context window",
+            "Successfully compacted the conversation after the context window was full.",
+        ):
+            with self.subTest(text=text[:60]):
+                self.assertFalse(resume_failure(text))
+        self.assertTrue(resume_failure("prompt is too long"))
+        self.assertTrue(resume_failure(json.dumps({
+            "type": "error", "error": {"code": "context_length_exceeded"},
+        })))
+
+    def test_independent_pass_cannot_resume_the_implementer(self):
+        implementer = self.seed()
+        self.worker._independent_ai_pass = True
+        self.worker.choice.resume = True
+        self.worker.choice.session_id = implementer
+        try:
+            rebuilt = self.worker.prepare_cli_session()
+            self.assertFalse(rebuilt)
+            self.assertFalse(self.worker.choice.resume)
+            self.assertNotEqual(self.worker.choice.session_id, implementer)
+            self.assertTrue(valid_session_id(self.worker.choice.session_id))
+            self.worker.remember_cli_session(True)
+        finally:
+            self.worker._independent_ai_pass = False
+        stored = self.worker.read_state().get("cli_sessions") or {}
+        self.assertEqual(stored.get("primary", {}).get("id"), implementer)
+        self.assertNotIn("documentation", stored)
+
     def test_session_metadata_contains_no_source_or_prompt(self):
         self.run_turn()
         metadata = json.dumps(self.worker.read_state()["cli_sessions"])
