@@ -40,6 +40,11 @@
       "model": "gpt-6-sol",
       "superseded_by": "gpt-6-1-sol",
       "reason": "GPT-6.1 Sol supersedes GPT-6 Sol."
+    },
+    {
+      "model": "grok-4.7-build-fast",
+      "superseded_by": "grok-4.7",
+      "reason": "Faster than Grok 4.7 but not smarter, and costs about twice as much."
     }
   ]
 }
