@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ai_execution_history import sanitize_text, sanitize_values
+from ai_execution_history import connect_sqlite, sanitize_text, sanitize_values
 
 
 @dataclasses.dataclass(frozen=True)
@@ -49,10 +49,7 @@ class DiagnosticRepository:
         self.migrate()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        return connect_sqlite(self.database_path, foreign_keys=False)
 
     def migrate(self) -> None:
         with self.connect() as database:

@@ -33,6 +33,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 from ai_execution_history import (
     ExecutionHistoryRepository,
+    connect_sqlite,
     sanitize_text,
 )
 
@@ -433,11 +434,7 @@ class KnowledgeStore:
         self.migrate()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        return connect_sqlite(self.database_path)
 
     def migrate(self) -> None:
         with self.connect() as database:
