@@ -24,5 +24,9 @@ cybersecurity, product, executive) without separate documents.
   (secrets, URLs, IPs, key blocks) and `safe_repo_path` (no `.env`, keys,
   traversal). The review runs after delivery and must never raise into it; any
   repository edit made by the review session is discarded.
+- Usage for that independent session is `agent_type=documentation` (GitHub
+  AI Usage label **Documentation**), not Primary. `session_role=documentation`
+  is the session-identity field; `infer_ai_agent_context` must keep the
+  #280 per-agent bucket aligned with it.
 - This setting changes behavior, so it needs the `minor` label from a trusted
   author; the worker owns VERSION.

@@ -6,9 +6,11 @@ routing and escalation. Do not add a cache toggle, direct inference API, source
 snapshot cache, or alternate telemetry store.
 
 Never share sessions between repositories/issues or with independent UAT/security
-reviewers. Each new assessment is fresh. Only interrupted same-phase reviews may
-resume; fixer continuity stays within its own stage/epoch/model/effort. Use an
-explicit validated UUID and current source/tests/findings; never use `--last`.
+reviewers or the architecture documentation review. Each new assessment is fresh.
+Only interrupted same-phase reviews may resume; fixer continuity stays within
+its own stage/epoch/model/effort. Use an explicit validated UUID and current
+source/tests/findings; never use `--last`. Documentation-review usage is
+`agent_type=documentation`, not Primary.
 
 Extend `token_usage.py`, `ai_token_usage` and `usage_report.py` for telemetry.
 Missing counters remain unavailable. Codex cache reads are included in input;

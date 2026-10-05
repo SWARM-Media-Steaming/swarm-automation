@@ -30,6 +30,7 @@ if str(ISSUE_WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(ISSUE_WORKER_DIR))
 
 from swarm_issue_worker import Config, IssueContext, ProviderChoice, Worker, build_parser  # noqa: E402
+from token_usage import AgentType, PromptType  # noqa: E402
 
 REVIEW_REPLY = json.dumps({"impact": "none", "reason": "no change", "confidence": 0.9, "operations": []})
 REVIEW_PROMPT = "Documentation impact review: list affected architecture entities."
@@ -134,6 +135,9 @@ class DocumentationReviewSessionTests(unittest.TestCase):
                             "the review's usage row names the implementer's session")
         self.assertFalse(review.get("session_reused"),
                          "a fresh review session is reported as reused")
+        self.assertEqual(review.get("agent_type"), AgentType.DOCUMENTATION.value,
+                         "documentation review usage is still classified as the primary agent")
+        self.assertEqual(review.get("prompt_type"), PromptType.REVIEW.value)
 
     def test_implementer_continuity_survives_the_review(self) -> None:
         implementer = self.implementer_finishes_a_turn()

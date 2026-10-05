@@ -38,7 +38,7 @@ from ai_execution_history import ExecutionHistoryRepository  # noqa: E402
 from dynamic_router import cache_adjusted_cost  # noqa: E402
 from prompt_sessions import valid_session_id  # noqa: E402
 from swarm_issue_worker import Config, IssueContext, ProviderChoice, Worker, build_parser  # noqa: E402
-from token_usage import NormalizedUsage, invocation_usage  # noqa: E402
+from token_usage import AgentType, NormalizedUsage, PromptType, invocation_usage  # noqa: E402
 from usage_report import cache_routing_evidence  # noqa: E402
 
 REPOSITORY = "acme/project"
@@ -265,8 +265,13 @@ class TelemetryAttributionTests(WorkerFixture):
 
         review = self.worker.read_state()["token_usage_events"][-1]
         self.assertEqual(review.get("session_role"), "documentation")
+        self.assertEqual(review.get("agent_type"), AgentType.DOCUMENTATION.value)
+        self.assertEqual(review.get("prompt_type"), PromptType.REVIEW.value)
         self.assertFalse(review.get("session_reused"))
         self.assertNotEqual(review.get("agent_run_id"), implementer)
+        report = self.worker.render_ai_usage_report()
+        self.assertIn("| Documentation |", report)
+        self.assertNotIn("| Primary |", report)
 
     def test_router_usage_is_not_attributed_to_the_implementation_session(self) -> None:
         implementer = str(uuid.uuid4())

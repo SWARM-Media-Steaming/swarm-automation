@@ -70,16 +70,17 @@ def _claude_result_json(*, input_tokens: int, output_tokens: int) -> str:
 
 class CrossStageTokenAttributionIntegrityTests(unittest.TestCase):
     """A single work-round that exercises every agent type (router, primary,
-    UAT scan+fix, cybersecurity scan+fix) in the real production order, then
-    verifies every one of the six resulting events — in memory, in the
-    ``### AI Usage`` report, and once flushed to the execution-history DB —
-    keeps its own distinct agent/prompt attribution and input-token count."""
+    UAT scan+fix, cybersecurity scan+fix, documentation review) in the real
+    production order, then verifies every one of the seven resulting events
+    — in memory, in the ``### AI Usage`` report, and once flushed to the
+    execution-history DB — keeps its own distinct agent/prompt attribution
+    and input-token count."""
 
     setUp = fixtures.WorkerTestCase.setUp
     git = fixtures.WorkerTestCase.git
     _worker_argv = fixtures.WorkerTestCase._worker_argv
 
-    # (agent_type, prompt_type, input_tokens) expected for each of the six
+    # (agent_type, prompt_type, input_tokens) expected for each of the seven
     # calls below, in the order they are made.
     EXPECTED = [
         (AgentType.ROUTER.value, PromptType.INITIAL.value, 111),
@@ -88,6 +89,7 @@ class CrossStageTokenAttributionIntegrityTests(unittest.TestCase):
         (AgentType.ADVERSARIAL_UAT.value, PromptType.REMEDIATION.value, 444),
         (AgentType.ADVERSARIAL_CYBERSECURITY.value, PromptType.ADVERSARIAL_SCAN.value, 555),
         (AgentType.ADVERSARIAL_CYBERSECURITY.value, PromptType.REMEDIATION.value, 666),
+        (AgentType.DOCUMENTATION.value, PromptType.REVIEW.value, 777),
     ]
 
     def _run_claude_with(self, input_tokens: int, output_tokens: int):
@@ -154,9 +156,28 @@ class CrossStageTokenAttributionIntegrityTests(unittest.TestCase):
         with mock.patch.object(worker, "_run_claude", side_effect=self._run_claude_with(666, 66)):
             worker.run_ai("cyber fix", activity="fixing")
 
+        # 7. Post-delivery architecture documentation review: a fresh
+        # independent session that must not inherit the primary bucket.
+        worker.update_state(
+            **{fixtures.SECURITY_STAGE.key: {"phase": "fix", "round": 1, "active": False}}
+        )
+        review = json.dumps({
+            "impact": "none", "reason": "No architectural change.", "confidence": 0.9,
+            "operations": [],
+        })
+
+        def run_docs(prompt: str, env: dict, activity: str = "") -> int:
+            worker._last_ai_raw_output = _claude_result_json(input_tokens=777, output_tokens=77)
+            worker.ai_output_file.write_text(review, encoding="utf-8")
+            return 0
+
+        with mock.patch.object(worker, "_run_claude", side_effect=run_docs), \
+             mock.patch.object(worker, "provider_environment", return_value={}):
+            worker._run_documentation_pass("review architecture impact")
+
         events = worker.read_state()["token_usage_events"]
         self.assertEqual(
-            len(events), 6, f"expected exactly one usage event per invocation, got {len(events)}"
+            len(events), 7, f"expected exactly one usage event per invocation, got {len(events)}"
         )
         actual = [(event["agent_type"], event["prompt_type"], event["input_tokens"]) for event in events]
         self.assertEqual(
@@ -167,14 +188,15 @@ class CrossStageTokenAttributionIntegrityTests(unittest.TestCase):
             "or overwritten instead of each staying independent (issue #280 items 4, 13, 16).",
         )
 
-        # The GitHub-facing report must show every one of the six rows, with
-        # UAT and cybersecurity independently labelled per item 9.
+        # The GitHub-facing report must show every one of the seven rows, with
+        # UAT, cybersecurity, and documentation independently labelled.
         report = worker.render_ai_usage_report()
-        self.assertIn("**AI Invocations:** 6", report)
+        self.assertIn("**AI Invocations:** 7", report)
         self.assertIn("UAT Adversarial", report)
         self.assertIn("Cyber Adversarial", report)
+        self.assertIn("| Documentation |", report)
         self.assertNotIn("| Adversarial |", report)
-        self.assertIn(f"**Input:** {111 + 222 + 333 + 444 + 555 + 666:,}", report)
+        self.assertIn(f"**Input:** {111 + 222 + 333 + 444 + 555 + 666 + 777:,}", report)
 
         # Flushing to the execution-history DB must preserve every row's own
         # distinct attribution and support per-agent-type aggregation without
@@ -182,12 +204,12 @@ class CrossStageTokenAttributionIntegrityTests(unittest.TestCase):
         worker.flush_token_usage_to_history()
         repository = fixtures.ExecutionHistoryRepository(history_db)
         rows = repository.token_usage_for_execution(execution_id)
-        self.assertEqual(len(rows), 6)
+        self.assertEqual(len(rows), 7)
         persisted = [(row["agent_type"], row["prompt_type"], row["input_tokens"]) for row in rows]
         self.assertEqual(persisted, self.EXPECTED)
 
         issue_rows = repository.token_usage_for_issue(worker.config.github_repository, 501)
-        self.assertEqual(len(issue_rows), 6)
+        self.assertEqual(len(issue_rows), 7)
 
         uat_totals = repository.token_usage_totals(
             [worker.config.github_repository], agent_type=AgentType.ADVERSARIAL_UAT.value
@@ -207,9 +229,15 @@ class CrossStageTokenAttributionIntegrityTests(unittest.TestCase):
         self.assertEqual(primary_totals["invocations"], 1)
         self.assertEqual(primary_totals["inputTokens"], 222)
 
+        documentation_totals = repository.token_usage_totals(
+            [worker.config.github_repository], agent_type=AgentType.DOCUMENTATION.value
+        )
+        self.assertEqual(documentation_totals["invocations"], 1)
+        self.assertEqual(documentation_totals["inputTokens"], 777)
+
         overall_totals = repository.token_usage_totals([worker.config.github_repository])
-        self.assertEqual(overall_totals["invocations"], 6)
-        self.assertEqual(overall_totals["inputTokens"], 111 + 222 + 333 + 444 + 555 + 666)
+        self.assertEqual(overall_totals["invocations"], 7)
+        self.assertEqual(overall_totals["inputTokens"], 111 + 222 + 333 + 444 + 555 + 666 + 777)
 
 
 class RouterUsageBeforeStateFileSurvivesIntoPersistedStateTests(unittest.TestCase):
