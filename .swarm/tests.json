@@ -4798,6 +4798,68 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_identity_isolation_and_rejection.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-identity-isolation-and-rejection",
+      "name": "Issue #381: repo/issue identity isolation, rejected assessments, and non-quota failure recovery",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue381_identity_isolation_and_rejection.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_confirmation_telemetry_and_gates.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-confirmation-telemetry-and-gates",
+      "name": "Issue #381: CLI session confirmation, telemetry attribution, and cache-routing evidence gates",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/token_usage.py",
+          "issue_worker/usage_report.py",
+          "tests/adversarial/test_issue381_confirmation_telemetry_and_gates.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
