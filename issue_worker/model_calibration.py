@@ -1217,7 +1217,7 @@ def explain_update(active: dict[str, Any] | None, proposed: dict[str, Any] | Non
         answers.append({
             "question": f"Why was {change.get('model')} retired?",
             "answer": f"{change.get('superseded_by')} replaces it: it is offered by its provider CLI and priced. "
-                      "Sessions already started finish on their pinned model.",
+                      "A session already started on it is re-routed on its next resume; committed work is kept.",
         })
     if diff.get("regression"):
         answers.append({

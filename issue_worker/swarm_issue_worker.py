@@ -2569,8 +2569,8 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         """
         if (pinned.key, pinned.model, pinned.effort) == (fresh.key, fresh.model, fresh.effort):
             return False, "the routing decision is unchanged"
-        if pinned.resume and available_models.is_blacklisted(pinned.model):
-            return False, "the started session finishes on its pinned model despite retirement"
+        if available_models.is_blacklisted(pinned.model):
+            return True, f"{pinned.model} is retired"
         if not has_work:
             return True, "nothing has been done yet, so re-routing loses nothing"
         if pinned.key != fresh.key:

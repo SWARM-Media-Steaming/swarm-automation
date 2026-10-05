@@ -2514,19 +2514,19 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(self.worker.read_state()["session_id"], "session-old")
         self.assertEqual(self.worker._reroute_note, "")
 
-    def test_a_retirement_preserves_the_started_session_and_routing_record(self) -> None:
+    def test_a_retirement_reroutes_the_started_session_to_the_fresh_pick(self) -> None:
         self._saved_attempt(dirty=True)
         self.worker.update_state(model="claude-sonnet-5", routing_decision={
             "provider": "claude", "selected_model": "claude-sonnet-5", "reasoning_effort": "medium",
         })
         self.worker.choice = self.worker.choice_from_state(self.worker.read_state())
-        before = self.worker.read_state()
-        bundles = self._reroute("Claude", "claude-sonnet-5-5", "high")
-        after = self.worker.read_state()
-        for field in ("model", "effort", "session_id", "session_started", "routing_decision"):
-            self.assertEqual(after[field], before[field], field)
-        self.assertEqual(bundles, [])
-        self.assertTrue(self.worker.choice.resume)
+        self._reroute("Claude", "claude-sonnet-5-5", "high")
+        state = self.worker.read_state()
+        self.assertEqual(state["model"], "claude-sonnet-5-5")
+        self.assertEqual(state["session_id"], "new-claude")
+        self.assertFalse(state["session_started"])
+        self.assertFalse(self.worker.choice.resume)
+        self.assertIn("claude-sonnet-5 is retired", self.worker._reroute_note)
 
     def test_a_different_provider_takes_over_with_a_handoff_bundle_once_work_exists(self) -> None:
         self._saved_attempt(dirty=True)

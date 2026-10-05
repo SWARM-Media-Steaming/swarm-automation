@@ -28,7 +28,7 @@ are excluded from fresh routing and option lists.
 
 An active retirement removes the predecessor from fresh routing, upgrades,
 Jev's advisory list, and option lists, and repairs saved selections into the
-successor. Started sessions finish on their pinned model. Every retirement
+successor. A started session on a retired model is re-routed on resume (committed work is kept, the session context is not). Every retirement
 transition is logged once and included in the calibration diff/notification.
 
 A new feed model needs no static catalog or pricing edit: validation, CLI
