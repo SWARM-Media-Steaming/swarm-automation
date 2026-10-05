@@ -505,8 +505,11 @@ closed (`resume=False`, new Grok id) the same way official provider handoff
 does. Primary, UAT fixes and security fixes have separate scopes; each new
 adversarial review is fresh. Legacy/missing/stale metadata, model/effort
 changes, instruction changes, history rewinds and failed resumes restart
-safely with current context. Successful native compaction is left alone. Never
-persist source snapshots.
+safely with current context. Successful native compaction is left alone,
+including Claude `compact_result=success` and Codex `context_compacted`.
+Claude's failed compact (`system`/`status` with `compact_result=failed`, a
+result event that names it, or "Compaction failed" prose) is one fresh retry.
+Never persist source snapshots.
 
 History schema 10 adds nullable cache/reuse/cost fields to `ai_token_usage`;
 `agent_run_id` remains the native session ID. Reused Codex cumulative counters

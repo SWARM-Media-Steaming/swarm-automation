@@ -10,6 +10,9 @@ reviewers or the architecture documentation review. Each new assessment is fresh
 Grok is outside native cache: do not leave `resume=True` or a Claude/Codex UUID
 on a Grok choice. Official handoff and `prepare_cli_session` mint a fresh Grok
 session. Grok may still `--resume` a session it started.
+Claude failed compaction is a `system`/`status` event with `compact_result=failed`,
+a result event that names the failure, or "Compaction failed" prose.
+`compact_result=success` and Codex `context_compacted` stay success.
 Only interrupted same-phase reviews may resume; fixer continuity stays within
 its own stage/epoch/model/effort. Use an explicit validated UUID and current
 source/tests/findings; never use `--last`. Documentation-review usage is

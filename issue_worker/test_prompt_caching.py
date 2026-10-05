@@ -278,6 +278,38 @@ class SessionTests(unittest.TestCase):
             with self.subTest(event=event):
                 self.assertFalse(resume_failure(json.dumps(event)))
 
+    def test_claude_status_compact_result_and_prose_are_resume_failures(self):
+        # Claude Code does not mark a failed compact as an error-typed
+        # compact_boundary. The status field, the result errors, and the CLI
+        # prose are the signals. A later failure is not hidden by an earlier
+        # successful boundary. Success status and Codex context_compacted are not.
+        self.assertTrue(resume_failure(json.dumps({
+            "type": "system", "subtype": "status", "compact_result": "failed",
+        })))
+        self.assertTrue(resume_failure(json.dumps({
+            "type": "system", "subtype": "status", "compact_result": "Failed",
+            "compact_error": "conversation could not be reduced below the context",
+        })))
+        self.assertTrue(resume_failure(
+            "Compaction failed · conversation could not be reduced below the context\n"
+        ))
+        self.assertTrue(resume_failure(json.dumps({
+            "type": "result", "subtype": "error_during_execution", "is_error": True,
+            "errors": ["automatic compaction failed: conversation could not be reduced"],
+            "result": "Compaction failed",
+        })))
+        self.assertFalse(resume_failure(json.dumps({
+            "type": "system", "subtype": "status", "compact_result": "success",
+        })))
+        self.assertFalse(resume_failure(json.dumps({
+            "type": "event_msg", "payload": {"type": "context_compacted"},
+        })))
+        self.assertTrue(resume_failure("\n".join([
+            json.dumps({"type": "system", "subtype": "compact_boundary",
+                        "content": "Conversation compacted"}),
+            json.dumps({"type": "system", "subtype": "status", "compact_result": "failed"}),
+        ])))
+
     def test_a_damaged_rejection_marker_still_discards_the_assessment(self):
         for payload in ({}, [], "rejected", 1):
             with self.subTest(payload=payload):
