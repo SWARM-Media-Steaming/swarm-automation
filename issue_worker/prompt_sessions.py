@@ -21,11 +21,15 @@ _RESUME_FAILURE_CODES = frozenset({
     "session_not_found",
     "thread_not_found",
 })
-_SUCCESSFUL_COMPACTION = re.compile(
-    r"compact_boundary|successfully\s+compact(?:ed|ion)|"
-    r"compacted\s+(?:the\s+)?conversation|compacted\s+successfully",
-    re.IGNORECASE,
+# Prose that reports a compaction that worked. The bare ``compact_boundary``
+# marker is only success evidence on a non-error event: an error event that
+# carries that subtype is the CLI reporting a compaction that failed.
+_COMPACTION_SUCCESS_TEXT = (
+    r"successfully\s+compact(?:ed|ion)|"
+    r"compacted\s+(?:the\s+)?conversation|compacted\s+successfully"
 )
+_SUCCESSFUL_COMPACTION_PROSE = re.compile(_COMPACTION_SUCCESS_TEXT, re.IGNORECASE)
+_SUCCESSFUL_COMPACTION = re.compile(r"compact_boundary|" + _COMPACTION_SUCCESS_TEXT, re.IGNORECASE)
 _RESUME_FAILURE_TEXT = re.compile(
     r"(?:session|thread|conversation)[^\n]{0,120}(?:not found|does not exist|expired|corrupt|invalid)|"
     r"(?:failed|unable|cannot) to (?:resume|load session|load thread)|"
@@ -75,7 +79,7 @@ def resume_failure(raw: str) -> bool:
         if event.get("type") in {"error", "turn.failed"} or event.get("is_error"):
             collect_codes(event)
             blob = json.dumps(event)
-            if not _SUCCESSFUL_COMPACTION.search(blob):
+            if not _SUCCESSFUL_COMPACTION_PROSE.search(blob):
                 diagnostics.append(blob)
     if codes & _RESUME_FAILURE_CODES:
         return True
@@ -133,9 +137,12 @@ class PromptSessionMixin:
         return "primary", True
 
     def _rejection_generation(self, loop: dict) -> str:
-        rejected = loop.get("retry_rejection")
-        if not rejected:
+        # The loop sets this key when it discards a report and pops it when the
+        # replacement is accepted, so presence is the signal. A damaged payload
+        # (empty, non-dict) must still fail closed to a fresh assessment.
+        if "retry_rejection" not in loop:
             return ""
+        rejected = loop["retry_rejection"]
         attempts = 1
         if isinstance(rejected, dict):
             raw = rejected.get("attempts")

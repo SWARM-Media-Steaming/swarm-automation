@@ -44,7 +44,12 @@ repository and current continuation. Adversarial prompts are reconstructed from
 current spec/diff/findings/tests. Every attempt is accounted separately. Model
 rejection still uses the existing bounded model fallback. Ordinary provider errors
 and quota pauses retain their existing treatment. Successful native compaction is
-not treated as a failure and does not trigger a reset.
+not treated as a failure and does not trigger a reset. A compaction the CLI itself
+reports as an error (its `compact_boundary` event carries `is_error`, or an error
+code such as `context_length_exceeded`) is a resume failure and gets the one fresh
+retry; the `compact_boundary` subtype alone is only success evidence on a
+non-error event. Likewise, the presence of an adversarial loop's `retry_rejection`
+marker, even a damaged one, means the assessment was discarded and must start fresh.
 
 ## Context construction
 

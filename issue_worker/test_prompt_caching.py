@@ -225,6 +225,33 @@ class SessionTests(unittest.TestCase):
             "type": "error", "error": {"code": "context_length_exceeded"},
         })))
 
+    def test_a_failed_compaction_event_is_a_resume_failure(self):
+        # ``compact_boundary`` on an error event is the CLI reporting failure.
+        self.assertTrue(resume_failure(json.dumps({
+            "type": "system", "subtype": "compact_boundary", "is_error": True,
+            "message": "context window was full; compaction failed",
+        })))
+        self.assertFalse(resume_failure(json.dumps({
+            "type": "system", "subtype": "compact_boundary", "is_error": False,
+            "message": "context window was full; compacted successfully",
+        })))
+
+    def test_a_damaged_rejection_marker_still_discards_the_assessment(self):
+        for payload in ({}, [], "rejected", 1):
+            with self.subTest(payload=payload):
+                self.worker.update_state(adversarial={"active": True, "phase": "test", "epoch": 1, "round": 0})
+                rejected = self.seed()
+                self.worker.update_state(adversarial={
+                    "active": True, "phase": "test", "epoch": 1, "round": 0, "retry_rejection": payload})
+                self.worker.choice.resume = True
+                self.worker.choice.session_id = rejected
+                self.assertTrue(self.worker.prepare_cli_session())
+                self.assertFalse(self.worker.choice.resume)
+                self.assertNotEqual(self.worker.choice.session_id, rejected)
+        # Once the report is accepted the loop pops the key: no suffix remains.
+        self.worker.update_state(adversarial={"active": True, "phase": "test", "epoch": 1, "round": 0})
+        self.assertEqual(self.worker.session_role(), ("adversarial:test:1:0", False))
+
     def test_independent_pass_cannot_resume_the_implementer(self):
         implementer = self.seed()
         self.worker._independent_ai_pass = True
