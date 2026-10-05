@@ -450,12 +450,12 @@ still want the old delivery must set `adversarial_best_effort_merge=True`.
 
 Every Claude/Codex/Grok invocation's token usage (issue #280) is captured at
 the two chokepoints every agent already goes through, not inside each agent:
-`Worker.run_ai` (primary implementation, and — via
-`AdversarialStageMixin.run_adversarial_stage` — both adversarial stages) and
-`Worker.run_router` (dynamic routing / pre-flight grading, including its one
-corrective model-name retry). A new agent that calls through either of those
-gets usage tracking for free; adding tracking inside a new agent directly is
-the bug this design exists to prevent.
+`Worker.run_ai` (primary implementation, architecture documentation review,
+and — via `AdversarialStageMixin.run_adversarial_stage` — both adversarial
+stages) and `Worker.run_router` (dynamic routing / pre-flight grading,
+including its one corrective model-name retry). A new agent that calls
+through either of those gets usage tracking for free; adding tracking
+inside a new agent directly is the bug this design exists to prevent.
 
 `issue_worker/token_usage.py` owns provider-agnostic normalization
 (`normalize_claude_usage`/`normalize_codex_usage`/`normalize_grok_usage`,
@@ -469,11 +469,14 @@ rank, so changing that rank is a routing change and nothing else.
 (`AI_USAGE_RECORDED`), and stashes a usage event; `record_ai_usage` and
 `record_router_usage` are its two thin, context-specific callers.
 
-`Worker.infer_ai_agent_context` reads the *existing* adversarial loop state
-(`stage.key`/`phase`/`round` in the in-progress state file) to attribute a
-`run_ai` call to `primary`/`adversarial_uat`/`adversarial_cybersecurity`
-automatically — it does not add a parameter to `run_ai` for this, since that
-would be exactly the kind of per-call-site wiring a future agent could forget.
+`Worker.infer_ai_agent_context` attributes a `run_ai` call automatically —
+it does not add a parameter to `run_ai` for this, since that would be
+exactly the kind of per-call-site wiring a future agent could forget. It
+reads `_independent_ai_pass` first (architecture documentation review →
+`documentation` / `review`, never `primary`; issue #389), then the
+existing adversarial loop state (`stage.key`/`phase`/`round` in the
+in-progress state file) for `adversarial_uat` / `adversarial_cybersecurity`,
+and otherwise `primary`.
 
 Usage events accumulate in `Worker.token_usage_events` (mirrored into the
 in-progress state under `token_usage_events` once that file exists, since a
@@ -639,7 +642,9 @@ Per-repository, off by default (`architecture_docs_enabled`, worker flag
 `--architecture-docs-enabled`). Logic: `issue_worker/architecture_docs.py`
 (tests: `test_architecture_docs.py`, run with `python3.13 -m unittest`);
 renderer: `ui/architecture-docs.js`; Tauri command `get_architecture_docs`.
-See `.claude/rules/architecture-docs.md` before changing it.
+The post-delivery review is an independent `run_ai` session whose usage
+bucket is `AgentType.DOCUMENTATION`, not Primary. See
+`.claude/rules/architecture-docs.md` before changing it.
 
 ## Repository-aware complexity scoring
 

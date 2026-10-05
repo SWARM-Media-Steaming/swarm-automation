@@ -4737,7 +4737,13 @@ class Worker(PromptSessionMixin, DeliveryRecoveryMixin, AdversarialUatMixin, Adv
         belongs to, read from worker state rather than threaded through every
         call site. This is what lets a new caller of ``run_ai`` get correct
         token-usage attribution automatically instead of having to remember
-        to pass it (issue #280 item 4)."""
+        to pass it (issue #280 item 4). Architecture documentation review
+        is its own per-agent bucket (issue #389), never Primary."""
+        # Independent one-off passes (architecture documentation) must win
+        # even when an adversarial loop is still marked active in state.
+        if getattr(self, "_independent_ai_pass", False):
+            prompt_type = PromptType.RETRY if attempt_number > 1 else PromptType.REVIEW
+            return AgentType.DOCUMENTATION.value, prompt_type.value
         if self.in_progress_file.exists():
             state = self.read_state()
             for stage in ADVERSARIAL_STAGES:
@@ -4770,10 +4776,10 @@ class Worker(PromptSessionMixin, DeliveryRecoveryMixin, AdversarialUatMixin, Adv
     ) -> None:
         """Normalize, cost, log, and stash one ``run_ai`` invocation's usage.
 
-        Called once per actual provider call (primary implementation and,
-        via ``adversarial_core``, both adversarial stages), so every retry
-        gets its own independent record rather than overwriting an earlier
-        attempt's usage.
+        Called once per actual provider call (primary implementation,
+        architecture documentation review, and via ``adversarial_core``
+        both adversarial stages), so every retry gets its own independent
+        record rather than overwriting an earlier attempt's usage.
         """
         assert self.choice
         inferred_agent, inferred_prompt = self.infer_ai_agent_context(attempt_number)

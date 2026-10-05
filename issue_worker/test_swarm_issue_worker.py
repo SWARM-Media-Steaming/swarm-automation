@@ -6564,6 +6564,57 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(events[-1]["agent_type"], AgentType.ADVERSARIAL_CYBERSECURITY.value)
         self.assertEqual(events[-1]["prompt_type"], PromptType.RETRY.value)
 
+    def test_run_ai_attributes_documentation_review_as_its_own_agent(self) -> None:
+        self.worker.issue = IssueContext(389, "Title", "body", [], "https://example.invalid/389")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-docs")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        review = json.dumps({
+            "impact": "none", "reason": "No architectural change.", "confidence": 0.9,
+            "operations": [],
+        })
+
+        def fake_run_claude(prompt: str, env: dict[str, str], activity: str = "") -> int:
+            self.worker._last_ai_raw_output = self._claude_result_json(input_tokens=7, output_tokens=3)
+            self.worker.ai_output_file.write_text(review, encoding="utf-8")
+            return 0
+
+        with mock.patch.object(self.worker, "_run_claude", side_effect=fake_run_claude), \
+             mock.patch.object(self.worker, "provider_environment", return_value={}):
+            self.worker._run_documentation_pass("review architecture impact")
+        events = self.worker.read_state()["token_usage_events"]
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["agent_type"], AgentType.DOCUMENTATION.value)
+        self.assertEqual(event["prompt_type"], PromptType.REVIEW.value)
+        self.assertEqual(event["session_role"], "documentation")
+        self.assertFalse(event["session_reused"])
+        self.assertEqual(event["input_tokens"], 7)
+        report = self.worker.render_ai_usage_report()
+        self.assertIn("| Documentation |", report)
+        self.assertNotIn("| Primary |", report)
+
+    def test_infer_ai_agent_context_keeps_documentation_off_primary(self) -> None:
+        self.worker.issue = IssueContext(389, "Title", "body", [], "https://example.invalid/389")
+        self.worker.choice = ProviderChoice("Claude", "test-model", "high", "session-docs")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.update_state(
+            **{UAT_STAGE.key: {"phase": "test", "round": 0, "active": True}}
+        )
+        self.worker._independent_ai_pass = True
+        try:
+            agent, prompt = self.worker.infer_ai_agent_context(1)
+            retry_agent, retry_prompt = self.worker.infer_ai_agent_context(2)
+        finally:
+            self.worker._independent_ai_pass = False
+        self.assertEqual(agent, AgentType.DOCUMENTATION.value)
+        self.assertEqual(prompt, PromptType.REVIEW.value)
+        self.assertEqual(retry_agent, AgentType.DOCUMENTATION.value)
+        self.assertEqual(retry_prompt, PromptType.RETRY.value)
+        self.assertEqual(
+            self.worker.infer_ai_agent_context(1),
+            (AgentType.ADVERSARIAL_UAT.value, PromptType.ADVERSARIAL_SCAN.value),
+        )
+
     def test_router_call_records_its_own_usage_event(self) -> None:
         self.worker.issue = IssueContext(362, "Title", "body", [], "https://example.invalid/362")
         self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", "session-3")
