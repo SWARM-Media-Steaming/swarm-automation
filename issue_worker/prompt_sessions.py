@@ -49,8 +49,21 @@ def valid_session_id(value: object) -> bool:
         return False
 
 
+def _error_flag(value: object) -> bool:
+    """A CLI ``is_error`` marker, whether it arrives as a bool, number or string."""
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "false", "0", "no", "none", "null"}
+    return bool(value)
+
+
 def resume_failure(raw: str) -> bool:
-    """Only resume/context errors warrant a fresh retry, not arbitrary failures."""
+    """Only resume/context errors warrant a fresh retry, not arbitrary failures.
+
+    The event decides, not its wording. A ``compact_boundary`` event is success
+    evidence only when the CLI did not mark it as an error: one flagged
+    ``is_error`` is a failed compaction whatever its message says, and one
+    typed ``error``/``turn.failed`` keeps any exhaustion code it carries.
+    """
     diagnostics = []
     codes = set()
 
@@ -74,9 +87,14 @@ def resume_failure(raw: str) -> bool:
             continue
         if not isinstance(event, dict):
             continue
-        if event.get("subtype") == "compact_boundary" and not event.get("is_error"):
-            continue
-        if event.get("type") in {"error", "turn.failed"} or event.get("is_error"):
+        error_typed = event.get("type") in {"error", "turn.failed"}
+        flagged = _error_flag(event.get("is_error"))
+        if event.get("subtype") == "compact_boundary":
+            if flagged:
+                return True
+            if not error_typed:
+                continue
+        if error_typed or flagged:
             collect_codes(event)
             blob = json.dumps(event)
             if not _SUCCESSFUL_COMPACTION_PROSE.search(blob):

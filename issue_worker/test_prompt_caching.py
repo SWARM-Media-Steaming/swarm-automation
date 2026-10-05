@@ -236,6 +236,33 @@ class SessionTests(unittest.TestCase):
             "message": "context window was full; compacted successfully",
         })))
 
+    def test_the_compaction_event_decides_not_its_wording(self):
+        # An error-flagged boundary is a failure with a terse, empty or
+        # success-sounding message, and whatever shape the flag takes.
+        for flag in (True, "true", 1):
+            for extra in ({}, {"message": "compaction failed"},
+                          {"message": "last successfully compacted checkpoint was stale"},
+                          {"errors": ["compaction failed"]}):
+                with self.subTest(flag=flag, extra=extra):
+                    self.assertTrue(resume_failure(json.dumps({
+                        "type": "system", "subtype": "compact_boundary", "is_error": flag, **extra})))
+        for flag in (False, "false", "0", 0, None):
+            with self.subTest(flag=flag):
+                self.assertFalse(resume_failure(json.dumps({
+                    "type": "system", "subtype": "compact_boundary", "is_error": flag})))
+        # An error-typed boundary keeps its exhaustion code, with or without the flag.
+        for kind in ("error", "turn.failed"):
+            for code in ("context_length_exceeded", "context-length-exceeded"):
+                with self.subTest(kind=kind, code=code):
+                    self.assertTrue(resume_failure(json.dumps({
+                        "type": kind, "subtype": "compact_boundary", "is_error": False,
+                        "error": {"code": code}})))
+        # A later failed compaction is not hidden by an earlier successful one.
+        self.assertTrue(resume_failure("\n".join([
+            json.dumps({"type": "system", "subtype": "compact_boundary"}),
+            json.dumps({"type": "system", "subtype": "compact_boundary", "is_error": True}),
+        ])))
+
     def test_a_damaged_rejection_marker_still_discards_the_assessment(self):
         for payload in ({}, [], "rejected", 1):
             with self.subTest(payload=payload):

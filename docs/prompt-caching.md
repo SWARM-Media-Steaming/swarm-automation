@@ -48,7 +48,11 @@ not treated as a failure and does not trigger a reset. A compaction the CLI itse
 reports as an error (its `compact_boundary` event carries `is_error`, or an error
 code such as `context_length_exceeded`) is a resume failure and gets the one fresh
 retry; the `compact_boundary` subtype alone is only success evidence on a
-non-error event. Likewise, the presence of an adversarial loop's `retry_rejection`
+non-error event. The event decides, not its wording: `is_error` (as a boolean,
+number or string) marks a failed compaction even with a terse, empty or
+success-sounding message, an `error`/`turn.failed` event keeps its exhaustion code
+even when it also carries `compact_boundary`, and a later failed compaction is never
+hidden by an earlier successful one in the same stream. Likewise, the presence of an adversarial loop's `retry_rejection`
 marker, even a damaged one, means the assessment was discarded and must start fresh.
 
 ## Context construction
