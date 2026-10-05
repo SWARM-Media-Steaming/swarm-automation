@@ -1427,6 +1427,29 @@ fn repo_worker_args_carries_each_adversarial_stage_independently() {
 }
 
 #[test]
+fn routing_caps_reach_the_worker_per_provider_and_only_when_complete() {
+    let value_after = |args: &[String]| {
+        let at = args
+            .iter()
+            .position(|a| a == "--routing-caps")
+            .expect("flag");
+        args[at + 1].clone()
+    };
+    assert_eq!(value_after(&args_for(&repo("octocat/example"))), "{}");
+    let capped = args_for(&RepoConfig {
+        routing_cap_claude_model: "claude-sonnet-5-5".into(),
+        routing_cap_claude_effort: "high".into(),
+        // A model without an effort is not a cap.
+        routing_cap_codex_model: "gpt-6".into(),
+        ..repo("octocat/example")
+    });
+    let caps: serde_json::Value = serde_json::from_str(&value_after(&capped)).unwrap();
+    assert_eq!(caps["claude"]["model"], "claude-sonnet-5-5");
+    assert_eq!(caps["claude"]["effort"], "high");
+    assert!(caps.get("codex").is_none() && caps.get("grok").is_none());
+}
+
+#[test]
 fn history_is_always_on_and_has_no_worker_toggle() {
     let mut config = AppConfig::default();
     let repo = repo("octocat/example");

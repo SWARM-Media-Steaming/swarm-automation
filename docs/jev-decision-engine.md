@@ -128,6 +128,10 @@ offered to Jev, recommended by it, or routed to.
 The full routing policy lives in `skills/model-router/SKILL.md` and
 `skills/model-router/routing-rules.yaml`.
 
+A repository routing cap (`routing_cap.py`) is applied after Swarm's router, as a
+final clamp. Jev's recommendation, the Swarm baseline and the router's raw pick are
+recorded separately from the capped selection and are never overwritten.
+
 ## Persistence and Feedback
 
 Every Jev decision is stored in `jev_decisions`. Baseline vs Jev vs combined

@@ -40,6 +40,8 @@ import subprocess
 import tempfile
 from typing import Any
 
+import routing_cap
+
 #: Counted fix/re-test rounds in one epoch. The initial assessment (round 0)
 #: is not counted.
 MAX_ROUNDS = 3
@@ -913,6 +915,7 @@ class AdversarialStageMixin:
         choice = self.apply_tester_floor(stage, loop, choice)
         if escalation:
             choice = self.escalate_stage_choice(stage, loop, choice, escalation, remaining)
+        choice = self.cap_stage_choice(stage, loop, choice, escalating=bool(escalation))
         if choice.name not in loop["capacity_used"]:
             loop["capacity_used"].append(choice.name)
         return choice
@@ -933,12 +936,43 @@ class AdversarialStageMixin:
         upgrade = latest_release(
             choice.key, choice.model, choice.effort,
             allow_usage_credit_models=self.config.allow_usage_credit_models,
+            max_cost=routing_cap.upgrade_ceiling(
+                choice.key, self.config.routing_caps,
+                allow_usage_credit_models=self.config.allow_usage_credit_models),
         )
         if upgrade is None:
             return choice
         log(f"{stage.label} for issue #{self.issue.number}: upgrading {upgrade.previous} to "
             f"{upgrade.model}: {upgrade.reason}.")
         return ProviderChoice(choice.name, upgrade.model, choice.effort, choice.session_id, choice.resume)
+
+    def cap_stage_choice(self, stage: AdversarialStage, loop: dict[str, Any], choice, *, escalating: bool = False):
+        """Final clamp of a fixer/tester choice to the repository's routing cap.
+
+        The tester floor and strict-mode escalation raise the choice; the cap is
+        a hard ceiling over both, so it runs last. Escalation therefore stops at
+        the cap (a stalled epoch keeps the cap's pair rather than looping on a
+        stronger model it may not use). A started session and a run with Dynamic
+        Model Routing off keep the pair they have.
+        """
+        from swarm_issue_worker import ProviderChoice, log
+
+        if not self.config.routing_caps or not self.config.dynamic_model_routing or choice.resume \
+                or self.config.dry_run:
+            return choice
+        model, effort, record = routing_cap.clamp_choice(
+            choice.key, choice.model, choice.effort, self.config.routing_caps,
+            allow_usage_credit_models=self.config.allow_usage_credit_models)
+        if record and record.get("note") and not record.get("applied"):
+            log(f"{stage.label} for issue #{self.issue.number}: {record['note']}")
+        if not (record and record.get("applied")):
+            return choice
+        log(f"{stage.label} for issue #{self.issue.number}: "
+            + routing_cap.log_line(self.issue.number, record).split(": ", 1)[-1])
+        if escalating:
+            log(f"{stage.label} for issue #{self.issue.number}: the routing cap blocks further escalation; "
+                f"the epoch {loop.get('epoch', 1)} fixer stays at {choice.name} {model} at {effort} effort.")
+        return ProviderChoice(choice.name, model, effort, choice.session_id, choice.resume)
 
     def apply_tester_floor(self, stage: AdversarialStage, loop: dict[str, Any], choice):
         """Keep a tester from running below the floor for following its rules.
