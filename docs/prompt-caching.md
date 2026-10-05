@@ -21,7 +21,8 @@ session, even if the provider and model match the implementer. Only an interrupt
 assessment may resume its own exact stage/epoch/round. The post-delivery
 architecture-documentation review is likewise always one fresh session that is
 never remembered or resumed, and its usage rows carry the `documentation` role. A rejected report starts a
-fresh assessment. Epoch escalation discards old fixer continuity.
+fresh assessment (its `retry_rejection` generation is part of the tester identity, so the discarded
+conversation cannot be resumed; a later interrupted retry may resume itself). Epoch escalation discards old fixer continuity.
 
 Compatibility requires the same resolved checkout, GitHub repository, issue
 number/title/body/labels, base commit, branch, provider, model, effort and repository

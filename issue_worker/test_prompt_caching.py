@@ -112,6 +112,31 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(self.worker.prepare_cli_session())
         self.assertFalse(self.worker.choice.resume)
 
+    def test_rejected_assessment_cannot_resume_its_discarded_session(self):
+        for stage in ("adversarial", "adversarial_security"):
+            with self.subTest(stage=stage):
+                self.worker.update_state(**{stage: {
+                    "active": True, "phase": "test", "epoch": 1, "round": 0,
+                }})
+                rejected = self.seed()
+                self.worker.update_state(**{stage: {
+                    "active": True, "phase": "test", "epoch": 1, "round": 0,
+                    "retry_rejection": {"reason": "invalid tester result", "attempts": 1},
+                }})
+                self.worker.choice.resume = True
+                self.worker.choice.session_id = rejected
+                rebuilt = self.worker.prepare_cli_session()
+                self.assertTrue(rebuilt)
+                self.assertFalse(self.worker.choice.resume)
+                self.assertNotEqual(self.worker.choice.session_id, rejected)
+                retry = self.seed()
+                self.assertNotEqual(retry, rejected)
+                self.worker.choice.resume = True
+                self.worker.prepare_cli_session()
+                self.assertTrue(self.worker.choice.resume)
+                self.assertEqual(self.worker.choice.session_id, retry)
+                self.worker.update_state(**{stage: {"active": False}})
+
     def test_model_effort_issue_repository_and_instruction_changes_invalidate(self):
         for change in ("model", "effort", "issue", "repository", "instructions"):
             with self.subTest(change=change):

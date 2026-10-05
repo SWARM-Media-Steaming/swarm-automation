@@ -124,8 +124,28 @@ class PromptSessionMixin:
                     return f"{stage.key}:fix:{epoch}", True
                 # Fresh assessment each round; only an interrupted same phase
                 # may resume. Never share with implementers or another stage.
-                return f"{stage.key}:test:{epoch}:{round_number}", False
+                # A rejected report starts a new assessment even at the same
+                # epoch/round, so it cannot resume the discarded conversation.
+                # Later retries keep their own identity and may resume if
+                # interrupted after the rejection.
+                generation = self._rejection_generation(loop)
+                return f"{stage.key}:test:{epoch}:{round_number}{generation}", False
         return "primary", True
+
+    def _rejection_generation(self, loop: dict) -> str:
+        rejected = loop.get("retry_rejection")
+        if not rejected:
+            return ""
+        attempts = 1
+        if isinstance(rejected, dict):
+            raw = rejected.get("attempts")
+            try:
+                attempts = int(raw or 1)
+            except (TypeError, ValueError, OverflowError):
+                attempts = 1
+            if isinstance(raw, bool) or attempts < 1:
+                attempts = 1
+        return f":rejected:{attempts}"
 
     def session_context(self) -> str:
         state = self.read_state()
