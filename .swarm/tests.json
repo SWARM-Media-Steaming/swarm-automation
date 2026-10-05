@@ -4983,6 +4983,36 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue404_jev_context_relevance_comment.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue404-jev-context-relevance-comment",
+      "name": "Issue #404: omit Context Relevance from GitHub Workflow Decisions",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/decision_engine.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/ai_execution_history.py",
+          "tests/adversarial/test_issue404_jev_context_relevance_comment.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

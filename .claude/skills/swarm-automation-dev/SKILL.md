@@ -252,7 +252,9 @@ scores, and modified/combined scores are stored separately. The Feedback
 
 Jev must never merge code, approve a PR, suppress a failed test, skip
 configured UAT/Cyber, or close a blocking security finding. Low-confidence
-cyber results never suppress a finding.
+cyber results never suppress a finding. GitHub `### Jev Decision Engine`
+comments omit per-candidate Context Relevance lines from Workflow Decisions;
+the ratings remain in `jev_decisions` and in Jev-call totals.
 
 ## Model Routing Calibration
 

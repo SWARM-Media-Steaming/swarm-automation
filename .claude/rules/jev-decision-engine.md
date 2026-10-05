@@ -74,6 +74,10 @@ being recorded, a recommendation being actionable, and the final
 - Do not persist credentials, raw prompts, or unredacted Jev CLI output.
 - Persist sanitized fingerprints, typed results, confidence, scores, reason
   codes, fallback state, final Swarm action, and eventual outcome.
+- GitHub `format_jev_markdown` omits `CONTEXT_RELEVANCE` from **Workflow
+  Decisions** with no summary or blurb for the omitted ratings. If nothing else
+  remains in that list, omit the heading. Totals still include those records.
+  Persist them in `jev_decisions`; this is display-only.
 
 ## Source of truth
 

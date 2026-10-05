@@ -1369,6 +1369,10 @@ def format_jev_markdown(
     Complexity is shown out of 10, the router's own scale, with the rubric level
     Jev picked; ``router_complexity`` adds the router's grade beside it so the
     two can be compared directly.
+
+    Per-candidate ``CONTEXT_RELEVANCE`` ratings stay off the Workflow Decisions
+    list (they remain in ``records`` and in the totals). Omit that heading when
+    nothing else remains to list.
     """
     if not verbose:
         return ""
@@ -1405,7 +1409,12 @@ def format_jev_markdown(
         item
         for item in items
         if item.decision_type
-        not in {DecisionType.TASK_CLASSIFICATION.value, DecisionType.ISSUE_TRIAGE.value}
+        not in {
+            DecisionType.TASK_CLASSIFICATION.value,
+            DecisionType.ISSUE_TRIAGE.value,
+            # Internal RAG assembly, not an actionable issue outcome (#404).
+            DecisionType.CONTEXT_RELEVANCE.value,
+        }
     ]
     if workflow:
         lines.append("Workflow Decisions:")
