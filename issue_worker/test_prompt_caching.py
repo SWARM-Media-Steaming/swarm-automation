@@ -319,6 +319,66 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("current requirements", metadata)
         self.assertNotIn("value = 1", metadata)
 
+    def test_grok_does_not_resume_a_confirmed_claude_session(self):
+        claude = self.seed()
+        seen = []
+
+        def grok_runner(prompt, env, activity="working"):
+            seen.append((self.worker.choice.resume, self.worker.choice.session_id))
+            self.worker.update_state(session_started=True)
+            self.worker._last_ai_raw_output = json.dumps({
+                "text": "done", "sessionId": self.worker.choice.session_id,
+            })
+            return 0
+
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", claude, resume=True)
+        with mock.patch.object(self.worker, "_run_grok", side_effect=grok_runner), \
+             mock.patch.object(self.worker, "provider_environment", return_value={}):
+            self.assertEqual(self.worker.run_ai("current requirements"), 0)
+        self.assertEqual(len(seen), 1)
+        self.assertFalse(seen[0][0], "Grok inherited Claude native-cache resume")
+        self.assertNotEqual(seen[0][1], claude)
+        self.assertTrue(valid_session_id(seen[0][1]))
+
+    def test_run_ai_does_not_pass_resume_to_grok_after_claude(self):
+        claude = self.seed()
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = list(command)
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps({"text": "ok", "sessionId": command[-1]}),
+            )
+
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", claude, resume=True)
+        with mock.patch.object(self.worker, "provider_bin", return_value="/bin/echo"), \
+             mock.patch.object(self.worker, "provider_environment", return_value={}), \
+             mock.patch("swarm_issue_worker.subprocess.run", side_effect=fake_run):
+            self.assertEqual(self.worker.run_ai("current requirements"), 0)
+        command = captured["command"]
+        self.assertNotIn("--resume", command)
+        self.assertIn("--session-id", command)
+        self.assertNotEqual(command[command.index("--session-id") + 1], claude)
+
+    def test_grok_still_resumes_its_own_started_session(self):
+        grok_id = str(uuid.uuid4())
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", grok_id)
+        self.worker.update_state_for_choice(self.worker.choice)
+        self.worker.update_state(session_started=True)
+        self.worker.choice.resume = True
+        self.assertFalse(self.worker.prepare_cli_session())
+        self.assertTrue(self.worker.choice.resume)
+        self.assertEqual(self.worker.choice.session_id, grok_id)
+
+    def test_grok_own_resume_survives_an_unrelated_claude_record(self):
+        self.seed()
+        grok_id = str(uuid.uuid4())
+        self.worker.choice = ProviderChoice("Grok", "grok-4.6", "medium", grok_id, resume=True)
+        self.worker.update_state(ai_tool="Grok", session_id=grok_id, session_started=True)
+        self.worker.prepare_cli_session()
+        self.assertTrue(self.worker.choice.resume)
+        self.assertEqual(self.worker.choice.session_id, grok_id)
+
 
 class CacheTelemetryTests(unittest.TestCase):
     def test_provider_denominators_and_write_premium(self):

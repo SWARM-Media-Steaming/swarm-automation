@@ -3,7 +3,11 @@
 CHOMP optimizes the existing Claude Code and Codex CLI integrations automatically.
 There is no setting, inference cache, API client, or additional service. Native
 CLI login, subscriptions, system prompts, tool permissions and compaction stay
-under each CLI's control. Grok retains its existing execution path.
+under each CLI's control. Grok retains its existing execution path: it may
+`--resume` a session it actually started (quota pause, worker restart). A leftover
+Claude or Codex UUID with `resume=True` must not reach Grok. `prepare_cli_session`
+fails closed in that case (`resume=False`, a new Grok session id, full current
+prompt), matching official provider handoff.
 
 ## Session lifecycle
 
