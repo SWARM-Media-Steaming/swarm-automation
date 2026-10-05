@@ -1227,6 +1227,8 @@ fn repo_worker_args(
             "--no-architecture-docs-enabled"
         }
         .into(),
+        "--routing-caps".into(),
+        repo.routing_caps_json(),
         if repo.allow_environment_only_summary {
             "--allow-environment-only-summary"
         } else {

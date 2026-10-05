@@ -140,6 +140,11 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid #2a3448; border-
 .automation-flow-toggle small { margin-top: 5px; color: var(--muted-2); font-size: 9px; line-height: 1.45; }
 .automation-flow-toggle code { color: #c5bbff; font: inherit; }
 .automation-flow-options .best-effort-toggle { grid-column: 1 / -1; }
+.routing-cap-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 18px; }
+.routing-cap-row { display: grid; gap: 8px; padding: 13px; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(8,11,18,.35); }
+.routing-cap-row strong { color: #cbd2df; font-size: 11px; }
+.routing-cap-row label { display: grid; gap: 4px; color: var(--muted-2); font-size: 9px; }
+.routing-cap-row select:disabled { opacity: .5; }
 .best-effort-toggle .warning-copy { color: #f3d095; }
 .best-effort-toggle:has(input:checked) { border-color: rgba(240,187,98,.45); background: rgba(240,187,98,.09); }
 .execution-warning { display: inline-block; margin: 8px 0 0; border-radius: 8px; padding: 8px 10px; background: rgba(240,187,98,.09); border: 1px solid rgba(240,187,98,.28); color: #f3d095; font-size: 11px; font-weight: 750; line-height: 1.45; text-transform: none; letter-spacing: 0; }
@@ -484,6 +489,7 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
 .calc-result .usage-table-wrap { margin-top: 8px; }
 .calc-result tr.chosen td { color: var(--text); font-weight: 750; }
 @media (max-width: 1060px) {
+  .routing-cap-grid { grid-template-columns: 1fr 1fr; }
   .arch-layout { grid-template-columns: minmax(0, 1fr); }
   .arch-detail { position: static; max-height: none; }
   .router-row { grid-template-columns: 96px minmax(0, 1fr); }
@@ -511,7 +517,7 @@ h2 .help-dot, h3 .help-dot { transform: translateY(-1px); }
   .now-working-row { grid-template-columns: 1fr auto; }.now-working-kind { grid-column: 1 / -1; justify-self: start; }
   .repo-switcher { display: none; }
   .activity-toolbar { align-items: flex-start; flex-direction: column; }
-  .automation-flow-options { grid-template-columns: 1fr; }
+  .automation-flow-options, .routing-cap-grid { grid-template-columns: 1fr; }
   .automation-flow-heading { grid-column: auto; }
   .calc-layout { grid-template-columns: 1fr; }
   .modal.wide { width: 100%; }

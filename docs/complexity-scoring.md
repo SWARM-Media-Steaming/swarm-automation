@@ -48,6 +48,21 @@ effort, candidate scores, versions and commit, plus predicted vs actual (files,
 rounds, UAT/Cyber findings, tokens, cost, outcome). Similar completed issues
 inform difficulty, rounds and confidence with sample-size damping.
 
+## Routing cap (issue #401)
+
+A repository may set, per provider, a ceiling model and effort. The router and
+Jev run unchanged and their picks are recorded; the cap is a final clamp over
+the router's pick, compared by `model_router.estimated_dollar_cost` (price and
+effort aware, no rank table). A costlier pick is replaced by the cap's exact
+model and effort; a cheaper or equal one stands and the Cap line says the cap
+was not applied. The cap also bounds release upgrades (`latest_release`
+`max_cost`), the adversarial tester floor and strict-epoch escalation, which
+stop at the cap. If the cap sits below the capability floor, the cap wins and
+the floor and expected-success gap are recorded. Manual pins and runs with
+Dynamic Model Routing off are never capped. `routing_cap.py` owns the logic;
+the record (cap, raw router pick, applied flag, final pick, estimated costs) is
+`routing_decision.routing_cap` in the history database.
+
 ## Limitations
 
 Only the Python analyzer measures cyclomatic complexity; other languages get

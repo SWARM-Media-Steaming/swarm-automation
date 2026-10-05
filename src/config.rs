@@ -280,6 +280,21 @@ pub struct RepoConfig {
     /// Repository-scoped and off by default.
     #[serde(default)]
     pub architecture_docs_enabled: bool,
+    /// Dynamic-routing ceiling per provider (issue #401): the most expensive
+    /// model and effort routing may select. An empty model means uncapped.
+    /// No default model name is stored; the worker compares by estimated cost.
+    #[serde(default)]
+    pub routing_cap_claude_model: String,
+    #[serde(default)]
+    pub routing_cap_claude_effort: String,
+    #[serde(default)]
+    pub routing_cap_codex_model: String,
+    #[serde(default)]
+    pub routing_cap_codex_effort: String,
+    #[serde(default)]
+    pub routing_cap_grok_model: String,
+    #[serde(default)]
+    pub routing_cap_grok_effort: String,
     /// Let the AI return a summary without code when the issue is caused by
     /// local environment, credentials, services, or infrastructure state.
     pub allow_environment_only_summary: bool,
@@ -316,6 +331,12 @@ impl Default for RepoConfig {
             adversarial_best_effort_merge: false,
             update_claude_assets_enabled: false,
             architecture_docs_enabled: false,
+            routing_cap_claude_model: String::new(),
+            routing_cap_claude_effort: String::new(),
+            routing_cap_codex_model: String::new(),
+            routing_cap_codex_effort: String::new(),
+            routing_cap_grok_model: String::new(),
+            routing_cap_grok_effort: String::new(),
             allow_environment_only_summary: false,
             repo_dir: String::new(),
         }
@@ -323,6 +344,39 @@ impl Default for RepoConfig {
 }
 
 impl RepoConfig {
+    /// The worker's `--routing-caps` value: `{provider: {model, effort}}` for
+    /// each provider with a cap. A cap needs both a model and an effort; a half
+    /// set cap means uncapped, so a stale effort never caps by itself.
+    pub fn routing_caps_json(&self) -> String {
+        let mut caps = serde_json::Map::new();
+        for (provider, model, effort) in [
+            (
+                "claude",
+                &self.routing_cap_claude_model,
+                &self.routing_cap_claude_effort,
+            ),
+            (
+                "codex",
+                &self.routing_cap_codex_model,
+                &self.routing_cap_codex_effort,
+            ),
+            (
+                "grok",
+                &self.routing_cap_grok_model,
+                &self.routing_cap_grok_effort,
+            ),
+        ] {
+            let (model, effort) = (model.trim(), effort.trim());
+            if !model.is_empty() && !effort.is_empty() {
+                caps.insert(
+                    provider.into(),
+                    serde_json::json!({ "model": model, "effort": effort }),
+                );
+            }
+        }
+        serde_json::Value::Object(caps).to_string()
+    }
+
     fn with_repository(github_repository: &str) -> Self {
         let github_repository = github_repository.trim().to_string();
         Self {
@@ -1124,6 +1178,28 @@ impl AppConfig {
                 if let Some(preferred) = canonicalize_preferred_provider(&repo.preferred_provider) {
                     repo.preferred_provider = preferred;
                 }
+                // A routing cap is a model plus an effort; half of one is no cap.
+                for (model, effort) in [
+                    (
+                        &mut repo.routing_cap_claude_model,
+                        &mut repo.routing_cap_claude_effort,
+                    ),
+                    (
+                        &mut repo.routing_cap_codex_model,
+                        &mut repo.routing_cap_codex_effort,
+                    ),
+                    (
+                        &mut repo.routing_cap_grok_model,
+                        &mut repo.routing_cap_grok_effort,
+                    ),
+                ] {
+                    *model = model.trim().to_string();
+                    *effort = effort.trim().to_lowercase();
+                    if model.is_empty() || effort.is_empty() {
+                        model.clear();
+                        effort.clear();
+                    }
+                }
                 kept.push(repo);
             }
         }
@@ -1495,6 +1571,23 @@ mod tests {
         // Grok had no suggestion, so it stays unset for the worker's auto.
         assert!(config.has_unset_models());
         assert!(config.apply_suggested_models(&suggested).is_empty());
+    }
+
+    #[test]
+    fn routing_caps_default_uncapped_and_half_a_cap_is_cleared_on_normalize() {
+        let mut config = AppConfig::default();
+        let mut repo = RepoConfig::with_repository("octocat/example");
+        assert_eq!(repo.routing_caps_json(), "{}");
+        repo.routing_cap_grok_model = " grok-4 ".into();
+        repo.routing_cap_claude_model = "m".into();
+        repo.routing_cap_claude_effort = " HIGH ".into();
+        config.repositories = vec![repo];
+        config.normalize();
+        let repo = &config.repositories[0];
+        assert!(repo.routing_cap_grok_model.is_empty());
+        assert_eq!(repo.routing_cap_claude_effort, "high");
+        let older: RepoConfig = serde_json::from_str("{\"github_repository\":\"a/b\"}").unwrap();
+        assert!(older.routing_cap_claude_model.is_empty());
     }
 
     #[test]
