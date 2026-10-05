@@ -81,6 +81,7 @@ from adversarial_uat import (
 )
 from architecture_docs import ArchitectureDocsMixin
 from delivery_recovery import DeliveryRecoveryMixin, DeliveryRecoveryYield
+from integration_recovery import IntegrationRecoveryMixin
 from complexity_worker import ComplexityWorkerMixin
 from prompt_sessions import PromptSessionMixin, resume_failure, valid_session_id
 from dynamic_router import cache_adjusted_cost
@@ -1100,7 +1101,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker(PromptSessionMixin, DeliveryRecoveryMixin, AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin, ComplexityWorkerMixin):
+class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin, AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin, ComplexityWorkerMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -1109,6 +1110,7 @@ class Worker(PromptSessionMixin, DeliveryRecoveryMixin, AdversarialUatMixin, Adv
         self.completed_file = self.state / "completed-issues"
         self.pending_file = self.state / "pending-delivery.json"
         self.in_progress_file = self.state / "in-progress-issue.json"
+        self.integration_recovery_file = self.state / "integration-recovery.json"
         self.paused_dir = self.state / "quota-paused-issues"
         self.closed_paused_dir = self.state / "closed-paused-issues"
         self.ai_output_file = self.state / "last-ai-output.log"
@@ -5408,6 +5410,15 @@ class Worker(PromptSessionMixin, DeliveryRecoveryMixin, AdversarialUatMixin, Adv
         remote = self.config.remote_name
         base = self.config.base_branch
         integ = self.config.integration_branch
+        if self.integration_recovery_file.exists():
+            if self.git("branch", "--show-current") != integ:
+                if self.worktree_status():
+                    raise WorkerError("Cannot resume integration recovery outside its saved branch")
+                self.git("switch", integ)
+            checkpoint = read_json(self.integration_recovery_file)
+            self.recover_integration_merge(checkpoint)
+            self.push_integration_branch()
+            self.integration_recovery_file.unlink(missing_ok=True)
         self.git("fetch", remote, check=False)
         base_head = self.synchronize_base_branch()
         if not self.git_ok("show-ref", "--verify", f"refs/heads/{integ}"):
@@ -5439,21 +5450,17 @@ class Worker(PromptSessionMixin, DeliveryRecoveryMixin, AdversarialUatMixin, Adv
         elif self.git_ok("merge-base", "--is-ancestor", base, "HEAD"):
             log(f"{integ} already contains {base}.")
         else:
-            result = run_command(
-                [self.config.git_bin, "-C", self.config.repo_dir, "merge", "--no-edit",
-                 "-m", f"[{integ}] sync {base}", base],
-                check=False,
-            )
-            if result.returncode != 0:
-                self.git("merge", "--abort", check=False)
-                raise WorkerError(
-                    f"{integ} conflicts with {base}; refusing to create an issue branch until a human "
-                    "reconciles the integration branch"
-                )
-            else:
-                log(f"Merged {base} into {integ}.")
+            checkpoint = {
+                "phase": "merging",
+                "original": self.git("rev-parse", "HEAD"),
+                "target": base_head,
+                "started_at": iso_timestamp(),
+            }
+            atomic_write_json(self.integration_recovery_file, checkpoint)
+            self.recover_integration_merge(checkpoint)
         _ = merged
         self.push_integration_branch()
+        self.integration_recovery_file.unlink(missing_ok=True)
         head = self.git("rev-parse", "HEAD")
         return head
 
