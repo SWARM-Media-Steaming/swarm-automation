@@ -218,6 +218,16 @@ class PromptSessionMixin:
             )
             return False
         if self.choice.key not in {"claude", "codex"}:
+            # Native cache is Claude/Codex only. Grok keeps --resume for a
+            # session it actually started; a leftover native UUID or another
+            # provider's resume flag must fail closed, matching official handoff.
+            was_resume = self.choice.resume
+            own_session = was_resume and self._owns_non_native_resume()
+            stolen = self._native_cached_session(self.choice.session_id)
+            if (was_resume and not own_session) or stolen:
+                self.fresh_cli_session()
+                self.forget_cli_session()
+                return True
             self.forget_cli_session()
             return False
         state = self.read_state()
@@ -259,6 +269,39 @@ class PromptSessionMixin:
         self._cli_session_role = role
         self._cli_session_context = context
         return was_resume and not compatible
+
+    def _owns_non_native_resume(self) -> bool:
+        """True when resume=True is this provider's own started session."""
+        try:
+            state = self.read_state()
+        except (OSError, ValueError):
+            return False
+        return (
+            str(state.get("ai_tool") or "").strip().lower() == self.choice.key
+            and state.get("session_started") is True
+            and bool(self.choice.session_id)
+            and state.get("session_id") == self.choice.session_id
+        )
+
+    def _native_cached_session(self, session_id: str) -> bool:
+        """True when this UUID is a remembered Claude or Codex session."""
+        if not session_id:
+            return False
+        try:
+            state = self.read_state()
+        except (OSError, ValueError):
+            return False
+        sessions = state.get("cli_sessions") or {}
+        if not isinstance(sessions, dict):
+            return False
+        for entry in sessions.values():
+            if (
+                isinstance(entry, dict)
+                and entry.get("id") == session_id
+                and entry.get("provider") in {"claude", "codex"}
+            ):
+                return True
+        return False
 
     def forget_cli_session(self) -> None:
         if not self.issue:

@@ -498,11 +498,15 @@ already do.
 Issue #381 extends the existing worker/session and token-usage paths; see
 [the lifecycle and reporting contract](../../../docs/prompt-caching.md) and
 [the cache rule](../../rules/prompt-caching.md). `PromptSessionMixin` selects
-compatible explicit UUID sessions at `Worker.run_ai` after routing. Primary,
-UAT fixes and security fixes have separate scopes; each new adversarial review
-is fresh. Legacy/missing/stale metadata, model/effort changes, instruction
-changes, history rewinds and failed resumes restart safely with current context.
-Successful native compaction is left alone. Never persist source snapshots.
+compatible explicit UUID sessions at `Worker.run_ai` after routing. Native
+cache is Claude/Codex only. Grok keeps its existing `--resume` path for a
+session it started; a leftover Claude/Codex UUID with `resume=True` must fail
+closed (`resume=False`, new Grok id) the same way official provider handoff
+does. Primary, UAT fixes and security fixes have separate scopes; each new
+adversarial review is fresh. Legacy/missing/stale metadata, model/effort
+changes, instruction changes, history rewinds and failed resumes restart
+safely with current context. Successful native compaction is left alone. Never
+persist source snapshots.
 
 History schema 10 adds nullable cache/reuse/cost fields to `ai_token_usage`;
 `agent_run_id` remains the native session ID. Reused Codex cumulative counters
