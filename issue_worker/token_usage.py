@@ -19,6 +19,7 @@ import dataclasses
 import enum
 import json
 import math
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 import model_pricing
@@ -278,17 +279,19 @@ def _openai_style_usage(payload: dict[str, Any]) -> NormalizedUsage:
 def normalize_codex_usage(raw: str) -> NormalizedUsage | None:
     """Usage from a Codex CLI ``--json`` JSONL event transcript.
 
-    Looks for the last ``type: "token_count"`` event's
-    ``info.total_token_usage`` object (the cumulative usage for the whole
-    turn); falls back to a bare top-level ``usage`` key for robustness
-    against CLI version differences.
+    Prefer ``turn.completed`` usage for the current invocation, then a bare
+    top-level ``usage`` object for older CLI versions. ``token_count``'s
+    ``info.total_token_usage`` is a session total and needs a resume baseline.
     """
     usage_payload = None
+    turn_usage = None
     cumulative = None
     # turn.completed is authoritative for this invocation; token_count totals
     # may cover the *whole resumed session*, not just this new CLI process.
     for event in _iter_json_events(raw):
-        if event.get("type") == "token_count":
+        if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
+            turn_usage = event["usage"]
+        elif event.get("type") == "token_count":
             info = event.get("info")
             candidate = info.get("total_token_usage") if isinstance(info, dict) else None
             if isinstance(candidate, dict):
@@ -297,6 +300,8 @@ def normalize_codex_usage(raw: str) -> NormalizedUsage | None:
                 usage_payload = event["usage"]
         elif isinstance(event.get("usage"), dict):
             usage_payload = event["usage"]
+    if turn_usage is not None:
+        return _openai_style_usage(turn_usage)
     if usage_payload is not None:
         return _openai_style_usage(usage_payload)
     if cumulative is not None:
@@ -440,7 +445,7 @@ def cache_metrics(usage: NormalizedUsage | None, estimate: model_pricing.CostEst
                                     estimate.cache_write_rate_per_million)
     if rate is not None and cached_rate is not None and (not write or write_rate is not None):
         result["cache_savings_estimate"] = (
-            read * (rate - cached_rate) + (write or 0) * (rate - (write_rate or rate))
+            read * (rate - cached_rate) + (write or 0) * (rate - (write_rate if write_rate is not None else rate))
         ) / 1_000_000
     return result
 
@@ -450,14 +455,15 @@ _USAGE_COUNTERS = ("input_tokens", "output_tokens", "reasoning_tokens", "cached_
 
 
 def invocation_usage(usage: NormalizedUsage | None, resumed: bool,
-                     baseline: dict[str, Any] | None) -> NormalizedUsage | None:
+                     baseline: object | None) -> NormalizedUsage | None:
     if usage is None or usage.usage_scope != "session" or not resumed:
         return usage
+    prior = baseline if isinstance(baseline, Mapping) else {}
     values = {}
     for name in _USAGE_COUNTERS:
-        current, previous = getattr(usage, name), (baseline or {}).get(name)
-        values[name] = (current - previous if isinstance(previous, int) and current is not None
-                        and current >= previous else None)
+        current, previous = getattr(usage, name), prior.get(name)
+        values[name] = (current - previous if type(previous) is int and current is not None
+                        and 0 <= previous <= current else None)
     return dataclasses.replace(usage, **values)
 
 
@@ -528,7 +534,10 @@ def _format_int(value: int | None) -> str:
 
 
 def _format_cost(value: float | None) -> str:
-    return f"${value:,.2f}" if isinstance(value, (int, float)) else "—"
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return "—"
+    sign = "-" if value < 0 else ""
+    return f"{sign}${abs(value):,.2f}"
 
 
 def render_ai_usage_markdown(events: Iterable[dict[str, Any]]) -> str:

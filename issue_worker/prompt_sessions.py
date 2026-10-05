@@ -39,6 +39,7 @@ def resume_failure(raw: str) -> bool:
         r"(?:session|thread|conversation)[^\n]{0,120}(?:not found|does not exist|expired|corrupt|invalid)|"
         r"(?:failed|unable|cannot) to (?:resume|load session|load thread)|"
         r"no (?:conversation|session|thread) found|context (?:window|length)[^\n]{0,60}(?:exceed|full)|"
+        r"no rollout found for thread id|"
         r"prompt is too long",
         "\n".join(diagnostics), re.IGNORECASE,
     ))
@@ -58,7 +59,14 @@ class PromptSessionMixin:
 
     def session_role(self) -> tuple[str, bool]:
         from swarm_issue_worker import ADVERSARIAL_STAGES
-        state = self.read_state()
+        try:
+            state = self.read_state()
+        except (OSError, ValueError):
+            # Routing can compare a saved choice before an issue state exists,
+            # and optional cache evidence must never make that path fail.
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
         for stage in ADVERSARIAL_STAGES:
             loop = state.get(stage.key)
             if isinstance(loop, dict) and loop.get("active"):
@@ -151,6 +159,8 @@ class PromptSessionMixin:
             self.update_state(cli_sessions={k: v for k, v in sessions.items() if k != role})
 
     def fresh_cli_session(self) -> None:
+        self._cli_usage_baseline = None
+        self._cli_usage_totals = None
         self.choice.resume = False
         self.choice.session_id = self.new_session_id(self.config.require_spec(self.choice.key))
         self.update_state_for_choice(self.choice)
@@ -189,7 +199,16 @@ class PromptSessionMixin:
         role, _ = self.session_role()
         if role == "primary":
             # Rebuild current issue/conventions/handoff, never replay a saved
-            # source snapshot. Preserve the current continuation/amendments.
+            # source snapshot. A normal first-attempt prompt may already be the
+            # complete current issue prompt; do not embed it in another copy
+            # during a model fallback. A resume-recovery delta is appended to
+            # newly reconstructed current context.
+            requirements = (
+                f"Issue title:\n{self.issue.title}\nIssue number:\n#{self.issue.number}\n\n"
+                f"Issue description:\n{self.issue.body}\n\nIssue tags:\n"
+            )
+            if prompt.startswith(requirements):
+                return prompt
             return self.build_prompt(False, "", bool(self.worktree_status())) + "\nCurrent request:\n" + prompt
         from swarm_issue_worker import ADVERSARIAL_STAGES
         for stage in ADVERSARIAL_STAGES:

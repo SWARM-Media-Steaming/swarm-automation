@@ -58,7 +58,7 @@
     { key: "estimatedCost", label: "Estimated cost", sort: "cost", numeric: true, cost: true },
     { key: "cacheHitEfficiency", label: "Cache hit efficiency", numeric: true },
     { key: "sessionReused", label: "Sessions reused", numeric: true },
-    { key: "cacheSavingsEstimate", label: "API-equivalent cache savings", numeric: true, money: true },
+    { key: "cacheSavingsEstimate", label: "API-equivalent cache savings", numeric: true, cost: true },
     { key: "coverage", label: "Coverage", sort: "", numeric: false },
   ];
 
@@ -76,8 +76,8 @@
     { key: "outputTokens", label: "Output", numeric: true },
     { key: "totalTokens", label: "Total", numeric: true },
     { key: "estimatedCost", label: "Estimated cost", numeric: true, cost: true },
-    { key: "reportedCost", label: "Reported cost", numeric: true, money: true },
-    { key: "cacheSavingsEstimate", label: "API-equivalent cache savings", numeric: true, money: true },
+    { key: "reportedCost", label: "Reported cost", numeric: true, cost: true },
+    { key: "cacheSavingsEstimate", label: "API-equivalent cache savings", numeric: true, cost: true },
     { key: "sessionId", label: "Session" },
     { key: "sessionReused", label: "Session reused", numeric: true, plain: true },
     { key: "durationMs", label: "Duration", numeric: true },

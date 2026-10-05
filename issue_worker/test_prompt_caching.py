@@ -216,6 +216,13 @@ class CacheTelemetryTests(unittest.TestCase):
         raw = json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}) + "\n" + raw
         self.assertEqual(normalize_usage("codex", raw).input_tokens, 5)
 
+    def test_damaged_cumulative_baseline_stays_unavailable(self):
+        usage = NormalizedUsage(input_tokens=150, output_tokens=20, usage_scope="session")
+        for baseline in ("corrupt", [1], 7, {"input_tokens": "100"}):
+            with self.subTest(baseline=baseline):
+                delta = invocation_usage(usage, True, baseline)
+                self.assertIsNone(delta.input_tokens)
+
     def test_invalid_statistics_stay_unavailable(self):
         for invalid in (-1, float("inf"), float("nan"), True, "bad", 1.5):
             usage = normalize_usage("claude", json.dumps({"type": "result", "usage": {"input_tokens": invalid},
@@ -225,6 +232,10 @@ class CacheTelemetryTests(unittest.TestCase):
                 self.assertIsNone(usage.reported_cost)
         self.assertFalse(valid_session_id("--last"))
         self.assertFalse(resume_failure("Rate limit exceeded"))
+        self.assertTrue(resume_failure(
+            "Error: thread/resume failed: no rollout found for thread id "
+            "11111111-2222-4333-8444-555555555555 (code -32600)"
+        ))
 
     def test_migration_roundtrip_aggregation_and_history_compatibility(self):
         with tempfile.TemporaryDirectory() as directory:

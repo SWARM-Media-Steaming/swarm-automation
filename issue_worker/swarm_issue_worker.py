@@ -2552,21 +2552,17 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
         old = model_route_profile(pinned.key, pinned.model, pinned.effort)
         new = model_route_profile(fresh.key, fresh.model, fresh.effort)
         if old and new:
-            # Only execution-cost estimates change; capability and mandatory
-            # effort checks below still take precedence over cache continuity.
+            if new[0] > old[0]:
+                return True, f"routing now needs a more capable model than {pinned.model}"
+            if pinned.model == fresh.model:
+                return False, "the saved session is kept because only the effort differs"
+            # Evidence only adjusts the cost comparison for different models;
+            # it cannot change capability or effort-only routing decisions.
             role, _ = self.session_role()
             role = ":".join(role.split(":")[:2])
             evidence = self.cache_routing_evidence(role)
             old = (old[0], cache_adjusted_cost(old[1], pinned.key, pinned.model, pinned.effort, evidence))
             new = (new[0], cache_adjusted_cost(new[1], fresh.key, fresh.model, fresh.effort, evidence))
-            if new[0] > old[0]:
-                return True, f"routing now needs a more capable model than {pinned.model}"
-            if pinned.model == fresh.model:
-                efforts = ("low", "medium", "high", "xhigh", "max")
-                if (pinned.effort in efforts and fresh.effort in efforts
-                        and efforts.index(fresh.effort) > efforts.index(pinned.effort)):
-                    return True, "routing requires higher reasoning effort"
-                return False, "the saved session is kept because only the effort differs"
             if new[0] >= old[0] and old[1] and new[1] is not None and new[1] <= old[1] * self.REROUTE_COST_MARGIN:
                 return True, (
                     f"{fresh.model} is materially cheaper than {pinned.model} "
@@ -4760,8 +4756,11 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
         assert self.choice
         inferred_agent, inferred_prompt = self.infer_ai_agent_context(attempt_number)
         raw_usage = normalize_usage(self.choice.key, self._last_ai_raw_output)
-        if raw_usage and raw_usage.usage_scope == "session":
-            self._cli_usage_totals = dataclasses.asdict(raw_usage)
+        # Only this attempt can establish the next cumulative baseline. A fresh
+        # recovery/fallback without totals must not inherit the failed session's.
+        self._cli_usage_totals = (
+            dataclasses.asdict(raw_usage) if raw_usage and raw_usage.usage_scope == "session" else None
+        )
         usage = invocation_usage(raw_usage, self.choice.resume, getattr(self, "_cli_usage_baseline", None))
         self._record_usage_event(
             agent_type=agent_type or inferred_agent,
