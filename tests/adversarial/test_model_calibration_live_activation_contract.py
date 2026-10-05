@@ -1,7 +1,7 @@
 """Issue #205: activation must govern the real dynamic-router choice path.
 
-Oracle: proposed changes need review, deprecated models are excluded from
-routing, and rollback restores the prior usable calibration (AC 6, 16, 17).
+Oracle: validated changes activate immediately, deprecated models are excluded
+from routing, and rollback restores the prior usable calibration (AC 6, 16, 17).
 Use public source refresh, persistence, activation and resolve_routing_decision;
 do not substitute simulation output for the model actually dispatched.
 """
@@ -41,12 +41,12 @@ class LiveActivationContractTests(CalibrationUAT):
             key="codex", name="Codex", tiers=tiers,
         )
 
-    def propose_deprecation(self):
+    def activate_deprecation(self):
         result = self.remote({"models": [{
             "provider": "openai", "model": self.retiring, "deprecated": True,
         }]}, now=NOW + 1)
         self.assertEqual(result["status"], "changed")
-        self.assertFalse(result["activated"])
+        self.assertTrue(result["activated"])
         return result["calibration_version"]
 
     def resolve(self, model):
@@ -60,14 +60,17 @@ class LiveActivationContractTests(CalibrationUAT):
             router_model="fixture-router", router_effort="low",
             allow_usage_credit_models=True, allow_tier_fallback=True)
 
-    def test_proposal_does_not_change_the_running_workers_catalog(self):
-        self.propose_deprecation()
-        self.assertEqual(self.resolve(self.retiring)["selected_model"], self.retiring)
-        self.assertEqual(self.service.load_active()["version"], self.baseline_version)
+    def test_validated_deprecation_changes_the_live_catalog_immediately(self):
+        version = self.activate_deprecation()
+        self.assertEqual(self.service.load_active()["version"], version)
+        self.assertNotEqual(self.resolve(self.retiring)["selected_model"], self.retiring)
 
     def test_explicit_router_choice_cannot_bypass_activated_deprecation(self):
-        self.service.activate(self.propose_deprecation())
-        eligible = {m.model for m in router.load_model_catalog(self.service.catalog_override_path)}
+        self.activate_deprecation()
+        eligible = {
+            model.model for model in router.load_model_catalog(self.service.catalog_override_path)
+            if model.active and not model.deprecated
+        }
         self.assertEqual(eligible, {self.replacement})
         # Control: the fallback path can already read the activated catalog.
         self.assertEqual(self.resolve("not-in-the-catalog")["selected_model"], self.replacement)
@@ -76,7 +79,7 @@ class LiveActivationContractTests(CalibrationUAT):
                       "The normal router-choice path dispatched a model excluded by the active calibration")
 
     def test_rollback_restores_prior_explicit_model_eligibility(self):
-        self.service.activate(self.propose_deprecation())
+        self.activate_deprecation()
         self.service.activate(self.baseline_version)
         self.assertEqual(self.resolve(self.retiring)["selected_model"], self.retiring)
         self.assertEqual(self.service.status_report()["active_version"], self.baseline_version)

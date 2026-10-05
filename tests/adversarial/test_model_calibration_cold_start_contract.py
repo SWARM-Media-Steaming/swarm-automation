@@ -2,7 +2,7 @@
 
 The bundled catalog is the pre-feature known-good routing configuration.
 Opening AI Configuration before the startup request completes must not decide
-whether an external proposal is automatically activated under manual policy.
+whether validated external data activates; every initiator uses auto policy.
 Exercise the real desktop CLI boundary and a held transport, without HTTP.
 """
 
@@ -31,40 +31,37 @@ class ColdStartupContractTests(CalibrationUAT):
             code = calibration.main([
                 "--state-dir", str(self.service.state_dir), "refresh",
                 "--source", "json", "--source-url", SOURCE_URL,
-                "--initiated-by", "STARTUP", "--activation-policy", "manual",
+                "--initiated-by", "STARTUP", "--activation-policy", "auto",
                 "--min-interval-hours", "6",
             ])
         self.assertEqual(code, 0, output.getvalue())
         return json.loads(output.getvalue())
 
-    def assert_local_active_and_remote_pending(self, result):
+    def assert_remote_activated(self, result):
         active = self.service.load_active()
-        self.assertIsNotNone(active, "Startup must retain an immediately usable baseline")
+        self.assertIsNotNone(active)
         self.assertEqual(
             (active["models"][0]["input_cost"], active["models"][0]["output_cost"]),
-            (2, 8),
-            "External startup data silently replaced the bundled known-good prices under manual policy",
+            (50, 200),
         )
-        self.assertFalse(result.get("activated", False))
-        proposal = self.service.load_proposed()
-        self.assertIsNotNone(proposal, "Changed external prices must remain available for review")
-        self.assertEqual(proposal["models"][0]["output_cost"], 200)
+        self.assertTrue(result.get("activated", False))
+        self.assertEqual(result["diff"]["activation"]["policy"], "auto")
 
-    def test_first_external_startup_preserves_manual_review_without_a_prior_status_read(self):
+    def test_first_external_startup_activates_without_a_prior_status_read(self):
         self.assertIsNone(self.service.load_active())
         payload = {"models": [price_row(input_cost=50, output_cost=200)]}
         with mock.patch.object(sources, "fetch_json", return_value=(payload, "fixture-v1")):
             result = self.startup_cli()
         self.assertEqual(result["initiated_by"], "STARTUP")
-        self.assert_local_active_and_remote_pending(result)
+        self.assert_remote_activated(result)
 
-    def test_opening_ai_configuration_before_startup_does_not_change_activation_policy(self):
+    def test_opening_ai_configuration_before_startup_does_not_change_auto_activation(self):
         # Control for the otherwise identical first-launch CLI operation.
         self.assertTrue(self.service.status_report()["healthy"])
         payload = {"models": [price_row(input_cost=50, output_cost=200)]}
         with mock.patch.object(sources, "fetch_json", return_value=(payload, "fixture-v1")):
             result = self.startup_cli()
-        self.assert_local_active_and_remote_pending(result)
+        self.assert_remote_activated(result)
 
     def test_first_startup_exposes_known_good_status_while_the_source_is_blocked(self):
         entered, release = threading.Event(), threading.Event()
@@ -80,7 +77,7 @@ class ColdStartupContractTests(CalibrationUAT):
             try:
                 results.append(self.service.refresh(
                     source="json", source_url=SOURCE_URL, initiated_by="STARTUP",
-                    activation_policy="manual", now=NOW,
+                    activation_policy="auto", now=NOW,
                 ))
             except BaseException as error:
                 errors.append(error)

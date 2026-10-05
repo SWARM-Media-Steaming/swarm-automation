@@ -41,17 +41,18 @@ const MODEL_BLACKLIST_JSON: &str = include_str!("../skills/model-router/model-bl
 
 /// `claude-opus-4-7-20251001` and `claude-opus-4-7` name the same model.
 fn canonical_model(value: &str) -> String {
-    let mut parts: Vec<&str> = value.trim().split('-').collect();
-    while parts.len() >= 3
-        && parts
-            .last()
-            .is_some_and(|part| part.len() >= 8 && part.chars().all(|c| c.is_ascii_digit()))
-    {
-        parts.pop();
+    let mut name = value.trim().to_ascii_lowercase();
+    while let Some(index) = name.rfind(['-', '_']) {
+        let suffix = &name[index + 1..];
+        if suffix.len() < 8 || !suffix.chars().all(|c| c.is_ascii_digit()) {
+            break;
+        }
+        name.truncate(index);
     }
-    parts.join("-").to_ascii_lowercase()
+    name
 }
 
+#[cfg(test)]
 fn blacklist() -> &'static Vec<String> {
     static LISTED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     LISTED.get_or_init(|| {
@@ -65,26 +66,312 @@ fn blacklist() -> &'static Vec<String> {
     })
 }
 
-/// True when the operator has blacklisted this model. It is never offered in
-/// a dropdown and never the model a saved selection is repaired into.
+/// Whether a model is listed in the JSON. Eligibility uses `active_retirements`.
+#[cfg(test)]
 pub fn is_blacklisted(value: &str) -> bool {
     let wanted = canonical_model(value);
-    blacklist().iter().any(|listed| *listed == wanted)
+    blacklist().contains(&wanted)
 }
 
-/// `models` without the blacklisted ones, unless that would leave nothing: a
-/// known provider always needs at least one offerable model.
-fn without_blacklisted(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
-    let kept: Vec<_> = models
-        .iter()
-        .filter(|model| !is_blacklisted(&model.value))
-        .cloned()
-        .collect();
-    if kept.is_empty() {
-        models
-    } else {
-        kept
+fn static_prices() -> &'static Vec<serde_json::Value> {
+    static PRICES: std::sync::OnceLock<Vec<serde_json::Value>> = std::sync::OnceLock::new();
+    PRICES.get_or_init(|| {
+        serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/model-prices.json")))
+            .expect("validated pricing catalog exported by build.rs")
+    })
+}
+
+fn price_names(row: &serde_json::Value) -> std::collections::HashSet<String> {
+    row["model"]
+        .as_str()
+        .into_iter()
+        .chain(
+            row["aliases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str()),
+        )
+        .map(canonical_model)
+        .collect()
+}
+
+/// Same effective-window rule as Python. Evaluate at use time: a running app
+/// must not keep a price alive after its window expires.
+fn statically_priced_models() -> std::collections::HashSet<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let mut matches: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for row in static_prices() {
+        let effective = row["starts_at"].as_f64().is_some_and(|start| start <= now)
+            && (row["ends_at"].is_null() || row["ends_at"].as_f64().is_some_and(|end| now < end));
+        if effective {
+            for name in price_names(row) {
+                *matches.entry(name).or_default() += 1;
+            }
+        }
     }
+    matches
+        .into_iter()
+        .filter_map(|(name, count)| (count == 1).then_some(name))
+        .collect()
+}
+
+fn priced_name_set(policy: &serde_json::Value) -> std::collections::HashSet<String> {
+    match policy
+        .get("priced_models")
+        .and_then(|value| value.as_array())
+    {
+        Some(prices) => prices
+            .iter()
+            .filter_map(|price| price.as_str().map(canonical_model))
+            .collect(),
+        None => statically_priced_models(),
+    }
+}
+
+fn priced_names_by_agent(
+    policy: &serde_json::Value,
+    fallback_agent: &str,
+) -> std::collections::BTreeMap<String, std::collections::HashSet<String>> {
+    if let Some(scoped) = policy["priced_models_by_agent"].as_object() {
+        return scoped
+            .iter()
+            .map(|(agent, names)| {
+                (
+                    agent.clone(),
+                    names
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|name| name.as_str())
+                        .map(canonical_model)
+                        .collect(),
+                )
+            })
+            .collect();
+    }
+    // Older snapshots carry names only. Recover ownership from the shared
+    // static catalog; feed ownership is supplied by calibration_policy below.
+    let mut result: std::collections::BTreeMap<String, std::collections::HashSet<String>> =
+        std::collections::BTreeMap::new();
+    for name in priced_name_set(policy) {
+        let owners: std::collections::HashSet<_> = static_prices()
+            .iter()
+            .filter(|row| price_names(row).contains(&name))
+            .filter_map(|row| row["provider"].as_str())
+            .collect();
+        let owner = if owners.len() == 1 {
+            *owners.iter().next().unwrap()
+        } else if owners.is_empty() {
+            fallback_agent
+        } else {
+            continue;
+        };
+        result.entry(owner.to_string()).or_default().insert(name);
+    }
+    result
+}
+
+fn offered_names_by_agent(
+    models: &[ModelInfo],
+    agent: &str,
+    policy: &serde_json::Value,
+) -> std::collections::BTreeMap<String, std::collections::HashSet<String>> {
+    let mut offered = std::collections::BTreeMap::new();
+    if let Some(available) = policy
+        .get("available_models")
+        .and_then(|value| value.as_object())
+    {
+        for (provider, names) in available {
+            if provider == agent {
+                continue;
+            }
+            if let Some(names) = names.as_array() {
+                offered.insert(
+                    provider.clone(),
+                    names
+                        .iter()
+                        .filter_map(|name| name.as_str())
+                        .map(canonical_model)
+                        .collect(),
+                );
+            }
+        }
+    }
+    offered.insert(
+        agent.to_string(),
+        models
+            .iter()
+            .map(|model| canonical_model(&model.value))
+            .collect(),
+    );
+    offered
+}
+
+/// Apply conditional retirements to a raw CLI response before a calibration exists.
+#[cfg(test)]
+fn without_blacklisted(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    let retired = active_retirements(&models, "", &serde_json::Value::Null);
+    models
+        .into_iter()
+        .filter(|model| !retired.contains_key(&canonical_model(&model.value)))
+        .collect()
+}
+
+/// Both readers use the shared JSON plus calibration-derived retirements.
+/// A successor must be offered and priced. The current CLI response replaces
+/// its recorded list; bundled catalog rows are never availability evidence.
+fn active_retirements(
+    models: &[ModelInfo],
+    agent: &str,
+    policy: &serde_json::Value,
+) -> std::collections::BTreeMap<String, String> {
+    let mut entries = std::collections::BTreeMap::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(MODEL_BLACKLIST_JSON) {
+        if let Some(rows) = value["models"].as_array() {
+            for row in rows {
+                if let (Some(old), Some(new)) =
+                    (row["model"].as_str(), row["superseded_by"].as_str())
+                {
+                    if !old.trim().is_empty() {
+                        entries.insert(canonical_model(old), new.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    let offered = offered_names_by_agent(models, agent, policy);
+    let prices = priced_names_by_agent(policy, agent);
+    let in_force = |new: &str| {
+        new.is_empty() || {
+            let successor = canonical_model(new);
+            let owners: Vec<_> = prices
+                .iter()
+                .filter(|(_, names)| names.contains(&successor))
+                .collect();
+            owners.len() == 1
+                && offered
+                    .get(if agent.is_empty() { "" } else { owners[0].0 })
+                    .is_some_and(|names| names.contains(&successor))
+        }
+    };
+    entries.retain(|_, new| in_force(new));
+    if let Some(derived) = policy
+        .get("derived_supersessions")
+        .and_then(|value| value.as_object())
+    {
+        for (old, new) in derived {
+            if let Some(new) = new.as_str() {
+                if !old.is_empty() && !new.is_empty() && in_force(new) {
+                    entries
+                        .entry(canonical_model(old))
+                        .or_insert_with(|| new.to_string());
+                }
+            }
+        }
+    }
+    for (old, new) in entries.clone() {
+        let mut successor = new;
+        let mut seen = std::collections::HashSet::from([old.clone()]);
+        while let Some(next) = entries.get(&canonical_model(&successor)) {
+            if !seen.insert(canonical_model(&successor)) {
+                break;
+            }
+            successor = next.clone();
+        }
+        if !seen.contains(&canonical_model(&successor)) {
+            entries.insert(old, successor);
+        }
+    }
+    entries
+}
+
+pub fn apply_model_policy(tools: &mut [ToolInfo], policy: &serde_json::Value) {
+    for tool in tools.iter_mut().filter(|tool| {
+        crate::config::KNOWN_PROVIDERS.contains(&tool.id.as_str()) && tool.models_detected
+    }) {
+        let retired = active_retirements(&tool.models, &tool.id, policy);
+        let prices = priced_names_by_agent(policy, &tool.id);
+        let kept: Vec<_> = tool
+            .models
+            .iter()
+            .filter(|model| {
+                let name = canonical_model(&model.value);
+                !retired.contains_key(&name)
+                    && prices
+                        .get(&tool.id)
+                        .is_some_and(|names| names.contains(&name))
+            })
+            .cloned()
+            .collect();
+        // An empty list is honest: an unpriced or retired model is never an option.
+        tool.models = kept;
+    }
+}
+
+pub fn calibration_policy(config: &AppConfig) -> serde_json::Value {
+    let path =
+        PathBuf::from(&config.worker_state_dir).join("model_calibration/active_catalog.json");
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .map(|data| {
+            let calibration = &data["calibration"];
+            if calibration["model_policy"]["priced_models_by_agent"].is_object()
+                || (calibration["model_policy"].is_object() && !calibration["models"].is_array())
+            {
+                return calibration["model_policy"].clone();
+            }
+            // A pre-#374 publication can already contain authoritative feed
+            // prices. Keep those usable while the next refresh is pending.
+            let mut scoped_prices = priced_names_by_agent(&serde_json::Value::Null, "");
+            let catalogued: std::collections::HashSet<_> =
+                static_prices().iter().flat_map(price_names).collect();
+            for row in calibration["models"].as_array().into_iter().flatten() {
+                if let Some(model) = row["model"].as_str() {
+                    let model = canonical_model(model);
+                    let valid = ["input_cost", "output_cost"].iter().all(|field| {
+                        row[field]
+                            .as_f64()
+                            .is_some_and(|rate| rate.is_finite() && rate >= 0.0)
+                    });
+                    if valid && !catalogued.contains(&model) {
+                        let agent = row["agent"]
+                            .as_str()
+                            .or_else(|| row["provider"].as_str())
+                            .unwrap_or("");
+                        let agent = match agent {
+                            "anthropic" => "claude",
+                            "openai" => "codex",
+                            "xai" => "grok",
+                            other => other,
+                        };
+                        if !agent.is_empty() {
+                            let names = scoped_prices.entry(agent.to_string()).or_default();
+                            names.insert(model);
+                            if let Some(alias) = row["model_id"].as_str() {
+                                names.insert(canonical_model(alias));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut policy = calibration["model_policy"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            let prices: std::collections::HashSet<_> = scoped_prices.values().flatten().collect();
+            policy.insert("priced_models".into(), serde_json::json!(prices));
+            policy.insert(
+                "priced_models_by_agent".into(),
+                serde_json::json!(scoped_prices),
+            );
+            serde_json::Value::Object(policy)
+        })
+        .unwrap_or_default()
 }
 
 /// True when a catalog entry itself says the model bills against usage
@@ -111,8 +398,8 @@ pub struct ToolInfo {
     pub authenticated: Option<bool>,
     pub status: String,
     pub installable: bool,
-    /// Models and reasoning levels for this provider; never empty for a known
-    /// provider so the UI can always offer a dropdown.
+    /// Models and reasoning levels for this provider; nonempty for a known
+    /// provider when a priced CLI offer exists.
     pub models: Vec<ModelInfo>,
     /// True when `models` was read from the installed CLI, false when it is the
     /// built-in fallback used because the CLI is missing or exposes no catalog.
@@ -677,10 +964,7 @@ fn provider_models(
         }
         model.requires_usage_credits |= requires_usage_credits(&model.value);
     }
-    // Blacklisted models are dropped the same way, so they can never be
-    // offered nor be the model a saved selection is repaired into. Like the
-    // credit filter below, this never filters a provider down to nothing.
-    models = without_blacklisted(models);
+    // Retirement and pricing are applied after discovery using the atomic calibration policy.
     if !allow_credit_models {
         let without_credit_models: Vec<_> = models
             .iter()
@@ -785,6 +1069,7 @@ fn supported_effort(model: &ModelInfo, current: &str) -> String {
 /// can decide whether to persist and reload a running scheduler.
 pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Vec<String> {
     let mut repairs = Vec::new();
+    let policy = calibration_policy(config);
     for tool in tools
         .iter()
         .filter(|tool| tool.models_detected && !tool.models.is_empty())
@@ -796,7 +1081,11 @@ pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Ve
         else {
             continue;
         };
-        let worker = matching_model(&tool.models, &provider.model);
+        let retired = active_retirements(&tool.models, &tool.id, &policy);
+        let worker_name = retired
+            .get(&canonical_model(&provider.model))
+            .unwrap_or(&provider.model);
+        let worker = matching_model(&tool.models, worker_name);
         if provider.model != worker.value {
             repairs.push(format!(
                 "{} worker model '{}' is unavailable; using '{}'.",
@@ -813,7 +1102,10 @@ pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Ve
             provider.effort = effort;
         }
 
-        let router = matching_model(&tool.models, &provider.router_model);
+        let router_name = retired
+            .get(&canonical_model(&provider.router_model))
+            .unwrap_or(&provider.router_model);
+        let router = matching_model(&tool.models, router_name);
         if provider.router_model != router.value {
             repairs.push(format!(
                 "{} router model '{}' is unavailable; using '{}'.",
@@ -968,6 +1260,7 @@ pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
             _ => {}
         }
     }
+    apply_model_policy(&mut tools, &calibration_policy(config));
     tools
 }
 
@@ -1472,5 +1765,315 @@ mod tests {
         ] {
             assert!(value.get(key).is_some(), "missing {key}");
         }
+    }
+    #[test]
+    fn retirement_dormancy_agrees_with_python_and_repairs_only_when_active() {
+        let script = r#"
+import json, os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+import available_models as availability
+import model_lifecycle
+payload = json.loads(sys.argv[2])
+rows = payload['rows']
+policy = model_lifecycle.snapshot(rows, payload['offered'])
+with tempfile.TemporaryDirectory() as directory:
+    path = os.path.join(directory, 'active_catalog.json')
+    with open(path, 'w') as stream:
+        json.dump({'calibration': {'models': rows, 'model_policy': policy}}, stream)
+    os.environ['SWARM_MODEL_CALIBRATION_CATALOG'] = path
+    availability.configure(payload['offered'])
+    print(json.dumps({'policy': policy, 'retired': availability.active_retirements()}))
+"#;
+        for (offered, priced) in [(false, true), (true, false), (true, true)] {
+            let mut models = vec![model("gpt-6-sol")];
+            if offered {
+                models.push(model("gpt-6-1-sol"));
+            }
+            let mut successor =
+                serde_json::json!({"provider": "openai", "agent": "codex", "model": "gpt-6-1-sol"});
+            if priced {
+                successor["input_cost"] = serde_json::json!(2);
+                successor["output_cost"] = serde_json::json!(10);
+            }
+            let payload = serde_json::json!({
+                "offered": {"codex": models.iter().map(|m| &m.value).collect::<Vec<_>>(), "claude": [], "grok": []},
+                "rows": [{"provider": "openai", "agent": "codex", "model": "gpt-6-sol", "input_cost": 2, "output_cost": 10}, successor]
+            });
+            let output = std::process::Command::new("python3")
+                .args([
+                    "-c",
+                    script,
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/issue_worker"),
+                    &payload.to_string(),
+                ])
+                .env_remove("SWARM_MODEL_CALIBRATION_CATALOG")
+                .output()
+                .expect("Python is required for the shared lifecycle contract");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let python: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let retired = active_retirements(&models, "codex", &python["policy"]);
+            assert_eq!(serde_json::to_value(&retired).unwrap(), python["retired"]);
+            assert_eq!(retired.contains_key("gpt-6-sol"), offered && priced);
+            let mut tool = basic_tool("codex", "Codex", "codex", true, "");
+            tool.models = models;
+            tool.models_detected = true;
+            let mut tools = vec![tool];
+            apply_model_policy(&mut tools, &python["policy"]);
+            let mut config = AppConfig::default();
+            let provider = config
+                .providers
+                .iter_mut()
+                .find(|p| p.id == "codex")
+                .unwrap();
+            provider.model = "gpt-6-sol".into();
+            provider.router_model = "gpt-6-sol".into();
+            reconcile_config_models(&mut config, &tools);
+            let expected = if offered && priced {
+                "gpt-6-1-sol"
+            } else {
+                "gpt-6-sol"
+            };
+            assert_eq!(config.provider("codex").unwrap().model, expected);
+            assert_eq!(config.provider("codex").unwrap().router_model, expected);
+        }
+    }
+
+    #[test]
+    fn every_retirement_and_static_price_agrees_with_python() {
+        let script = r#"
+import json, os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+import available_models as a
+import model_lifecycle as lifecycle
+import model_pricing as pricing
+cases = []
+with tempfile.TemporaryDirectory() as directory:
+    path = os.path.join(directory, 'active_catalog.json')
+    os.environ['SWARM_MODEL_CALIBRATION_CATALOG'] = path
+    for old, new in a.listed_retirements().items():
+        agent = 'codex' if old.startswith('gpt-') else 'claude'
+        for offered, suffix in ((offer, suffix) for offer in (False, True) for suffix in ('', '-20261003', '_20261003')):
+            names = [name + suffix for name in ([old, new] if offered else [old])]
+            rows = [{'agent': agent, 'model': new, 'input_cost': 2, 'output_cost': 10}]
+            policy = lifecycle.snapshot(rows, {agent: names})
+            with open(path, 'w') as stream:
+                json.dump({'calibration': {'models': rows, 'model_policy': policy}}, stream)
+            a.configure({agent: names})
+            cases.append({'agent': agent, 'names': names, 'policy': policy, 'retired': a.blacklist(), 'old': old, 'offered': offered})
+    # The CLI may skip the explicitly named successor entirely.
+    names = ['gpt-6-sol', 'gpt-6-2-sol']
+    rows = [{'agent': 'codex', 'provider': 'openai', 'model': name, 'input_cost': 2, 'output_cost': 10} for name in names]
+    policy = lifecycle.snapshot(rows, {'codex': names})
+    with open(path, 'w') as stream:
+        json.dump({'calibration': {'models': rows, 'model_policy': policy}}, stream)
+    a.configure({'codex': names})
+    cases.append({'agent': 'codex', 'names': names, 'policy': policy, 'retired': a.blacklist(), 'old': names[0], 'offered': True})
+print(json.dumps({'cases': cases, 'static': sorted({a.canonical(n) for row in pricing.PRICING_CATALOG if pricing.resolve_price(row.model, provider=row.provider).priced for n in row.model_names})}))
+"#;
+        let output = Command::new("python3")
+            .args([
+                "-c",
+                script,
+                concat!(env!("CARGO_MANIFEST_DIR"), "/issue_worker"),
+            ])
+            .env_remove("SWARM_MODEL_CALIBRATION_CATALOG")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let results: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let prices: std::collections::HashSet<_> = results["static"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(statically_priced_models(), prices);
+        for case in results["cases"].as_array().unwrap() {
+            let models: Vec<_> = case["names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|name| model(name.as_str().unwrap()))
+                .collect();
+            let retired =
+                active_retirements(&models, case["agent"].as_str().unwrap(), &case["policy"]);
+            assert_eq!(
+                serde_json::to_value(&retired).unwrap(),
+                case["retired"],
+                "{case}"
+            );
+            assert_eq!(
+                retired.contains_key(case["old"].as_str().unwrap()),
+                case["offered"].as_bool().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn unpriced_only_cli_offer_leaves_no_selectable_model() {
+        let mut tool = basic_tool("codex", "Codex", "codex", true, "");
+        tool.models = vec![model("gpt-unpriced-preview")];
+        tool.models_detected = true;
+        apply_model_policy(
+            std::slice::from_mut(&mut tool),
+            &serde_json::json!({"priced_models": []}),
+        );
+        assert!(tool.models.is_empty());
+    }
+
+    #[test]
+    fn provider_scoped_retirements_agree_with_python() {
+        let script = r#"
+import copy, json, os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+import available_models as a
+import model_calibration as calibration
+import model_lifecycle as lifecycle
+rows = calibration.fetch_local_source() + [
+    {'provider': 'openai', 'agent': 'codex', 'model': name, 'active': True,
+     'input_cost': 2, 'output_cost': 10} for name in ('gpt-10-sol', 'gpt-10-1-sol')]
+cases = []
+with tempfile.TemporaryDirectory() as directory:
+    path = os.path.join(directory, 'active_catalog.json')
+    os.environ['SWARM_MODEL_CALIBRATION_CATALOG'] = path
+    for correct in (False, True):
+        evidence = {'claude': ['claude-sonnet-5'], 'codex': ['gpt-10-sol'], 'grok': []}
+        evidence['claude' if correct else 'codex'].append('claude-sonnet-5-5')
+        evidence['codex' if correct else 'claude'].append('gpt-10-1-sol')
+        policy = lifecycle.snapshot(copy.deepcopy(rows), evidence)
+        with open(path, 'w') as stream:
+            json.dump({'calibration': {'models': rows, 'model_policy': policy}}, stream)
+        a.configure(evidence)
+        retired = a.blacklist()
+        assert ('claude-sonnet-5' in retired) == correct, retired
+        assert ('gpt-10-sol' in retired) == correct, retired
+        assert retired == policy['retirements'], (retired, policy)
+        cases.append({'policy': policy, 'retired': retired, 'correct': correct})
+print(json.dumps(cases))
+"#;
+        let output = Command::new("python3")
+            .args([
+                "-c",
+                script,
+                concat!(env!("CARGO_MANIFEST_DIR"), "/issue_worker"),
+            ])
+            .env_remove("SWARM_MODEL_CALIBRATION_CATALOG")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cases: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        for case in cases.as_array().unwrap() {
+            for agent in ["claude", "codex", "grok"] {
+                let models: Vec<_> = case["policy"]["available_models"][agent]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|name| model(name.as_str().unwrap()))
+                    .collect();
+                let retired = active_retirements(&models, agent, &case["policy"]);
+                assert_eq!(
+                    serde_json::to_value(&retired).unwrap(),
+                    case["retired"],
+                    "{agent}: {case}"
+                );
+            }
+            // A live withdrawal replaces the recorded list for that provider.
+            let retired =
+                active_retirements(&[model("claude-sonnet-5")], "claude", &case["policy"]);
+            assert!(!retired.contains_key("claude-sonnet-5"));
+        }
+        // Before calibration the static catalog also binds prices to a CLI.
+        let retired = active_retirements(
+            &[model("claude-sonnet-5-5")],
+            "codex",
+            &serde_json::Value::Null,
+        );
+        assert!(!retired.contains_key("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn legacy_feed_prices_keep_the_dormant_predecessor_selectable() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_dir = dir.path().join("model_calibration");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(policy_dir.join("active_catalog.json"), serde_json::json!({
+            "calibration": {"models": [
+                {"provider": "openai", "agent": "codex", "model": "gpt-6-sol", "input_cost": 2, "output_cost": 10},
+                {"provider": "openai", "agent": "codex", "model": "gpt-6-1-sol", "input_cost": 2, "output_cost": 10}
+            ]}
+        }).to_string()).unwrap();
+        let mut config = AppConfig {
+            worker_state_dir: dir.path().to_string_lossy().into_owned(),
+            ..AppConfig::default()
+        };
+        let provider = config
+            .providers
+            .iter_mut()
+            .find(|p| p.id == "codex")
+            .unwrap();
+        provider.model = "gpt-6-sol".into();
+        provider.router_model = "gpt-6-sol".into();
+        let mut tool = basic_tool("codex", "Codex", "codex", true, "");
+        tool.models = vec![model("gpt-5.6-sol"), model("gpt-6-sol")];
+        tool.models_detected = true;
+        apply_model_policy(
+            std::slice::from_mut(&mut tool),
+            &calibration_policy(&config),
+        );
+        assert!(tool.models.iter().any(|m| m.value == "gpt-6-sol"));
+        reconcile_config_models(&mut config, &[tool]);
+        assert_eq!(config.provider("codex").unwrap().model, "gpt-6-sol");
+        assert_eq!(config.provider("codex").unwrap().router_model, "gpt-6-sol");
+    }
+
+    #[test]
+    fn retired_selection_uses_its_successor_even_when_another_family_peer_is_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_dir = dir.path().join("model_calibration");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        let policy =
+            serde_json::json!({"priced_models": ["gpt-6-sol", "gpt-6-1-sol", "gpt-5.6-sol"]});
+        std::fs::write(
+            policy_dir.join("active_catalog.json"),
+            serde_json::json!({"calibration": {"model_policy": policy}}).to_string(),
+        )
+        .unwrap();
+        let mut config = AppConfig {
+            worker_state_dir: dir.path().to_string_lossy().into_owned(),
+            ..AppConfig::default()
+        };
+        let provider = config
+            .providers
+            .iter_mut()
+            .find(|p| p.id == "codex")
+            .unwrap();
+        provider.model = "gpt-6-sol".into();
+        provider.router_model = "gpt-6-sol".into();
+        let mut tool = basic_tool("codex", "Codex", "codex", true, "");
+        tool.models = vec![
+            model("gpt-5.6-sol"),
+            model("gpt-6-sol"),
+            model("gpt-6-1-sol"),
+        ];
+        tool.models_detected = true;
+        apply_model_policy(std::slice::from_mut(&mut tool), &policy);
+        reconcile_config_models(&mut config, &[tool]);
+        assert_eq!(config.provider("codex").unwrap().model, "gpt-6-1-sol");
+        assert_eq!(
+            config.provider("codex").unwrap().router_model,
+            "gpt-6-1-sol"
+        );
     }
 }

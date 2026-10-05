@@ -201,18 +201,17 @@ class ModelCalibrationServiceTests(unittest.TestCase):
         status = self.service.status_report()
         self.assertFalse(status["has_newer_proposed"])
 
-    def test_meaningful_change_produces_a_proposed_calibration_awaiting_review(self) -> None:
+    def test_meaningful_change_activates_without_review(self) -> None:
         self.service.refresh(fetch_fn=lambda: [_entry("m1", cost=2)], now=1.0, activation_policy="auto")
         result = self.service.refresh(fetch_fn=lambda: [_entry("m1", cost=4)], now=100.0, force=True)
         self.assertEqual(result["status"], "changed")
         self.assertTrue(result["diff"]["pricing_changes"])
         status = self.service.status_report()
-        self.assertTrue(status["has_newer_proposed"])
-        # Manual activation policy (the default) never swaps the active
-        # calibration on its own.
-        self.assertEqual(status["active_calibration"]["models"][0]["relative_cost"], 2)
+        self.assertFalse(status["has_newer_proposed"])
+        self.assertTrue(result["activated"])
+        self.assertEqual(status["active_calibration"]["models"][0]["relative_cost"], 4)
 
-    def test_a_newly_seen_model_is_discovered_not_immediately_routable(self) -> None:
+    def test_a_newly_seen_valid_model_is_immediately_routable(self) -> None:
         self.service.refresh(fetch_fn=lambda: [_entry("m1")], now=1.0, activation_policy="auto")
         result = self.service.refresh(
             fetch_fn=lambda: [_entry("m1"), _entry("m2")], now=100.0, force=True
@@ -221,7 +220,7 @@ class ModelCalibrationServiceTests(unittest.TestCase):
         proposed = self.service.load_proposed()
         by_key = {m["key"]: m for m in proposed["models"]}
         self.assertEqual(by_key["fixture/m1"]["status"], calib.STATUS_ACTIVE)
-        self.assertEqual(by_key["fixture/m2"]["status"], calib.STATUS_DISCOVERED)
+        self.assertEqual(by_key["fixture/m2"]["status"], calib.STATUS_ACTIVE)
 
     def test_auto_activation_policy_promotes_a_clean_refresh(self) -> None:
         self.service.refresh(fetch_fn=lambda: [_entry("m1", cost=2)], now=1.0)
@@ -277,25 +276,25 @@ class ExternalEvaluationRefreshTests(unittest.TestCase):
         payload = {
             "data": [
                 {
-                    "model_creator": {"slug": "fixture"},
+                    "model_creator": {"slug": "openai"},
                     "slug": "m1",
                     "evaluations": evaluations,
                 }
             ],
         }
         with mock.patch.dict("os.environ", {"ARTIFICIAL_ANALYSIS_API_KEY": "fixture-key"}):
-            with mock.patch.object(calib, "fetch_local_source", return_value=[_entry("m1")]):
+            with mock.patch.object(calib, "fetch_local_source", return_value=[_entry("m1", provider="openai", agent="codex") | {"input_cost": 1, "output_cost": 4}]):
                 with mock.patch.object(sources, "fetch_json", return_value=(payload, str(now))):
                     return self.service.refresh(
-                        source="artificial_analysis", force=True, now=now
+                        source="artificial_analysis", force=True, now=now, available_models={"codex": ["m1"]}
                     )
 
     def test_external_values_are_reviewable_with_history_activation_and_rollback(self) -> None:
         initial = self.refresh_evaluations(
             {"coding_agent_index": 60, "intelligence_index": 40}, now=1.0
         )
-        # First external data is a proposal against the offline baseline too.
-        self.assertFalse(initial["activated"])
+        # First external data activates over the offline baseline, like every refresh.
+        self.assertTrue(initial["activated"])
         self.service.activate(initial["calibration_version"])
         active_before = self.service.active_path.read_bytes()
         catalog_before = self.service.catalog_override_path.read_bytes()
@@ -304,7 +303,7 @@ class ExternalEvaluationRefreshTests(unittest.TestCase):
         )
 
         self.assertEqual(updated["status"], "changed")
-        self.assertFalse(updated["activated"])
+        self.assertTrue(updated["activated"])
         self.assertIsNotNone(updated["simulation"])
         changes = updated["diff"]["benchmark_changes"]
         self.assertEqual(
@@ -314,8 +313,8 @@ class ExternalEvaluationRefreshTests(unittest.TestCase):
                 ("external_evaluations.intelligence_index", 40, 50),
             ],
         )
-        self.assertEqual(self.service.active_path.read_bytes(), active_before)
-        self.assertEqual(self.service.catalog_override_path.read_bytes(), catalog_before)
+        self.assertNotEqual(self.service.active_path.read_bytes(), active_before)
+        self.assertNotEqual(self.service.catalog_override_path.read_bytes(), catalog_before)
         proposed = self.service.load_proposed()
         history = proposed["models"][0]["benchmark_history"]
         latest = [item for item in history if item["at"] == calib.iso_now(100.0)]
@@ -395,13 +394,13 @@ class ExternalBootstrapTests(unittest.TestCase):
                     with mock.patch.object(sources, "fetch_json", side_effect=fetch):
                         result = service.refresh(
                             source="json", source_url="https://example.invalid/models.json",
-                            initiated_by=initiator, now=1.0,
+                            initiated_by=initiator, now=1.0, available_models={"fixture": ["m1"]},
                         )
                 self.assertEqual(result["status"], "changed")
-                self.assertFalse(result["activated"])
-                self.assertEqual(service.load_active(), active_during_fetch[0])
-                self.assertEqual(service.load_state()["active_version"], active_during_fetch[0]["version"])
-                self.assertEqual(service.load_proposed()["models"][0]["output_cost"], 50)
+                self.assertTrue(result["activated"])
+                self.assertNotEqual(service.load_active()["version"], active_during_fetch[0]["version"])
+                self.assertEqual(service.load_state()["active_version"], result["calibration_version"])
+                self.assertEqual(service.load_active()["models"][0]["output_cost"], 50)
 
 
 class OverlayReviewLifecycleTests(unittest.TestCase):
@@ -421,24 +420,24 @@ class OverlayReviewLifecycleTests(unittest.TestCase):
                 force=True, now=now, **options,
             )
 
-    def test_repeated_pending_proposal_keeps_version_history_and_review_data(self) -> None:
+    def test_repeated_automatic_refresh_keeps_version_and_history(self) -> None:
         rows = [
             {"provider": "fixture", "model": "m1", "input_cost": 2, "output_cost": 8},
             {"provider": "fixture", "model": "new", "input_cost": 1, "output_cost": 4},
         ]
-        active_before = self.service.active_path.read_bytes()
         first = self.refresh_rows(rows, now=100.0)
-        proposal_before = self.service.proposed_path.read_bytes()
+        active_before = self.service.active_path.read_bytes()
         history_before = self.service.list_history()
         result = self.refresh_rows(rows, now=200.0, initiated_by="STARTUP")
         self.assertEqual(result["status"], "no_change")
         self.assertFalse(result["notification"]["should_notify"])
         self.assertEqual(result["diff"]["newly_discovered_models"], [])
         self.assertEqual(self.service.active_path.read_bytes(), active_before)
-        self.assertEqual(self.service.proposed_path.read_bytes(), proposal_before)
+        self.assertFalse(self.service.status_report()["has_newer_proposed"])
         self.assertEqual(self.service.list_history(), history_before)
+        # Without CLI evidence the unmatched feed row stays a non-routable record.
         self.assertEqual(self.service.status_report()["discovered_model_count"], 1)
-        self.assertEqual(self.service.analyze()["proposed_version"], first["calibration_version"])
+        self.assertEqual(self.service.load_active()["version"], first["calibration_version"])
 
     def test_benchmark_only_overlay_preserves_known_prices(self) -> None:
         self.refresh_rows([
@@ -456,28 +455,28 @@ class OverlayReviewLifecycleTests(unittest.TestCase):
         def rows(price: float, benchmark: float) -> list[dict]:
             return [
                 {"provider": "fixture", "model": "m1", "output_cost": 8},
-                {"provider": "fixture", "model": "new", "output_cost": price,
+                {"provider": "openai", "model": "gpt-7-sol", "input_cost": 1, "output_cost": price,
                  "evaluations": {"coding": benchmark}},
             ]
-        self.refresh_rows(rows(4, 50), now=100.0, activation_policy="auto")
-        result = self.refresh_rows(rows(3, 60), now=200.0)
+        self.refresh_rows(rows(4, 50), now=100.0, available_models={"codex": ["gpt-7-sol"]})
+        result = self.refresh_rows(rows(3, 60), now=200.0, available_models={"codex": ["gpt-7-sol"]})
         self.assertEqual(result["status"], "changed")
         self.assertEqual(result["diff"]["newly_discovered_models"], [])
         proposed = self.service.load_proposed()
-        model = proposed["discovered_models"][0]
-        self.assertEqual(model["status"], "DISCOVERED")
+        model = next(row for row in proposed["models"] if row["model"] == "gpt-7-sol")
+        self.assertEqual(model["status"], "CANDIDATE")
         self.assertTrue(any(item["previous"] == 4 and item["new"] == 3 for item in model["pricing_history"]))
         self.assertTrue(any(item["previous"] == 50 and item["new"] == 60 for item in model["benchmark_history"]))
-        self.assertNotIn("new", {item["model"] for item in self.service._router_models(proposed)})
+        self.assertIn("gpt-7-sol", {item["model"] for item in self.service._router_models(proposed)})
 
-    def test_auto_activation_requires_a_completed_simulation(self) -> None:
+    def test_auto_activation_does_not_require_a_simulation(self) -> None:
         before = self.service.active_path.read_bytes()
         result = self.refresh_rows([
             {"provider": "fixture", "model": "m1", "input_cost": 2, "output_cost": 8},
         ], now=100.0, activation_policy="auto", run_simulation_flag=False)
-        self.assertFalse(result["activated"])
+        self.assertTrue(result["activated"])
         self.assertIsNone(result["simulation"])
-        self.assertEqual(self.service.active_path.read_bytes(), before)
+        self.assertNotEqual(self.service.active_path.read_bytes(), before)
 
 
 class SimulationAndDiffTests(unittest.TestCase):
@@ -518,6 +517,7 @@ class CalibrationPublicationTests(unittest.TestCase):
             fetch_fn=lambda: [_entry("m1", cost=4)], now=100.0, force=True,
         )
         self.version = update["calibration_version"]
+        self.service.activate(self.previous["version"])
 
     def test_readers_observe_the_committed_version_throughout_publication(self) -> None:
         reader = calib.ModelCalibrationService(self.service.state_dir)
@@ -563,8 +563,8 @@ class CalibrationPublicationTests(unittest.TestCase):
             self.service.lock_path.write_text("{truncated", encoding="utf-8")
             with self.assertRaises(calib.CalibrationBusyError):
                 other.activate(self.version)
-            with self.assertRaises(calib.CalibrationBusyError):
-                other.approve_discovered_model("fixture/m2")
+            result = other.refresh(force=True)
+            self.assertEqual(result["status"], "already_running")
             self.assertEqual(other.load_active(), self.previous)
         finally:
             self.service.release_lock()

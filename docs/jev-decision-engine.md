@@ -202,3 +202,8 @@ This document describes the contract. The exact enforcement remains in
 (`apply_jev_signals_to_decision`). When documentation and implementation
 appear to disagree, update both and treat the safety gates in code as the
 behavior that must not be weakened.
+
+Model availability follows automatic calibration (#374): the advisory model
+list includes only CLI-offered, non-retired models with static or feed prices.
+Feed onboarding and retirement do not change Jev's authority, thresholds, or
+baseline routing records.

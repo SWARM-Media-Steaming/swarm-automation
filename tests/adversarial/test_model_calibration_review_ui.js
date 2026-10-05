@@ -2,8 +2,8 @@
 
 /**
  * Issue #205 UI integration: render real calibration-service responses in
- * the app's real rendering functions. Expected from the issue: a discovered
- * model can be inspected before activation, model detail exposes history,
+ * the app's real rendering functions. Expected from #374: an unoffered
+ * discovery stays non-routable without an approval action, model detail exposes history,
  * and startup failures include useful error information while active routing
  * remains visibly available. The DOM and Tauri transport are local doubles;
  * no implementation is re-created here.
@@ -65,7 +65,7 @@ function page(status, lastResult = null) {
     config: { dynamic_model_routing: true, routing_optimization: "best" },
     modelCalibration: {
       status, lastResult, analysis: null, refreshing: false, analyzing: false,
-      activating: false, approvingKeys: new Set(), sort: { column: "provider", direction: "asc" },
+      sort: { column: "provider", direction: "asc" },
       progressTimer: null,
     },
   };
@@ -81,30 +81,34 @@ function page(status, lastResult = null) {
     createTextNode: (text) => { const node = new Element("#text"); node.textContent = text; return node; },
   };
   const window = { SwarmModelCalibration: helpers, setInterval: () => 1, clearInterval: () => {} };
-  const load = new Function("state", "window", "document", "byId", "invoke", "showToast", "formatIsoTimestamp", "errorText",
+  const toolRefreshes = [];
+  const refreshTools = async (options) => { toolRefreshes.push(options); };
+  const load = new Function("state", "window", "document", "byId", "invoke", "showToast", "formatIsoTimestamp", "errorText", "refreshTools",
     `${source.slice(start, end)}
      return { renderModelCalibrationFull, refreshModelCalibration, refreshModelData, onModelCalibrationRefreshed };`);
-  const controller = load(state, window, document, byId, invoke, () => {}, (value) => value, String);
-  return { controller, byId, calls, nodes, state };
+  const controller = load(state, window, document, byId, invoke, () => {}, (value) => value, String, refreshTools);
+  return { controller, byId, calls, nodes, state, toolRefreshes };
 }
 
 test("manual refresh bypasses the interval and displays backend change counts", async () => {
-  const app = page(snapshots.proposal);
+  const app = page(snapshots.active);
   await app.controller.refreshModelData();
   assert.ok(app.calls.some(({ command, args }) => command === "refresh_model_data_background" && args.force === true));
   assert.match(app.byId("model-calibration-result").textContent, /Model data refreshed successfully/);
   assert.match(app.byId("model-calibration-result").textContent, /New models/);
   assert.equal(app.byId("refresh-model-data").disabled, false);
+  assert.equal(app.toolRefreshes.length, 1, "Activated model options must refresh immediately");
 });
 
-test("a newly discovered remote model is inspectable before activating its proposal", () => {
-  assert.equal(snapshots.result.activated, false);
-  assert.equal(snapshots.proposal.proposed_calibration.discovered_models[0].model, "newly-discovered");
-  const app = page(snapshots.proposal, snapshots.result);
+test("an unoffered discovery is inspectable but has no approval affordance", () => {
+  assert.equal(snapshots.result.activated, true);
+  assert.equal(snapshots.active.active_calibration.discovered_models[0].model, "newly-discovered");
+  const app = page(snapshots.active, snapshots.result);
   app.controller.renderModelCalibrationFull();
   const rows = app.byId("model-routing-table").textContent;
-  assert.match(rows, /newly-discovered/, "The proposed model exists in backend data but has no model-detail row for review");
+  assert.match(rows, /newly-discovered/);
   assert.match(rows, /DISCOVERED/);
+  assert.doesNotMatch(rows, /Approve for routing/);
 });
 
 test("model detail exposes stored pricing and benchmark history", () => {

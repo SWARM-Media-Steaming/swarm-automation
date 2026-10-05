@@ -2,7 +2,7 @@
 
 Oracles from AC 4-8, 14-18: the exact configured interval permits startup,
 manual refresh bypasses it, outages preserve usable routing, concurrent
-refreshes do not duplicate work, and reviewed versions can be rolled back.
+refreshes do not duplicate work, and activated versions can be rolled back.
 Events control the concurrent test; it never depends on a scheduling sleep.
 """
 
@@ -24,7 +24,7 @@ class LifecycleIntegrationTests(CalibrationUAT):
         with mock.patch.object(sources, "fetch_json", return_value=(payload, "v1")) as fetch:
             first = self.service.refresh(source="json", source_url=SOURCE_URL, initiated_by="STARTUP", now=NOW)
             self.assertEqual(first["status"], "changed")
-            self.service.activate(first["calibration_version"])
+            self.assertTrue(first["activated"])
             early = self.service.refresh(source="json", source_url=SOURCE_URL, initiated_by="STARTUP", now=NOW + 21599, min_interval_hours=6)
             self.assertEqual(early["status"], "skipped_interval")
             self.assertEqual(fetch.call_count, 1)
@@ -92,28 +92,27 @@ class LifecycleIntegrationTests(CalibrationUAT):
             self.assertFalse(thread.is_alive(), "Refresh must finish after the fixture is released")
         self.assertEqual(errors, [])
         self.assertEqual(results[0]["status"], "changed")
-        self.assertEqual(self.active_bytes(), before)
+        self.assertTrue(results[0]["activated"])
+        self.assertNotEqual(self.active_bytes(), before)
         self.assertFalse(self.service.status_report()["refresh_running"])
         self.assertFalse(self.service.lock_path.exists())
 
-    def test_all_initiators_record_reviewable_history_through_shared_refresh(self):
-        baseline = self.active_bytes()
+    def test_all_initiators_activate_and_record_history_through_shared_refresh(self):
         for index, initiator in enumerate(("STARTUP", "USER", "SCHEDULED", "AI_AGENT"), start=1):
             with self.subTest(initiator=initiator):
                 result = self.remote({"models": [price_row(output_cost=8 + index)]}, now=NOW + index, initiated_by=initiator)
                 self.assertEqual(result["status"], "changed")
-                self.assertFalse(result["activated"])
+                self.assertTrue(result["activated"])
                 history = {item["version"]: item for item in self.service.list_history()}
                 self.assertEqual(history[result["calibration_version"]]["initiated_by"], initiator)
-                self.assertEqual(self.active_bytes(), baseline)
+                self.assertEqual(self.service.load_active()["version"], result["calibration_version"])
 
-    def test_manual_activation_and_rollback_restore_the_live_catalog(self):
+    def test_automatic_activation_and_rollback_restore_the_live_catalog(self):
         first = self.service.load_active()["version"]
         before = self.active_bytes()
         result = self.remote({"models": [price_row()]}, now=NOW + 1)
-        self.assertFalse(result["activated"])
-        self.assertEqual(self.active_bytes(), before)
-        self.service.activate(result["calibration_version"])
+        self.assertTrue(result["activated"])
+        self.assertNotEqual(self.active_bytes(), before)
         loaded = router.load_model_catalog(self.service.catalog_override_path)
         self.assertEqual(loaded[0].input_cost, 2)
         self.assertEqual(loaded[0].output_cost, 8)

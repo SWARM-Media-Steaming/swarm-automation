@@ -366,6 +366,7 @@ fn write_repos_file<R: tauri::Runtime>(
         .map_err(|_| "Repository list lock was poisoned".to_string())?;
     let state_root = PathBuf::from(&config.worker_state_dir);
     let mut spec = Vec::new();
+    let provider_args = provider_scheduler_arguments(config, &resolve_providers(config));
     for repo in config.enabled_repos() {
         let workspace = prepared_workspace(app, config, repo)?;
         let repo_state = state_root.join(&repo.id);
@@ -377,7 +378,7 @@ fn write_repos_file<R: tauri::Runtime>(
             "base_branch": repo.base_branch,
             "remote_name": repo.remote_name,
             "integration_branch": repo.integration_branch,
-            "worker_args": repo_worker_args(config, repo, &workspace, git, gh),
+            "worker_args": ([repo_worker_args(config, repo, &workspace, git, gh), provider_args.clone()].concat()),
         }));
     }
     if spec.is_empty() {
@@ -702,12 +703,13 @@ fn start_issue_worker(
     ];
     // Live routing always reads the active calibration when one exists;
     // otherwise the worker falls back to the bundled `models.yaml`.
-    if let Some(catalog) = model_calibration_active_catalog_path(&config) {
-        environment.push((
-            "SWARM_MODEL_CALIBRATION_CATALOG".into(),
-            catalog.to_string_lossy().into_owned(),
-        ));
-    }
+    environment.push((
+        "SWARM_MODEL_CALIBRATION_CATALOG".into(),
+        model_calibration_state_dir(&config)
+            .join("active_catalog.json")
+            .to_string_lossy()
+            .into_owned(),
+    ));
     state.processes.spawn(
         &app,
         "issue",
@@ -871,22 +873,25 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
 /// Every model each installed provider CLI reports, keyed by provider id, for
 /// the worker's routers and Jev. Pulled from the CLIs on each scheduler start
 /// so a newly released model (for example `claude-sonnet-5-5`) is routable
-/// without a code change. A provider whose CLI reports nothing is omitted, and
-/// the worker then uses its checked-in catalog for that provider.
+/// without a code change. Empty reports remain explicit; catalog metadata must
+/// never be mistaken for a CLI offer.
 fn available_models_json(config: &AppConfig, providers: &[ResolvedProvider]) -> String {
+    cli_models_json(providers, config.allow_usage_credit_models, false)
+}
+
+fn cli_models_json(
+    providers: &[ResolvedProvider],
+    allow_credits: bool,
+    include_disabled: bool,
+) -> String {
     let mut models = serde_json::Map::new();
     for provider in providers {
-        if !provider.enabled || provider.bin.as_os_str().is_empty() {
-            continue;
-        }
-        let reported = tools::reported_models(
-            &provider.id,
-            &provider.bin,
-            config.allow_usage_credit_models,
-        );
-        if reported.is_empty() {
-            continue;
-        }
+        let reported =
+            if provider.bin.as_os_str().is_empty() || (!provider.enabled && !include_disabled) {
+                Vec::new()
+            } else {
+                tools::reported_models(&provider.id, &provider.bin, allow_credits)
+            };
         if let Ok(value) = serde_json::to_value(&reported) {
             models.insert(provider.id.clone(), value);
         }
@@ -1929,7 +1934,7 @@ fn run_model_calibration<R: tauri::Runtime>(
         // Only models a provider CLI actually reports become new candidates, so
         // the benchmark feeds (hundreds of models) cannot bury the few that can run.
         full_arguments.push("--available-models".into());
-        full_arguments.push(available_models_json(config, &resolve_providers(config)));
+        full_arguments.push(cli_models_json(&resolve_providers(config), true, true));
     }
     // The optional Artificial Analysis key reaches the refresh through its
     // environment only: never an argument, never the config file, never a log.
@@ -1940,13 +1945,45 @@ fn run_model_calibration<R: tauri::Runtime>(
         .collect();
     let (ok, raw) = run_capture_owned_with_env(&python, &full_arguments, &environment);
     let raw = redact_secret(&raw, key.as_deref());
-    let outcome = if ok {
+    let mut outcome: Result<serde_json::Value, String> = if ok {
         serde_json::from_str(raw.trim())
             .map_err(|error| format!("{failure_context}: response could not be parsed: {error}"))
     } else {
         Err(format!("{failure_context}: {raw}"))
     };
+    if action == "status" && key.is_none() {
+        if let Ok(status) = &mut outcome {
+            status["source_status"] = serde_json::json!("not_configured");
+        }
+    }
     log_model_data_outcome(app, &action, &outcome);
+    if action == "refresh"
+        && outcome
+            .as_ref()
+            .ok()
+            .is_some_and(|value| value["activated"] == true)
+    {
+        let detected = tools::detect(config, "github.com");
+        let state = app.state::<AppState>();
+        let updated = if let Ok(mut current) = state.config.lock() {
+            let mut candidate = current.clone();
+            let repairs = tools::reconcile_config_models(&mut candidate, &detected);
+            if !repairs.is_empty() {
+                if let Ok(path) = app_config_path(app) {
+                    if config::save(&path, &candidate).is_ok() {
+                        *current = candidate;
+                    }
+                }
+            }
+            Some(current.clone())
+        } else {
+            None
+        };
+        if let Some(updated) = updated {
+            // Refresh CLI evidence even when no saved selection needed repair.
+            let _ = refresh_running_scheduler(app, &state, &updated);
+        }
+    }
     outcome
 }
 
@@ -1979,13 +2016,7 @@ fn describe_refresh(result: &serde_json::Value) -> Vec<(&'static str, String)> {
                 text("calibration_version")
             ),
         )),
-        "changed" => lines.push((
-            "stderr",
-            format!(
-                "Model data refresh: {checked} models checked; calibration {} needs review (regressions found), so routing is unchanged.",
-                text("calibration_version")
-            ),
-        )),
+        "not_configured" => {},
         "no_change" => lines.push((
             "stdout",
             format!("Model data refresh: {checked} models checked, no meaningful change."),
@@ -1999,6 +2030,19 @@ fn describe_refresh(result: &serde_json::Value) -> Vec<(&'static str, String)> {
             "Model data refresh skipped: another refresh is already running.".to_string(),
         )),
         other => lines.push(("stdout", format!("Model data refresh finished ({other})."))),
+    }
+    if let Some(events) = result["log_lines"].as_array() {
+        for line in events.iter().filter_map(|line| line.as_str()) {
+            lines.push(("stdout", line.to_string()));
+        }
+    }
+    if result["notification"]["should_notify"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        if let Some(message) = result["notification"]["message"].as_str() {
+            lines.push(("stdout", message.to_string()));
+        }
     }
     if let Some(warnings) = result["source_warnings"].as_array() {
         for warning in warnings.iter().filter_map(|warning| warning.as_str()) {
@@ -2063,16 +2107,15 @@ async fn get_model_calibration_status_background(
 }
 
 fn refresh_model_data_args(config: &AppConfig, initiated_by: &str, force: bool) -> Vec<String> {
-    // The source is fixed: models.dev for prices and lifecycle, plus
-    // Artificial Analysis benchmarks when a key is saved (the key travels in
-    // the environment, see `run_model_calibration`). A clean refresh is always
-    // activated; one that regresses stays a proposal for review.
+    // Artificial Analysis supplies prices and measurements. Validated data
+    // always activates; regressions are informational. Keys travel only in
+    // the environment (see `run_model_calibration`).
     let mut arguments = vec![
         "refresh".into(),
         "--initiated-by".into(),
         initiated_by.into(),
         "--source".into(),
-        "models_dev".into(),
+        "artificial_analysis".into(),
         "--min-interval-hours".into(),
         config.model_data_min_refresh_interval_hours.to_string(),
         "--routing-optimization".into(),
@@ -2147,44 +2190,6 @@ async fn activate_model_calibration_background(
     .map_err(|error| format!("Could not activate that calibration: {error}"))?
 }
 
-/// Clears a DISCOVERED model's review gate (`ModelCalibrationService.
-/// approve_discovered_model`) so the *next* refresh can assign it a normal
-/// ACTIVE/CANDIDATE status. Discovering a model never makes it routable by
-/// itself -- this is the only way an operator turns that into a deliberate
-/// decision, and takes effect on the next refresh rather than instantly.
-#[tauri::command]
-fn approve_discovered_model<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    state: State<'_, AppState>,
-    key: String,
-) -> Result<serde_json::Value, String> {
-    let config = current_config(&state)?;
-    run_model_calibration(
-        &app,
-        &config,
-        vec![
-            "approve".into(),
-            key,
-            "--initiated-by".into(),
-            "USER".into(),
-        ],
-        "Could not approve that model",
-    )
-}
-
-#[tauri::command]
-async fn approve_discovered_model_background(
-    app: tauri::AppHandle,
-    key: String,
-) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        approve_discovered_model(app.clone(), state, key)
-    })
-    .await
-    .map_err(|error| format!("Could not approve that model: {error}"))?
-}
-
 /// Grounded, deterministic explanation of the latest stored calibration
 /// diff ("Analyze Routing Update" / "Why did this route change?"). Reads
 /// only already-computed calibration/simulation data -- it never invents a
@@ -2222,10 +2227,7 @@ async fn analyze_model_calibration_update_background(
 /// `model_data_min_refresh_interval_hours` itself, so this can unconditionally
 /// ask for a `STARTUP` refresh without re-checking either concern here.
 fn spawn_startup_model_calibration_refresh(app: &tauri::AppHandle) {
-    if !current_or_default_config(app).model_data_refresh_on_startup {
-        return;
-    }
-    // Once at startup, then re-checked at least hourly for as long as the app
+    // Once at startup, then re-checked every 15 minutes for as long as the app
     // runs; the refresh itself only does work once
     // `model_data_min_refresh_interval_hours` (6 by default) has passed since
     // the last success, so a long-lived app does not route on stale prices and
@@ -2237,7 +2239,7 @@ fn spawn_startup_model_calibration_refresh(app: &tauri::AppHandle) {
             let mut initiator = "STARTUP";
             loop {
                 let config = current_or_default_config(&handle);
-                if config.model_data_refresh_on_startup {
+                if initiator == "SCHEDULED" || config.model_data_refresh_on_startup {
                     let result = run_model_calibration(
                         &handle,
                         &config,
@@ -2249,17 +2251,9 @@ fn spawn_startup_model_calibration_refresh(app: &tauri::AppHandle) {
                     }
                 }
                 initiator = "SCHEDULED";
-                // Wake at most hourly and let the service decide whether a
-                // refresh is due. Sleeping a full interval after a skipped
-                // attempt drifted the next check far past the last success
-                // (a launch 5 hours after one skipped, then slept 6 more).
-                std::thread::sleep(std::time::Duration::from_secs_f64(
-                    config
-                        .model_data_min_refresh_interval_hours
-                        .clamp(0.0, 1.0)
-                        .max(0.25)
-                        * 3600.0,
-                ));
+                // The service enforces successful-refresh intervals and
+                // exponential retry backoff. Startup preference never stops scheduling.
+                std::thread::sleep(std::time::Duration::from_secs(15 * 60));
             }
         })
         .ok();
@@ -5452,8 +5446,6 @@ fn main() {
             clear_model_data_key,
             activate_model_calibration,
             activate_model_calibration_background,
-            approve_discovered_model,
-            approve_discovered_model_background,
             analyze_model_calibration_update,
             analyze_model_calibration_update_background,
             get_prompt_grades,

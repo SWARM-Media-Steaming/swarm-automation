@@ -276,6 +276,24 @@ models:
 
   - provider: openai
     agent: codex
+    model: gpt-6-sol
+    model_id: gpt-6-sol
+    active: false
+    recommended: false
+    deprecated: true
+    superseded_by: gpt-6-1-sol
+    supported_efforts: [low, medium, high, xhigh]
+    strengths: [normal_software_engineering, repository_implementation]
+    weaknesses: []
+    relative_capability: 4
+    relative_cost: 4
+    relative_token_efficiency: 2
+    relative_latency: 4
+    benchmarks: {}
+    notes: "Retained peer. Retirement is dormant until the CLI offers its priced successor."
+
+  - provider: openai
+    agent: codex
     model: gpt-6-astra
     model_id: gpt-6-astra
     active: true

@@ -73,7 +73,10 @@ def saved_routing_overrides(worker_args: Sequence[object]) -> list[str]:
             flags.append(argument)
             index += 1
             continue
-        if argument == "--routing-optimization" and index + 1 < len(arguments):
+        provider_value = any(argument == f"--{provider}-{field}"
+                             for provider in ("claude", "codex", "grok")
+                             for field in ("model", "effort", "router-model", "router-effort"))
+        if (argument in {"--routing-optimization", "--available-models"} or provider_value) and index + 1 < len(arguments):
             flags.extend([argument, arguments[index + 1]])
             index += 2
             continue
