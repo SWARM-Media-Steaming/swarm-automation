@@ -75,3 +75,9 @@ test("collapses adjacent duplicate milestones", () => {
   assert.equal(entries.length, 1);
   assert.equal(entries[0].message, "Issue #84 work started");
 });
+
+test("a completed issue whose title says 'failed' stays info", () => {
+  const entry = actionableLogEntry(line("Finished issue #391 with Grok: [xai] Recover from Claude compact_result=failed events (#391) (#399) (e58800e)."));
+  assert.equal(entry.level, "info");
+  assert.equal(entry.message, "Issue #391 work completed");
+});
