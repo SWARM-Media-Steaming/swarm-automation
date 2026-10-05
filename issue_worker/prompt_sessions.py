@@ -60,9 +60,9 @@ def resume_failure(raw: str) -> bool:
     """Only resume/context errors warrant a fresh retry, not arbitrary failures.
 
     The event decides, not its wording. A ``compact_boundary`` event is success
-    evidence only when the CLI did not mark it as an error: one flagged
-    ``is_error`` is a failed compaction whatever its message says, and one
-    typed ``error``/``turn.failed`` keeps any exhaustion code it carries.
+    evidence only on a non-error event: one flagged ``is_error`` or typed
+    ``error``/``turn.failed`` is a failed compaction whatever its message says
+    or omits (no flag, no exhaustion code, empty or success-sounding text).
     """
     diagnostics = []
     codes = set()
@@ -90,10 +90,9 @@ def resume_failure(raw: str) -> bool:
         error_typed = event.get("type") in {"error", "turn.failed"}
         flagged = _error_flag(event.get("is_error"))
         if event.get("subtype") == "compact_boundary":
-            if flagged:
+            if flagged or error_typed:
                 return True
-            if not error_typed:
-                continue
+            continue
         if error_typed or flagged:
             collect_codes(event)
             blob = json.dumps(event)

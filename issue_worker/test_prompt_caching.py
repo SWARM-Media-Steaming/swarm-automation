@@ -263,6 +263,21 @@ class SessionTests(unittest.TestCase):
             json.dumps({"type": "system", "subtype": "compact_boundary", "is_error": True}),
         ])))
 
+    def test_error_typed_compact_boundary_fails_without_flag_or_code(self):
+        # The event type is the signal: no is_error, no exhaustion code, and a
+        # terse, empty or success-sounding message must not read as success.
+        for kind in ("error", "turn.failed"):
+            for extra in ({}, {"message": "compaction failed"}, {"message": "compacted successfully"},
+                          {"is_error": False}, {"error": {"message": "last successfully compacted checkpoint"}}):
+                with self.subTest(kind=kind, extra=extra):
+                    self.assertTrue(resume_failure(json.dumps({
+                        "type": kind, "subtype": "compact_boundary", **extra})))
+        # The same subtype on a non-error event is still success evidence.
+        for event in ({"type": "system", "subtype": "compact_boundary"},
+                      {"type": "system", "subtype": "compact_started"}):
+            with self.subTest(event=event):
+                self.assertFalse(resume_failure(json.dumps(event)))
+
     def test_a_damaged_rejection_marker_still_discards_the_assessment(self):
         for payload in ({}, [], "rejected", 1):
             with self.subTest(payload=payload):
