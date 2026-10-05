@@ -5,21 +5,10 @@ description: Use when working on this repository (SWARM Automation, the Tauri de
 
 # Working in this repository
 
-The issue-worker automation used to live inside the
-[SWARM monorepo](https://github.com/DotNetRockStar/swarm) as
-`scripts/issue_worker/` (a Python script suite, originally added by "Migrate
-issue automation to Python with provider bots" (#90)). It was pulled out
-into this standalone repo/app so it could be built and distributed
-independently of any one target project — it's meant to run an issue worker
-against **any** local Git checkout, not just SWARM's own.
-Once the standalone app existed, SWARM's own copy was deleted from the
-monorepo as dead weight (issue #169, "Clean up old issue worker scripts":
-*"The issue worker was converted into the swarm automation project so we
-need to remove the old script files from here"*, closed 2026-09-01). There
-is no `apps/automation/` and no `scripts/issue_worker/` left in the SWARM
-monorepo today — this repo's `issue_worker/` is the only copy that exists
-anywhere, not a fork or vendored snapshot of something still maintained
-elsewhere.
+`issue_worker/` is the only copy of the issue-worker scripts: SWARM's monorepo
+(`DotNetRockStar/swarm`) no longer has `scripts/issue_worker/`, and the worker is
+meant to run against **any** local Git checkout, not just SWARM's. A fix made here
+is the whole change; there is no other copy to sync.
 
 ## This is a standalone Cargo package, not a workspace member
 
@@ -158,7 +147,7 @@ The upgrade to a newer release (`latest_release`) also runs for every fresh
 adversarial tester/fixer session, and each stage's router prompt carries the
 implementation's graded complexity and diff size (`stage_scope_note`).
 
-Optional per-repo setting (`dynamic_model_routing`) that, when on, has one
+Optional app-wide setting (`dynamic_model_routing`) that, when on, has one
 of the enabled providers grade a new issue and pick which provider handles
 it, instead of the operator always choosing one provider up front. Lives
 mostly in `issue_worker/dynamic_router.py`; `swarm_issue_worker.py` calls
@@ -170,9 +159,9 @@ now genuine AI discretion bounded by operator settings:
    `selected_provider` from the enabled candidates, weighing each one's
    `strengths` text (`_DEFAULT_PROVIDER_STRENGTHS` /
    `provider_strengths_preset` in `config.rs` — real input to the prompt,
-   genuinely read by the router, not decorative; its UI textbox was removed
-   2026-09-22 because an *editable* field next to model/effort looked like a
-   rule the app enforced, when it is only advice the router can overrule).
+   genuinely read by the router, not decorative; it has no editable field, because
+   one next to model/effort would look like an enforced rule when it is only
+   advice the router can overrule).
    This is real AI discretion: `_select_candidate` can be overridden by the
    operator's `preferred_provider` tie-break or by the rework-favors-a-
    different-tool rule, but nothing here is mechanical.
@@ -218,23 +207,18 @@ any later change here:
   The same tier path covers a decision whose *tool* pick was
   overruled, since the router's model then belongs to a different tool.
 
-Since 2026-09-22, each model also carries a short built-in description of what
-it tends to be good for (`_MODEL_DESCRIPTIONS` / `model_description`, now the
-by-slug view of `_MODEL_CATALOG`) — Haiku-tier "fast, cheap, well-scoped"
-through Opus-tier "large, ambiguous, high-risk" — plus a relative `cost` rank
-comparable across providers, which is what makes cost-first routing a
-cross-provider judgement rather than a per-tier one. These are shown in the
-router prompt and folded into the stored `tier_explanation`, so they show up in
-AI execution history and the routing notice posted on the issue. Unlike the
-provider strengths, this table has no `config.rs` counterpart
-and nothing to keep in sync: it is never sent to the app or saved in
-`config.json`, only built into `dynamic_router.py`. CLI-offered models absent from it are inferred automatically; a static or
-feed price is required before routing. No catalog edit is needed for onboarding.
+Each catalog model carries a short description (`model_description`) and a
+relative `cost` rank comparable across providers, which makes cost-first routing
+a cross-provider judgement. Both are shown in the router prompt and folded into
+the stored `tier_explanation`, so they appear in AI execution history and the
+routing notice posted on the issue. CLI-offered models absent from the catalog
+are inferred automatically; a static or feed price is required before routing,
+and no catalog edit is needed for onboarding. See
+`.claude/rules/model-routing-no-static-tables.md`.
 
-Adding a provider's tiers or strengths without a matching edit on the other
-side (Python vs. `config.rs`) is a real way to introduce drift — the router
-prompt and the saved config would disagree about that provider's defaults. The
-model catalog is the one exception: Python-only by design, see above.
+Provider `strengths` are the one routing input mirrored in both
+`dynamic_router.py` and `config.rs`; edit both together or the router prompt and
+the saved config disagree. The model catalog is Python-only by design.
 
 ## Jev Decision Engine
 
