@@ -254,6 +254,20 @@ security floors first and only then optimizes cost; it consumes the whole vector
 not one score. See `docs/complexity-scoring.md` and
 `.claude/rules/repository-complexity-scoring.md`. There is no toggle.
 
+## Measured native-cache evidence (issue #381)
+
+When the repository's history holds enough recent measurements for the exact
+provider, model, effort and agent role (`usage_report.cache_routing_evidence`:
+at least 20 calls over five issues in 30 days, 95% success, complete priced
+cache observations, one pricing rate), `build_router_prompt` includes that
+evidence and saved-attempt cost comparisons apply it through
+`dynamic_router.cache_adjusted_cost` (discount capped at 50%). It only adjusts
+the API-equivalent cost estimate of the measured route. Cache evidence never
+overrides the capability, expected-success, reasoning-effort, safety,
+context-fit or reviewer-independence gates, never applies to an unmeasured
+candidate, and is not subscription billing. Insufficient evidence leaves routing
+unchanged. See `docs/prompt-caching.md`.
+
 ## Tests
 
 `issue_worker/test_model_router.py` and `issue_worker/test_model_router_yaml.py`

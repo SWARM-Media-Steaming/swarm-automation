@@ -438,6 +438,25 @@ def _coverage_values(row: Sequence[Any], start: int) -> tuple[dict[str, int], in
     return counts, start + len(COVERAGE_STATUSES)
 
 
+# Cache ratios use paired observations, never an unrelated all-row input sum.
+_CACHE_SELECT = """SUM(CASE WHEN u.cache_input_tokens IS NOT NULL THEN u.cache_read_tokens END),
+    SUM(CASE WHEN u.cache_read_tokens IS NOT NULL THEN u.cache_input_tokens END),
+    COUNT(CASE WHEN u.cache_input_tokens IS NOT NULL AND u.cache_read_tokens IS NOT NULL THEN 1 END),
+    SUM(u.session_reused), COUNT(u.session_reused),
+    SUM(u.cache_savings_estimate), COUNT(u.cache_savings_estimate),
+    SUM(u.reported_cost), COUNT(u.reported_cost)"""
+
+
+def _cache_values(row: Sequence[Any]) -> dict[str, Any]:
+    return {
+        "cacheHitEfficiency": row[0] / row[1] if row[0] is not None and row[1] else None,
+        "cacheMeasuredInvocations": int(row[2] or 0),
+        "sessionReused": _optional_int(row[3]), "sessionReuseReported": int(row[4] or 0),
+        "cacheSavingsEstimate": _optional_float(row[5]), "cacheSavingsReported": int(row[6] or 0),
+        "reportedCost": _optional_float(row[7]), "costReported": int(row[8] or 0),
+    }
+
+
 def _summary(connection: sqlite3.Connection, filters: UsageFilters) -> dict[str, Any]:
     where, params = filters.where()
     row = connection.execute(
@@ -468,6 +487,8 @@ def _summary(connection: sqlite3.Connection, filters: UsageFilters) -> dict[str,
         "mixedCurrencies": currencies > 1,
     }
     summary.update(tokens)
+    cache = connection.execute(f"SELECT {_CACHE_SELECT} {_JOIN}{where}", params).fetchone()
+    summary.update(_cache_values(cache))
     return {"summary": summary, "coverage": coverage}
 
 
@@ -509,7 +530,7 @@ def _group_rows(
         f"{_token_select()}, {_COVERAGE_SELECT}, "
         "MAX(COALESCE(e.issue_title, '')), "
         f"MAX({_REPOSITORY}), MAX({_ISSUE_NUMBER}), MAX(COALESCE(e.issue_url, '')), "
-        "MAX(COALESCE(u.execution_id, '')) "
+        f"MAX(COALESCE(u.execution_id, '')), {_CACHE_SELECT} "
         f"{_JOIN}{where} GROUP BY group_value ORDER BY {order} LIMIT ? OFFSET ?",
         (*params, limit, offset),
     ).fetchall()
@@ -531,6 +552,7 @@ def _group_rows(
             "executionId": str(row[index + 4] or ""),
         }
         entry.update(tokens)
+        entry.update(_cache_values(row[index + 5:]))
         results.append(entry)
     return {"rows": results, "total": total, "offset": offset, "limit": limit}
 
@@ -569,6 +591,8 @@ _DETAIL_COLUMNS = (
     _ACTIVITY,
     "u.completed_at",
     _COVERAGE,
+    "u.agent_run_id", "u.session_reused", "u.session_role", "u.cache_input_tokens",
+    "u.cache_savings_estimate", "u.reported_cost",
 )
 
 _DETAIL_KEYS = (
@@ -605,6 +629,8 @@ _DETAIL_KEYS = (
     "startedAt",
     "completedAt",
     "coverage",
+    "sessionId", "sessionReused", "sessionRole", "cacheInputTokens",
+    "cacheSavingsEstimate", "reportedCost",
 )
 
 _DETAIL_INT_KEYS = {
@@ -617,7 +643,7 @@ _DETAIL_INT_KEYS = {
     "reasoningTokens",
     "outputTokens",
     "totalTokens",
-    "durationMs",
+    "durationMs", "sessionReused", "cacheInputTokens",
 }
 
 
@@ -626,7 +652,7 @@ def _detail_row(row: Sequence[Any]) -> dict[str, Any]:
     for key, value in zip(_DETAIL_KEYS, row):
         if key in _DETAIL_INT_KEYS:
             record[key] = _optional_int(value)
-        elif key == "estimatedCost":
+        elif key in {"estimatedCost", "reportedCost", "cacheSavingsEstimate"}:
             record[key] = _optional_float(value)
         elif key == "success":
             record[key] = bool(value)
@@ -909,6 +935,7 @@ def empty_report(group_by: str = "issue") -> dict[str, Any]:
         "direction": "desc",
         "filters": UsageFilters().to_dict(),
         "summary": {
+            **_cache_values([None, None, 0, None, 0, None, 0, None, 0]),
             "invocations": 0,
             "issues": 0,
             "executions": 0,
@@ -944,3 +971,42 @@ def empty_report(group_by: str = "issue") -> dict[str, Any]:
         "hasAnyActivity": False,
         "executionsWithoutUsage": 0,
     }
+
+
+# Conservative evidence gate for routing: enough recent calls across issues,
+# same repository/model/effort/role and price version, including failed calls.
+CACHE_MIN_SAMPLES = 20
+CACHE_MIN_ISSUES = 5
+CACHE_MIN_SUCCESS_RATE = 0.95
+
+
+def cache_routing_evidence(connection: sqlite3.Connection, repository: str,
+                           role: str) -> list[dict[str, Any]]:
+    rows = connection.execute("""
+        SELECT lower(provider), model, reasoning_effort, COUNT(*),
+               COUNT(DISTINCT issue_number), AVG(success),
+               SUM(cache_savings_estimate), SUM(estimated_cost + cache_savings_estimate),
+               SUM(cache_read_tokens), SUM(cache_input_tokens)
+        FROM ai_token_usage
+        WHERE repository = ? AND
+              (session_role = ? OR session_role GLOB ?)
+              AND datetime(started_at) >= datetime('now', '-30 days')
+              AND datetime(started_at) <= datetime('now')
+        GROUP BY lower(provider), model, reasoning_effort
+        HAVING COUNT(*) >= ? AND COUNT(DISTINCT issue_number) >= ?
+           AND AVG(success) >= ? AND COUNT(cache_savings_estimate) = COUNT(*)
+           AND COUNT(cache_input_tokens) = COUNT(*) AND COUNT(estimated_cost) = COUNT(*)
+           AND COUNT(DISTINCT pricing_rate_id) = 1 AND MIN(pricing_rate_id) <> ''
+           AND COUNT(DISTINCT pricing_version) = 1
+        ORDER BY lower(provider), model, reasoning_effort LIMIT 100
+    """, (repository, role, role + ":[0-9]*", CACHE_MIN_SAMPLES, CACHE_MIN_ISSUES,
+          CACHE_MIN_SUCCESS_RATE)).fetchall()
+    evidence = []
+    for provider, model, effort, count, issues, success, savings, baseline, read, inputs in rows:
+        if not baseline or savings is None or not 0 < savings < baseline or not inputs:
+            continue
+        evidence.append({"provider": provider, "model": model, "effort": effort,
+                         "role": role, "samples": count, "issues": issues,
+                         "success_rate": success, "cache_hit_efficiency": read / inputs,
+                         "api_cost_discount": min(0.5, savings / baseline)})
+    return evidence

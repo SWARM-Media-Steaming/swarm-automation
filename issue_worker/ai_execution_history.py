@@ -22,7 +22,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import usage_report
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 PROMPT_TEMPLATE_VERSION = "issue-worker-v1"
 # Feedback shows one page of executions. Callers cannot raise this to dump
 # the whole history through the paged query.
@@ -280,6 +280,8 @@ _TOKEN_USAGE_COLUMNS = (
     "cached_input_rate_per_million",
     "cache_write_rate_per_million",
     "output_rate_per_million",
+    "session_reused", "session_role", "cache_input_tokens",
+    "cache_savings_estimate", "reported_cost",
 )
 
 # Migration 7 columns on ``ai_token_usage`` (issue #295). Two groups:
@@ -958,6 +960,18 @@ class ExecutionHistoryRepository:
                     (9,),
                 )
 
+            # Additive migration: old records retain NULL for unavailable cache
+            # statistics and session reuse; history is never retrospectively priced.
+            applied = {row[0] for row in database.execute("SELECT version FROM schema_migrations")}
+            if 10 not in applied:
+                existing = {row[1] for row in database.execute("PRAGMA table_info(ai_token_usage)")}
+                for name, kind in (("session_reused", "INTEGER"), ("session_role", "TEXT NOT NULL DEFAULT ''"),
+                                   ("cache_input_tokens", "INTEGER"), ("cache_savings_estimate", "REAL"),
+                                   ("reported_cost", "REAL")):
+                    if name not in existing:
+                        database.execute(f"ALTER TABLE ai_token_usage ADD COLUMN {name} {kind}")
+                database.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)")
+
     def create(self, start: ExecutionStart, started_at: str) -> str:
         execution_id = str(uuid.uuid4())
         repository = sanitize_text(start.repository)
@@ -1513,12 +1527,12 @@ class ExecutionHistoryRepository:
                 elif column in {
                     "attempt_number", "input_tokens", "output_tokens", "reasoning_tokens",
                     "cached_input_tokens", "cache_read_tokens", "cache_write_tokens",
-                    "total_tokens", "duration_ms",
+                    "total_tokens", "duration_ms", "session_reused", "cache_input_tokens",
                 }:
                     raw_value = event.get(column)
                     values.append(None if raw_value is None else int(raw_value))
                 elif column in {
-                    "estimated_cost", "input_rate_per_million",
+                    "estimated_cost", "cache_savings_estimate", "reported_cost", "input_rate_per_million",
                     "cached_input_rate_per_million", "cache_write_rate_per_million",
                     "output_rate_per_million",
                 }:

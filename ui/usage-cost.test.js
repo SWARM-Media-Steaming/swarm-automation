@@ -44,13 +44,13 @@ test("offers every grouping dimension the report supports", () => {
 test("aggregate and invocation tables carry the columns the report specifies", () => {
   assert.deepEqual(
     GROUP_COLUMNS.map((column) => column.label),
-    ["Group", "Issues", "Invocations", "Input", "Cached", "Reasoning", "Output", "Total", "Estimated cost", "Coverage"],
+    ["Group", "Issues", "Invocations", "Input", "Cached", "Reasoning", "Output", "Total", "Estimated cost", "Cache hit efficiency", "Sessions reused", "API-equivalent cache savings", "Coverage"],
   );
   assert.deepEqual(
     INVOCATION_COLUMNS.map((column) => column.label),
     [
-      "Agent", "Provider / Model", "Prompt", "Effort", "Attempt", "Input", "Cached",
-      "Reasoning", "Output", "Total", "Estimated cost", "Duration", "Result",
+      "Agent", "Provider / Model", "Prompt", "Effort", "Attempt", "Input", "Cache read", "Cache write", "Cached",
+      "Reasoning", "Output", "Total", "Estimated cost", "Reported cost", "API-equivalent cache savings", "Session", "Session reused", "Duration", "Result",
     ],
   );
 });
@@ -202,4 +202,14 @@ test("cross-links from the other Feedback reports produce one filter shape", () 
   const execution = filtersForExecution("exec-1");
   assert.equal(execution.executionId, "exec-1");
   assert.equal(execution.issueNumber, "");
+});
+
+
+test("cache efficiency preserves missing data and genuine zero", () => {
+  const { formatEfficiency } = require("./usage-cost.js");
+  assert.equal(formatEfficiency(null), "—");
+  assert.equal(formatEfficiency(0), "0.0%");
+  assert.equal(formatEfficiency(0.8), "80.0%");
+  assert.equal(formatEfficiency(NaN), "—");
+  assert.equal(formatEfficiency(1.1), "—");
 });

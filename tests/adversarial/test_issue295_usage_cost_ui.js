@@ -109,22 +109,51 @@ test("summary cards, filters, grouping, and both pagers are in the panel", () =>
   assert.match(panel, /id="usage-clear-filters"/);
 });
 
+// Revised for issue #381 (dispute adjudication). #295 specifies the columns the
+// usage report must offer; it never said no other column may ever exist. #381
+// requires cache efficiency, session reuse, reported cost and estimated savings
+// "alongside the existing per-agent token and cost breakdown", i.e. as extra
+// columns in these very tables, so an exact label list made the two issues
+// contradict each other. The #295 requirement is kept in full: every original
+// label must still be present, in its original relative order, exactly once.
+// Only additions are tolerated; the added #381 columns are pinned by
+// test_issue381_cache_ui.js and test_issue381_usage_tables_runtime.js.
+function assertContainsInOrder(actual, required, what) {
+  assert.equal(new Set(actual).size, actual.length, `${what} labels must be unique: ${actual.join(", ")}`);
+  let from = 0;
+  required.forEach((label) => {
+    const at = actual.indexOf(label, from);
+    assert.notEqual(
+      at,
+      -1,
+      `${what}: #295 column "${label}" is missing or out of order in [${actual.join(", ")}]`,
+    );
+    from = at + 1;
+  });
+}
+
 test("every grouping dimension and required table column is offered", () => {
   assert.deepEqual(
     USAGE_GROUPS.map((entry) => entry.value),
     ["issue", "model", "provider", "grade", "effort", "agent", "prompt", "repository", "day", "week", "month"],
   );
-  assert.deepEqual(
+  assertContainsInOrder(
     GROUP_COLUMNS.map((column) => column.label),
     ["Group", "Issues", "Invocations", "Input", "Cached", "Reasoning", "Output", "Total", "Estimated cost", "Coverage"],
+    "aggregate table",
   );
-  assert.deepEqual(
+  assertContainsInOrder(
     INVOCATION_COLUMNS.map((column) => column.label),
     [
       "Agent", "Provider / Model", "Prompt", "Effort", "Attempt", "Input", "Cached",
       "Reasoning", "Output", "Total", "Estimated cost", "Duration", "Result",
     ],
+    "invocation table",
   );
+  // The group label is still the row header and Coverage still closes the
+  // aggregate table, which is how the row renderer lays its cells out.
+  assert.equal(GROUP_COLUMNS[0].label, "Group");
+  assert.equal(GROUP_COLUMNS[GROUP_COLUMNS.length - 1].label, "Coverage");
   assert.equal(COVERAGE.length, 5);
   ["Complete", "Tokens only", "Partial", "Unreported", "Failed"].forEach((label) => {
     assert.ok(COVERAGE.some((entry) => entry.label === label), `missing coverage ${label}`);

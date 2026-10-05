@@ -2513,6 +2513,26 @@
       api.formatTokens(summary && summary.cachedTokens),
       `${api.formatTokens(summary && summary.cacheReadTokens)} read · ${api.formatTokens(summary && summary.cacheWriteTokens)} written`,
     ));
+    box.appendChild(usageSummaryCard(
+      "Cache hit efficiency",
+      api.formatEfficiency(summary && summary.cacheHitEfficiency),
+      `${api.formatCount(summary && summary.cacheMeasuredInvocations)} measured invocations`,
+    ));
+    box.appendChild(usageSummaryCard(
+      "Session reuse",
+      api.formatTokens(summary && summary.sessionReused),
+      `${api.formatCount(summary && summary.sessionReuseReported)} invocations reported reuse status`,
+    ));
+    box.appendChild(usageSummaryCard(
+      "API-equivalent cache savings",
+      api.formatCost(summary && summary.cacheSavingsEstimate, currency),
+      "Estimated net cache discount, not realized subscription savings",
+    ));
+    box.appendChild(usageSummaryCard(
+      "Provider-reported cost",
+      api.formatCost(summary && summary.reportedCost, currency),
+      `${api.formatCount(summary && summary.costReported)} reported · not verified subscription charges`,
+    ));
     const chips = api.coverageChips(coverage);
     const complete = chips.find((chip) => chip.key === "complete");
     box.appendChild(usageSummaryCard(
@@ -2724,6 +2744,13 @@
       priced.textContent = api.pricedLabel(row.pricedInvocations, row.invocations);
       cost.append(costValue, priced);
       tr.appendChild(cost);
+      [api.formatEfficiency(row.cacheHitEfficiency), api.formatTokens(row.sessionReused),
+        api.formatCost(row.cacheSavingsEstimate, usageCurrency())].forEach((value) => {
+        const cell = document.createElement("td");
+        cell.className = "numeric";
+        cell.textContent = value;
+        tr.appendChild(cell);
+      });
       const coverage = document.createElement("td");
       const dominant = api.dominantCoverage(row.coverage);
       const badge = document.createElement("span");
@@ -2837,6 +2864,8 @@
       tr.appendChild(text(row.reasoningEffort));
       tr.appendChild(numeric(api.formatCount(row.attemptNumber)));
       tr.appendChild(numeric(api.formatTokens(row.inputTokens)));
+      tr.appendChild(numeric(api.formatTokens(row.cacheReadTokens)));
+      tr.appendChild(numeric(api.formatTokens(row.cacheWriteTokens)));
       tr.appendChild(numeric(api.formatTokens(row.cachedInputTokens)));
       tr.appendChild(numeric(api.formatTokens(row.reasoningTokens)));
       tr.appendChild(numeric(api.formatTokens(row.outputTokens)));
@@ -2848,6 +2877,10 @@
         ? `Rate ${row.pricingRateId} (catalog ${row.pricingVersion || "unknown"})`
         : `Unpriced: ${row.pricingStatus || "no matching price"}`;
       tr.appendChild(cost);
+      tr.appendChild(numeric(api.formatCost(row.reportedCost, row.currency || "USD")));
+      tr.appendChild(numeric(api.formatCost(row.cacheSavingsEstimate, row.currency || "USD")));
+      tr.appendChild(text(row.sessionId));
+      tr.appendChild(text(row.sessionReused == null ? "—" : row.sessionReused ? "Yes" : "No"));
       tr.appendChild(numeric(api.formatDurationMs(row.durationMs)));
       const result = document.createElement("td");
       const badge = document.createElement("span");

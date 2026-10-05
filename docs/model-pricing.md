@@ -191,6 +191,17 @@ The feed supplies no cache discount. Its input rate applies to all input
 classes, with cached tokens counted once. Static catalog entries retain their
 explicit cache read/write rates. Routing cost ranks never become dollar rates.
 
+## Native-cache reporting (#381)
+
+`token_usage.cache_metrics` uses the invocation's effective-dated rates to
+compute net API-equivalent cache savings: the read discount minus any
+cache-write premium. It persists that estimate with existing provenance;
+historical rows are never repriced. A missing counter or rate means unavailable,
+not zero. Claude's `total_cost_usd`, when present, is stored separately as
+provider-reported usage cost, not verified subscription charges. Estimated
+savings do not establish any realized subscription savings. See
+[native caching](prompt-caching.md).
+
 ## Automatic refresh operation
 
 The app refreshes from Artificial Analysis at startup (when enabled) and on a

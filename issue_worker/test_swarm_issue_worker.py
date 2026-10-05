@@ -1696,7 +1696,9 @@ class WorkerTestCase(unittest.TestCase):
 
         self.assertEqual(status, 0)
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0], ("claude-fable-5-1", "high", "old-session"))
+        self.assertEqual(calls[0][:2], ("claude-fable-5-1", "high"))
+        # Legacy session identities have no scope metadata: restart safely.
+        self.assertNotEqual(calls[0][2], "old-session")
         self.assertEqual(calls[1][0], "claude-sonnet-5-5")
         self.assert_complexity_route()
         self.assertNotEqual(calls[1][2], "old-session")
