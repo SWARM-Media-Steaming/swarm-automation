@@ -4452,6 +4452,178 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue381_session_lifecycle.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-session-lifecycle",
+      "name": "Issue #381: native session reuse, recovery and reviewer independence",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/token_usage.py",
+          "tests/adversarial/test_issue381_session_lifecycle.py"
+        ]
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_cache_telemetry.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-cache-telemetry",
+      "name": "Issue #381: cache telemetry, reporting, history migration and routing evidence",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/token_usage.py",
+          "issue_worker/usage_report.py",
+          "issue_worker/ai_execution_history.py",
+          "issue_worker/dynamic_router.py",
+          "tests/adversarial/test_issue381_cache_telemetry.py"
+        ]
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue381_cache_ui.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-cache-ui",
+      "name": "Issue #381: cache efficiency UI keeps unavailable, zero and negative values honest",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/usage-cost.js",
+          "ui/app.js",
+          "tests/adversarial/test_issue381_cache_ui.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_independent_sessions.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-independent-sessions",
+      "name": "Issue #381: a non-implementation AI pass (documentation review) never resumes or overwrites the implementer's session",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/architecture_docs.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue381_independent_sessions.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_delivery_contracts.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-delivery-contracts",
+      "name": "Issue #381: no stray backup files in the bundle, no dangling doc references, router skill documents cache evidence, sub-cent report amounts stay distinguishable from zero",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "docs/prompt-caching.md",
+          "skills/model-router/SKILL.md",
+          "issue_worker/token_usage.py",
+          "ui",
+          "tests/adversarial/test_issue381_delivery_contracts.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue381_usage_tables_runtime.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-usage-tables-runtime",
+      "name": "Issue #381: Usage & cost tables render one cell per header with unavailable, zero and negative cache values kept distinct",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "ui/usage-cost.js",
+          "tests/adversarial/test_issue381_usage_tables_runtime.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue374_automatic_calibration_boundaries.py",
         "-v"
       ],
@@ -4562,6 +4734,252 @@
           "issue_worker/dynamic_router.py",
           "issue_worker/test_available_models.py",
           "tests/adversarial/test_issue374_available_model_state_isolation.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_session_safety_boundaries.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-session-safety-boundaries",
+      "name": "Issue #381: ignored instructions, malformed role state, structured recovery errors, and session confirmation",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue381_session_safety_boundaries.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_context_isolation_and_recovery.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-context-isolation-and-recovery",
+      "name": "Issue #381: ignored instruction trees, history rewind, independent-pass fail-closed, CLI argv and fixer context",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/adversarial_core.py",
+          "tests/adversarial/test_issue381_context_isolation_and_recovery.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_identity_isolation_and_rejection.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-identity-isolation-and-rejection",
+      "name": "Issue #381: repo/issue identity isolation, rejected assessments, and non-quota failure recovery",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue381_identity_isolation_and_rejection.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_confirmation_telemetry_and_gates.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-confirmation-telemetry-and-gates",
+      "name": "Issue #381: CLI session confirmation, telemetry attribution, and cache-routing evidence gates",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/token_usage.py",
+          "issue_worker/usage_report.py",
+          "tests/adversarial/test_issue381_confirmation_telemetry_and_gates.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_compaction_and_rejection_failclosed.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-compaction-and-rejection-failclosed",
+      "name": "Issue #381: failed compaction recovers and malformed rejection identity cannot resume",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue381_compaction_and_rejection_failclosed.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_compaction_error_event_shapes.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-compaction-error-event-shapes",
+      "name": "Issue #381: compact_boundary error events recover without requiring matching prose",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/adversarial_core.py",
+          "tests/adversarial/test_issue381_compaction_error_event_shapes.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_error_typed_compaction_recovery.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-error-typed-compaction-recovery",
+      "name": "Issue #381: error-typed compact_boundary recovers without is_error or an exhaustion code",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/adversarial_core.py",
+          "tests/adversarial/test_issue381_error_typed_compaction_recovery.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_native_cli_compaction_failure.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-native-cli-compaction-failure",
+      "name": "Issue #381: recover from the compaction-failure events Claude Code and Codex actually emit",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/adversarial_core.py",
+          "tests/adversarial/test_issue381_native_cli_compaction_failure.py"
         ]
       },
       "timeoutSeconds": 300

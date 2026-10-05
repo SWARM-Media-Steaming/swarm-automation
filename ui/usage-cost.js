@@ -56,6 +56,9 @@
     { key: "outputTokens", label: "Output", sort: "output", numeric: true },
     { key: "totalTokens", label: "Total", sort: "total", numeric: true },
     { key: "estimatedCost", label: "Estimated cost", sort: "cost", numeric: true, cost: true },
+    { key: "cacheHitEfficiency", label: "Cache hit efficiency", numeric: true },
+    { key: "sessionReused", label: "Sessions reused", numeric: true },
+    { key: "cacheSavingsEstimate", label: "API-equivalent cache savings", numeric: true, money: true },
     { key: "coverage", label: "Coverage", sort: "", numeric: false },
   ];
 
@@ -66,11 +69,17 @@
     { key: "reasoningEffort", label: "Effort" },
     { key: "attemptNumber", label: "Attempt", numeric: true, plain: true },
     { key: "inputTokens", label: "Input", numeric: true },
+    { key: "cacheReadTokens", label: "Cache read", numeric: true },
+    { key: "cacheWriteTokens", label: "Cache write", numeric: true },
     { key: "cachedInputTokens", label: "Cached", numeric: true },
     { key: "reasoningTokens", label: "Reasoning", numeric: true },
     { key: "outputTokens", label: "Output", numeric: true },
     { key: "totalTokens", label: "Total", numeric: true },
     { key: "estimatedCost", label: "Estimated cost", numeric: true, cost: true },
+    { key: "reportedCost", label: "Reported cost", numeric: true, money: true },
+    { key: "cacheSavingsEstimate", label: "API-equivalent cache savings", numeric: true, money: true },
+    { key: "sessionId", label: "Session" },
+    { key: "sessionReused", label: "Session reused", numeric: true, plain: true },
     { key: "durationMs", label: "Duration", numeric: true },
     { key: "result", label: "Result" },
   ];
@@ -153,6 +162,11 @@
     return Number.isFinite(number) ? number.toLocaleString() : UNAVAILABLE;
   }
 
+  function formatEfficiency(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+      ? `${(value * 100).toFixed(1)}%` : UNAVAILABLE;
+  }
+
   function formatCount(value) {
     const number = Number(value);
     return Number.isFinite(number) ? number.toLocaleString() : "0";
@@ -166,8 +180,10 @@
     const number = Number(value);
     if (!Number.isFinite(number)) return UNAVAILABLE;
     const symbol = currency === "USD" ? "$" : `${currency} `;
-    if (number !== 0 && Math.abs(number) < 0.01) return `${symbol}${number.toFixed(4)}`;
-    return `${symbol}${number.toLocaleString(undefined, {
+    const sign = number < 0 ? "-" : "";
+    const magnitude = Math.abs(number);
+    if (magnitude !== 0 && magnitude < 0.01) return `${sign}${symbol}${magnitude.toFixed(4)}`;
+    return `${sign}${symbol}${magnitude.toLocaleString(undefined, {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     })}`;
@@ -336,6 +352,7 @@
     dominantCoverage,
     formatTokens,
     formatCount,
+    formatEfficiency,
     formatCost,
     formatDurationMs,
     pricedLabel,

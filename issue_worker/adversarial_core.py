@@ -894,6 +894,7 @@ class AdversarialStageMixin:
                         title=f"{stage.router_task} {loop['phase']}: {self.issue.title}",
                         body=body, labels=self.issue.labels, candidates=candidates,
                         previous_provider=previous.lower(), rework=bool(previous),
+                        cache_evidence=self.cache_routing_evidence(f"{stage.key}:{loop['phase']}"),
                         routing_optimization=self.config.routing_optimization,
                         allow_usage_credit_models=self.config.allow_usage_credit_models,
                     )
@@ -1138,8 +1139,13 @@ class AdversarialStageMixin:
                 f"Rejected attempts so far: {int(rejected.get('attempts', 1))}\n"
                 f"{self.rejection_remedy(reason)}"
             )
-        return (
+        issue_context = (
+            f"Continue issue #{self.issue.number}; its unchanged specification is retained in this session.\n"
+            if loop["phase"] == "fix" and self.choice.resume else
             f"Issue #{self.issue.number}: {self.issue.title}\n\n{self.issue.body}\n\n"
+        )
+        return (
+            issue_context +
             f"Trusted issue amendments (authoritative clarifications):\n{amendments or 'None.'}\n\n"
             f"Repository: {self.config.repo_dir}\nRemain on {self.expected_branch()}. "
             "Read repository conventions (AGENTS.md, CLAUDE.md, .claude/rules and existing test patterns). "
