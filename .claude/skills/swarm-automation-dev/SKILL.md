@@ -92,6 +92,18 @@ Retrieval is behind `KnowledgeRetriever` (SQL + text matching + relationship
 traversal) so a later semantic/vector implementation can replace that class
 without rewriting Ask SWARM or agent context injection.
 
+App-wide SQLite helpers (`ExecutionHistoryRepository`, `DiagnosticRepository`,
+`KnowledgeStore`) open handles through `connect_sqlite` / `ClosingConnection`.
+A `with` block still commits or rolls back, then closes. Do not return a raw
+`sqlite3.Connection` from `connect()` and rely on `with` alone: Python 3.13
+prints `ResourceWarning: unclosed database` on stderr, and unittest `-v`
+interleaves it with the test-name line so CI-alignment checks looking for
+`... ok` fail even when the inner test passed. `ComplexityStore` already uses
+`contextlib.closing`. Replay assertions for
+`test_cap_holds_automation_and_asks_a_trusted_author_to_adjudicate` must
+tolerate 3.13's `Class.method` verbose form, not the exact Python 3.9 status
+line.
+
 Ownership lives on every object (`owner_scope_kind` / `owner_scope_id`,
 default `"environment"` / `"local"`). Project grouping is the GitHub owner
 today. Never design retrieval to bypass repository permissions.
@@ -594,6 +606,11 @@ runs `cargo fmt --all -- --check` before clippy, tests, Python, and frontend
 suites; a long line that rustfmt would wrap (common in `src/main.rs` unit
 tests) fails CI even when `cargo test` is green. Format with `cargo fmt
 --all` before committing Rust changes.
+
+Python 3.13 unittest `-v` prints `test_name (Class.method)` and will splice a
+`ResourceWarning` between `... ` and `ok`. Inner subprocess assertions that
+replay issue-worker cases must match `Ran 1 test` / `OK` plus that header,
+not the contiguous Python 3.9 line `test_name (Class) ... ok`.
 
 `issue_worker/test_swarm_issue_worker.py` is the Python-side counterpart —
 `unittest.TestCase`-based, with a real local git remote/repo fixture per

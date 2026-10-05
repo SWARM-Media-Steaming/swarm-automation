@@ -28,9 +28,13 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SUITE_DIR = Path(__file__).resolve().parent
 ISSUE_WORKER_DIR = REPO_ROOT / "issue_worker"
-if str(ISSUE_WORKER_DIR) not in sys.path:
-    sys.path.insert(0, str(ISSUE_WORKER_DIR))
+for _path in (SUITE_DIR, ISSUE_WORKER_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from issue321_ci_subrun import assert_verbose_subrun_passed  # noqa: E402
 
 import adversarial_core  # noqa: E402
 import adversarial_uat as uat  # noqa: E402
@@ -263,18 +267,12 @@ class Issue321CiCapHitTesterCountTests(unittest.TestCase):
             text=True,
             check=False,
         )
-        output = completed.stdout + completed.stderr
-        self.assertEqual(
-            completed.returncode,
-            0,
-            "issue-worker cap-hold test still fails the same way CI did:\n" + output,
+        assert_verbose_subrun_passed(
+            self,
+            completed,
+            method=CAP_HOLDS_METHOD,
+            class_qualname=f"test_adversarial_uat.{CAP_HOLDS_CLASS}",
         )
-        self.assertIn(CAP_HOLDS_METHOD, output)
-        self.assertRegex(output, r"Ran 1 test")
-        self.assertRegex(output, r"\nOK\n?\Z")
-        self.assertIn(f"{CAP_HOLDS_METHOD} (test_adversarial_uat.{CAP_HOLDS_CLASS}) ... ok", output)
-        self.assertNotIn("FAILED (failures=", output)
-        self.assertNotIn("skipped", output.lower().split("Ran 1 test", 1)[-1])
 
     def test_cap_hit_operator_copy_uses_the_current_round_budget(self) -> None:
         word = CARDINALS[uat.MAX_ROUNDS]
