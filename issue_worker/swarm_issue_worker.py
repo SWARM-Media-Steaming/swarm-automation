@@ -78,6 +78,7 @@ from adversarial_uat import (
     UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_LEGACY_NOTICE, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE,
 )
 from architecture_docs import ArchitectureDocsMixin
+from delivery_recovery import DeliveryRecoveryMixin, DeliveryRecoveryYield
 from complexity_worker import ComplexityWorkerMixin
 from repository_complexity import format_analysis
 from handoff_context import HandoffContextMixin
@@ -1095,7 +1096,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin, ComplexityWorkerMixin):
+class Worker(DeliveryRecoveryMixin, AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin, ComplexityWorkerMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -1785,6 +1786,12 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
     def suspend_paused(self) -> None:
         state = self.read_state()
         self.validate_paused_state(state)
+        recovery = state.get("delivery_recovery") or {}
+        if recovery.get("phase") in {"merge", "resolve"} and self.git_ok("rev-parse", "--verify", "MERGE_HEAD"):
+            # git stash refuses an unmerged index and cannot preserve MERGE_HEAD.
+            # Keep this repo pinned; other repositories can continue independently.
+            log(f"Quota-paused issue #{state['issue_number']}: preserving its integration merge in place until usage returns.")
+            return
         current = self.git("rev-parse", "HEAD")
         state = self.normalize_recovery_commits(self.in_progress_file, current)
         issue_number = int(state["issue_number"])
@@ -1948,6 +1955,13 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 continue
             if pr_state != "OPEN":
                 continue
+            if self.in_progress_file.exists():
+                saved = self.read_state()
+                if saved.get("delivery_recovery") and saved.get("branch_name") == branch:
+                    # The saved recovery owns delivery until its fresh reviews
+                    # finish. Reconciliation must not merge the older remote tip.
+                    log(f"Issue #{issue_number}: retaining its PR for integration recovery and fresh reviews.")
+                    continue
             if CAP_HIT_PR_MARKER in str(pull_request.get("body") or ""):
                 # Older workers used this marker as a human-review hold. The
                 # three-round boundary is now an automatic handoff: remove
@@ -6103,7 +6117,7 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 "--limit",
                 "1",
                 "--json",
-                "url,state,mergeCommit,baseRefName,body",
+                "url,state,mergeCommit,baseRefName,body,author",
             ],
             self.choice.key,
         )
@@ -6242,7 +6256,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         # (issue #305), so it merges even when routine PR approval is manual.
         # Promotion to the base branch still follows `auto_promote`.
         if allow_automation and (self.config.auto_approve or adversarial_cap_hit):
-            self.approve_pull_request(pr_url)
+            author_provider = (
+                self.pull_request_author_provider(existing[0], self.choice.key)
+                if existing and existing[0].get("state") == "OPEN" else self.choice.key
+            )
+            self.approve_pull_request(pr_url, author_provider)
             delivered_sha = self.merge_pull_request(
                 pr_url, commit_sha, self.choice.key, self.issue.number
             )
@@ -6559,6 +6577,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         adversarial_cap_hit: bool = False,
     ) -> None:
         assert self.issue and self.choice
+        if allow_automation and (self.config.auto_approve or adversarial_cap_hit):
+            self.synchronize_issue_delivery(commit_sha, ai_output)
         base_sha = str(self.read_state().get("base_sha") or "")
         commits = list(reversed(self.git("rev-list", f"{base_sha}..{commit_sha}").splitlines()))
         files = self.git("diff", "--name-only", base_sha, commit_sha).splitlines()
@@ -6921,6 +6941,11 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
         if not self.adversarial_state_present():
             self.post_started_comment()
         self.post_resumed_comment()
+        self.resume_delivery_recovery()
+        recovery = self.read_state().get("delivery_recovery") or {}
+        if recovery.get("phase") == "done" and not self.adversarial_state_present():
+            self.finalize_issue(self.git("rev-parse", "HEAD"), recovery["implementation_output"])
+            return ISSUE_COMPLETED_EXIT_CODE
         if self.adversarial_state_present():
             self.refresh_adversarial_requirements()
             return self.run_adversarial_pipeline()
@@ -7531,6 +7556,8 @@ class Worker(AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin,
                 return 0
             try:
                 return self.run_selected_issue()
+            except DeliveryRecoveryYield as recovery:
+                return recovery.status
             except Exception as error:
                 self.history.warning(str(error), iso_timestamp())
                 self.finish_execution_history("failed")

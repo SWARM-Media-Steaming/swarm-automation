@@ -242,6 +242,17 @@ queue. Its explicit **Merge to Main** action first reconciles `main` into
 `ai-main`, obtains a configured bot approval, and completes the promotion
 through GitHub's pull-request protections.
 
+Before automatic issue-PR delivery, the worker fetches the current integration
+branch and merges it into the saved issue branch locally. A coding agent
+resolves any conflicts while preserving both histories. The worker commits
+the update and restarts every enabled adversarial review before pushing or
+merging the PR. Interrupted resolutions and quota pauses resume from a durable
+checkpoint; reviews of the old commit cannot authorize the updated commit.
+When another provider repairs an existing PR, approval still uses a bot other
+than that PR's original author.
+Manual issue-PR delivery and integration-to-main promotion retain their own
+configured policies.
+
 ### Cleaning up branches no pull request will ever cover
 
 An environment-only summary, a `Question` answer and a no-code `AI Needs Input` request
