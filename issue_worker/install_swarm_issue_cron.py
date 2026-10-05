@@ -30,6 +30,9 @@ PROVIDER_UNAVAILABLE_EXIT_CODE = 12
 # A strict adversarial epoch was checkpointed. The same in-progress issue
 # resumes on the next pass; this is progress, not a failed worker.
 ADVERSARIAL_EPOCH_YIELD_EXIT_CODE = 13
+# Repeated identical infrastructure failure. The checkpoint is held until a
+# newer worker build or application version arrives. Not progress.
+AUTOMATION_FAILED_EXIT_CODE = 14
 PROGRESS_EXIT_CODES = (
     ISSUE_COMPLETED_EXIT_CODE,
     QUOTA_PAUSED_EXIT_CODE,
@@ -673,6 +676,11 @@ class Runner:
                 f"{label}: an issue is queued, but no enabled AI provider has "
                 "enough verified capacity; will retry on schedule."
             )
+        elif status == AUTOMATION_FAILED_EXIT_CODE:
+            self.log(
+                f"{label}: automation is held after repeated identical failures; "
+                "the issue checkpoint is preserved and will resume after a worker update."
+            )
         elif status:
             self.log(f"{label}: worker exited with status {status}; will retry.")
         else:
@@ -689,7 +697,11 @@ class Runner:
             return 0
         if len(real) == 1:
             return real[0]
+        # A held automation failure is the most significant expected state:
+        # callers of --once must not mistake another repository's progress for
+        # a wholly successful fleet cycle.
         expected = (
+            AUTOMATION_FAILED_EXIT_CODE,
             *PROGRESS_EXIT_CODES,
             PROVIDER_UNAVAILABLE_EXIT_CODE,
         )

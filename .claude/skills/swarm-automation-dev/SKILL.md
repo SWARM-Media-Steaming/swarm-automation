@@ -626,3 +626,31 @@ Always on, no toggle. Logic: `issue_worker/repository_complexity.py`,
 `test_repository_complexity.py` (`python3.13 -m unittest`). Read
 `.claude/rules/repository-complexity-scoring.md` and `docs/complexity-scoring.md`
 before changing routing, and keep scoring data, versions and the issue output in step.
+
+## Durable failure and ignored test-definition invariants
+
+The desktop may put `.swarm/` in a checkout's `.git/info/exclude` while a test
+definition is still an app-owned draft. Adversarial UAT deliberately promotes
+only `.swarm/tests.json` into version control. Use exact-path force staging for
+that transition and retain the ignore for every sibling file; ordinary
+`git add` works only after the definition is tracked. Tests for this path must
+create the checkout-local ignore and an existing draft, not only a clean Git
+fixture.
+
+Once an issue is selected and has durable state, repeated deterministic
+automation failures are part of the public issue lifecycle, including failures
+in repository or adversarial-definition preflight before the Started comment.
+Three identical failures must preserve the branch/state, post one
+`automation-failed` marker and stop further AI work.
+The hold is build-scoped: a changed packaged worker source revision or app
+version resumes the saved checkpoint, posts `automation-resumed`, and removes
+the `Automation Failed` label after preflight passes. Never implement this by
+clearing `in-progress-issue.json`, cleaning the branch, or publishing untested
+work merely to reach a terminal state. The scheduler exit for this hold is 14.
+Exit 13 stays the strict adversarial epoch yield.
+
+The desktop exports `RUST_LOG` for its own native diagnostics, but Rust-based
+provider CLIs must not inherit that setting accidentally. Capture a provider's
+machine-readable stdout separately from stderr and parse only stdout; retain
+both streams in the private diagnostic file. Regression fixtures must include
+valid JSON stdout alongside noisy stderr.
