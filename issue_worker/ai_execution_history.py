@@ -1149,7 +1149,18 @@ class ExecutionHistoryRepository:
             if row is None:
                 return
             values = json.loads(row[0])
-            values.append(sanitize_text(message))
+            sanitized = sanitize_text(message)
+            # Durable checkpoints can encounter the same deterministic failure
+            # on several scheduler cycles. Keep history useful instead of
+            # growing it with identical stack-sized messages; retry counts and
+            # timestamps live in worker state.
+            if sanitized in values:
+                database.execute(
+                    "UPDATE ai_executions SET updated_at = ? WHERE execution_id = ?",
+                    (updated_at, execution_id),
+                )
+                return
+            values.append(sanitized)
             database.execute(
                 f"UPDATE ai_executions SET {column} = ?, updated_at = ? WHERE execution_id = ?",
                 (json.dumps(values), updated_at, execution_id),

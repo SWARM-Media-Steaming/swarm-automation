@@ -28,6 +28,7 @@ import argparse
 import contextlib
 import dataclasses
 import datetime as dt
+import hashlib
 import io
 import json
 import math
@@ -79,6 +80,7 @@ from adversarial_uat import (
     UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_LEGACY_NOTICE, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE,
 )
 from architecture_docs import ArchitectureDocsMixin
+from delivery_recovery import DeliveryRecoveryMixin, DeliveryRecoveryYield
 from complexity_worker import ComplexityWorkerMixin
 from prompt_sessions import PromptSessionMixin, resume_failure, valid_session_id
 from dynamic_router import cache_adjusted_cost
@@ -145,6 +147,10 @@ PROVIDER_UNAVAILABLE_EXIT_CODE = 12
 # A strict-mode adversarial stage renewed its epochs STRICT_EPOCHS_PER_RUN
 # times in this run; its checkpoint resumes on the scheduler's next pass.
 ADVERSARIAL_EPOCH_YIELD_EXIT_CODE = 13
+# The same deterministic infrastructure failure has reached its limit. The
+# checkpoint stays; a newer worker build or app version resumes it.
+AUTOMATION_FAILED_EXIT_CODE = 14
+AUTOMATION_FAILURE_LIMIT = 3
 CODEX_QUOTA_TIMEOUTS_SECONDS = (30, 60)
 CODEX_QUOTA_CACHE_MAX_AGE_SECONDS = 15 * 60
 CODEX_QUOTA_CACHE_FILE = "codex-rate-limits-cache.json"
@@ -173,6 +179,7 @@ NEEDS_INPUT_MARKER_RE = re.compile(
     r"swarm-issue-worker:needs-input:issue:[0-9]+;provider:([a-z0-9_-]+)"
 )
 NEEDS_INPUT_LABEL = "AI Needs Input"
+AUTOMATION_FAILED_LABEL = "Automation Failed"
 NEEDS_INPUT_MARKER = "SWARM_NEEDS_INPUT"
 QUESTION_ANSWER_MARKER_RE = re.compile(
     r"swarm-issue-worker:question-answer:issue:[0-9]+;provider:([a-z0-9_-]+)"
@@ -1093,7 +1100,7 @@ def extract_followup_metadata(
     }
 
 
-class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin, ComplexityWorkerMixin):
+class Worker(PromptSessionMixin, DeliveryRecoveryMixin, AdversarialUatMixin, AdversarialSecurityMixin, HandoffContextMixin, ArchitectureDocsMixin, ComplexityWorkerMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.state = config.state_dir
@@ -1783,6 +1790,12 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
     def suspend_paused(self) -> None:
         state = self.read_state()
         self.validate_paused_state(state)
+        recovery = state.get("delivery_recovery") or {}
+        if recovery.get("phase") in {"merge", "resolve"} and self.git_ok("rev-parse", "--verify", "MERGE_HEAD"):
+            # git stash refuses an unmerged index and cannot preserve MERGE_HEAD.
+            # Keep this repo pinned; other repositories can continue independently.
+            log(f"Quota-paused issue #{state['issue_number']}: preserving its integration merge in place until usage returns.")
+            return
         current = self.git("rev-parse", "HEAD")
         state = self.normalize_recovery_commits(self.in_progress_file, current)
         issue_number = int(state["issue_number"])
@@ -1946,6 +1959,13 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
                 continue
             if pr_state != "OPEN":
                 continue
+            if self.in_progress_file.exists():
+                saved = self.read_state()
+                if saved.get("delivery_recovery") and saved.get("branch_name") == branch:
+                    # The saved recovery owns delivery until its fresh reviews
+                    # finish. Reconciliation must not merge the older remote tip.
+                    log(f"Issue #{issue_number}: retaining its PR for integration recovery and fresh reviews.")
+                    continue
             if CAP_HIT_PR_MARKER in str(pull_request.get("body") or ""):
                 # Older workers used this marker as a human-review hold. The
                 # three-round boundary is now an automatic handoff: remove
@@ -5185,6 +5205,12 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
             else ["--session-id", self.choice.session_id]
         )
         self.update_state(session_started=True)
+        # The desktop sets RUST_LOG for its own diagnostics. Grok is also a
+        # Rust binary; inheriting that setting can emit megabytes of tracing.
+        # Keep provider output deterministic and parse stdout independently of
+        # any legitimate stderr diagnostics.
+        grok_env = dict(env)
+        grok_env.pop("RUST_LOG", None)
         # `--output-format json` prints exactly one JSON object on stdout:
         # {"text": ..., "sessionId": ...}. stderr carries the CLI's own
         # tracing/log lines (startup/shutdown notices etc.), which can appear
@@ -5197,7 +5223,7 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
             result = subprocess.run(
                 command,
                 cwd=self.config.repo_dir,
-                env=env,
+                env=grok_env,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=diagnostic,
@@ -6149,7 +6175,7 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
                 "--limit",
                 "1",
                 "--json",
-                "url,state,mergeCommit,baseRefName,body",
+                "url,state,mergeCommit,baseRefName,body,author",
             ],
             self.choice.key,
         )
@@ -6288,7 +6314,11 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
         # (issue #305), so it merges even when routine PR approval is manual.
         # Promotion to the base branch still follows `auto_promote`.
         if allow_automation and (self.config.auto_approve or adversarial_cap_hit):
-            self.approve_pull_request(pr_url)
+            author_provider = (
+                self.pull_request_author_provider(existing[0], self.choice.key)
+                if existing and existing[0].get("state") == "OPEN" else self.choice.key
+            )
+            self.approve_pull_request(pr_url, author_provider)
             delivered_sha = self.merge_pull_request(
                 pr_url, commit_sha, self.choice.key, self.issue.number
             )
@@ -6605,6 +6635,8 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
         adversarial_cap_hit: bool = False,
     ) -> None:
         assert self.issue and self.choice
+        if allow_automation and (self.config.auto_approve or adversarial_cap_hit):
+            self.synchronize_issue_delivery(commit_sha, ai_output)
         base_sha = str(self.read_state().get("base_sha") or "")
         commits = list(reversed(self.git("rev-list", f"{base_sha}..{commit_sha}").splitlines()))
         files = self.git("diff", "--name-only", base_sha, commit_sha).splitlines()
@@ -6957,11 +6989,21 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
         if self.history.execution_id and self.read_state().get("execution_id") != self.history.execution_id:
             self.update_state(execution_id=self.history.execution_id)
         self.history.note("Repository prepared", iso_timestamp())
+        self.preflight_adversarial_definition()
+        # Only clear a version-scoped terminal hold after the corrected worker
+        # has prepared the preserved checkout and passed its infrastructure
+        # preflight. A broken upgrade therefore leaves the visible hold intact.
+        self.post_automation_failure_resumed()
         # The loop is part of this work-round, with one Started comment even
         # when a different tester or fixer owns the active quota checkpoint.
         if not self.adversarial_state_present():
             self.post_started_comment()
         self.post_resumed_comment()
+        self.resume_delivery_recovery()
+        recovery = self.read_state().get("delivery_recovery") or {}
+        if recovery.get("phase") == "done" and not self.adversarial_state_present():
+            self.finalize_issue(self.git("rev-parse", "HEAD"), recovery["implementation_output"])
+            return ISSUE_COMPLETED_EXIT_CODE
         if self.adversarial_state_present():
             self.refresh_adversarial_requirements()
             return self.run_adversarial_pipeline()
@@ -7329,6 +7371,224 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
             ci_monitor=True,
         )
 
+    def preflight_adversarial_definition(self) -> None:
+        """Verify the shared test manifest can be promoted before spending AI work."""
+        if not (
+            self.config.adversarial_uat_enabled or self.config.adversarial_security_enabled
+        ):
+            return
+        from adversarial_uat import DEFINITION, read_definition
+
+        definition = self.config.repo_dir / DEFINITION
+        definition.parent.mkdir(parents=True, exist_ok=True)
+        if definition.is_symlink():
+            raise WorkerError(f"Adversarial test definition may not be a symlink: {DEFINITION}")
+        if definition.exists():
+            try:
+                read_definition(self.config.repo_dir)
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                raise WorkerError(f"Adversarial test definition is invalid: {error}") from error
+            # Exercise the exact safe promotion path without changing the
+            # index. The real desktop checkout excludes `.swarm/` locally.
+            self.git("add", "--dry-run", "-f", "--", DEFINITION)
+        elif not os.access(definition.parent, os.W_OK):
+            raise WorkerError(
+                f"Adversarial test definition directory is not writable: {definition.parent}"
+            )
+
+    @staticmethod
+    def automation_failure_fingerprint(message: str) -> str:
+        return hashlib.sha256(message.encode("utf-8", errors="replace")).hexdigest()[:20]
+
+    @staticmethod
+    def automation_worker_revision() -> str:
+        """Identify packaged worker code independently of the app version."""
+        try:
+            source = Path(__file__).read_bytes()
+        except OSError:
+            return "unavailable"
+        return hashlib.sha256(source).hexdigest()[:20]
+
+    def automation_failure_is_held(self) -> bool:
+        """Hold terminal infrastructure failures until upgraded code arrives."""
+        if not self.in_progress_file.exists():
+            return False
+        state = self.read_state()
+        failure = state.get("automation_failure") or {}
+        failed_version = str(failure.get("application_version") or "")
+        failed_revision = str(failure.get("worker_revision") or "")
+        current_revision = self.automation_worker_revision()
+        upgraded = bool(failure) and (
+            failed_version != self.config.application_version
+            or (failed_revision and failed_revision != current_revision)
+        )
+        if state.get("status") != "automation_failed":
+            # A corrected build may arrive after attempt one or two, before the
+            # public hold is reached. Do not carry the old build's retry count
+            # into a new implementation of the worker.
+            if upgraded and not self.config.dry_run:
+                state.pop("automation_failure", None)
+                self.write_state(state)
+                log(
+                    f"Cleared the prior automation-failure count for issue "
+                    f"#{state['issue_number']} after a worker update."
+                )
+            return False
+        if upgraded:
+            if self.config.dry_run:
+                log(
+                    f"Dry run: newer automation would resume preserved issue "
+                    f"#{state['issue_number']} from its last safe checkpoint."
+                )
+                return True
+            state["status"] = "active"
+            state["automation_failure_resumed"] = failure
+            state.pop("automation_failure", None)
+            self.write_state(state)
+            log(
+                f"A newer automation version is installed; resuming preserved issue "
+                f"#{state['issue_number']} from its last safe checkpoint."
+            )
+            return False
+        log(
+            f"Issue #{state['issue_number']} remains held after a repeated automation failure; "
+            "install a corrected SWARM Automation build to resume automatically."
+        )
+        return True
+
+    def post_automation_failure_resumed(self) -> None:
+        """Clear the terminal hold visibly once upgraded code takes over."""
+        if not self.in_progress_file.exists():
+            return
+        state = self.read_state()
+        failure = state.get("automation_failure_resumed")
+        if not failure:
+            return
+        assert self.issue and self.choice
+        if self.config.dry_run:
+            log(
+                f"Dry run: would clear the automation-failure hold on issue #{self.issue.number} "
+                "and resume its preserved checkpoint."
+            )
+            return
+        marker = (
+            f"<!-- swarm-issue-worker:automation-resumed:issue:{self.issue.number};"
+            f"fingerprint:{failure['fingerprint']};version:{self.config.application_version} -->"
+        )
+        body = (
+            f"{marker}\n🤖 **SWARM Automation** is resuming this issue from its preserved "
+            "checkpoint after an application update.\n\n"
+            f"- Previous version: `{failure['application_version']}`\n"
+            f"- Current version: `{self.config.application_version}`\n"
+            "- The implementation branch and adversarial-test phase were retained.\n"
+        )
+        if not any(marker in str(c.get("body") or "") for c in self.comments(self.issue.number)):
+            self.github.gh(
+                [
+                    "issue", "comment", str(self.issue.number), "--repo",
+                    self.config.github_repository, "--body-file", "-",
+                ],
+                self.choice.key,
+                body,
+            )
+        self.github.gh(
+            [
+                "issue", "edit", str(self.issue.number), "--repo",
+                self.config.github_repository, "--remove-label", AUTOMATION_FAILED_LABEL,
+            ],
+            self.choice.key,
+        )
+        state = self.read_state()
+        state.pop("automation_failure_resumed", None)
+        self.write_state(state)
+
+    def post_automation_failure(self, message: str, failure: dict[str, Any]) -> None:
+        """Post one terminal, actionable lifecycle comment without losing work."""
+        assert self.issue and self.choice
+        fingerprint = str(failure["fingerprint"])
+        marker = (
+            f"<!-- swarm-issue-worker:automation-failed:issue:{self.issue.number};"
+            f"fingerprint:{fingerprint} -->"
+        )
+        body = (
+            f"{marker}\n# ⚠️ Automation needs attention\n\n"
+            "The implementation checkpoint, issue branch, and worker state were preserved, but "
+            f"the same automation failure occurred {failure['count']} times. Further AI and "
+            "adversarial-test retries are paused.\n\n"
+            "## Action required\n\n"
+            "Install a corrected SWARM Automation build, then leave this issue assigned and open. "
+            "Changed worker code will resume from the saved checkpoint automatically.\n\n"
+            "## Failure\n\n"
+            f"```text\n{message[:4000]}\n```\n\n"
+            f"- First occurrence: {failure['first_at']}\n"
+            f"- Last occurrence: {failure['last_at']}\n"
+            f"- Application version: `{failure['application_version']}`\n"
+            f"- Worker revision: `{failure['worker_revision']}`\n"
+        )
+        existing = any(
+            marker in str(comment.get("body") or "")
+            for comment in self.comments(self.issue.number)
+        )
+        if not existing:
+            self.github.gh(
+                [
+                    "issue", "comment", str(self.issue.number), "--repo",
+                    self.config.github_repository, "--body-file", "-",
+                ],
+                self.choice.key,
+                body,
+            )
+        self.ensure_label(
+            AUTOMATION_FAILED_LABEL,
+            "B60205",
+            "Automation stopped after a repeated deterministic failure",
+            self.choice.key,
+        )
+        self.github.gh(
+            [
+                "issue", "edit", str(self.issue.number), "--repo",
+                self.config.github_repository, "--add-label", AUTOMATION_FAILED_LABEL,
+            ],
+            self.choice.key,
+        )
+
+    def record_automation_failure(self, error: Exception) -> bool:
+        """Count identical failures and hold the attempt at a bounded limit."""
+        if not self.in_progress_file.exists() or not self.issue or not self.choice:
+            return False
+        state = self.read_state()
+        now = iso_timestamp()
+        message = sanitize_text(str(error))
+        fingerprint = self.automation_failure_fingerprint(message)
+        previous = state.get("automation_failure") or {}
+        same = previous.get("fingerprint") == fingerprint
+        count = int(previous.get("count") or 0) + 1 if same else 1
+        failure = {
+            "fingerprint": fingerprint,
+            "count": count,
+            "first_at": previous.get("first_at", now) if same else now,
+            "last_at": now,
+            "application_version": self.config.application_version,
+            "worker_revision": self.automation_worker_revision(),
+            "message": message,
+        }
+        state["automation_failure"] = failure
+        self.write_state(state)
+        if count < AUTOMATION_FAILURE_LIMIT:
+            return False
+        self.post_automation_failure(message, failure)
+        state = self.read_state()
+        state["status"] = "automation_failed"
+        state["automation_failure"] = failure
+        self.write_state(state)
+        self.history.note("Automation retries held; implementation checkpoint preserved", now)
+        self.finish_execution_history("automation_failed")
+        log(
+            f"Issue #{self.issue.number} reached the repeated-failure limit; "
+            "preserved its checkpoint and posted an actionable terminal notice."
+        )
+        return True
+
     def run(self) -> int:
         with PidLock(self.lock_dir, "worker"):
             for executable, label in (
@@ -7341,6 +7601,8 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
             self.deliver_pending()
             self.reconcile_issue_pull_requests()
             self.reconcile_orphan_issue_branches()
+            if self.automation_failure_is_held():
+                return AUTOMATION_FAILED_EXIT_CODE
             if not self.config.dry_run:
                 self.refresh_complexity_profile()
             if self.prepare_paused_resume():
@@ -7352,9 +7614,13 @@ class Worker(PromptSessionMixin, AdversarialUatMixin, AdversarialSecurityMixin, 
                 return 0
             try:
                 return self.run_selected_issue()
+            except DeliveryRecoveryYield as recovery:
+                return recovery.status
             except Exception as error:
                 self.history.warning(str(error), iso_timestamp())
                 self.finish_execution_history("failed")
+                if self.record_automation_failure(error):
+                    return AUTOMATION_FAILED_EXIT_CODE
                 raise
 
 

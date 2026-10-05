@@ -95,6 +95,25 @@ label from a trusted author; the worker owns VERSION.
   since cross-language runners do not share a portable test-case count protocol.
   Capacity consumed is an approximate percentage-point drop across used
   providers' remaining-quota snapshots, never token/dollar cost.
+- `.swarm/` may be intentionally ignored in a managed checkout because the
+  desktop owns uncommitted test-definition drafts. When adversarial bootstrap
+  promotes `.swarm/tests.json` into a repository artifact, force-add only that
+  exact file; never force-add the directory. Preflight the same exact-path
+  promotion before spending an implementation call, and cover the real
+  `.git/info/exclude` scenario in integration tests.
+- A deterministic repository, delivery, or UAT-infrastructure error must not
+  retry forever. Three identical failures after durable issue selection,
+  including preflight failures before the Started comment, create one
+  idempotent Automation Failed lifecycle comment and label, retain the branch
+  and checkpoint, and suppress further AI/test calls. A changed packaged
+  worker build or newer application version resumes the checkpoint, posts the
+  matching resume transition, and removes the hold label only after repository
+  preparation and preflight pass. Exit code 14 carries this hold. Exit code 13
+  remains the strict-mode epoch yield and must not be reused for it.
+- Provider diagnostics must never be parsed as the provider's structured
+  result. In particular, remove the desktop's `RUST_LOG` from Grok's child
+  environment, capture JSON stdout separately from stderr, and preserve a
+  regression test with noisy Rust stderr and valid JSON stdout.
 - Emit the stable `Adversarial UAT for issue #...` boundary logs when an
   independent test, a fix/re-test round, a completed fix, its re-test, a
   strict-mode epoch, or a best-effort delivery begins. The Overview panel

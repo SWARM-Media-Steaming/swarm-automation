@@ -16,6 +16,13 @@ pushed — cannot recur silently.
 
 For every work-round that produces a commit, in this order:
 
+Automatic issue delivery first incorporates the latest fetched integration
+revision into the issue branch locally (`delivery_recovery.py`). A conflict
+resolution is a new implementation: invalidate all earlier review verdicts
+and run every enabled adversarial stage again before pushing. Keep the merge
+revisions and phase durable across process interruptions and quota pauses;
+never deliver while conflicts remain or reuse a PASS from before the merge.
+
 0. When an adversarial stage is on, finish the current epoch's local
    fix/re-test rounds before pushing. No intermediate round pushes or PRs.
    A clean pass follows steps 1–3 below. With **Allow best-effort adversarial
