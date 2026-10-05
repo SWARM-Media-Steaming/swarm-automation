@@ -207,7 +207,12 @@ class PromptSessionMixin:
         return f":rejected:{attempts}"
 
     def session_context(self) -> str:
-        state = self.read_state()
+        try:
+            state = self.read_state()
+        except (OSError, ValueError):
+            # No issue state yet (e.g. integration-merge recovery before an
+            # issue is selected): nothing is remembered.
+            state = {}
         root = self.config.repo_dir.resolve()
         digest = hashlib.sha256()
         identity = [SESSION_POLICY_VERSION, str(root), self.config.github_repository,
@@ -265,7 +270,12 @@ class PromptSessionMixin:
                 return True
             self.forget_cli_session()
             return False
-        state = self.read_state()
+        try:
+            state = self.read_state()
+        except (OSError, ValueError):
+            # No issue state yet (e.g. integration-merge recovery before an
+            # issue is selected): nothing is remembered.
+            state = {}
         role, reusable = self.session_role()
         try:
             context = self.session_context()
