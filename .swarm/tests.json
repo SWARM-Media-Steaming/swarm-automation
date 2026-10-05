@@ -4860,6 +4860,36 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_compaction_and_rejection_failclosed.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-compaction-and-rejection-failclosed",
+      "name": "Issue #381: failed compaction recovers and malformed rejection identity cannot resume",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue381_compaction_and_rejection_failclosed.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
