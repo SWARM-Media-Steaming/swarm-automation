@@ -245,6 +245,17 @@ score margin. Retired rows stay as inactive, deprecated peers with
 repaired only after retirement takes effect. Started sessions finish pinned.
 See `.claude/rules/model-blacklist.md` and `docs/model-pricing.md`.
 
+## Routing cap (per repository, per provider)
+
+After the router's pick (and before any release upgrade) `routing_cap.clamp`
+compares the pick's estimated cost with the cap's model at the cap's effort for
+the same provider. Over the cap: the cap's exact pair is used, the raw pick stays
+in `routing_decision.routing_cap`. At or under: the pick stands. Release upgrades
+(`latest_release(max_cost=...)`), the tester floor and escalation are clamped the
+same way and never loop past it. Manual pins and Dynamic Routing off are uncapped.
+Retired cap models repair to their successor; unpriced ones are ignored with a log.
+Jev's `recommended_model` stays advisory and is never capped directly.
+
 ## Repository-aware complexity (always on)
 
 Before routing, every issue gets a complexity vector from the cached repository

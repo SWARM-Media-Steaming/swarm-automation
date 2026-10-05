@@ -461,6 +461,7 @@ def latest_release(
     *,
     allow_usage_credit_models: bool = False,
     excluded: Sequence[tuple[str, str]] = (),
+    max_cost: float | None = None,
 ) -> ReleaseUpgrade | None:
     """The newest release of ``model``'s family, when using it is a safe upgrade.
 
@@ -476,7 +477,9 @@ def latest_release(
       spend is recorded;
     * it must not cost meaningfully more per token than the model it replaces;
     * a measured Intelligence Index that is clearly *lower* at the same effort
-      vetoes it.
+      vetoes it;
+    * with a routing cap (``max_cost``), only releases estimated at or below the
+      cap's cost at this effort are considered, so the newest one under it wins.
     """
     key = str(agent).strip().lower()
     family, version = _available_models.family_and_version(model)
@@ -501,6 +504,9 @@ def latest_release(
     # An upgrade must land on a model whose spend the app can record: a model
     # with no catalog or feed price would run with its cost unknown.
     newer = [spec for spec in newer if _model_pricing.resolve_price(spec.model, provider=key).priced]
+    if max_cost is not None:
+        newer = [spec for spec in newer
+                 if (_model_router.estimated_dollar_cost(spec, effort) or float("inf")) <= max_cost]
     if not newer:
         return None
     best = max(newer, key=lambda spec: _available_models.family_and_version(spec.model)[1])
@@ -2072,6 +2078,9 @@ def routing_history_message(
         override = str(decision.get("provider_override_reason") or "").strip()
         if override:
             message += f" {override}"
+        capped = cap_line(decision)
+        if capped:
+            message += " " + capped.replace("**", "")
     complexity_reason = str(decision.get("complexity_reason") or "").strip()
     if complexity_reason:
         message += f" Complexity {decision.get('complexity')}/10: {complexity_reason}"
@@ -2161,6 +2170,12 @@ def routing_optimization_label(value: Any) -> str:
     return "Cheapest model that fits the work"
 
 
+def cap_line(decision: dict[str, Any]) -> str:
+    """The repository routing cap's line for this decision (empty when uncapped)."""
+    import routing_cap
+    return routing_cap.describe(decision.get("routing_cap"))
+
+
 def format_routing_notice(decision: dict[str, Any]) -> str:
     """Issue-comment block shown when SWARM takes ownership."""
     model = display_model_name(str(decision.get("selected_model") or ""))
@@ -2183,6 +2198,8 @@ def format_routing_notice(decision: dict[str, Any]) -> str:
         chosen = how_model_was_chosen(decision)
         if chosen:
             lines.append(chosen)
+        if cap_line(decision):
+            lines.append(cap_line(decision))
         if grader:
             lines.append(f"**Routed by:** {grader}")
         reason = str(decision.get("grade_reason") or "").strip()
@@ -2207,6 +2224,8 @@ def format_routing_notice(decision: dict[str, Any]) -> str:
     chosen = how_model_was_chosen(decision)
     if chosen:
         lines.append(chosen)
+    if cap_line(decision):
+        lines.append(cap_line(decision))
     recommendation = router_recommendation_line(decision) if not applied else ""
     if recommendation:
         lines.append(recommendation)

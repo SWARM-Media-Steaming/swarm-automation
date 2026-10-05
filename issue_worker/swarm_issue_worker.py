@@ -102,6 +102,7 @@ from issue_images import (
     inlined_images,
 )
 import available_models
+import routing_cap
 from dynamic_router import (
     DEFAULT_ROUTING_OPTIMIZATION,
     InvalidRouterModel,
@@ -594,6 +595,8 @@ class Config:
     # renewing strict-mode epochs. Explicit opt-in only; never inferred.
     adversarial_best_effort_merge: bool = False
     architecture_docs_enabled: bool = False
+    # Issue #401: per-provider ceiling on dynamic routing, {provider: {model, effort}}.
+    routing_caps: dict = dataclasses.field(default_factory=dict)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
@@ -644,6 +647,7 @@ class Config:
             adversarial_best_effort_merge=args.adversarial_best_effort_merge is True,
             update_claude_assets_enabled=args.update_claude_assets_enabled,
             architecture_docs_enabled=bool(getattr(args, "architecture_docs_enabled", False)),
+            routing_caps=routing_cap.parse_caps(getattr(args, "routing_caps", "")),
             allow_environment_only_summary=args.allow_environment_only_summary,
             branch_prefix=args.branch_prefix.strip("/"),
             base_branch=args.base_branch,
@@ -2987,7 +2991,14 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             log(override)
         self.choice.model = str(decision["selected_model"])
         self.choice.effort = str(decision["reasoning_effort"])
-        self.upgrade_to_latest_release(decision)
+        # The cap clamps the router's own pick first; a capped pick is the cap's
+        # exact pair, so only an uncapped (or within-cap) pick is upgraded.
+        if not self.apply_routing_cap(decision):
+            self.upgrade_to_latest_release(decision)
+            record = decision.get("routing_cap")
+            if record and decision.get("upgraded_from"):
+                record["final_model"] = self.choice.model
+                record["final_cost"] = routing_cap.route_cost(self.choice.key, self.choice.model, self.choice.effort)
         decision["dynamic_model_routing"] = True
         self.routing = decision
         log(
@@ -3013,6 +3024,9 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             self.choice.effort,
             allow_usage_credit_models=self.config.allow_usage_credit_models,
             excluded=tuple(getattr(self, "_routing_excluded", ())),
+            max_cost=routing_cap.upgrade_ceiling(
+                self.choice.key, self.config.routing_caps,
+                allow_usage_credit_models=self.config.allow_usage_credit_models),
         )
         if upgrade is None:
             return
@@ -3031,6 +3045,39 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             f" Upgraded from {upgrade.previous} to {upgrade.model}, {upgrade.reason}."
         )
         decision["tier_explanation"] = str(decision.get("tier_explanation") or "").rstrip() + note
+
+    def apply_routing_cap(self, decision: dict[str, Any]) -> bool:
+        """Clamp the routed pick to the repository's cap for its provider (issue #401).
+
+        The router's own pick stays in the decision (``routing_cap.router_*``); only
+        ``selected_model``/``reasoning_effort`` and the live choice change, and
+        only when the pick costs more than the cap. Manual selections never get
+        here: Dynamic Model Routing off pins the configured pair instead.
+        """
+        assert self.choice
+        if not self.config.routing_caps:
+            return False
+        record = routing_cap.clamp(
+            self.choice.key, self.choice.model, self.choice.effort, self.config.routing_caps,
+            allow_usage_credit_models=self.config.allow_usage_credit_models,
+            requirements=(decision.get("complexity_analysis") or {}).get("requirements"),
+        )
+        if not record:
+            return False
+        decision["routing_cap"] = record
+        if record.get("note"):
+            log(record["note"])
+        if not record.get("applied"):
+            return False
+        self.choice.model, self.choice.effort = record["final_model"], record["final_effort"]
+        decision["selected_model"], decision["reasoning_effort"] = record["final_model"], record["final_effort"]
+        log(routing_cap.log_line(self.issue.number, record))
+        if record.get("below_capability_floor"):
+            gap = record["below_capability_floor"]
+            log(f"Routing cap for issue #{self.issue.number}: capped below the capability floor "
+                f"({gap['capability']}/100 against {gap['floor']}/100, expected-success gap "
+                f"{gap['expected_success_gap']:.2f}); the cap still wins.")
+        return True
 
     def record_routing_in_history(self) -> None:
         """Note whether the configured setting or dynamic routing selected the worker."""
@@ -7742,6 +7789,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("cost", "best"),
         default=env_value("SWARM_ROUTING_OPTIMIZATION", DEFAULT_ROUTING_OPTIMIZATION).lower(),
         help="Accepted for compatibility. Automatic routing is always cost-first; 'best' migrates to 'cost'.",
+    )
+    parser.add_argument(
+        "--routing-caps",
+        default=env_value("SWARM_ROUTING_CAPS", ""),
+        help="JSON object {provider: {model, effort}}: the most Dynamic Model Routing may select "
+             "per provider, compared by estimated cost. Empty means uncapped.",
     )
     parser.add_argument(
         "--allow-usage-credit-models",

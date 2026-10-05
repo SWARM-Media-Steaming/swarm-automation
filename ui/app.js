@@ -200,6 +200,11 @@
       html: "<p><strong>Automatically approve and merge issue PRs</strong> asks another AI provider’s bot to approve the pull request, then combines it into one tidy commit on the AI integration branch and removes the issue branch.</p><p>The GitHub issue does not need to be closed first. Merge conflicts remain open for attention.</p><p><strong>Automatically merge <code>ai-main</code> into <code>main</code></strong> is off by default. When on, the worker also opens (or reuses) the <code>ai-main</code> → <code>main</code> pull request after issue PRs land, has another provider’s bot approve it, and merges it — so everything the app has finished lands on <code>main</code> immediately. It needs issue PR merging on, and a promotion with conflicts stays open for a person to resolve. Leave it off to keep <code>main</code> a human decision.</p><p><strong>Allow best-effort adversarial merge after 3 rounds</strong> is off by default. Off, adversarial UAT and cybersecurity keep starting a fresh three-round epoch, with a stronger model and effort when progress stalls, and they merge only after the acceptance policy passes. On, the first three rounds merge the latest commit into <code>ai-main</code> even if adversarial tests or security findings are still open. Promotion to <code>main</code> still needs both automatic promotion and issue PR merging. Enabling it may merge code with unresolved adversarial tests or actionable security findings. It is never inferred.</p><p><strong>Allow bots to merge</strong> updates the human-owned branch’s existing push allow list so the worker’s GitHub Apps can perform that merge. People already on the list stay on it. If the branch does not restrict who can push, the button stays off.</p>",
       links: [],
     },
+    "routing-cap": {
+      title: "Routing cap",
+      html: "<p>The <strong>routing cap</strong> is a per-repository, per-AI-tool ceiling on what Dynamic Model Routing may select. Pick a model and a reasoning effort for a tool, or leave it <strong>Uncapped</strong>.</p><p>The router still runs and its choice is still recorded. If that choice costs more than the cap (by the router's own estimated cost, which includes the effort), the cap's exact model and effort run instead and the issue's Routing Decision says so. A choice that costs the same or less stands.</p><p>The cap also limits release upgrades, escalation after failed rounds, and the adversarial tester floor. If the cap is below what the task's capability floor asks for, the cap still wins and that is recorded. Manual model selections and runs with Dynamic Model Routing off are never capped. A retired cap model is moved to its successor.</p>",
+      links: [],
+    },
     "ci-monitoring": {
       title: "Monitor GitHub Actions",
       html: "<p><strong>Monitor GitHub Actions</strong> is off by default. When on, each worker run first checks the newest GitHub Actions run of every workflow on the AI integration branch (<code>ai-main</code>).</p><p>If a pipeline is failing and nothing tracks it yet, the worker files one issue — labelled <code>bug</code> and <code>ci-failure</code>, assigned to the configured assignee, with the failing runs and the tail of their logs — and works it in that same run, like any other issue.</p><p>That issue is handled once: the worker does not also pick it up from the regular queue in that run, and it files nothing new while a CI-failure issue for the branch is open or was already filed for the same commit. Runs still in progress and cancelled runs are ignored. If GitHub cannot be read, the worker logs it and carries on with the normal queue.</p>",
@@ -320,6 +325,7 @@
     ["Protected branch flow", "delivery-mode"],
     ["Repositories ready to promote", "promotion-queue"],
     ["Pull request automation", "auto-approve-merge"],
+    ["Routing cap", "routing-cap"],
     ["Monitor GitHub Actions", "ci-monitoring"],
     ["One worker per repository", "parallel-repo-workers"],
     ["Minimum quota remaining", "quota-threshold"],
@@ -761,6 +767,12 @@
       adversarial_best_effort_merge: false,
       update_claude_assets_enabled: false,
       architecture_docs_enabled: false,
+      routing_cap_claude_model: "",
+      routing_cap_claude_effort: "",
+      routing_cap_codex_model: "",
+      routing_cap_codex_effort: "",
+      routing_cap_grok_model: "",
+      routing_cap_grok_effort: "",
       allow_environment_only_summary: false,
       repo_dir: "",
     };
@@ -878,9 +890,48 @@
     select.value = state.activeRepoId;
   }
 
+  // Fill each provider's routing-cap selects before the generic data-repo-config
+  // loop assigns their saved values. Model lists come from the provider cards'
+  // own discovered, priced, non-retired models.
+  function renderRoutingCapSelects(repo) {
+    const api = window.SwarmDynamicRouting;
+    if (!api) return;
+    document.querySelectorAll("[data-cap-provider]").forEach((row) => {
+      const id = row.dataset.capProvider;
+      const modelSelect = row.querySelector(".routing-cap-model");
+      const effortSelect = row.querySelector(".routing-cap-effort");
+      const savedModel = repo[`routing_cap_${id}_model`] || "";
+      const savedEffort = repo[`routing_cap_${id}_effort`] || "";
+      modelSelect.replaceChildren(...api.capOptions(modelSpecs(id), savedModel).map((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.value;
+        option.textContent = entry.label;
+        return option;
+      }));
+      modelSelect.value = savedModel;
+      fillRoutingCapEffort(row, savedEffort);
+    });
+  }
+
+  function fillRoutingCapEffort(row, savedEffort) {
+    const id = row.dataset.capProvider;
+    const modelSelect = row.querySelector(".routing-cap-model");
+    const effortSelect = row.querySelector(".routing-cap-effort");
+    const next = window.SwarmDynamicRouting.capEffortState(modelSpecs(id), modelSelect.value, savedEffort);
+    effortSelect.replaceChildren(...next.efforts.map((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      return option;
+    }));
+    effortSelect.value = next.effort;
+    effortSelect.disabled = next.disabled;
+  }
+
   function bindRepositoryForm() {
     const repo = currentRepo();
     if (!repo) return;
+    renderRoutingCapSelects(repo);
     document.querySelectorAll("[data-repo-config]").forEach((input) => {
       const value = repo[input.dataset.repoConfig];
       if (input.type === "checkbox") input.checked = Boolean(value);
@@ -4719,6 +4770,7 @@
         setDirty();
         renderSummaries();
         if (input.id === "dynamic-model-routing") syncDynamicRoutingChrome();
+        if (input.classList.contains("routing-cap-model")) fillRoutingCapEffort(input.closest("[data-cap-provider]"), "");
       });
     });
     document.querySelectorAll("[data-action]").forEach((button) => button.addEventListener("click", () => runAction(button.dataset.action)));

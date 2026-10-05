@@ -59,7 +59,43 @@
     return state;
   }
 
+  // Routing cap (per repository, per provider): the select for a provider's
+  // model lists only what the CLI discovered and the catalog prices (the same
+  // list the provider card uses), preceded by "Uncapped". A saved model that is
+  // no longer offered stays selectable so the setting is never silently lost.
+  const CAP_PROVIDERS = ["claude", "codex", "grok"];
+
+  function capOptions(models, savedModel) {
+    const options = [{ value: "", label: "Uncapped" }];
+    const seen = new Set();
+    (models || []).forEach((entry) => {
+      if (!entry || !entry.value || seen.has(entry.value)) return;
+      seen.add(entry.value);
+      options.push({ value: entry.value, label: entry.label || entry.value });
+    });
+    if (savedModel && !seen.has(savedModel)) {
+      options.push({ value: savedModel, label: `${savedModel} (not offered)` });
+    }
+    return options;
+  }
+
+  // An effort is only meaningful with a model. Uncapped leaves it empty and
+  // disabled; otherwise it keeps the saved effort when the model supports it.
+  function capEffortState(models, model, savedEffort) {
+    if (!model) return { efforts: [], effort: "", disabled: true };
+    const spec = (models || []).find((entry) => entry.value === model);
+    const efforts = spec && Array.isArray(spec.efforts) ? [...new Set(spec.efforts)] : [];
+    if (savedEffort && !efforts.includes(savedEffort)) efforts.push(savedEffort);
+    const effort = efforts.includes(savedEffort)
+      ? savedEffort
+      : (spec && spec.defaultEffort) || (efforts.includes("high") ? "high" : efforts[0] || "");
+    return { efforts, effort, disabled: false };
+  }
+
   return {
+    CAP_PROVIDERS,
+    capOptions,
+    capEffortState,
     defaultRouter,
     valuedToggleChecked,
     valuedToggleValue,
