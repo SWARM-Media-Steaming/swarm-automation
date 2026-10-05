@@ -30,6 +30,14 @@ _COMPACTION_SUCCESS_TEXT = (
 )
 _SUCCESSFUL_COMPACTION_PROSE = re.compile(_COMPACTION_SUCCESS_TEXT, re.IGNORECASE)
 _SUCCESSFUL_COMPACTION = re.compile(r"compact_boundary|" + _COMPACTION_SUCCESS_TEXT, re.IGNORECASE)
+# Claude Code's failed native compact is a system/status compact_result.
+# The CLI also prints "Compaction failed".
+_FAILED_COMPACT_RESULTS = frozenset({"failed", "failure", "error"})
+_SUCCESS_COMPACT_RESULTS = frozenset({"success", "succeeded", "successful", "ok"})
+_COMPACTION_FAILURE_TEXT = re.compile(
+    r"compact(?:ion)?\s+failed|failed\s+compact(?:ion)?|failed\s+to\s+compact",
+    re.IGNORECASE,
+)
 _RESUME_FAILURE_TEXT = re.compile(
     r"(?:session|thread|conversation)[^\n]{0,120}(?:not found|does not exist|expired|corrupt|invalid)|"
     r"(?:failed|unable|cannot) to (?:resume|load session|load thread)|"
@@ -56,6 +64,19 @@ def _error_flag(value: object) -> bool:
     return bool(value)
 
 
+def _named_compact_result(event: dict) -> str:
+    """Claude's ``compact_result`` on the event or one nested payload object."""
+    sources = [event]
+    payload = event.get("payload")
+    if isinstance(payload, dict):
+        sources.append(payload)
+    for source in sources:
+        value = source.get("compact_result")
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return ""
+
+
 def resume_failure(raw: str) -> bool:
     """Only resume/context errors warrant a fresh retry, not arbitrary failures.
 
@@ -63,6 +84,11 @@ def resume_failure(raw: str) -> bool:
     evidence only on a non-error event: one flagged ``is_error`` or typed
     ``error``/``turn.failed`` is a failed compaction whatever its message says
     or omits (no flag, no exhaustion code, empty or success-sounding text).
+    Claude's real failed compact is a ``system``/``status`` event with
+    ``compact_result`` of ``failed`` (optional ``compact_error``), a result
+    event that names the compaction failure, or the CLI's own "Compaction
+    failed" prose. ``compact_result=success`` and Codex ``context_compacted``
+    are not resume failures.
     """
     diagnostics = []
     codes = set()
@@ -89,9 +115,14 @@ def resume_failure(raw: str) -> bool:
             continue
         error_typed = event.get("type") in {"error", "turn.failed"}
         flagged = _error_flag(event.get("is_error"))
+        compact_result = _named_compact_result(event)
+        if compact_result in _FAILED_COMPACT_RESULTS:
+            return True
         if event.get("subtype") == "compact_boundary":
             if flagged or error_typed:
                 return True
+            continue
+        if compact_result in _SUCCESS_COMPACT_RESULTS and not (flagged or error_typed):
             continue
         if error_typed or flagged:
             collect_codes(event)
@@ -100,7 +131,11 @@ def resume_failure(raw: str) -> bool:
                 diagnostics.append(blob)
     if codes & _RESUME_FAILURE_CODES:
         return True
-    return bool(_RESUME_FAILURE_TEXT.search("\n".join(diagnostics)))
+    diagnostic_text = "\n".join(diagnostics)
+    return bool(
+        _RESUME_FAILURE_TEXT.search(diagnostic_text)
+        or _COMPACTION_FAILURE_TEXT.search(diagnostic_text)
+    )
 
 
 class PromptSessionMixin:
