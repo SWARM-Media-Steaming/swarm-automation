@@ -4952,6 +4952,37 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue381_native_cli_compaction_failure.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue381-native-cli-compaction-failure",
+      "name": "Issue #381: recover from the compaction-failure events Claude Code and Codex actually emit",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/prompt_sessions.py",
+          "issue_worker/swarm_issue_worker.py",
+          "issue_worker/adversarial_core.py",
+          "tests/adversarial/test_issue381_native_cli_compaction_failure.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
