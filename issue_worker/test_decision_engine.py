@@ -319,6 +319,164 @@ class PersistenceAndReportTests(unittest.TestCase):
         self.assertNotIn("RAW PROMPT", markdown)
         self.assertEqual(format_jev_markdown([], verbose=True), "")
 
+    def test_github_report_omits_context_relevance_but_keeps_totals(self) -> None:
+        from decision_engine import DecisionResult, summarize_decisions
+
+        relevance = [
+            DecisionResult(
+                decision_type="CONTEXT_RELEVANCE",
+                decision="LOW",
+                confidence=0.97,
+                source="jev",
+                latency_ms=12,
+                estimated_cost=0.00001,
+            )
+            for _ in range(8)
+        ]
+        relevance.append(
+            DecisionResult(
+                decision_type="CONTEXT_RELEVANCE",
+                decision="KEEP",
+                confidence=0.5,
+                source="low_confidence",
+                latency_ms=8,
+                estimated_cost=0.0,
+            )
+        )
+        records = [
+            DecisionResult(
+                decision_type="TASK_CLASSIFICATION",
+                decision="FEATURE",
+                confidence=0.9,
+                scores={"complexity": 0.5},
+                source="jev",
+                latency_ms=100,
+                estimated_cost=0.001,
+            ),
+            DecisionResult(
+                decision_type="RAG_SCOPE",
+                decision="REPOSITORY",
+                confidence=0.91,
+                source="jev",
+                latency_ms=40,
+                estimated_cost=0.0002,
+                llm_calls_avoided=2,
+            ),
+            *relevance,
+            DecisionResult(
+                decision_type="COMPLETION",
+                decision="COMPLETE",
+                confidence=0.95,
+                source="jev",
+                latency_ms=80,
+                estimated_cost=0.0003,
+            ),
+        ]
+        markdown = format_jev_markdown(records)
+        summary = summarize_decisions(records)
+        self.assertIn("Workflow Decisions:", markdown)
+        self.assertIn("- **Rag Scope:** Repository — 91%", markdown)
+        self.assertIn("- **Completion:** Complete — 95%", markdown)
+        self.assertNotIn("Context Relevance", markdown)
+        self.assertNotIn("Keep — 50%", markdown)
+        self.assertEqual(markdown.count("Workflow Decisions:"), 1)
+        self.assertIn(f"**Jev calls:** {summary['jevCalls']}", markdown)
+        self.assertIn(f"**Total decision latency:** {summary['totalLatencyMs'] / 1000:.1f}s", markdown)
+        self.assertIn(f"**Estimated cost:** ${summary['estimatedCost']:.4f}", markdown)
+        self.assertIn(
+            f"**Estimated LLM decision calls avoided:** {summary['llmCallsAvoided']}",
+            markdown,
+        )
+        self.assertEqual(summary["jevCalls"], 11)
+        self.assertEqual(summary["llmCallsAvoided"], 2)
+
+    def test_github_report_omits_workflow_heading_when_only_context_relevance(self) -> None:
+        from decision_engine import DecisionResult
+
+        markdown = format_jev_markdown(
+            [
+                DecisionResult(
+                    decision_type="CONTEXT_RELEVANCE",
+                    decision="LOW",
+                    confidence=0.97,
+                    source="jev",
+                    latency_ms=10,
+                    estimated_cost=0.0001,
+                )
+                for _ in range(3)
+            ]
+        )
+        self.assertIn("### Jev Decision Engine", markdown)
+        self.assertNotIn("Workflow Decisions:", markdown)
+        self.assertNotIn("Context Relevance", markdown)
+        self.assertIn("**Jev calls:** 3", markdown)
+
+    def test_context_relevance_still_persists_when_omitted_from_github_report(self) -> None:
+        from decision_engine import DecisionResult
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = ExecutionHistoryRepository(Path(directory) / "history.sqlite3")
+            for index in range(3):
+                repo.record_jev_decision(
+                    {
+                        "decision_id": f"ctx-{index}",
+                        "execution_id": "exec-404",
+                        "repository": "acme/app",
+                        "issue_number": 404,
+                        "decision_type": "CONTEXT_RELEVANCE",
+                        "decision": "LOW",
+                        "confidence": 0.97,
+                        "scores": {"relevance": 0.1},
+                        "source": "jev",
+                        "latency_ms": 11,
+                        "estimated_cost": 0.00001,
+                    }
+                )
+            repo.record_jev_decision(
+                {
+                    "decision_id": "rag-404",
+                    "execution_id": "exec-404",
+                    "repository": "acme/app",
+                    "issue_number": 404,
+                    "decision_type": "RAG_SCOPE",
+                    "decision": "REPOSITORY",
+                    "confidence": 0.91,
+                    "source": "jev",
+                    "latency_ms": 40,
+                    "estimated_cost": 0.0002,
+                }
+            )
+            with repo.connect() as database:
+                kinds = [
+                    row["decision_type"]
+                    for row in database.execute(
+                        "SELECT decision_type FROM jev_decisions ORDER BY created_at, rowid"
+                    )
+                ]
+            self.assertEqual(kinds.count("CONTEXT_RELEVANCE"), 3)
+            self.assertIn("RAG_SCOPE", kinds)
+            markdown = format_jev_markdown(
+                [
+                    DecisionResult(
+                        decision_type="CONTEXT_RELEVANCE",
+                        decision="LOW",
+                        confidence=0.97,
+                        source="jev",
+                    )
+                    for _ in range(3)
+                ]
+                + [
+                    DecisionResult(
+                        decision_type="RAG_SCOPE",
+                        decision="REPOSITORY",
+                        confidence=0.91,
+                        source="jev",
+                    )
+                ]
+            )
+            self.assertNotIn("Context Relevance", markdown)
+            self.assertIn("- **Rag Scope:** Repository — 91%", markdown)
+
 
 def _levels(score: float, count: int, confidence: float = 0.8) -> dict:
     """A Jev ``score`` answer as the CLI returns it: the expected level, 0..count-1."""

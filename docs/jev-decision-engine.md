@@ -147,6 +147,11 @@ and maximum Jev cost filters run in the history query, so they cover every page
 of history. The Retries / failures card counts retried and failed outcomes.
 
 GitHub execution comments include a concise `### Jev Decision Engine` section.
+The **Workflow Decisions** list omits per-candidate `CONTEXT_RELEVANCE` ratings
+(they describe how RAG context was assembled, not an outcome a reader can act
+on). Those rows stay in `jev_decisions` and still count toward **Jev calls**,
+latency, cost, and estimated LLM calls avoided. If no other workflow decision
+remains, the heading is omitted rather than printed empty.
 Raw prompts, credentials, and unredacted CLI output are not persisted or posted.
 
 ## Configuration
