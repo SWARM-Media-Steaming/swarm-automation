@@ -556,6 +556,37 @@ class WorkerTestCase(unittest.TestCase):
         self.assertNotIn("--prompt-file", grok_command)
         self.assertIn("Fix the layout", self.worker.ai_prompt_file.read_text(encoding="utf-8"))
 
+    def test_grok_parses_json_stdout_separately_from_rust_diagnostics(self) -> None:
+        self.worker.issue = IssueContext(
+            351, "Search results", "Body", [], "https://example.invalid/351"
+        )
+        self.worker.choice = ProviderChoice("Grok", "test-model", "low", "session-351")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        payload = json.dumps(
+            {"text": "## Summary\nAdversarial suite passed.", "sessionId": "session-351"}
+        )
+
+        def run(_command, **kwargs):
+            kwargs["stderr"].write("INFO sampling.request emitted by Rust tracing\n")
+            return subprocess.CompletedProcess(["grok"], 0, stdout=payload)
+
+        with mock.patch.object(self.worker, "provider_bin", return_value="/bin/echo"), mock.patch(
+            "swarm_issue_worker.subprocess.run", side_effect=run
+        ) as invoked:
+            self.assertEqual(
+                self.worker._run_grok("Test issue 351", {"RUST_LOG": "info", "PATH": "/bin"}),
+                0,
+            )
+
+        self.assertNotIn("RUST_LOG", invoked.call_args.kwargs["env"])
+        self.assertEqual(
+            self.worker.ai_output_file.read_text(encoding="utf-8"),
+            "## Summary\nAdversarial suite passed.\n",
+        )
+        diagnostic = self.worker.ai_diagnostic_file.read_text(encoding="utf-8")
+        self.assertIn("Rust tracing", diagnostic)
+        self.assertIn(payload, diagnostic)
+
     def test_dynamic_routing_receives_downloaded_issue_images(self) -> None:
         from issue_images import IssueImage
 
@@ -5069,8 +5100,123 @@ class WorkerTestCase(unittest.TestCase):
         self.assertFalse(recovery_mode)
         self.assertEqual(run_start, worker.git("rev-parse", "ai-main"))
 
+    def test_repeated_automation_failure_posts_once_holds_and_resumes_after_upgrade(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, application_version="1.0.0"
+        )
+        self.worker.issue = IssueContext(
+            351, "Stuck delivery", "Body", [], "https://example.invalid/351"
+        )
+        self.worker.choice = ProviderChoice("Codex", "test-model", "low", "session-351")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        calls: list[tuple[list[str], str | None]] = []
+
+        def gh(args, provider=None, body=None, **_kwargs):
+            calls.append((args, body))
+            return ""
+
+        error = WorkerError("git add refused the ignored test definition")
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker, "ensure_label"),
+            mock.patch.object(self.worker.github, "gh", side_effect=gh),
+        ):
+            self.assertFalse(self.worker.record_automation_failure(error))
+            self.assertFalse(self.worker.record_automation_failure(error))
+            self.assertTrue(self.worker.record_automation_failure(error))
+
+        state = self.worker.read_state()
+        self.assertEqual(state["status"], "automation_failed")
+        self.assertEqual(state["automation_failure"]["count"], 3)
+        comments = [body for args, body in calls if args[:2] == ["issue", "comment"]]
+        self.assertEqual(len(comments), 1)
+        self.assertIn("Automation needs attention", comments[0])
+        self.assertTrue(self.worker.automation_failure_is_held())
+
+        self.worker.config = dataclasses.replace(
+            self.worker.config, application_version="1.0.1"
+        )
+        self.assertFalse(self.worker.automation_failure_is_held())
+        resumed = self.worker.read_state()
+        self.assertEqual(resumed["status"], "active")
+        self.assertEqual(
+            resumed["automation_failure_resumed"]["application_version"], "1.0.0"
+        )
+
+    def test_changed_worker_revision_resumes_hold_without_marketing_version_bump(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, application_version="1.0.0"
+        )
+        self.worker.issue = IssueContext(
+            353, "Held delivery", "Body", [], "https://example.invalid/353"
+        )
+        self.worker.choice = ProviderChoice("Codex", "test-model", "low", "session-353")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.update_state(
+            status="automation_failed",
+            automation_failure={
+                "application_version": "1.0.0",
+                "worker_revision": "previous-build",
+                "fingerprint": "failure",
+                "count": 3,
+            },
+        )
+
+        self.assertFalse(self.worker.automation_failure_is_held())
+        self.assertEqual(self.worker.read_state()["status"], "active")
+
+    def test_changed_worker_revision_clears_pre_hold_failure_count(self) -> None:
+        self.worker.issue = IssueContext(
+            354, "Retrying delivery", "Body", [], "https://example.invalid/354"
+        )
+        self.worker.choice = ProviderChoice("Grok", "test-model", "low", "session-354")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.update_state(
+            automation_failure={
+                "application_version": self.worker.config.application_version,
+                "worker_revision": "previous-build",
+                "fingerprint": "failure",
+                "count": 1,
+            }
+        )
+
+        self.assertFalse(self.worker.automation_failure_is_held())
+        self.assertNotIn("automation_failure", self.worker.read_state())
+
+    def test_preflight_failure_is_bounded_before_started_comment(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, application_version="1.0.0"
+        )
+        self.worker.issue = IssueContext(
+            352, "Invalid UAT draft", "Body", [], "https://example.invalid/352"
+        )
+        self.worker.choice = ProviderChoice("Codex", "test-model", "low", "session-352")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.assertFalse(self.worker.read_state().get("started_comment_posted"))
+
+        error = WorkerError("Adversarial test definition is invalid")
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker, "ensure_label"),
+            mock.patch.object(self.worker.github, "gh", return_value=""),
+        ):
+            self.assertFalse(self.worker.record_automation_failure(error))
+            self.assertFalse(self.worker.record_automation_failure(error))
+            self.assertTrue(self.worker.record_automation_failure(error))
+
+        self.assertEqual(self.worker.read_state()["status"], "automation_failed")
+
 
 class RunnerTestCase(unittest.TestCase):
+    def test_automation_failure_is_most_significant_expected_cycle_status(self) -> None:
+        self.assertEqual(
+            runner_module.Runner._cycle_exit_status(
+                [runner_module.ISSUE_COMPLETED_EXIT_CODE,
+                 runner_module.AUTOMATION_FAILED_EXIT_CODE]
+            ),
+            runner_module.AUTOMATION_FAILED_EXIT_CODE,
+        )
+
     def test_saved_routing_flags_win_over_scheduler_startup_flags(self) -> None:
         worker_args = [
             "--github-repository", "acme/widgets",

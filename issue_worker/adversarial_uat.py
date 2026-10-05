@@ -317,7 +317,11 @@ class AdversarialUatMixin:
         atomic_write_json(self.config.repo_dir / DEFINITION, definition)
         # .swarm drafts are normally app-owned/untracked; this is intentionally
         # a repository artifact, so stage it explicitly for ongoing scheduling.
-        self.git("add", "--", DEFINITION)
+        # The desktop intentionally keeps draft definitions beneath `.swarm/`
+        # ignored in `.git/info/exclude`. Adversarial UAT is the point where
+        # this one exact file becomes a durable repository artifact, so it must
+        # override that local ignore without force-adding sibling app data.
+        self.git("add", "-f", "--", DEFINITION)
         self.commit_completed_work(self.git("rev-parse", "HEAD"))
         loop["bootstrap"] = definition["adversarialBootstrap"]
         self.save_adversarial(loop)
@@ -437,7 +441,7 @@ class AdversarialUatMixin:
                 loop["tests_added"] = sum(r["tests_added"] for r in loop["rounds"])
                 loop["tests_modified"] = sum(r["tests_modified"] for r in loop["rounds"])
                 loop["results"] = results
-                self.git("add", "--", DEFINITION)
+                self.git("add", "-f", "--", DEFINITION)
                 if not round_value["tests_failing_after"]:
                     loop["outcome"] = "clean_first_pass" if loop["round"] == 0 else "resolved_after_n"
                 elif loop["round"] >= MAX_ROUNDS:

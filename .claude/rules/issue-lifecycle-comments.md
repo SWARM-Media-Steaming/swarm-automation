@@ -29,6 +29,14 @@ transitions, and the code that must keep producing them:
 6. **Question answered** — `finalize_question_answer`, for issues labelled
    `Question`. Post a grounded no-code answer and never apply `Ready For
    Testing`.
+7. **Automation failed** — `post_automation_failure`, after the same
+   deterministic failure reaches its bounded retry limit once an issue has
+   durable state. This includes repository or UAT preflight failures before a
+   Started comment can be posted.
+   Preserve the implementation branch and checkpoint, apply `Automation
+   Failed`, and post one actionable comment. A changed packaged worker build
+   or newer app version resumes automatically, removes the label after
+   preflight, and posts an idempotent resume transition.
 
 ### Each comment is idempotent via an HTML marker
 
@@ -135,10 +143,26 @@ No repository changes were made.
 ...
 ```
 
+**Automation failed** (`post_automation_failure`):
+```
+<!-- swarm-issue-worker:automation-failed:issue:<n>;fingerprint:<digest> -->
+# ⚠️ Automation needs attention
+
+The implementation checkpoint, issue branch, and worker state were preserved.
+
+## Action required
+Install a corrected SWARM Automation release; the newer version resumes the
+saved checkpoint automatically.
+
+## Failure
+<sanitized error and first/last occurrence metadata>
+```
+
 ### What must never happen
 
 - A work-round finishing without one terminal comment—"Reworked"/"Completed",
-  "AI needs your input", "AI answer", or a quota pause—landing on the issue.
+  "AI needs your input", "AI answer", a quota pause, or "Automation needs
+  attention"—landing on the issue.
   Silence after real work is indistinguishable from the worker having crashed
   or never run.
 - A "Reworked"/"Completed" comment whose `Commit:`/marker `sha` is not the
@@ -146,8 +170,8 @@ No repository changes were made.
   for the specific failure mode this guards against).
 - A quota-pause with no "Started" comment ever having been posted for that
   work-round, or a "Started" comment for a work-round that never gets a
-  matching "Reworked"/"Completed"/quota-pause — every "Started" must
-  eventually be answered by exactly one of the other three.
+  matching "Reworked"/"Completed"/quota-pause/automation-failed notice —
+  every "Started" must eventually receive one terminal status.
 - Two providers, or the same provider on two different transitions, using
   visibly different phrasing/structure for what is conceptually the same
   event. Extend the templates above rather than inventing a parallel

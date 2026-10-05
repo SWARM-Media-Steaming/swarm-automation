@@ -26,6 +26,7 @@ from typing import Sequence, TextIO
 ISSUE_COMPLETED_EXIT_CODE = 10
 QUOTA_PAUSED_EXIT_CODE = 11
 PROVIDER_UNAVAILABLE_EXIT_CODE = 12
+AUTOMATION_FAILED_EXIT_CODE = 13
 BEGIN_MARKER = "# BEGIN SWARM ISSUE WORKER"
 END_MARKER = "# END SWARM ISSUE WORKER"
 WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -662,6 +663,11 @@ class Runner:
                 f"{label}: an issue is queued, but no enabled AI provider has "
                 "enough verified capacity; will retry on schedule."
             )
+        elif status == AUTOMATION_FAILED_EXIT_CODE:
+            self.log(
+                f"{label}: automation is held after repeated identical failures; "
+                "the issue checkpoint is preserved and will resume after a worker update."
+            )
         elif status:
             self.log(f"{label}: worker exited with status {status}; will retry.")
         else:
@@ -678,7 +684,11 @@ class Runner:
             return 0
         if len(real) == 1:
             return real[0]
+        # A held automation failure is the most significant expected state:
+        # callers of --once must not mistake another repository's progress for
+        # a wholly successful fleet cycle.
         expected = (
+            AUTOMATION_FAILED_EXIT_CODE,
             ISSUE_COMPLETED_EXIT_CODE,
             QUOTA_PAUSED_EXIT_CODE,
             PROVIDER_UNAVAILABLE_EXIT_CODE,

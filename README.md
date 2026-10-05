@@ -74,6 +74,14 @@ branch and PR, bypasses automatic approval/merge/promotion, and marks the issue
 phase and remaining rounds. Pilot this setting on one repository per stack
 before enabling it broadly.
 
+Repository preparation, delivery, and adversarial-UAT infrastructure failures
+are bounded: after three identical failures, the worker preserves the issue
+branch and checkpoint, posts one **Automation Failed** issue transition, and
+stops spending AI or test capacity on that issue. Installing a changed worker
+build or newer app version resumes the preserved checkpoint automatically after
+its repository and UAT preflight succeeds. The macOS installer also exports an
+installed Homebrew Java 17 as `JAVA_HOME` for Gradle-based target repositories.
+
 Optional AI execution history can be enabled under Work Policy. It stores the
 original issue, sanitized effective prompt, provider settings, lifecycle,
 changes, delivery metadata, and failures in `swarm-automation.sqlite3` beneath
