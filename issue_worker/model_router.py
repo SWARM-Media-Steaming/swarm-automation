@@ -413,7 +413,14 @@ def load_model_catalog(path: Path | None = None) -> tuple[ModelSpec, ...]:
         included = {(spec.provider, spec.model) for spec in catalog}
         for entry in full.get("models") or []:
             if isinstance(entry, dict) and (entry.get("provider"), entry.get("model")) not in included:
-                catalog.append(dataclasses.replace(_parse_model(entry), active=False, recommended=False))
+                spec = _parse_model(entry)
+                # A DISCOVERED row is a pre-#374 review gate, not a disablement:
+                # that gate is retired, so a priced, CLI-offered row stays
+                # eligible while the next refresh republishes it.
+                if entry.get("status") == "DISCOVERED" and spec.active and not spec.deprecated:
+                    catalog.append(dataclasses.replace(spec, recommended=False))
+                else:
+                    catalog.append(dataclasses.replace(spec, active=False, recommended=False))
     return with_discovered_models(tuple(catalog), _measured_evidence(data))
 
 
