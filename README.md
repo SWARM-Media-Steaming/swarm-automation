@@ -87,6 +87,14 @@ implementer cannot modify them. Out-of-scope findings become separate labelled,
 assigned issues. Quota pauses preserve the phase, epoch, and remaining rounds.
 Pilot this setting on one repository per stack before enabling it broadly.
 
+Repository preparation, delivery, and adversarial-UAT infrastructure failures
+are bounded: after three identical failures, the worker preserves the issue
+branch and checkpoint, posts one **Automation Failed** issue transition, and
+stops spending AI or test capacity on that issue. Installing a changed worker
+build or newer app version resumes the preserved checkpoint automatically after
+its repository and UAT preflight succeeds. The macOS installer also exports an
+installed Homebrew Java 17 as `JAVA_HOME` for Gradle-based target repositories.
+
 Work Policy also includes **Adversarial cybersecurity** (off by default; CLI
 `--adversarial-security-enabled`, environment
 `SWARM_ADVERSARIAL_SECURITY_ENABLED`). It is a second adversarial agent on the

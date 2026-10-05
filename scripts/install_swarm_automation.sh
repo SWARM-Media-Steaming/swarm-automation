@@ -66,6 +66,20 @@ DOMAIN="gui/$(id -u)"
 # scheduler, to the provider CLIs (claude / codex / grok). A LaunchAgent
 # inherits only a minimal PATH, so give it the usual locations those live in.
 SERVICE_PATH="$HOME/.local/bin:$HOME/.grok/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+JAVA_17_HOME=""
+if command -v brew >/dev/null 2>&1; then
+    JAVA_17_PREFIX="$(brew --prefix openjdk@17 2>/dev/null || true)"
+    if [ -x "$JAVA_17_PREFIX/libexec/openjdk.jdk/Contents/Home/bin/java" ]; then
+        JAVA_17_HOME="$JAVA_17_PREFIX/libexec/openjdk.jdk/Contents/Home"
+    fi
+fi
+if [ -z "$JAVA_17_HOME" ]; then
+    JAVA_17_CANDIDATE="$(/usr/libexec/java_home -v 17 2>/dev/null || true)"
+    if [ -x "$JAVA_17_CANDIDATE/bin/java" ] \
+        && "$JAVA_17_CANDIDATE/bin/java" -version 2>&1 | head -n1 | grep -Eq 'version "17([.]|$)'; then
+        JAVA_17_HOME="$JAVA_17_CANDIDATE"
+    fi
+fi
 
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "This installer is macOS-only." >&2
@@ -104,6 +118,9 @@ launchctl_start() {
     # on PATH, which a bare launchd environment lacks. Session-scoped.
     launchctl setenv PATH "$SERVICE_PATH" 2>/dev/null || true
     launchctl setenv RUST_LOG "info" 2>/dev/null || true
+    if [ -n "$JAVA_17_HOME" ]; then
+        launchctl setenv JAVA_HOME "$JAVA_17_HOME" 2>/dev/null || true
+    fi
     launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null \
         || launchctl load "$PLIST" 2>/dev/null \
         || true
@@ -204,7 +221,11 @@ do_install() {
 
     echo
     echo "==> Building the release app — this takes several minutes ..."
-    ( cd "$REPO_ROOT" && "$tauri_cli" build )
+    # A local install only needs the .app bundle. Building every configured
+    # artifact also creates the signed updater archive, which correctly needs
+    # release credentials and should not block a developer's local update.
+    ( cd "$REPO_ROOT" && "$tauri_cli" build --bundles app \
+        --config '{"bundle":{"createUpdaterArtifacts":false}}' )
     if [ ! -d "$BUILT_APP" ]; then
         echo "Build did not produce $BUILT_APP" >&2
         exit 1

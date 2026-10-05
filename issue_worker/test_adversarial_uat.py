@@ -144,6 +144,36 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual([r["tests_failing_after"] for r in rounds], [1, 0])
         self.assertEqual(self.git("rev-parse", "refs/remotes/origin/ai/claude/issue-180"), self.git("rev-parse", "HEAD"))
 
+    def test_ignored_app_draft_is_promoted_and_uat_finishes(self):
+        draft = self.repo / uat.DEFINITION
+        draft.parent.mkdir(parents=True)
+        draft.write_text(json.dumps({"version": 1, "suites": []}))
+        exclude = self.repo / ".git/info/exclude"
+        exclude.write_text(exclude.read_text() + "\n.swarm/\n")
+        self.assertIn(uat.DEFINITION, self.git("check-ignore", uat.DEFINITION))
+
+        self.prepare(fixed=True)
+        before = self.git("status", "--porcelain")
+        self.worker.preflight_adversarial_definition()
+        self.assertEqual(self.git("status", "--porcelain"), before)
+        with self.patches(), mock.patch.object(self.worker, "finalize_issue"):
+            self.assertEqual(self.worker.run_adversarial_delivery(), 10)
+
+        self.assertIn(uat.DEFINITION, self.git("ls-files").splitlines())
+        self.assertEqual([call[0] for call in self.calls], ["test"])
+        self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
+
+    def test_execution_history_deduplicates_repeated_failure_text(self):
+        self.prepare()
+        self.worker.history.warning("same deterministic failure", iso_timestamp())
+        self.worker.history.warning("same deterministic failure", iso_timestamp())
+        row = self.worker.history.repository.for_repository(
+            self.worker.config.github_repository
+        )[0]
+        self.assertEqual(
+            json.loads(row["warnings_errors"]), ["same deterministic failure"]
+        )
+
     def test_cap_holds_automation_and_asks_a_trusted_author_to_adjudicate(self):
         self.prepare(auto=True)
         self.worker.config = dataclasses.replace(
