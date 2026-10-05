@@ -56,7 +56,11 @@ event decides, not its wording: `is_error` (as a boolean, number or string) mark
 failed compaction even with a terse, empty or success-sounding message, an
 `error`/`turn.failed` event carrying `compact_boundary` is a failed compaction even
 with no `is_error` and no exhaustion code, and a later failed compaction is never
-hidden by an earlier successful one in the same stream. Likewise, the presence of an adversarial loop's `retry_rejection`
+hidden by an earlier successful one in the same stream. Claude Code's own failed
+compact is a `system`/`status` event with `compact_result=failed` (optional
+`compact_error`), a result event whose errors name the compaction failure, or the
+CLI's "Compaction failed" prose. `compact_result=success` and Codex
+`context_compacted` are left alone. Likewise, the presence of an adversarial loop's `retry_rejection`
 marker, even a damaged one, means the assessment was discarded and must start fresh.
 
 ## Context construction
