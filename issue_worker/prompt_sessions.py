@@ -14,6 +14,13 @@ import uuid
 
 SESSION_MAX_IDLE_SECONDS = 24 * 60 * 60
 SESSION_POLICY_VERSION = 1
+_RESUME_FAILURE_CODES = frozenset({
+    "context_length_exceeded",
+    "context_window_exceeded",
+    "conversation_not_found",
+    "session_not_found",
+    "thread_not_found",
+})
 
 
 def valid_session_id(value: object) -> bool:
@@ -27,6 +34,19 @@ def valid_session_id(value: object) -> bool:
 def resume_failure(raw: str) -> bool:
     """Only resume/context errors warrant a fresh retry, not arbitrary failures."""
     diagnostics = []
+    codes = set()
+
+    def collect_codes(value: object) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in {"code", "type"} and isinstance(nested, str):
+                    codes.add(nested.strip().lower().replace("-", "_"))
+                if isinstance(nested, (dict, list)):
+                    collect_codes(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect_codes(nested)
+
     for line in raw.splitlines():
         try:
             event = json.loads(line)
@@ -34,7 +54,10 @@ def resume_failure(raw: str) -> bool:
             diagnostics.append(line)
             continue
         if isinstance(event, dict) and (event.get("type") in {"error", "turn.failed"} or event.get("is_error")):
+            collect_codes(event)
             diagnostics.append(json.dumps(event))
+    if codes & _RESUME_FAILURE_CODES:
+        return True
     return bool(re.search(
         r"(?:session|thread|conversation)[^\n]{0,120}(?:not found|does not exist|expired|corrupt|invalid)|"
         r"(?:failed|unable|cannot) to (?:resume|load session|load thread)|"
@@ -74,12 +97,20 @@ class PromptSessionMixin:
         for stage in ADVERSARIAL_STAGES:
             loop = state.get(stage.key)
             if isinstance(loop, dict) and loop.get("active"):
-                epoch = int(loop.get("epoch") or 1)
-                if loop.get("phase") == "fix":
+                phase = loop.get("phase")
+                try:
+                    epoch = int(loop.get("epoch") or 1)
+                    round_number = int(loop.get("round") or 0)
+                except (TypeError, ValueError, OverflowError):
+                    return "", False
+                if (isinstance(loop.get("epoch"), bool) or isinstance(loop.get("round"), bool)
+                        or epoch < 1 or round_number < 0 or phase not in {"fix", "test"}):
+                    return "", False
+                if phase == "fix":
                     return f"{stage.key}:fix:{epoch}", True
                 # Fresh assessment each round; only an interrupted same phase
                 # may resume. Never share with implementers or another stage.
-                return f"{stage.key}:test:{epoch}:{loop.get('round', 0)}", False
+                return f"{stage.key}:test:{epoch}:{round_number}", False
         return "primary", True
 
     def session_context(self) -> str:
@@ -93,9 +124,15 @@ class PromptSessionMixin:
         # Hash instructions from disk on every execution, including untracked
         # instructions. Never follow symlinks outside the checkout or retain
         # their contents in application state.
+        pathspecs = ("AGENTS.md", "CLAUDE.md", ":(glob)**/AGENTS.md",
+                     ":(glob)**/CLAUDE.md", ".claude", ".codex")
         paths = self.git("ls-files", "--cached", "--others", "--exclude-standard", "-z",
-                         "--", "AGENTS.md", "CLAUDE.md", ":(glob)**/AGENTS.md",
-                         ":(glob)**/CLAUDE.md", ".claude", ".codex", check=False)
+                         "--", *pathspecs, check=False)
+        # Provider CLIs discover repository instructions from the filesystem,
+        # including intentionally ignored local guidance. Ask Git for ignored
+        # files separately so its normal untracked-file filter cannot hide them.
+        paths += self.git("ls-files", "--others", "--ignored", "--exclude-standard", "-z",
+                          "--", *pathspecs, check=False)
         for name in sorted(set(paths.split("\0")) - {""}):
             path = root / name
             if root not in path.resolve().parents or not path.is_file():
