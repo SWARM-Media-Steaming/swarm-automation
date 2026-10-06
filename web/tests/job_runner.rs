@@ -323,6 +323,93 @@ fn ecs_response(
     (ok, json!({}))
 }
 
+/// A stand-in for the ECS agent's credentials endpoint: counts requests and
+/// insists on the authorization token the agent would require.
+async fn serve_role_credentials(hits: Arc<Mutex<u32>>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+        let hits = hits.clone();
+        async move {
+            *hits.lock().unwrap() += 1;
+            if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("agent-token") {
+                return (axum::http::StatusCode::FORBIDDEN, String::new());
+            }
+            (
+                axum::http::StatusCode::OK,
+                json!({
+                    "AccessKeyId": "ASIAROLEEXAMPLE",
+                    "SecretAccessKey": "role-secret-value",
+                    "Token": "role-session-token-value",
+                    "Expiration": "2099-01-01T00:00:00Z"
+                })
+                .to_string(),
+            )
+        }
+    });
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{address}/v2/credentials/task")
+}
+
+#[tokio::test]
+async fn fargate_signs_with_the_task_role_when_no_static_key_is_set() {
+    let state = Arc::new(Mutex::new(EcsState::default()));
+    let endpoint = serve_ecs(state.clone()).await;
+    let hits = Arc::new(Mutex::new(0));
+    let credentials = serve_role_credentials(hits.clone()).await;
+    let runner = EcsFargateJobRunner::new(
+        endpoint,
+        "us-east-1",
+        "swarm",
+        "swarm-worker",
+        vec!["subnet-1".into()],
+        vec!["sg-1".into()],
+    )
+    .unwrap()
+    .with_role_credentials(credentials, Some(Secret::new("agent-token")));
+    let started = runner.start(spec("job-role", None)).await.unwrap();
+    runner.status(&started.id).await.unwrap();
+    let guard = state.lock().unwrap();
+    assert!(guard.requests.len() >= 2);
+    for (_, _, authorization) in &guard.requests {
+        assert!(authorization.contains("Credential=ASIAROLEEXAMPLE/"));
+        assert!(authorization.contains("x-amz-security-token"));
+        assert!(!authorization.contains("role-secret-value"));
+        assert!(!authorization.contains("role-session-token-value"));
+    }
+    assert_eq!(
+        *hits.lock().unwrap(),
+        1,
+        "the role credential is cached between calls"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_role_credential_fails_the_call_without_echoing_anything() {
+    let state = Arc::new(Mutex::new(EcsState::default()));
+    let endpoint = serve_ecs(state.clone()).await;
+    let credentials = serve_role_credentials(Arc::new(Mutex::new(0))).await;
+    let runner = EcsFargateJobRunner::new(
+        endpoint,
+        "us-east-1",
+        "swarm",
+        "swarm-worker",
+        vec!["subnet-1".into()],
+        vec![],
+    )
+    .unwrap()
+    .with_role_credentials(credentials, Some(Secret::new("wrong-token")));
+    let error = runner.start(spec("job-denied", None)).await.unwrap_err();
+    assert!(error.to_string().contains("credentials"));
+    assert!(!error.to_string().contains("wrong-token"));
+    assert!(
+        state.lock().unwrap().requests.is_empty(),
+        "nothing is sent unsigned"
+    );
+}
+
 #[tokio::test]
 async fn fargate_contract_matches_docker_and_has_no_task_role() {
     let state = Arc::new(Mutex::new(EcsState::default()));

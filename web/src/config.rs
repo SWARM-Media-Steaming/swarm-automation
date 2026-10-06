@@ -269,6 +269,26 @@ fn parse_u64(value: &str, name: &str) -> Result<u64, ConfigError> {
         .map_err(|_| ConfigError(format!("{name} must be a number")))
 }
 
+/// An environment variable cannot carry a newline in every deployment path
+/// (a Compose `.env` line, an ECS secret), so a PEM may arrive on one line
+/// with a literal `\n` for each line break. Real newlines are left alone.
+fn unescape_pem(value: &str) -> String {
+    if value.contains('\n') {
+        value.to_string()
+    } else {
+        value.replace("\\n", "\n")
+    }
+}
+
+/// Hosted-storage settings that are credentials: they travel in the job's
+/// env file, never as a plain environment value.
+const JOB_STORAGE_SECRETS: &[&str] = &[
+    "SWARM_STORAGE_POSTGRES_DSN",
+    "SWARM_STORAGE_S3_ACCESS_KEY_ID",
+    "SWARM_STORAGE_S3_SECRET_ACCESS_KEY",
+    "SWARM_STORAGE_S3_SESSION_TOKEN",
+];
+
 fn load_jobs(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<JobConfig>, ConfigError> {
     let Some(backend_name) = optional(get, "SWARM_WEB_JOB_RUNNER") else {
         return Ok(None);
@@ -291,14 +311,14 @@ fn load_jobs(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<JobConfig>, 
         })?,
         "SWARM_WEB_GITHUB_APP_ID",
     )?;
-    let private_key = Secret::new(
-        optional(get, "SWARM_WEB_GITHUB_APP_PRIVATE_KEY").ok_or_else(|| {
+    let private_key = Secret::new(unescape_pem(
+        &optional(get, "SWARM_WEB_GITHUB_APP_PRIVATE_KEY").ok_or_else(|| {
             ConfigError(
                 "SWARM_WEB_GITHUB_APP_PRIVATE_KEY is required when the job runner is enabled"
                     .into(),
             )
         })?,
-    );
+    ));
     if !private_key.expose().contains("BEGIN") {
         return Err(ConfigError(
             "SWARM_WEB_GITHUB_APP_PRIVATE_KEY must be a PEM private key".into(),
@@ -371,26 +391,20 @@ fn load_jobs(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<JobConfig>, 
         .unwrap_or_default();
     let mut plain_env = BTreeMap::new();
     let mut secret_env = BTreeMap::new();
-    for name in [
-        "SWARM_STORAGE_BACKEND",
-        "SWARM_STORAGE_POSTGRES_DRIVER",
-        "SWARM_STORAGE_S3_ENDPOINT",
-        "SWARM_STORAGE_S3_BUCKET",
-        "SWARM_STORAGE_S3_REGION",
-        "SWARM_JOB_STORAGE",
-    ] {
-        if let Some(value) = optional(get, name) {
+    // The same names `storage_factory.open_storage("hosted")` reads, split by
+    // sensitivity. The container gets no scratch dir: it uses its own tmpfs.
+    for name in crate::bridge::STORAGE_ENV {
+        let Some(value) = optional(get, name) else {
+            continue;
+        };
+        if JOB_STORAGE_SECRETS.contains(name) {
+            secret_env.insert(name.to_string(), Secret::new(value));
+        } else if *name != "SWARM_STORAGE_SCRATCH_DIR" {
             plain_env.insert(name.to_string(), value);
         }
     }
-    for name in [
-        "SWARM_STORAGE_POSTGRES_DSN",
-        "SWARM_STORAGE_S3_ACCESS_KEY",
-        "SWARM_STORAGE_S3_SECRET_KEY",
-    ] {
-        if let Some(value) = optional(get, name) {
-            secret_env.insert(name.to_string(), Secret::new(value));
-        }
+    if let Some(value) = optional(get, "SWARM_JOB_STORAGE") {
+        plain_env.insert("SWARM_JOB_STORAGE".to_string(), value);
     }
     Ok(Some(JobConfig {
         backend,
@@ -490,6 +504,69 @@ mod tests {
         assert_eq!(jobs.quota_resume_secs, 60);
         assert_eq!(jobs.provider, Provider::Claude);
         assert!(!format!("{:?}", jobs.private_key).contains("BEGIN"));
+    }
+
+    #[test]
+    fn a_job_gets_every_hosted_storage_setting_under_the_names_the_worker_reads() {
+        let (config, _) = load(&env(&[
+            ("SWARM_WEB_JOB_RUNNER", "docker"),
+            ("SWARM_WEB_WORKER_IMAGE", "swarm-automation-worker"),
+            ("SWARM_WEB_GITHUB_APP_ID", "123"),
+            (
+                "SWARM_WEB_GITHUB_APP_PRIVATE_KEY",
+                "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----",
+            ),
+            ("SWARM_STORAGE_POSTGRES_DSN", "postgresql://u:p@db/swarm"),
+            ("SWARM_STORAGE_POSTGRES_DRIVER", "psycopg:connect"),
+            ("SWARM_STORAGE_S3_ENDPOINT", "http://minio:9000"),
+            ("SWARM_STORAGE_S3_BUCKET", "swarm-dev"),
+            ("SWARM_STORAGE_S3_ACCESS_KEY_ID", "dev"),
+            ("SWARM_STORAGE_S3_SECRET_ACCESS_KEY", "devpassword"),
+            ("SWARM_STORAGE_S3_ADDRESSING", "path"),
+            ("SWARM_STORAGE_S3_ALLOW_INSECURE_HTTP", "1"),
+            ("SWARM_STORAGE_SCRATCH_DIR", "/api/only"),
+        ]))
+        .unwrap();
+        let jobs = config.jobs.expect("runner enabled");
+        let secrets: Vec<&str> = jobs.secret_env.keys().map(String::as_str).collect();
+        assert_eq!(
+            secrets,
+            [
+                "SWARM_STORAGE_POSTGRES_DSN",
+                "SWARM_STORAGE_S3_ACCESS_KEY_ID",
+                "SWARM_STORAGE_S3_SECRET_ACCESS_KEY"
+            ]
+        );
+        for name in [
+            "SWARM_STORAGE_POSTGRES_DRIVER",
+            "SWARM_STORAGE_S3_ENDPOINT",
+            "SWARM_STORAGE_S3_BUCKET",
+            "SWARM_STORAGE_S3_ADDRESSING",
+            "SWARM_STORAGE_S3_ALLOW_INSECURE_HTTP",
+        ] {
+            assert!(
+                jobs.plain_env.contains_key(name),
+                "{name} must reach the job"
+            );
+        }
+        assert!(!jobs.plain_env.contains_key("SWARM_STORAGE_SCRATCH_DIR"));
+        assert!(
+            jobs.plain_env
+                .keys()
+                .all(|name| !JOB_STORAGE_SECRETS.contains(&name.as_str())),
+            "a credential must not be a plain value"
+        );
+    }
+
+    #[test]
+    fn a_one_line_private_key_with_escaped_newlines_is_restored() {
+        let escaped = "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----";
+        assert_eq!(
+            unescape_pem(escaped),
+            "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
+        );
+        let real = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----";
+        assert_eq!(unescape_pem(real), real);
     }
 
     #[test]
