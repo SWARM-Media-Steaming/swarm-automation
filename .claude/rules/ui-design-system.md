@@ -29,7 +29,11 @@ rule intact.
   script-readable cookie (`X-CSRF-Token`, added by `api.js`); the session cookie
   is `HttpOnly`, and no token or key is ever kept in `localStorage`. The `web_*`
   rows are the hosted account endpoints (`web/`) and are never invoked by the
-  desktop path.
+  desktop path. The desktop's own commands have rows too (`web/src/catalog.rs` is
+  the source of truth and `web/tests/api_catalog.rs` checks the table); a command
+  with no row is intentionally removed on the web, listed in
+  `docs/web-architecture.md`, and the UI handles its `UnavailableOnWebError`.
+  `{tenant}` is filled by the adapter, not by call sites.
   Nothing else in `ui/` touches `window.__TAURI__`, `fetch`, `XMLHttpRequest`
   or `EventSource`.
 - Any `ui/` change must keep both transports working: new commands and events

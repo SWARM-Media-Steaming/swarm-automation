@@ -43,8 +43,32 @@ impl World {
 const CANARY_A: &str = "sk-ant-api03-ALICE-CANARY-0123456789";
 const CANARY_B: &str = "sk-ant-api03-BOB-CANARY-9876543210";
 
-/// Every tenant-scoped endpoint, as (method, path suffix, body).
-fn tenant_endpoints() -> Vec<(Method, &'static str, Option<serde_json::Value>)> {
+/// Every tenant-scoped endpoint, as (method, path suffix, body). The desktop
+/// command routes come from the catalog the router itself is built from, so a
+/// new one cannot be left out.
+fn tenant_endpoints() -> Vec<(Method, String, Option<serde_json::Value>)> {
+    let mut rows: Vec<(Method, String, Option<serde_json::Value>)> = account_endpoints()
+        .into_iter()
+        .map(|(method, suffix, body)| (method, suffix.to_string(), body))
+        .collect();
+    for route in swarm_web::catalog::ROUTES
+        .iter()
+        .filter(|route| route.scope == swarm_web::catalog::Scope::Tenant)
+    {
+        let suffix = route
+            .path
+            .replace("{repoId}", "acme__demo")
+            .replace("{process}", "issue");
+        rows.push((
+            Method::from_bytes(route.method.as_bytes()).unwrap(),
+            suffix,
+            (route.method != "GET").then(|| json!({})),
+        ));
+    }
+    rows
+}
+
+fn account_endpoints() -> Vec<(Method, &'static str, Option<serde_json::Value>)> {
     vec![
         (Method::GET, "", None),
         (Method::GET, "/members", None),

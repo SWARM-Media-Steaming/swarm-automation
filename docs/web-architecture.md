@@ -4,9 +4,10 @@ SWARM Automation gains a hosted, multi-tenant web version alongside the Tauri
 desktop app (tracked in #413). The desktop stays fully working; `ui/` and
 `issue_worker/` are shared. This document records the pieces as they land.
 It covers the storage seam and its hosted Postgres/S3 implementation, the
-desktop data importer, and the web backend (API, auth, tenancy, provider keys,
-usage and quotas), and the job runner (one container per repository, Docker
-locally and ECS Fargate on AWS).
+desktop data importer, the web backend (API, auth, tenancy, provider keys,
+usage and quotas), the job runner (one container per repository, Docker
+locally and ECS Fargate on AWS), and the REST and Server-Sent Events API that
+covers every desktop command.
 
 ## Storage
 
@@ -251,6 +252,10 @@ PUT  /api/v1/tenants/{tenant}/budgets                      (owner)
 GET  /api/v1/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}[/logs]
 POST /api/v1/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}/{run,pause,resume,stop}
 GET  /api/v1/events/jobs                          SSE `job-log` (session; no tenant in the path)
+GET  /api/v1/events/automation-log                SSE `automation-log` (the desktop's log event)
+GET  /api/v1/events/model-calibration             SSE `model-calibration-refreshed`
+     /api/v1/tenants/{tenant}/...                 the desktop's commands (see the table below)
+GET  /api/v1/version                              the build version
 POST /api/v1/webhooks/github                      signed, idempotent
      /api/v1/internal/tenants/{tenant}/usage|quotas|jobs   operator bearer token
 ```
@@ -382,6 +387,13 @@ it. Run now maps the same denial to HTTP 409.
 `SWARM_WEB_SESSION_TTL_SECS` are optional. Run it with
 `cargo run` in `web/` (tests: `cargo test --locked`).
 
+`SWARM_WEB_BRIDGE=python` turns the worker bridge on (`SWARM_WEB_PYTHON`, default
+`python3`, and `SWARM_WEB_WORKER_DIR`, default `../issue_worker`); the hosted
+storage it reads is the `SWARM_STORAGE_*` set of `storage_factory.py`, forwarded
+to the bridge child only. `SWARM_WEB_SSE_HEARTBEAT_SECS` (1-300, default 15) and
+`SWARM_WEB_APP_VERSION` (what `app_version` answers; default the crate version)
+are optional.
+
 `SWARM_WEB_JOB_RUNNER` (`docker` or `fargate`) turns the orchestrator on. It
 requires `SWARM_WEB_WORKER_IMAGE`, `SWARM_WEB_GITHUB_APP_ID` and
 `SWARM_WEB_GITHUB_APP_PRIVATE_KEY`. CPU, memory, poll and quota-resume
@@ -414,11 +426,185 @@ Exit 0/10 releases the slot; a webhook that arrived during the run starts one
 follow-up, otherwise the next poll does. Stop cancels the container and does
 not relaunch. The desktop scheduler is unchanged.
 
+### REST and SSE for the desktop's commands
+
+`web/src/catalog.rs` is the one table that says what the web does with each of the
+desktop's `#[tauri::command]`s and events. The router (`web/src/api.rs`) registers
+its routes from that table, `ui/api.js`'s `COMMANDS` / `EVENTS` rows mirror it, and
+`web/tests/api_catalog.rs` fails when the desktop's command list, the catalog, the
+adapter tables and this document disagree. A `*_background` command is the same
+endpoint as the command it wraps. The tenant is a path segment that
+`TenantAccess` re-checks for membership (404 otherwise); the desktop's call sites
+do not pass one, so the adapter fills `{tenant}` from `SwarmApi.setTenant(id)` or
+the first tenant of `GET /session`. Arguments are the camelCase names the UI
+already sends: query parameters on `GET`/`DELETE` (a list or object is
+JSON-encoded), a JSON object body otherwise. Path parameters win over any body
+field and the tenant is never read from a body, header or query string.
+
+Roles: **member** may read and run the actions that only spend the tenant's own
+budget; **owner** is needed to change settings and for anything that merges,
+promotes, files an issue, imports or activates. Every non-`GET` route needs the
+CSRF token and an active tenant (a suspended installation can still be read).
+A request body is at most 64 KiB and never echoed on an error.
+
+| Desktop command | Endpoint | Role | Served by |
+| --- | --- | --- | --- |
+| `get_config` | `GET /api/v1/tenants/{tenant}/config` | member | backend (`GetConfig`) |
+| `save_config` | `PUT /api/v1/tenants/{tenant}/config` | owner | backend (`SaveConfig`) |
+| `save_feedback_repo_filter` | `PUT /api/v1/tenants/{tenant}/feedback-repo-filter` | member | backend (`FeedbackFilter`) |
+| `web_list_repositories` | `GET /api/v1/tenants/{tenant}/repos` | member | backend (`Repositories`) |
+| `web_get_repo_config` | `GET /api/v1/tenants/{tenant}/repos/{repoId}/config` | member | backend (`GetRepoConfig`) |
+| `web_save_repo_config` | `PUT /api/v1/tenants/{tenant}/repos/{repoId}/config` | owner | backend (`SaveRepoConfig`) |
+| `detect_tools`, `detect_tools_background` | `GET /api/v1/tenants/{tenant}/tools` | member | backend (`Tools`) |
+| `check_provider_usage`, `check_provider_usage_background` | `GET /api/v1/tenants/{tenant}/provider-usage` | member | backend (`ProviderUsage`) |
+| `get_model_data_key_status` | `GET /api/v1/tenants/{tenant}/model-data-key` | member | backend (`ModelDataKeyStatus`) |
+| `save_model_data_key` | `PUT /api/v1/tenants/{tenant}/provider-keys/model-data` | owner | the write-only provider-key route |
+| `clear_model_data_key` | `DELETE /api/v1/tenants/{tenant}/provider-keys/model-data` | owner | the write-only provider-key route |
+| `verify_github_bots` | `GET /api/v1/tenants/{tenant}/repos/{repoId}/bots` | member | backend (`Readiness`) |
+| `check_repo_bot_readiness` | `GET /api/v1/tenants/{tenant}/repos/{repoId}/readiness` | member | backend (`Readiness`) |
+| `get_automation_status`, `get_automation_status_background` | `GET /api/v1/tenants/{tenant}/status` | member | backend (`Status`) |
+| `start_issue_worker`, `request_issue_scan` | `POST /api/v1/tenants/{tenant}/scan` | member | backend (`Scan`) |
+| `pause_process` | `POST /api/v1/tenants/{tenant}/processes/{process}/pause` | member | backend (`Pause`) |
+| `resume_process` | `POST /api/v1/tenants/{tenant}/processes/{process}/resume` | member | backend (`Resume`) |
+| `stop_process` | `POST /api/v1/tenants/{tenant}/processes/{process}/stop` | member | backend (`Stop`) |
+| `get_recent_logs` | `GET /api/v1/tenants/{tenant}/logs` | member | backend (`RecentLogs`) |
+| `get_execution_history`, `get_execution_history_background` | `GET /api/v1/tenants/{tenant}/history` | member | worker bridge `execution_history` |
+| `get_jev_feedback`, `get_jev_feedback_background` | `GET /api/v1/tenants/{tenant}/jev-feedback` | member | worker bridge `jev_feedback` |
+| `get_usage_report`, `get_usage_report_background` | `GET /api/v1/tenants/{tenant}/usage-report` | member | worker bridge `usage_report` |
+| `get_prompt_grades`, `get_prompt_grades_background` | `GET /api/v1/tenants/{tenant}/prompt-grades` | member | worker bridge `prompt_grades` |
+| `import_execution_history`, `import_execution_history_background` | `POST /api/v1/tenants/{tenant}/history/import` | owner | worker bridge `import_execution_history`: **501** until hosted |
+| `get_knowledge_status`, `get_knowledge_status_background` | `GET /api/v1/tenants/{tenant}/knowledge` | member | worker bridge `knowledge_status`: **501** until hosted |
+| `refresh_knowledge`, `refresh_knowledge_background` | `POST /api/v1/tenants/{tenant}/knowledge/refresh` | member | worker bridge `knowledge_refresh`: **501** until hosted |
+| `ask_swarm`, `ask_swarm_background` | `POST /api/v1/tenants/{tenant}/knowledge/ask` | member | worker bridge `ask_swarm`: **501** until hosted |
+| `get_architecture_docs` | `GET /api/v1/tenants/{tenant}/architecture-docs` | member | worker bridge `architecture_docs` |
+| `get_model_calibration_status`, `get_model_calibration_status_background` | `GET /api/v1/tenants/{tenant}/calibration` | member | worker bridge `calibration_status`: **501** until hosted |
+| `refresh_model_data`, `refresh_model_data_background` | `POST /api/v1/tenants/{tenant}/calibration/refresh` | member | worker bridge `calibration_refresh`: **501** until hosted |
+| `analyze_model_calibration_update`, `analyze_model_calibration_update_background` | `POST /api/v1/tenants/{tenant}/calibration/analyze` | member | worker bridge `calibration_analyze`: **501** until hosted |
+| `activate_model_calibration`, `activate_model_calibration_background` | `POST /api/v1/tenants/{tenant}/calibration/activate` | owner | worker bridge `calibration_activate`: **501** until hosted |
+| `describe_routing_calculator` | `GET /api/v1/tenants/{tenant}/routing/calculator` | member | worker bridge `routing_describe` |
+| `simulate_routing` | `POST /api/v1/tenants/{tenant}/routing/simulate` | member | worker bridge `routing_simulate` |
+| `run_diagnostics`, `run_diagnostics_background` | `POST /api/v1/tenants/{tenant}/diagnostics/run` | member | worker bridge `diagnostics_run`: **501** until hosted |
+| `file_diagnostic_issue`, `file_diagnostic_issue_background` | `POST /api/v1/tenants/{tenant}/diagnostics/issue` | owner | worker bridge `diagnostics_file_issue`: **501** until hosted |
+| `git_overview`, `git_overview_background` | `GET /api/v1/tenants/{tenant}/repos/{repoId}/git` | member | worker bridge `git_overview`: **501** until hosted |
+| `refresh_repo` | `POST /api/v1/tenants/{tenant}/repos/{repoId}/refresh` | member | worker bridge `git_overview`: **501** until hosted |
+| `merge_issue_branch` | `POST /api/v1/tenants/{tenant}/repos/{repoId}/merge-issue` | owner | worker bridge `merge_issue_branch`: **501** until hosted |
+| `merge_integration_branch` | `POST /api/v1/tenants/{tenant}/repos/{repoId}/merge-integration` | owner | worker bridge `merge_integration_branch`: **501** until hosted |
+| `branch_push_access` | `GET /api/v1/tenants/{tenant}/repos/{repoId}/push-access` | member | worker bridge `branch_push_access`: **501** until hosted |
+| `grant_bot_branch_push` | `POST /api/v1/tenants/{tenant}/repos/{repoId}/push-access` | owner | worker bridge `grant_bot_branch_push`: **501** until hosted |
+| `promotion_overview`, `promotion_overview_background` | `GET /api/v1/tenants/{tenant}/promotions` | member | worker bridge `promotion_overview`: **501** until hosted |
+| `open_integration_pr` | `POST /api/v1/tenants/{tenant}/repos/{repoId}/integration-pr` | owner | worker bridge `open_integration_pr`: **501** until hosted |
+| `promote_integration_branch`, `promote_integration_branch_background` | `POST /api/v1/tenants/{tenant}/repos/{repoId}/promote` | owner | worker bridge `promote_integration_branch`: **501** until hosted |
+| `app_version` | `GET /api/v1/version` | public | backend (`Version`) |
+
+`GET` and the mutating routes share one error vocabulary (`error`, `code`):
+`401 unauthorized`, `403 owner_required | csrf_token | csrf_origin |
+tenant_inactive`, `404 not_found` (also a tenant or repository the caller cannot
+reach), `400 bad_request`, `501 not_available_yet` (the endpoint exists, the
+worker-side operation does not yet; the message says why), `503
+bridge_unconfigured | jobs_unconfigured`.
+
+**Settings** are the worker's `tenant_config` layout (`app`, and `repo-<id>` per
+repository, written by `web/src/settings.rs`; `GET /config` reassembles the
+desktop's `AppConfig` shape, `repositories` included). Credential-shaped keys and
+key blocks, and the settings that only describe a desktop machine
+(`workspace_root`, `*_bin`, `repo_dir`, ...), are dropped on save, with the same
+rules as `desktop_import.py`; provider keys only go through the write-only
+`provider-keys` routes. `PUT /config` replaces the whole configuration and
+removes repositories that are no longer listed. `PUT /repos/{repoId}/config`
+replaces one repository (the id is the path's). A member may only change which
+repositories Feedback shows (`feedback-repo-filter`).
+
+**The worker bridge.** History, Jev feedback, usage analytics, prompt grades,
+architecture documentation and the routing calculator are computed by the shared
+worker, not re-implemented: `web/src/bridge.rs` runs `issue_worker/web_bridge.py`
+once per call (`SWARM_WEB_BRIDGE=python`; `SWARM_WEB_PYTHON`,
+`SWARM_WEB_WORKER_DIR`). The request is JSON on stdin, the environment is cleared
+down to `PATH` and the `SWARM_STORAGE_*` settings, and the one tenant comes from
+`TenantAccess`; repository ids are resolved to `owner/name` from that tenant's own
+settings before the call, so a caller can only ask about repositories the tenant
+has configured. Reads never provision a tenant's history store: a tenant without
+one reads like an empty desktop database. Without a bridge the endpoint answers
+`503` rather than an empty list. The worker-side operations the hosted
+deployment cannot serve yet (the knowledge index, model calibration snapshots and
+diagnostics still live in the desktop's local state, and branch, merge and
+promotion operations need a repository installation token on the bridge) answer
+`501` with their reason (`web_bridge.UNAVAILABLE`); they are endpoints, tested for
+tenancy, role and CSRF, that start answering when their hosted store lands.
+
+**Process controls and status.** The hosted scheduler is always on and
+webhook-driven, so there is no process to start: `start_issue_worker` and
+`request_issue_scan` are `POST /scan` (a scheduler tick), and `pause_process`,
+`resume_process` and `stop_process` take the process name `issue` and act on the
+tenant's jobs through the orchestrator (the desktop's `uat:<repo>` slots do not
+exist: UAT runs inside the job). `GET /status` is the desktop's
+`AutomationStatus` shape built from the tenant's saved repositories and active
+jobs. `GET /provider-usage` is the budget/quota status of `usage.rs`
+(`remainingPercent` is `null` when there is no budget and no provider report,
+never a made-up number); `GET /tools` reports each provider as ready when the
+tenant has saved its key; readiness (`/bots`, `/readiness`) is per provider: key
+saved and installation active.
+
+**Intentionally removed on the web**
+
+| Desktop command | Why |
+| --- | --- |
+| `choose_repository` | A browser has no native folder picker. Repositories are the GitHub App installation's repositories, saved with the tenant's settings (`GET /repos`). |
+| `inspect_repository` | It inspects a path on the user's machine. A hosted job clones the repository fresh for each run. |
+| `prepare_workspace` | A hosted job prepares its own clean workspace (`job_launch.py`); there is no managed checkout to prepare. |
+| `open_workspace_folder` | There is no local folder to open; the work is on the issue branch and its pull request. |
+| `open_automation_folder` | There is no local log file. Logs are `GET /logs` and the `automation-log` stream. |
+| `open_external_url` | The browser opens links itself. |
+| `hide_to_tray` | It hides the desktop window; the web page has no tray. |
+| `launch_bot_setup` | The GitHub App is installed from GitHub (sign-in creates the tenant); there is no local bot setup terminal. |
+| `install_ai_cli` | The provider CLIs are baked into the worker image; nothing is installed on the user's machine. |
+| `open_provider_login` | Hosted jobs use the tenant's own provider API keys (`provider-keys`), not an interactive CLI login. |
+
+**Events**
+
+| Desktop event | Stream | Notes |
+| --- | --- | --- |
+| `automation-log` | `GET /api/v1/events/automation-log` | The desktop's `LogEvent` (`source`, `stream`, `line`, `timestamp`) plus `tenant`, `repository`, `issue`. |
+| `job-log` | `GET /api/v1/events/jobs` | The per-issue projection of the same lines (`tenant`, `repository`, `issue`, `line`). |
+| `model-calibration-refreshed` | `GET /api/v1/events/model-calibration` | Published after `POST /calibration/refresh`. |
+| `system-permission-primed` | none (removed) | A macOS Automation permission prompt on the desktop; the web has no such permission. |
+
+Every stream is session-scoped (the tenants the signed-in user belongs to; the
+membership and the session are re-checked every 30 s and a logout ends the
+stream), so `listen()` needs no path parameter. Frames are served from
+`web/src/events.rs`:
+
+- **Ids and resume.** Each frame has a process-wide increasing `id`. A reconnect
+  sends `Last-Event-ID` (the browser's `EventSource` does it automatically) and
+  gets what it missed from a bounded per-tenant ring (5000 frames), in id order,
+  without gaps or duplicates. Asking for history older than the ring first sends
+  `event: resync` with `{"reason": "history_truncated"}`; refetch `GET /logs`.
+  Another tenant's frames are never replayed.
+- **Heartbeat.** A `: ready` comment on connect, then `: heartbeat` every
+  `SWARM_WEB_SSE_HEARTBEAT_SECS` (default 15).
+- **Backpressure.** The live channel (512 frames) and each connection's queue (64)
+  are bounded. A reader that falls behind gets `event: resync` with
+  `{"reason": "lagged", "missed": n}` and is caught up from the ring; nothing grows
+  without limit.
+- **Redaction.** Every frame is scrubbed (provider and GitHub tokens, key blocks,
+  credentialed URLs, `name=value` secrets) before it is stored or sent. Lines
+  otherwise pass through verbatim, so the `Adversarial UAT for issue #...` and
+  `Adversarial Cybersecurity for issue #...` boundary logs the Overview replays
+  keep their format, issue number and round/max values. `GET /logs?limit=` returns
+  the same ring in the desktop's log-file format (`[<unix seconds>]
+  [<source>/<stream>] <line>`).
+
+Tests: `web/tests/api_commands.rs` (every tenant route: no session 401, a foreign
+tenant 404, a member on an owner route 403, no CSRF 403; settings; the bridge),
+`web/tests/sse.rs` (scoping, resume, heartbeat, lag, redaction),
+`web/tests/api_catalog.rs` (the drift checks above), `ui/api.test.js` (both
+transports) and `issue_worker/test_web_bridge.py` (the worker operations).
+
 ### Not yet built
 
 Behind the seams above, by later issues of #413: the Postgres `Store` (the
 schema exists, see "Platform schema", but the in-memory store used today still
 loses state on restart and the binary says so at startup), the KMS
-`KeyWrapper`, and the UI screens that call the `web_*` commands. Scheduling
+`KeyWrapper`, the worker-side operations listed as 501 above, the web screens that
+call the `web_*` commands, and per-process (`uat:<repo>`) controls. Scheduling
 state lives in memory with that store. Checkpoints for a hosted job live in
 the object store via `job_checkpoint_sync.py`.

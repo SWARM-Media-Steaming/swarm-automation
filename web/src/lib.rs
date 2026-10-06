@@ -4,11 +4,15 @@
 //! `ui/` assets. See `docs/web-architecture.md` ("Web backend") and
 //! `.claude/rules/web-backend.md`.
 
+pub mod api;
 pub mod auth;
+pub mod bridge;
+pub mod catalog;
 pub mod clock;
 pub mod config;
 pub mod crypto;
 pub mod error;
+pub mod events;
 pub mod github;
 pub mod jobs_http;
 pub mod lifecycle;
@@ -21,6 +25,7 @@ pub mod routes;
 pub mod runner;
 pub mod schema;
 pub mod secret;
+pub mod settings;
 pub mod state;
 pub mod store;
 pub mod usage;

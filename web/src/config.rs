@@ -33,6 +33,20 @@ pub struct Config {
     pub default_plan: PlanQuotas,
     /// `None` unless `SWARM_WEB_JOB_RUNNER` is `docker` or `fargate`.
     pub jobs: Option<JobConfig>,
+    /// `None` unless `SWARM_WEB_BRIDGE=python`: how history, usage and the other
+    /// worker-computed answers are produced (`bridge.rs`).
+    pub bridge: Option<BridgeConfig>,
+    /// Seconds between SSE heartbeats (`SWARM_WEB_SSE_HEARTBEAT_SECS`).
+    pub sse_heartbeat_secs: u64,
+    /// What `app_version` answers (`SWARM_WEB_APP_VERSION`, else the crate's).
+    pub app_version: String,
+}
+
+pub struct BridgeConfig {
+    pub python: PathBuf,
+    pub worker_dir: PathBuf,
+    /// The hosted-storage settings forwarded to the bridge child.
+    pub env: BTreeMap<String, Secret>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -182,6 +196,13 @@ impl Config {
                 monthly_spend_cap_usd: Some(DEFAULT_MONTHLY_SPEND_CAP_USD),
             },
             jobs: load_jobs(get)?,
+            bridge: load_bridge(get)?,
+            sse_heartbeat_secs: match optional(get, "SWARM_WEB_SSE_HEARTBEAT_SECS") {
+                Some(v) => parse_u64(&v, "SWARM_WEB_SSE_HEARTBEAT_SECS")?.clamp(1, 300),
+                None => crate::events::DEFAULT_HEARTBEAT_SECS,
+            },
+            app_version: optional(get, "SWARM_WEB_APP_VERSION")
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
         };
         Ok((config, wrapper))
     }
@@ -193,6 +214,11 @@ impl Config {
         if let Some(token) = &self.internal_token {
             crate::redact::register_secret(token.expose());
         }
+        if let Some(bridge) = &self.bridge {
+            for secret in bridge.env.values() {
+                crate::redact::register_secret(secret.expose());
+            }
+        }
         if let Some(jobs) = &self.jobs {
             crate::redact::register_secret(jobs.private_key.expose());
             for secret in jobs.secret_env.values() {
@@ -202,6 +228,31 @@ impl Config {
                 crate::redact::register_secret(secret.expose());
             }
         }
+    }
+}
+
+fn load_bridge(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<BridgeConfig>, ConfigError> {
+    match optional(get, "SWARM_WEB_BRIDGE").as_deref() {
+        None | Some("off") => Ok(None),
+        Some("python") => {
+            let mut env = BTreeMap::new();
+            for name in crate::bridge::STORAGE_ENV {
+                if let Some(value) = optional(get, name) {
+                    env.insert(name.to_string(), Secret::new(value));
+                }
+            }
+            Ok(Some(BridgeConfig {
+                python: PathBuf::from(
+                    optional(get, "SWARM_WEB_PYTHON").unwrap_or_else(|| "python3".into()),
+                ),
+                worker_dir: PathBuf::from(
+                    optional(get, "SWARM_WEB_WORKER_DIR")
+                        .unwrap_or_else(|| "../issue_worker".into()),
+                ),
+                env,
+            }))
+        }
+        Some(_) => Err(ConfigError("SWARM_WEB_BRIDGE must be python or off".into())),
     }
 }
 

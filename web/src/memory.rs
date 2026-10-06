@@ -18,6 +18,7 @@ struct TenantData {
     ledger: BTreeMap<String, (String, LedgerEntry)>,
     reports: BTreeMap<Provider, ProviderReport>,
     jobs: BTreeMap<String, Provider>,
+    documents: BTreeMap<(String, String), serde_json::Value>,
 }
 
 #[derive(Debug, Default)]
@@ -411,6 +412,60 @@ impl Store for MemoryStore {
 
     async fn active_jobs(&self, tenant: &TenantId) -> StoreResult<usize> {
         Ok(self.lock()?.data.get(tenant).map_or(0, |d| d.jobs.len()))
+    }
+
+    async fn document(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        key: &str,
+    ) -> StoreResult<Option<serde_json::Value>> {
+        let mut inner = self.lock()?;
+        Ok(tenant_data(&mut inner, tenant)?
+            .documents
+            .get(&(collection.to_string(), key.to_string()))
+            .cloned())
+    }
+
+    async fn put_document(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> StoreResult<()> {
+        let mut inner = self.lock()?;
+        tenant_data(&mut inner, tenant)?
+            .documents
+            .insert((collection.to_string(), key.to_string()), value);
+        Ok(())
+    }
+
+    async fn delete_document(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        key: &str,
+    ) -> StoreResult<bool> {
+        let mut inner = self.lock()?;
+        Ok(tenant_data(&mut inner, tenant)?
+            .documents
+            .remove(&(collection.to_string(), key.to_string()))
+            .is_some())
+    }
+
+    async fn documents(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+    ) -> StoreResult<Vec<(String, serde_json::Value)>> {
+        let mut inner = self.lock()?;
+        Ok(tenant_data(&mut inner, tenant)?
+            .documents
+            .iter()
+            .filter(|((name, _), _)| name == collection)
+            .map(|((_, key), value)| (key.clone(), value.clone()))
+            .collect())
     }
 
     async fn claim_delivery(
