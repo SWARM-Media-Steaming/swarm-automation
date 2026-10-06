@@ -106,6 +106,15 @@ fn attach_jobs(state: &AppState) {
                 (&jobs.ecs_access_key, &jobs.ecs_secret_key)
             {
                 runner.with_static_credentials(access.clone(), secret.clone())
+            } else if let Some(url) = role_credentials_url() {
+                tracing::info!("fargate runner: signing with the API task role");
+                runner.with_role_credentials(
+                    url,
+                    std::env::var("AWS_CONTAINER_AUTHORIZATION_TOKEN")
+                        .ok()
+                        .filter(|value| !value.is_empty())
+                        .map(swarm_web::secret::Secret::new),
+                )
             } else {
                 runner
             };
@@ -150,4 +159,18 @@ fn attach_jobs(state: &AppState) {
             }
         }
     });
+}
+
+/// The ECS agent's credentials endpoint for this task's role, when running as
+/// an ECS task. The agent injects one of these two variables.
+fn role_credentials_url() -> Option<String> {
+    if let Ok(full) = std::env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI") {
+        if !full.is_empty() {
+            return Some(full);
+        }
+    }
+    std::env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+        .ok()
+        .filter(|relative| relative.starts_with('/'))
+        .map(|relative| format!("http://169.254.170.2{relative}"))
 }

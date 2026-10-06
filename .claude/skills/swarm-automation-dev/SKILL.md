@@ -121,7 +121,7 @@ idempotent GitHub webhook. Test it with `cargo test --locked` in `web/` (plus
 which CI runs). The store is behind a `Store` trait; only the in-memory
 implementation exists so far. The Postgres platform schema is
 `web/migrations/*.sql` (embedded as `swarm_web::schema::MIGRATIONS`, applied by
-`psql -f`); the Postgres `Store` and KMS `KeyWrapper` are later issues. Jobs
+`psql -f`); the Postgres `Store` and KMS `KeyWrapper` are known gaps. Jobs
 run through `JobRunner` (`DockerJobRunner` locally, `EcsFargateJobRunner` on
 AWS): one container per repository, image `web/worker/Dockerfile`, entrypoint
 `issue_worker/job_launch.py`. The orchestrator resumes exit 13 and quota
@@ -138,6 +138,27 @@ resume, heartbeat and bounded backpressure. `ui/api.js` fills `{tenant}` from
 sites pass none. Operations the hosted deployment cannot serve yet answer 501
 (`web_bridge.UNAVAILABLE`). See `docs/web-architecture.md` and
 `.claude/rules/web-backend.md`.
+
+### Running and deploying the web stack (#421)
+
+`docker-compose.yml` (repository root) is the whole hosted stack: the API
+(`web/Dockerfile`), Postgres, MinIO and the Docker job runner, which starts job
+containers through the host's Docker socket (so it is loopback-only and dev only).
+`cp web/.env.example .env`, fill the GitHub App values and `SWARM_WEB_LOCAL_KEY`,
+then `docker compose up --build`; `python3 scripts/web_smoke.py` checks the running
+stack without signing in. Job containers receive the `SWARM_STORAGE_*` names
+`storage_factory.py` reads (`..._S3_ACCESS_KEY_ID` / `..._SECRET_ACCESS_KEY`,
+`config.rs` forwards exactly `bridge::STORAGE_ENV`); both worker images install a
+pinned `psycopg` and ship an empty `/home/swarm` and `/workspace` (`job_launch.py`
+refuses a non-empty one, and a Fargate volume copies the image's files in). AWS is
+Terraform in `web/infra/aws` (no third-party modules; validated in CI, never
+applied; the Fargate runner signs with the API task role, a job's task role has no
+permissions, and `SWARM_WEB_KMS_KEY_ID` is never set because the build refuses it).
+Images are built and pushed by a person ("Building and publishing images" in
+`docs/web-architecture.md`); do not add a workflow that builds, pushes or applies.
+Change a variable name in `web/src/config.rs` and `test_web_deploy.py` (run
+`python3.13 -m unittest test_web_deploy` in `issue_worker/`) tells you which
+deployment file still uses the old one. Rules: `.claude/rules/web-deployment.md`.
 
 ## Engineering Knowledge / Ask SWARM
 

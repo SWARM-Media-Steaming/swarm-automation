@@ -10,6 +10,9 @@ ARG NODE_VERSION=22.14.0
 ARG CLAUDE_CODE_VERSION=2.1.285
 ARG CODEX_VERSION=0.160.1
 ARG GROK_VERSION=1.0.46
+# The Postgres driver SWARM_STORAGE_POSTGRES_DRIVER names (hosted history). The
+# worker itself stays standard library only; this is deployment, not code.
+ARG PSYCOPG_VERSION=3.2.9
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git openssl xz-utils \
@@ -28,7 +31,9 @@ RUN apt-get update \
         "@openai/codex@${CODEX_VERSION}" \
         "@xai-official/grok@${GROK_VERSION}" \
     && npm cache clean --force \
-    && useradd --uid 1000 --create-home --shell /usr/sbin/nologin swarm
+    && pip install --no-cache-dir "psycopg[binary]==${PSYCOPG_VERSION}" \
+    && useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin swarm \
+    && install -d -o 1000 -g 1000 /home/swarm /workspace
 
 COPY issue_worker /opt/swarm/issue_worker
 COPY web/worker/egress-allowlist.txt /opt/swarm/egress-allowlist.txt
@@ -40,6 +45,7 @@ USER 1000:1000
 WORKDIR /workspace
 ENV HOME=/home/swarm \
     AWS_EC2_METADATA_DISABLED=true \
+    SWARM_STORAGE_POSTGRES_DRIVER=psycopg:connect \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 ENTRYPOINT ["python3", "-I", "/opt/swarm/issue_worker/job_launch.py"]

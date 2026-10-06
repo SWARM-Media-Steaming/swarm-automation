@@ -5,3 +5,13 @@ Cargo.lock.orig
 .DS_Store
 __pycache__/
 *.pyc
+
+# Local stack and infrastructure state: never commit these.
+.env
+.env.*
+!web/.env.example
+web/infra/**/.terraform/
+web/infra/**/*.tfstate
+web/infra/**/*.tfstate.*
+web/infra/**/*.tfvars
+!web/infra/**/*.tfvars.example

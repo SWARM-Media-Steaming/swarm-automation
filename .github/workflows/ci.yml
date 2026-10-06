@@ -48,12 +48,70 @@ jobs:
         working-directory: scripts
         run: python3 -m unittest test_compute_version
 
+  # The deployment files (docs/web-architecture.md, "Local stack" and "AWS
+  # mapping"). Nothing here builds or pushes an image, signs in to AWS or
+  # applies Terraform: those are documented steps for a human.
+  web-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.1
+          terraform_wrapper: false
+      - name: Terraform format and validate (no backend, no credentials)
+        working-directory: web/infra/aws
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: Compose file validates, and refuses an empty .env
+        run: |
+          printf '%s\n' \
+            'SWARM_WEB_GITHUB_CLIENT_ID=Iv1.ci' \
+            'SWARM_WEB_GITHUB_CLIENT_SECRET=ci' \
+            'SWARM_WEB_GITHUB_WEBHOOK_SECRET=ci' \
+            'SWARM_WEB_GITHUB_APP_ID=1' \
+            'SWARM_WEB_GITHUB_APP_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nci\n-----END PRIVATE KEY-----' \
+            "SWARM_WEB_LOCAL_KEY=$(openssl rand -base64 32)" > "$RUNNER_TEMP/ci.env"
+          docker compose --env-file "$RUNNER_TEMP/ci.env" config -q
+          if docker compose --env-file /dev/null config -q 2>/dev/null; then
+            echo "compose must refuse a missing .env" >&2
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: web
+      - name: Deployment contract and smoke test of the API binary
+        working-directory: web
+        env:
+          SWARM_WEB_PUBLIC_URL: http://127.0.0.1:18080
+          SWARM_WEB_BIND: 127.0.0.1:18080
+          SWARM_WEB_UI_DIR: ../ui
+          SWARM_WEB_GITHUB_CLIENT_ID: Iv1.ci
+          SWARM_WEB_GITHUB_CLIENT_SECRET: ci
+          SWARM_WEB_GITHUB_WEBHOOK_SECRET: ci
+        run: |
+          cargo build --locked --bin swarm-web
+          SWARM_WEB_LOCAL_KEY="$(openssl rand -base64 32)" ./target/debug/swarm-web &
+          pid=$!
+          trap 'kill "$pid"' EXIT
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18080/api/v1/health >/dev/null && break
+            sleep 1
+          done
+          python3 ../scripts/web_smoke.py http://127.0.0.1:18080
+      - name: Deployment-file contract tests
+        working-directory: issue_worker
+        run: python3 -m unittest test_web_deploy
+
   # File a tracked issue when CI breaks on main or ai-main, so SWARM
   # Automation picks it up (assigned to the worker's configured assignee,
   # labelled ci-failure). PR failures are the author's to fix and are
   # skipped.
   report-failure:
-    needs: [test]
+    needs: [test, web-deploy]
     if: failure() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
