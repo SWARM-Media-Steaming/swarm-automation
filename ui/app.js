@@ -3,6 +3,11 @@
 
   // Desktop (Tauri) or web (fetch/SSE), chosen in api.js.
   const { invoke, listen } = window.SwarmApi;
+  // The hosted web version shares this file. It adds account views and drops the
+  // desktop-only affordances (tray, folder pickers, local CLI install and login);
+  // on the desktop none of that exists. `data-web-only` / `data-desktop-only` in
+  // index.html and style.css do the showing and hiding.
+  const webMode = window.SwarmApi.transport() === "web";
 
   const state = {
     config: null,
@@ -119,6 +124,11 @@
     guides: "Guides",
     debug: "Info & Debug",
     help: "Help",
+    signin: "Sign in",
+    account: "Account",
+    keys: "API keys",
+    github: "GitHub App",
+    quota: "Quota & budget",
   };
   const symbols = { git: "G", gh: "GH", python: "Py", node: "N", npm: "npm", claude: "C", codex: "X", grok: "Gk" };
 
@@ -309,6 +319,26 @@
       html: "<p><strong>Refresh Knowledge</strong> indexes new or changed repositories, issues, executions, and files.</p><p><strong>Rebuild Knowledge</strong> recreates derived summaries and inferred relationships from the source-of-truth data without discarding historical revisions of source-backed objects.</p>",
       links: [],
     },
+    "web-account": {
+      title: "Sign-in, tenants and members",
+      html: "<p>Sign-in is the SWARM Automation GitHub App's own authorization. Your GitHub token is used once to read who you are and which installations you can reach, and is then discarded; it is never stored.</p><p>Each GitHub App installation is a <strong>tenant</strong> with its own provider keys, budgets, settings and history. Nothing is shared between tenants. Use the tenant switcher to change which one these pages act on.</p><p><strong>Owners</strong> (the installation's own user, or an organization admin) can save keys and budgets. <strong>Members</strong> can view them. Roles follow GitHub and are re-synced on every sign-in, so change access on GitHub rather than here.</p><p>Sessions end on their own. When yours does, a banner asks you to sign in again and unsaved changes on the page stay where they are.</p>",
+      links: [],
+    },
+    "web-keys": {
+      title: "Provider API keys",
+      html: "<p>Hosted jobs run on <strong>your own</strong> provider accounts. Paste a key for each provider you want jobs to use. It is encrypted for this tenant and provider the moment it is saved.</p><p>Keys are <strong>write-only</strong>: the page shows whether one is set and when it was last changed, never the key. To change a key, save a new one; to stop using a provider, remove it. A job receives only the one provider's key it needs.</p><p>The Model data key is optional and unlocks benchmark and price refreshes. Never paste a key into an issue, a comment or a log.</p>",
+      links: [],
+    },
+    "web-github-app": {
+      title: "GitHub App installation",
+      html: "<p>The GitHub App signs you in, gives each job a short-lived token scoped to one repository, and delivers webhooks. Install it on every GitHub account or organization whose repositories SWARM should work on.</p><p>On GitHub's install screen choose <strong>All repositories</strong> so adding another repository later needs no further setup. Come back here and use <strong>Re-check</strong>; a finished installation appears as a new tenant.</p><p>If an installation is suspended or removed on GitHub, its tenant turns read-only here until it is active again.</p>",
+      links: [{ label: "About GitHub Apps", url: "https://docs.github.com/apps" }],
+    },
+    "web-quota": {
+      title: "Quota and budgets",
+      html: "<p><strong>Spend</strong> is the cost of the usage the worker recorded for this tenant this month. Invocations the worker could not price are counted separately as <em>unpriced</em>; they are never treated as free.</p><p><strong>Remaining</strong> is measured against the budget you set for a provider. With no budget and no figure from the provider, it shows <strong>—</strong> (unavailable), not 100% and not 0%.</p><p><strong>Minimum remaining</strong> is the reserve: a job waits when a provider with a budget falls below it. <strong>Concurrent jobs</strong> and the <strong>monthly cap</strong> are plan limits the operator sets; you can read them but not raise them.</p>",
+      links: [],
+    },
     "ai-agents-panel": {
       title: "AI agents",
       html: "<p>One row per <strong>enabled</strong> AI provider, combining what is otherwise scattered across the app: install/sign-in status from AI Configuration, live remaining quota, and whether the provider is currently working an issue (and where).</p><p>This covers every configured repository, not only the one selected above — quota is per account on this machine, and a provider can only be working one issue at a time across all of them. Quota is probed periodically rather than on every refresh, since each check runs the provider's own CLI.</p>",
@@ -395,6 +425,7 @@
     }
     if (view === "guides") void refreshModelCalibration({ quiet: true });
     if (view === "ai") void refreshModelDataKeyStatus();
+    if (webMode && ["account", "keys", "github", "quota"].includes(view)) void refreshWebAccount();
     if (view === "architecture") void refreshArchitecture({ quiet: true });
     if (view === "knowledge") {
       renderKnowledgeScope();
@@ -1174,10 +1205,10 @@
 
       const actions = document.createElement("div");
       actions.className = "provider-actions";
-      if (tool && !tool.installed && tool.installable) {
+      if (!webMode && tool && !tool.installed && tool.installable) {
         actions.appendChild(button(provider.id === "grok" ? "Install (Terminal)" : "Install", "primary-button", () => installProvider(provider.id)));
       }
-      if (tool && tool.installed && tool.authenticated === false) {
+      if (!webMode && tool && tool.installed && tool.authenticated === false) {
         actions.appendChild(button("Sign in", "secondary-button", () => signIn(provider.id)));
       }
       actions.appendChild(button("Docs", "secondary-button", () => openUrl(meta.docs)));
@@ -3211,10 +3242,10 @@
       version.textContent = tool.installed ? `${tool.version || "Installed"}\n${tool.path}` : "Not found in login-shell PATH";
       const actions = document.createElement("div");
       actions.className = "tool-actions";
-      if (tool.id === "gh" && tool.installed && tool.authenticated === false) {
+      if (!webMode && tool.id === "gh" && tool.installed && tool.authenticated === false) {
         actions.appendChild(button("Sign in", "secondary-button", () => signIn(tool.id)));
       }
-      if (["node", "npm"].includes(tool.id) && !tool.installed) {
+      if (!webMode && ["node", "npm"].includes(tool.id) && !tool.installed) {
         actions.appendChild(button("Install Node.js", "secondary-button", () => openUrl("https://nodejs.org/en/download")));
       }
       card.append(head, title, version, actions);
@@ -3267,6 +3298,11 @@
   }
 
   async function openUrl(url) {
+    if (webMode) {
+      // The browser opens links itself; only https goes out, and never with the opener.
+      if (/^https:\/\//i.test(String(url))) window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
     try { await invoke("open_external_url", { url }); } catch (error) { showToast(errorText(error), "error"); }
   }
 
@@ -5784,9 +5820,355 @@
     }
   }
 
+  // ----- Hosted web version: sign-in, tenant, keys, GitHub App, quota ---------
+  // The logic and state live in web-account.js (`SwarmWebAccount`, tested without
+  // a DOM); this block only renders what its controller holds. It runs only when
+  // the transport is "web", and it never sees a provider key after it is sent.
+  const webAccount = webMode && window.SwarmWebAccount
+    ? window.SwarmWebAccount.createAccountController({
+      invoke,
+      setTenant: (id) => window.SwarmApi.setTenant(id),
+      storedTenant: () => window.SwarmApi.getTenant(),
+    })
+    : null;
+
+  function webNode(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function webPill(label, tone) {
+    return webNode("span", `status-pill ${tone}`, label);
+  }
+
+  function setWebNotice(id, message) {
+    const notice = byId(id);
+    if (!notice) return;
+    notice.textContent = message || "";
+    notice.classList.toggle("hidden", !message);
+  }
+
+  function setSessionMode(mode) {
+    document.body.dataset.session = mode;
+  }
+
+  function renderWebSession() {
+    const { session, expired } = webAccount.state;
+    // An expired session keeps the signed-in layout: the banner is the only
+    // change, so the page and any unsaved edits stay put until the user signs in.
+    setSessionMode(session.authenticated || expired ? "signed-in" : "signed-out");
+    byId("session-banner").classList.toggle("hidden", !expired);
+    byId("session-banner-link").href = session.loginUrl;
+    byId("signin-link").href = session.loginUrl;
+    const install = byId("signin-install-link");
+    install.classList.toggle("hidden", !session.installUrl);
+    if (session.installUrl) install.href = session.installUrl;
+    byId("signin-state").className = `status-pill ${session.authenticated ? "running" : "stopped"}`;
+    byId("signin-state").textContent = session.authenticated ? "Signed in" : "Signed out";
+    setWebNotice("signin-error", webAccount.state.errors.session
+      ? `Could not check your session: ${webAccount.state.errors.session}`
+      : "");
+  }
+
+  function renderTenantSwitchers() {
+    const { session, tenant } = webAccount.state;
+    ["tenant-select", "account-tenant-select"].forEach((id) => {
+      const select = byId(id);
+      select.replaceChildren();
+      session.tenants.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.id;
+        option.textContent = entry.account;
+        select.appendChild(option);
+      });
+      select.disabled = session.tenants.length < 2;
+      select.value = tenant ? tenant.id : "";
+    });
+  }
+
+  function renderWebAccountPanel() {
+    const { session, tenant, errors } = webAccount.state;
+    const W = window.SwarmWebAccount;
+    byId("account-login").textContent = session.login || "—";
+    const role = byId("account-role-pill");
+    role.className = `status-pill ${tenant ? (tenant.role === "owner" ? "running" : "stopped") : "stopped"}`;
+    role.textContent = tenant ? W.roleLabel(tenant.role) : "—";
+    const status = W.tenantStatus(tenant);
+    const pill = byId("account-tenant-pill");
+    pill.className = `status-pill ${status.tone}`;
+    pill.textContent = status.label;
+    byId("account-tenant-type").textContent = tenant && tenant.accountType ? tenant.accountType : "—";
+    byId("account-tenant-note").textContent = tenant
+      ? W.readOnlyReason(tenant)
+      : "No GitHub App installation is connected yet. Install the app from the GitHub App page.";
+    const members = byId("account-members");
+    members.replaceChildren();
+    webAccount.state.members.forEach((member) => {
+      const row = document.createElement("tr");
+      const user = document.createElement("td");
+      user.appendChild(webNode("strong", "", member.login));
+      const roleCell = document.createElement("td");
+      roleCell.appendChild(webPill(member.roleLabel, member.role === "owner" ? "running" : "stopped"));
+      row.append(user, roleCell);
+      members.appendChild(row);
+    });
+    if (!webAccount.state.members.length) {
+      const row = document.createElement("tr");
+      const cell = webNode("td", "", errors.members ? "Members are unavailable." : "No members to show.");
+      cell.colSpan = 2;
+      row.appendChild(cell);
+      members.appendChild(row);
+    }
+    byId("account-member-count").textContent = String(webAccount.state.members.length);
+    setWebNotice("account-members-error", errors.members ? `Could not load members: ${errors.members}` : "");
+  }
+
+  function renderWebKeys() {
+    const W = window.SwarmWebAccount;
+    const { tenant, keys, errors } = webAccount.state;
+    const manage = W.canManage(tenant);
+    setWebNotice("keys-readonly", manage ? "" : W.readOnlyReason(tenant));
+    setWebNotice("keys-error", errors.keys ? `Keys: ${errors.keys}` : "");
+    const list = byId("key-list");
+    list.replaceChildren();
+    keys.forEach((row) => {
+      const item = webNode("div", "key-row");
+      const title = webNode("div", "key-row-title");
+      title.append(webNode("strong", "", row.label), webPill(row.status, row.tone));
+      const detail = webNode("div", "key-row-detail", row.detail || row.hint);
+      const field = webNode("div", "key-row-field");
+      const input = document.createElement("input");
+      input.type = "password";
+      input.id = `key-input-${row.id}`;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.disabled = !manage;
+      input.placeholder = row.configured ? "Paste a new key to replace it" : "Paste a key";
+      input.setAttribute("aria-label", `${row.label} API key`);
+      field.appendChild(input);
+      const actions = webNode("div", "control-row");
+      const save = button(row.configured ? "Replace" : "Save", "secondary-button compact", () => void saveWebKey(row.id, input));
+      save.disabled = !manage;
+      actions.appendChild(save);
+      if (row.configured) {
+        const remove = button("Remove", "text-button compact", () => void removeWebKey(row.id, row.label));
+        remove.disabled = !manage;
+        actions.appendChild(remove);
+      }
+      item.append(title, detail, field, actions);
+      list.appendChild(item);
+    });
+  }
+
+  async function saveWebKey(provider, input) {
+    await withBusy(`key-${provider}`, async () => {
+      const result = await webAccount.saveKey(provider, input.value);
+      // The value leaves the field whether or not the save worked: it is never
+      // kept in the page, and a retry means pasting it again.
+      input.value = "";
+      showToast(result.message, result.ok ? "success" : "error");
+      afterWebAction(result);
+    }, { progress: "Saving the key…" });
+  }
+
+  async function removeWebKey(provider, label) {
+    if (!window.confirm(`Remove the ${label} key? Jobs for that provider stop until a new one is saved.`)) return;
+    await withBusy(`key-${provider}`, async () => {
+      const result = await webAccount.removeKey(provider);
+      showToast(result.message, result.ok ? "success" : "error");
+      afterWebAction(result);
+    }, { progress: "Removing the key…" });
+  }
+
+  function renderWebGithub() {
+    const { session, tenant } = webAccount.state;
+    const W = window.SwarmWebAccount;
+    const installed = session.tenants.length > 0;
+    const active = Boolean(tenant) && tenant.status === "active";
+    const checks = [
+      ["Signed in with GitHub", session.authenticated, session.login ? `as ${session.login}` : "Signed out"],
+      ["GitHub App installed", installed, installed ? `${session.tenants.length} installation${session.tenants.length === 1 ? "" : "s"}` : "Not installed"],
+      ["Installation active", active, tenant ? W.tenantStatus(tenant).label : "No tenant"],
+    ];
+    const list = byId("github-checklist");
+    list.replaceChildren();
+    checks.forEach(([label, ready, detail]) => {
+      const row = webNode("div", `check-item ${ready ? "ready" : ""}`.trim());
+      row.append(webNode("span", "check-dot", "✓"), webNode("strong", "", label), webNode("span", "", detail));
+      list.appendChild(row);
+    });
+    const pill = byId("github-pill");
+    pill.className = `status-pill ${active ? "running" : installed ? "paused" : "stopped"}`;
+    pill.textContent = active ? "Connected" : installed ? "Needs attention" : "Not connected";
+    const link = byId("github-install-link");
+    link.classList.toggle("hidden", !session.installUrl);
+    if (session.installUrl) {
+      link.href = session.installUrl;
+      link.textContent = installed ? "Install on another account" : "Install on a GitHub account";
+    }
+    byId("github-install-note").textContent = session.installUrl
+      ? ""
+      : "This deployment has not published its GitHub App install link. Ask the operator to set it.";
+  }
+
+  function renderWebQuota() {
+    const W = window.SwarmWebAccount;
+    const { tenant, quota, errors } = webAccount.state;
+    setWebNotice("quota-error", errors.quota ? `Some usage figures are unavailable: ${errors.quota}` : "");
+    const manage = W.canManage(tenant);
+    setWebNotice("quota-readonly", manage ? "" : W.readOnlyReason(tenant));
+    byId("quota-period").textContent = quota.period || "—";
+    const summary = byId("quota-summary");
+    summary.replaceChildren();
+    [
+      ["Spend", quota.totalSpendText, "priced usage this month"],
+      ["Active jobs", quota.activeJobsText, `of ${quota.maxJobsText} allowed at once`],
+      ["Monthly cap", quota.monthlyCapText, "set by the plan"],
+      ["Reserve", quota.minimumPercent === null ? W.UNAVAILABLE : W.formatPercent(quota.minimumPercent), "minimum remaining"],
+    ].forEach(([label, value, note]) => {
+      const card = webNode("div", "usage-card");
+      card.append(webNode("span", "", label), webNode("strong", "", value), webNode("small", "", note));
+      summary.appendChild(card);
+    });
+    const body = byId("quota-rows");
+    body.replaceChildren();
+    quota.rows.forEach((row) => {
+      const tr = document.createElement("tr");
+      const name = document.createElement("td");
+      name.appendChild(webNode("strong", "", row.label));
+      if (row.detail) name.appendChild(webNode("small", "", row.detail));
+      const state = document.createElement("td");
+      state.appendChild(webPill(row.stateLabel, row.tone));
+      const remaining = webNode("td", "numeric quota-remaining");
+      remaining.appendChild(webNode("strong", "", row.remainingText));
+      remaining.appendChild(webNode("small", "", row.source));
+      if (row.remainingPercent !== null) {
+        const meter = document.createElement("meter");
+        meter.className = "quota-meter";
+        meter.min = 0;
+        meter.max = 100;
+        meter.low = 15;
+        meter.high = 40;
+        meter.optimum = 100;
+        meter.value = row.remainingPercent;
+        meter.setAttribute("aria-label", `${row.label} remaining ${row.remainingText}`);
+        remaining.appendChild(meter);
+      }
+      tr.append(name, state, remaining, webNode("td", "numeric", row.spendText), webNode("td", "numeric", row.budgetText), webNode("td", "", row.invocationsText));
+      body.appendChild(tr);
+    });
+    // Fill the form from the server's budgets, but never over what is being typed.
+    const form = byId("budget-form");
+    if (!form.contains(document.activeElement)) {
+      form.querySelectorAll("[data-budget]").forEach((input) => {
+        const key = input.dataset.budget;
+        input.value = key === "minimum" ? (quota.minimumPercent === null ? "" : String(quota.minimumPercent)) : quota.budgets[key] || "";
+      });
+    }
+    form.querySelectorAll("[data-budget]").forEach((input) => { input.disabled = !manage; });
+    byId("budget-save").disabled = !manage;
+  }
+
+  function renderWebAccount() {
+    renderWebSession();
+    renderTenantSwitchers();
+    renderWebAccountPanel();
+    renderWebKeys();
+    renderWebGithub();
+    renderWebQuota();
+  }
+
+  // An expired session shows the banner and keeps the page; every other failure
+  // was already named in its own section.
+  function afterWebAction(result) {
+    if (result && result.expired) renderWebSession();
+    else renderWebAccount();
+  }
+
+  async function refreshWebAccount() {
+    if (!webAccount) return;
+    await webAccount.loadSession();
+    if (webAccount.state.session.authenticated) await webAccount.loadTenantData();
+    renderWebAccount();
+  }
+
+  async function submitWebBudgets(event) {
+    event.preventDefault();
+    const form = { minimum_remaining_percent: "", provider_budgets_usd: {} };
+    byId("budget-form").querySelectorAll("[data-budget]").forEach((input) => {
+      if (input.dataset.budget === "minimum") form.minimum_remaining_percent = input.value;
+      else form.provider_budgets_usd[input.dataset.budget] = input.value;
+    });
+    await withBusy("budgets", async () => {
+      const result = await webAccount.saveBudgets(form);
+      byId("budget-status").textContent = result.message;
+      showToast(result.message, result.ok ? "success" : "error");
+      afterWebAction(result);
+    }, { progress: "Saving the budgets…" });
+  }
+
+  async function signOutWeb() {
+    const result = await webAccount.signOut();
+    if (!result.ok) { showToast(result.message, "error"); return; }
+    renderWebAccount();
+    navigate("signin");
+  }
+
+  async function chooseWebTenant(id) {
+    await webAccount.selectTenant(id);
+    renderWebAccount();
+    // Every desktop view reads through the active tenant, so reload them with it.
+    try {
+      state.config = await invoke("get_config");
+      bindConfig(state.config);
+      setDirty(false);
+    } catch (error) {
+      showToast(`Could not load this tenant's settings: ${errorText(error)}`, "error");
+    }
+    void refreshStatus({ quiet: true });
+  }
+
+  function bindWebAccountEvents() {
+    ["tenant-select", "account-tenant-select"].forEach((id) => {
+      byId(id).addEventListener("change", (event) => void chooseWebTenant(event.target.value));
+    });
+    byId("signout-button").addEventListener("click", () => void signOutWeb());
+    byId("account-signout").addEventListener("click", () => void signOutWeb());
+    byId("github-recheck").addEventListener("click", () => withBusy("github-recheck", () => refreshWebAccount(), { progress: "Checking GitHub…" }));
+    byId("budget-form").addEventListener("submit", (event) => void submitWebBudgets(event));
+    // Any command answered 401 means the session ended mid-use.
+    window.SwarmApi.onSessionExpired(() => {
+      webAccount.markExpired();
+      renderWebSession();
+    });
+    // And a quiet check for one that ended while the page sat idle.
+    window.setInterval(async () => {
+      if (!webAccount.state.session.authenticated) return;
+      await webAccount.loadSession();
+      renderWebSession();
+    }, 60000);
+  }
+
+  // Returns true when the signed-in desktop initialization should continue.
+  async function bootstrapWeb() {
+    document.body.dataset.transport = "web";
+    await webAccount.loadSession();
+    renderWebAccount();
+    bindWebAccountEvents();
+    if (!webAccount.state.session.authenticated) {
+      navigate("signin");
+      return false;
+    }
+    void refreshWebAccount();
+    return true;
+  }
+
   async function initialize() {
     renderHelpConcepts();
     bindEvents();
+    if (webAccount && !(await bootstrapWeb())) return;
     try {
       state.config = await invoke("get_config");
       bindConfig(state.config);

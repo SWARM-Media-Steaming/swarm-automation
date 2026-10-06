@@ -768,3 +768,13 @@ when the web backend serves it. `ui/api.test.js` runs the `app.js` controllers
 against mocked Tauri and mocked HTTP/SSE transports; keep both green when
 changing `ui/`. Keep `invoke("name"…)` call sites literal in `app.js` — several
 tests match them by source text.
+
+The web-only screens (#420: sign-in, account and tenant switcher, write-only
+provider keys, GitHub App install, quota/budget) are views in this same `ui/`, shown
+only when `body[data-transport="web"]` (set by `app.js` from `SwarmApi.transport()`):
+mark web-only markup `data-web-only` and desktop-only markup `data-desktop-only`,
+never fork the page. Their state lives in `ui/web-account.js` (`SwarmWebAccount`,
+DOM-free, tested in `ui/web-account.test.js`); `app.js` only renders it and must not
+name a `web_*` command. A provider key is write-only: clear its input after every
+attempt and keep it out of state, messages and logs. See "Web-only views" in
+`docs/web-architecture.md`.
