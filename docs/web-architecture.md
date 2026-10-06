@@ -5,7 +5,8 @@ desktop app (tracked in #413). The desktop stays fully working; `ui/` and
 `issue_worker/` are shared. This document records the pieces as they land.
 It covers the storage seam and its hosted Postgres/S3 implementation, the
 desktop data importer, and the web backend (API, auth, tenancy, provider keys,
-usage and quotas); the job runner is added by its own issue.
+usage and quotas), and the job runner (one container per repository, Docker
+locally and ECS Fargate on AWS).
 
 ## Storage
 
@@ -94,12 +95,15 @@ attributes (`in_progress_file`, `pending_file`, `paused_dir`, `ai_output_file`,
 has one owner. Its history facade and `ArchitectureStore` read and write
 through `Storage`. The worker's checkpoint reads and writes still operate on
 those local paths (they are interleaved with Git operations on the same
-checkout); moving them onto the interface calls is part of adding a remote
-implementation. Not covered yet and still local: the single-worker process lock
-(`worker.lock`), downloaded issue images, and the app-wide SQLite stores for
-complexity profiles, diagnostics and engineering knowledge. The remote
-implementation is `RemoteStorage` (below); pointing the worker's checkpoint
-reads and writes at it is part of the job runner.
+checkout). A hosted job does not change that: `job_launch.py` hydrates the
+tenant's hosted checkpoints into an empty state directory before the worker
+and publishes them back after it exits, including after `SIGTERM`. Inside the
+container the worker still uses `DEFAULT_TENANT`; the hosted copy is stored
+under the real tenant id. The desktop never sets `SWARM_JOB_STORAGE`. Not
+covered and still local: the single-worker process lock (`worker.lock`),
+downloaded issue images, and the app-wide SQLite stores for complexity
+profiles, diagnostics and engineering knowledge. The remote implementation is
+`RemoteStorage` (below).
 
 ### Contract tests
 
@@ -214,9 +218,16 @@ and idempotent, has a `--dry-run`, and never imports credentials. See
 
 ### Worker image entrypoint
 
-`issue_worker/worker_entrypoint.py` runs the worker from a plain copy of
-`issue_worker/` (no package install, no `src/` or `ui/`) and keeps its exit
-codes. It is the command the future worker image runs.
+`web/worker/Dockerfile` is the image both runners start. It pins git, `gh`,
+Node, and the Claude, Codex and Grok CLIs, runs as uid 1000, and its
+entrypoint is `issue_worker/job_launch.py`. That wrapper clones the repository
+into an empty workspace (a git object cache, if configured, is
+`--reference-if-able --dissociate`), refuses a non-empty `HOME` or workspace,
+hydrates and publishes checkpoints, then runs `worker_entrypoint.py` and
+returns its exit code. `SWARM_JOB_WORKER` is unset in that image. The fixture
+image (`Dockerfile.fixture`) sets it so acceptance tests can deliver without
+a provider CLI. Build from the repository root:
+`docker build -f web/worker/Dockerfile -t swarm-automation-worker .`
 
 ## Web backend (`web/`)
 
@@ -237,6 +248,9 @@ GET  /api/v1/tenants[/{tenant}[/members|/provider-keys|/quotas|/usage]]
 PUT  /api/v1/tenants/{tenant}/provider-keys/{provider}     write-only (owner)
 DEL  /api/v1/tenants/{tenant}/provider-keys/{provider}     (owner)
 PUT  /api/v1/tenants/{tenant}/budgets                      (owner)
+GET  /api/v1/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}[/logs]
+POST /api/v1/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}/{run,pause,resume,stop}
+GET  /api/v1/events/jobs                          SSE `job-log` (session; no tenant in the path)
 POST /api/v1/webhooks/github                      signed, idempotent
      /api/v1/internal/tenants/{tenant}/usage|quotas|jobs   operator bearer token
 ```
@@ -350,8 +364,14 @@ the raw body, constant time) **before anything is stored**; a bad signature is a
 the same id again is acknowledged as a `duplicate` (`200`) and not re-applied; a
 captured signed body replayed under a new id is refused (`409 replay`). A
 processing failure releases the claim and answers 5xx so GitHub's retry runs.
-`installation` events create, suspend, unsuspend and delete tenants; other
-events for a known active installation are recorded for the job runner.
+`installation` events create, suspend, unsuspend and delete tenants. Other
+events for a known active installation are handed to the orchestrator when a
+job runner is configured, and recorded (`detail: recorded`) when it is not.
+The orchestrator starts one container for `issues`, human `issue_comment`,
+label and pull-request events. The worker's own lifecycle-marker comments do
+not start another container. A denial (missing key, quota, concurrency,
+inactive tenant) is still HTTP 200 with a `detail`, so GitHub does not retry
+it. Run now maps the same denial to HTTP 409.
 
 ### Configuration
 
@@ -362,12 +382,43 @@ events for a known active installation are recorded for the job runner.
 `SWARM_WEB_SESSION_TTL_SECS` are optional. Run it with
 `cargo run` in `web/` (tests: `cargo test --locked`).
 
+`SWARM_WEB_JOB_RUNNER` (`docker` or `fargate`) turns the orchestrator on. It
+requires `SWARM_WEB_WORKER_IMAGE`, `SWARM_WEB_GITHUB_APP_ID` and
+`SWARM_WEB_GITHUB_APP_PRIVATE_KEY`. CPU, memory, poll and quota-resume
+intervals have defaults (1000 millis, 2048 MiB, 60 seconds, 60 seconds).
+There is no default job deadline; `SWARM_WEB_JOB_MAX_RUNTIME_SECS` is the only
+way to set one. Fargate also needs `SWARM_WEB_ECS_SUBNETS`. Storage variables
+named `SWARM_STORAGE_*` are forwarded into the container; the app private key
+and the ECS control-plane credentials are not. `web/docker-compose.jobs.yml`
+builds the fixture image for a local acceptance run.
+
+### Jobs
+
+`JobRunner` (`web/src/runner.rs`) is start, status, cancel, pause, resume of
+the same container, log snapshot, log stream, and resume-from-checkpoint
+(always a new container). `DockerJobRunner` and `EcsFargateJobRunner` consume
+the same `JobSpec` and entrypoint. Docker passes secrets through a mode-0600
+env file that is removed after start, drops all capabilities, sets a read-only
+root, a non-root user, pid and memory limits, and sinks the cloud metadata
+address. Fargate sends no task role and disables public IP and execute
+command. A `PauseTask` the backend does not implement stops the task; the
+orchestrator keeps the slot and resumes from the checkpoint.
+
+The orchestrator replaces `processes.rs` supervision and the cron installer
+on the web path only. One repository has one active container. Exit 13
+relaunches immediately from the `in-progress` checkpoint and keeps the
+concurrency slot. Exit 11 waits `SWARM_WEB_QUOTA_RESUME_SECS` (default 60,
+not 15 minutes) and relaunches from `quota-paused`. Exit 14 releases the slot
+and holds until Run now, Resume, a trusted follow-up, or a new image id.
+Exit 0/10 releases the slot; a webhook that arrived during the run starts one
+follow-up, otherwise the next poll does. Stop cancels the container and does
+not relaunch. The desktop scheduler is unchanged.
+
 ### Not yet built
 
 Behind the seams above, by later issues of #413: the Postgres `Store` (the
 schema exists, see "Platform schema", but the in-memory store used today still
-loses state on restart and the binary says so at startup), wiring the worker's
-own checkpoint file access to `RemoteStorage`, the KMS `KeyWrapper`, the `JobRunner`
-(Docker, ECS Fargate) that calls `Vault::job_environment` and the admission
-endpoints, Server-Sent Events streams (the `EVENTS` table in `ui/api.js` is
-still empty), and the UI screens that call the `web_*` commands.
+loses state on restart and the binary says so at startup), the KMS
+`KeyWrapper`, and the UI screens that call the `web_*` commands. Scheduling
+state lives in memory with that store. Checkpoints for a hosted job live in
+the object store via `job_checkpoint_sync.py`.

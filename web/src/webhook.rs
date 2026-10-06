@@ -137,8 +137,18 @@ async fn process(
                 Some(tenant) if tenant.status != TenantStatus::Active => {
                     Ok(("ignored", "tenant_inactive"))
                 }
-                // Scheduling work from an issue event is the job runner's job.
-                Some(_) => Ok(("processed", "recorded")),
+                Some(_) => {
+                    let Some(orchestrator) = state.orchestrator() else {
+                        return Ok(("processed", "recorded"));
+                    };
+                    match orchestrator.handle_delivery(event, payload).await {
+                        Ok(detail) => Ok(("processed", detail)),
+                        Err(error) => match error.denial_code() {
+                            Some(detail) => Ok(("processed", detail)),
+                            None => Err(crate::error::ApiError::Internal(error.to_string())),
+                        },
+                    }
+                }
             }
         }
     }

@@ -62,6 +62,12 @@ fn tenant_endpoints() -> Vec<(Method, &'static str, Option<serde_json::Value>)> 
             Some(json!({ "minimum_remaining_percent": 99.0 })),
         ),
         (Method::GET, "/usage", None),
+        (Method::GET, "/work/acme/demo/issues/1", None),
+        (Method::POST, "/work/acme/demo/issues/1/run", None),
+        (Method::POST, "/work/acme/demo/issues/1/pause", None),
+        (Method::POST, "/work/acme/demo/issues/1/resume", None),
+        (Method::POST, "/work/acme/demo/issues/1/stop", None),
+        (Method::GET, "/work/acme/demo/issues/1/logs", None),
     ]
 }
 

@@ -10,6 +10,11 @@ a Postgres schema per tenant for execution history).
   method. The desktop and worker use `DEFAULT_TENANT`, and `LocalStorage` keeps
   that tenant at the exact legacy file names, bytes and SQLite path: a state
   directory must keep working across versions in both directions.
+- A hosted job does not retarget the worker's checkpoint calls.
+  `job_launch.py` and `job_checkpoint_sync.py` copy checkpoints and the
+  delivery artifacts around the worker process. The container still uses
+  `DEFAULT_TENANT` on local files, and the hosted copy is stored under the
+  real tenant id. The desktop never sets `SWARM_JOB_STORAGE`.
 - New persisted state is a new registered checkpoint kind, document collection
   or artifact name, not an ad hoc file under `state_dir`. The kind sets are
   closed on purpose; update `docs/web-architecture.md` with them.

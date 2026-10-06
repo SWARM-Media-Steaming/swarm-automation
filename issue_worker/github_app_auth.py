@@ -27,6 +27,18 @@ from typing import Any
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "swarm" / "github-apps.json"
 API_VERSION = "2022-11-28"
 
+# What one worker container is allowed to do on the single repository it was
+# given. Contents, issues and pull requests are the delivery path; metadata is
+# required by GitHub whenever a narrower permission is requested; statuses lets
+# the worker publish the check it already publishes on the desktop.
+REPOSITORY_TOKEN_PERMISSIONS = {
+    "contents": "write",
+    "issues": "write",
+    "metadata": "read",
+    "pull_requests": "write",
+    "statuses": "write",
+}
+
 
 def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
@@ -243,6 +255,34 @@ class GitHubAppAuth:
         # GitHub installation tokens currently last one hour. Cache for at most
         # 50 minutes so clock skew cannot leak an expired token into a long run.
         self._tokens[cache_key] = (token, time.time() + 3000)
+        return token
+
+    def repository_scoped_token(self, provider: str, repository: str | None = None) -> str:
+        """Mint a fresh installation token that can access exactly one repository.
+
+        The desktop's :meth:`token` is an installation-wide credential and may be
+        cached. A hosted job must not receive that: each container gets a new
+        token whose ``repositories`` list is the single repo it is working on,
+        with the permissions the worker needs and nothing else. The token is not
+        cached and is never written to disk.
+        """
+        repository = (repository or self.repository or "").strip()
+        owner, _, name = repository.partition("/")
+        if not owner or not name or "/" in name or name.strip() != name or owner.strip() != owner:
+            raise RuntimeError(
+                "A repository-scoped installation token needs exactly one owner/name repository"
+            )
+        installation_id = self.installation_id_for(provider)
+        definition = self.definition(provider)
+        response = _request(
+            "POST",
+            f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+            self._jwt(definition),
+            {"repositories": [name], "permissions": dict(REPOSITORY_TOKEN_PERMISSIONS)},
+        )
+        token = str(response.get("token") or "")
+        if not token:
+            raise RuntimeError("GitHub did not return an installation token")
         return token
 
     def find_installation_for_owner(self, provider: str, owner: str) -> int | None:
@@ -482,11 +522,66 @@ def _build_parser() -> argparse.ArgumentParser:
         "--repository", default=os.getenv("SWARM_GITHUB_REPOSITORY", ""), help="owner/name"
     )
     execute.add_argument("command_args", nargs=argparse.REMAINDER)
+    subparsers.add_parser(
+        "mint-repository-token",
+        help="Mint one short-lived repository-scoped installation token from JSON on stdin",
+    )
     return parser
+
+
+def mint_repository_token_document(document: dict[str, Any]) -> dict[str, str]:
+    """Mint a token from an in-memory app key.
+
+    ``document`` is ``app_id``, ``installation_id``, ``private_key_pem``,
+    ``repository`` (``owner/name``) and optional ``provider``. The key is written
+    only inside a temporary directory that is removed before this returns, and
+    the token is returned to the caller rather than stored. Used by the hosted
+    job orchestrator; the desktop keeps using :meth:`GitHubAppAuth.token`.
+    """
+    try:
+        app_id = int(document["app_id"])
+        installation_id = int(document["installation_id"])
+        pem = str(document["private_key_pem"])
+        repository = str(document["repository"])
+        provider = str(document.get("provider") or "claude")
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("mint-repository-token document is incomplete") from error
+    if "BEGIN" not in pem:
+        raise RuntimeError("private_key_pem is not a PEM key")
+    with tempfile.TemporaryDirectory(prefix="swarm-app-mint.") as temporary:
+        root = Path(temporary)
+        key_path = root / "app.pem"
+        key_path.write_text(pem, encoding="utf-8")
+        key_path.chmod(0o600)
+        config_path = root / "apps.json"
+        owner = repository.split("/", 1)[0]
+        config_path.write_text(
+            json.dumps(
+                {
+                    provider: {
+                        "app_id": app_id,
+                        "installation_id": installation_id,
+                        "private_key_path": "app.pem",
+                        "bot_login": f"swarm-{provider}-bot[bot]",
+                        "installations": {owner: installation_id},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        auth = GitHubAppAuth(config_path, repository=repository)
+        token = auth.repository_scoped_token(provider, repository)
+    return {"repository": repository, "token": token}
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.command == "mint-repository-token":
+        # The private key arrives on stdin so it is not a process argument.
+        document = json.load(sys.stdin)
+        minted = mint_repository_token_document(document)
+        print(json.dumps({"token": minted["token"]}))
+        return 0
     repository = getattr(args, "repository", "") or None
     auth = GitHubAppAuth(args.config, args.openssl_bin, repository=repository)
     if args.command == "repo-status":
