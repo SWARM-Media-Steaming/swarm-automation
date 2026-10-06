@@ -34,6 +34,15 @@ pub struct JobLog {
     pub line: String,
 }
 
+/// One repository's current job, for a tenant-wide status.
+#[derive(Clone, Debug, Serialize)]
+pub struct ActiveJob {
+    pub repository: String,
+    pub issue: u64,
+    pub status: String,
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct JobView {
     pub status: String,
@@ -331,6 +340,23 @@ impl Orchestrator {
     pub fn publish_line(&self, mut entry: JobLog) {
         entry.line = redact_text(&entry.line);
         let _ = self.logs.send(entry);
+    }
+
+    /// Every repository of the tenant that has a job in any state but idle.
+    pub async fn tenant_jobs(&self, tenant: &TenantId) -> Vec<ActiveJob> {
+        let slots = self.slots.lock().await;
+        slots
+            .iter()
+            .filter(|(key, slot)| {
+                &key.tenant == tenant && slot.issue != 0 && slot.phase != Phase::Idle
+            })
+            .map(|(key, slot)| ActiveJob {
+                repository: format!("{}/{}", key.owner, key.repo),
+                issue: slot.issue,
+                status: view_of(slot, "").status,
+                exit_code: slot.last_exit,
+            })
+            .collect()
     }
 
     pub async fn set_image(&self, image: String) {

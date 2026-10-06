@@ -244,7 +244,16 @@ impl TestApp {
         Self::build("http://swarm.test", false)
     }
 
+    /// Extra environment, e.g. `SWARM_WEB_SSE_HEARTBEAT_SECS`.
+    pub fn with_env(extra: &[(&str, &str)]) -> Self {
+        Self::build_with("http://swarm.test", true, extra)
+    }
+
     fn build(public_url: &str, internal_api: bool) -> Self {
+        Self::build_with(public_url, internal_api, &[])
+    }
+
+    fn build_with(public_url: &str, internal_api: bool, extra: &[(&str, &str)]) -> Self {
         ensure_callsites_live();
         let ui = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -272,6 +281,9 @@ impl TestApp {
         ]);
         if !internal_api {
             env.remove("SWARM_WEB_INTERNAL_TOKEN");
+        }
+        for (name, value) in extra {
+            env.insert(name, value.to_string());
         }
         let (config, wrapper) =
             Config::from_lookup(&|name| env.get(name).cloned()).expect("test config");

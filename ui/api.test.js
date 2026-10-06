@@ -196,7 +196,7 @@ test("the default instance follows window.__TAURI__ at call time", async () => {
     assert.equal(await api.invoke("app_version"), "1.2.3");
     globalThis.window = {};
     assert.equal(api.transport(), "web");
-    await assert.rejects(api.invoke("app_version"), api.UnavailableOnWebError, "the shipped table has no row yet");
+    await assert.rejects(api.invoke("hide_to_tray"), api.UnavailableOnWebError, "a desktop-only command has no web row");
   } finally {
     if (previous === undefined) delete globalThis.window; else globalThis.window = previous;
   }
@@ -283,7 +283,7 @@ test("the default instance sends the CSRF cookie value from document.cookie", as
 });
 
 test("web-only account commands are never invoked by the desktop app code", () => {
-  for (const name of Object.keys(api.COMMANDS)) {
+  for (const name of Object.keys(api.COMMANDS).filter((key) => key.startsWith("web_"))) {
     assert.doesNotMatch(app, new RegExp(`invoke\\("${name}"`), `${name} is web-only`);
   }
 });
@@ -399,4 +399,69 @@ test("every command app.js invokes fails typed (never silently) while it has no 
   for (const name of names) {
     await assert.rejects(web.invoke(name), api.UnavailableOnWebError, `${name} fails typed while unmapped`);
   }
+});
+
+// ----- The desktop commands over REST/SSE (issue #419) -----------------------
+
+const docs = fs.readFileSync(path.join(__dirname, "..", "docs", "web-architecture.md"), "utf8");
+
+test("every command app.js invokes has a web row or is listed as intentionally removed", () => {
+  const names = [...new Set([...app.matchAll(/\binvoke\("([a-z_0-9]+)"/g)].map((m) => m[1]))];
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(api.COMMANDS, name)) continue;
+    assert.match(docs, new RegExp("`" + name + "`"), `${name} has no web row and is not documented as removed`);
+  }
+});
+
+test("every desktop event app.js listens to has a stream or is documented as removed", () => {
+  const events = [...new Set([...app.matchAll(/\blisten\("([a-z_\-]+)"/g)].map((m) => m[1]))];
+  assert.ok(events.includes("automation-log"));
+  for (const event of events) {
+    if (Object.prototype.hasOwnProperty.call(api.EVENTS, event)) continue;
+    assert.match(docs, new RegExp("`" + event + "`"), `${event} has no stream and is not documented as removed`);
+  }
+});
+
+test("desktop commands fill the active tenant from the session, and an explicit tenant wins", async () => {
+  const http = mockHttp({
+    "GET /api/v1/session": { body: { authenticated: true, tenants: [{ id: "t1first" }, { id: "t2second" }] } },
+    "GET /api/v1/tenants/t1first/history": { body: { records: [] } },
+    "PUT /api/v1/tenants/t1first/config": { body: { repositories: [] } },
+    "GET /api/v1/tenants/t2second/logs": { body: ["x"] },
+  });
+  const web = api.createApi({ fetch: http.fetch });
+  assert.deepEqual(await web.invoke("get_execution_history_background", { repoIds: ["a__b"], offset: 10 }), { records: [] });
+  assert.deepEqual(await web.invoke("save_config", { config: { repositories: [] } }), { repositories: [] });
+  assert.deepEqual(await web.invoke("get_recent_logs", { tenant: "t2second", limit: 5 }), ["x"]);
+  const urls = http.requests.map((request) => request.url);
+  assert.equal(urls.filter((url) => url.endsWith("/session")).length, 1, "the session is read once");
+  assert.ok(urls.includes("/api/v1/tenants/t1first/history?repoIds=%5B%22a__b%22%5D&offset=10"), urls.join("\n"));
+  const save = http.requests.find((request) => request.init.method === "PUT");
+  assert.equal(save.init.body, JSON.stringify({ config: { repositories: [] } }), "the tenant is a path segment, not a body field");
+});
+
+test("setTenant chooses the tenant without asking the session", async () => {
+  const http = mockHttp({ "GET /api/v1/tenants/t9chosen/provider-usage": { body: [] } });
+  const web = api.createApi({ fetch: http.fetch });
+  web.setTenant("t9chosen");
+  await web.invoke("check_provider_usage_background");
+  assert.deepEqual(http.requests.map((request) => request.url), ["/api/v1/tenants/t9chosen/provider-usage"]);
+});
+
+test("the version and tenant-free commands need no tenant", async () => {
+  const http = mockHttp({ "GET /api/v1/version": { body: "0.1.0" } });
+  const web = api.createApi({ fetch: http.fetch });
+  assert.equal(await web.invoke("app_version"), "0.1.0");
+  assert.equal(http.requests.length, 1);
+});
+
+test("the log and calibration streams deliver the desktop's payload shape", async () => {
+  const http = mockHttp();
+  const web = api.createApi({ EventSource: http.EventSource });
+  const lines = [];
+  await web.listen("automation-log", (event) => lines.push(event.payload));
+  await web.listen("model-calibration-refreshed", () => {});
+  assert.deepEqual(http.sources.map((source) => source.url), ["/api/v1/events/automation-log", "/api/v1/events/model-calibration"]);
+  http.sources[0].emit("automation-log", JSON.stringify({ source: "Issue worker", stream: "stdout", line: "Adversarial UAT for issue #12: round 1 of 3.", timestamp: 1 }));
+  assert.equal(lines[0].line, "Adversarial UAT for issue #12: round 1 of 3.");
 });

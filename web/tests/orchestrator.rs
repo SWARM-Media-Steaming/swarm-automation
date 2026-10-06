@@ -687,3 +687,157 @@ async fn log_snapshots_and_the_event_stream_redact_the_installation_token() {
     assert!(saw_ready, "the stream starts with a ready comment");
     assert!(saw_log, "a job-log frame was delivered");
 }
+
+#[tokio::test]
+async fn the_desktop_process_controls_and_status_act_on_the_tenants_jobs() {
+    let app = TestApp::new();
+    users(&app);
+    let runner = Scripted::new();
+    attach(&app, runner.clone());
+    let alice = app.sign_in("code-alice").await;
+    let bob = app.sign_in("code-bob").await;
+    let carol = app.sign_in("code-carol").await;
+    let tenant_s = alice.tenant_for("alice").await;
+    let tenant = TenantId::parse(&tenant_s).unwrap();
+    put_key(&app, &tenant).await;
+    let base = format!("/api/v1/tenants/{tenant_s}");
+
+    // Nothing running: the controls say so, status is stopped.
+    let idle = alice
+        .send(Method::POST, &format!("{base}/processes/issue/pause"), None)
+        .await;
+    assert_eq!(idle.status, StatusCode::CONFLICT);
+    assert_eq!(
+        alice.get(&format!("{base}/status")).await.json()["issue"]["state"],
+        "stopped"
+    );
+
+    alice
+        .send(Method::POST, &work(&tenant_s, 418, "run"), None)
+        .await;
+    let status = alice.get(&format!("{base}/status")).await.json();
+    assert_eq!(status["issue"]["state"], "running");
+    assert_eq!(status["jobs"][0]["repository"], "acme/demo");
+    assert_eq!(status["jobs"][0]["issue"], 418);
+    assert_eq!(
+        bob.get(&format!(
+            "/api/v1/tenants/{}/status",
+            bob.tenant_for("bob").await
+        ))
+        .await
+        .json()["jobs"],
+        json!([])
+    );
+
+    // A member may control the tenant's jobs; another tenant's user may not.
+    let paused = carol
+        .send(Method::POST, &format!("{base}/processes/issue/pause"), None)
+        .await;
+    assert_eq!(paused.status, StatusCode::OK, "{}", paused.text());
+    assert_eq!(paused.json()["state"], "paused");
+    assert_eq!(
+        alice.get(&format!("{base}/status")).await.json()["issue"]["state"],
+        "paused"
+    );
+    assert_eq!(
+        bob.send(Method::POST, &format!("{base}/processes/issue/stop"), None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    let resumed = alice
+        .send(
+            Method::POST,
+            &format!("{base}/processes/issue/resume"),
+            None,
+        )
+        .await;
+    assert_eq!(resumed.json()["state"], "running");
+    let wrong = alice
+        .send(
+            Method::POST,
+            &format!("{base}/processes/uat%3Aacme__demo/stop"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        wrong.status,
+        StatusCode::NOT_FOUND,
+        "the desktop's per-repo UAT slots do not exist on the web"
+    );
+
+    let scan = alice
+        .send(Method::POST, &format!("{base}/scan"), None)
+        .await;
+    assert_eq!(scan.status, StatusCode::OK, "{}", scan.text());
+    assert!(scan.json().as_str().unwrap().contains("1 job(s) active"));
+
+    let stopped = alice
+        .send(Method::POST, &format!("{base}/processes/issue/stop"), None)
+        .await;
+    assert_eq!(stopped.json()["state"], "stopped");
+    assert_eq!(
+        alice.get(&format!("{base}/status")).await.json()["issue"]["state"],
+        "stopped"
+    );
+    assert_eq!(app.store.active_jobs(&tenant).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn orchestrator_log_lines_reach_the_log_endpoint_and_the_automation_stream() {
+    let app = TestApp::new();
+    users(&app);
+    let jobs = attach(&app, Scripted::new());
+    let alice = app.sign_in("code-alice").await;
+    let bob = app.sign_in("code-bob").await;
+    let tenant_s = alice.tenant_for("alice").await;
+    let line = "Adversarial UAT for issue #418: round 1 of 3 begins.";
+
+    let request = Request::builder()
+        .uri("/api/v1/events/automation-log")
+        .header(
+            header::COOKIE,
+            format!("{}={}", session_cookie_name(app.secure), alice.session),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = app.router.clone().oneshot(request).await.unwrap();
+    let mut body = response.into_body();
+    jobs.publish_line(JobLog {
+        tenant: tenant_s.clone(),
+        repository: "acme/demo".into(),
+        issue: 418,
+        line: format!("{line} {CANARY}"),
+    });
+    let mut seen = String::new();
+    for _ in 0..6 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("sse frame timed out")
+            .expect("sse ended")
+            .expect("sse frame");
+        seen.push_str(&String::from_utf8_lossy(
+            &frame.into_data().unwrap_or_default(),
+        ));
+        if seen.contains("automation-log") {
+            break;
+        }
+    }
+    assert!(seen.contains("event: automation-log"), "{seen}");
+    assert!(
+        seen.contains(line) && seen.contains("\"source\":\"Issue worker\""),
+        "{seen}"
+    );
+    assert!(!seen.contains(CANARY));
+
+    let logs = alice.get(&format!("/api/v1/tenants/{tenant_s}/logs")).await;
+    assert!(logs.text().contains(line));
+    assert!(!logs.text().contains(CANARY));
+    let bob_tenant = bob.tenant_for("bob").await;
+    assert_eq!(
+        bob.get(&format!("/api/v1/tenants/{bob_tenant}/logs"))
+            .await
+            .json(),
+        json!([])
+    );
+}

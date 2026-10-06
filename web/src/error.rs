@@ -32,6 +32,16 @@ pub enum ApiError {
     },
     BadGateway(String),
     Internal(String),
+    /// The endpoint exists but this deployment cannot serve it yet (501).
+    NotAvailable {
+        code: &'static str,
+        message: String,
+    },
+    /// A dependency this endpoint needs is not configured (503).
+    Unconfigured {
+        code: &'static str,
+        message: String,
+    },
 }
 
 impl ApiError {
@@ -68,6 +78,12 @@ impl ApiError {
                 "upstream_error",
                 "GitHub could not be reached.".into(),
             ),
+            ApiError::NotAvailable { code, message } => {
+                (StatusCode::NOT_IMPLEMENTED, code, message.clone())
+            }
+            ApiError::Unconfigured { code, message } => {
+                (StatusCode::SERVICE_UNAVAILABLE, code, message.clone())
+            }
             ApiError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",

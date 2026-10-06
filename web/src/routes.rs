@@ -369,7 +369,9 @@ async fn static_guard(request: Request, next: Next) -> Response {
 pub fn router(state: AppState) -> Router {
     let tenant = "/api/v1/tenants/{tenant}";
     let internal = "/api/v1/internal/tenants/{tenant}";
-    let api = Router::new()
+    let api = Router::new();
+    let api = crate::api::mount(api);
+    let api = api
         .route("/api/v1/health", get(health))
         .route("/api/v1/session", get(auth::session))
         .route("/api/v1/auth/github/login", get(auth::login))
@@ -411,6 +413,14 @@ pub fn router(state: AppState) -> Router {
             get(jobs_http::logs),
         )
         .route("/api/v1/events/jobs", get(jobs_http::events))
+        .route(
+            "/api/v1/events/automation-log",
+            get(jobs_http::automation_log),
+        )
+        .route(
+            "/api/v1/events/model-calibration",
+            get(jobs_http::calibration_events),
+        )
         .route(&format!("{internal}/usage"), post(internal_ingest))
         .route(&format!("{internal}/quotas"), put(internal_set_plan))
         .route(&format!("{internal}/jobs"), post(internal_admit))

@@ -12,6 +12,8 @@ use std::fmt;
 
 use async_trait::async_trait;
 
+use serde_json::Value;
+
 use crate::crypto::SealedSecret;
 use crate::model::*;
 
@@ -112,6 +114,36 @@ pub trait Store: Send + Sync {
     ) -> StoreResult<bool>;
     async fn release_job(&self, tenant: &TenantId, job_id: &str) -> StoreResult<bool>;
     async fn active_jobs(&self, tenant: &TenantId) -> StoreResult<usize>;
+
+    // ---- tenant documents (settings and per-user preferences) -----------
+    /// One JSON document of a tenant's collection (`tenant_config` in the
+    /// worker's `Storage`: key `app`, and `repo-<id>` per repository).
+    async fn document(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        key: &str,
+    ) -> StoreResult<Option<Value>>;
+    /// Replace the document atomically.
+    async fn put_document(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        key: &str,
+        value: Value,
+    ) -> StoreResult<()>;
+    async fn delete_document(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        key: &str,
+    ) -> StoreResult<bool>;
+    /// Every document of the collection, sorted by key.
+    async fn documents(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+    ) -> StoreResult<Vec<(String, Value)>>;
 
     // ---- webhook deliveries (arrive before a tenant is known) -----------
     /// Claim a delivery for processing. `Duplicate` for an id already claimed,
