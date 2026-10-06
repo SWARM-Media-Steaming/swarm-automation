@@ -24,14 +24,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
+
+from storage import DEFAULT_TENANT, LocalStorage, Storage, StorageError
 
 SCHEMA_VERSION = 1
 
@@ -468,20 +468,38 @@ def _empty(repository: str) -> dict[str, Any]:
     }
 
 
-class ArchitectureStore:
-    """JSON snapshot keyed by repository under the application state directory."""
+COLLECTION = "architecture_docs"
 
-    def __init__(self, state_dir: Path | str, repository: str):
+
+class ArchitectureStore:
+    """JSON snapshot keyed by repository, held in a tenant-scoped ``Storage``.
+
+    Without ``storage`` the snapshot is a file under ``state_dir`` (the desktop
+    layout); a hosted deployment passes its own ``Storage`` and tenant.
+    """
+
+    def __init__(
+        self, state_dir: Path | str, repository: str, *,
+        storage: Storage | None = None, tenant: str = DEFAULT_TENANT,
+    ):
         self.repository = str(repository)
-        self.path = Path(state_dir) / f"{_slug(self.repository)}.json"
+        self.key = _slug(self.repository)
+        self.tenant = tenant
+        self.storage = storage or LocalStorage(
+            Path(state_dir).parent, collection_dirs={COLLECTION: Path(state_dir)}
+        )
+        self.path = (
+            self.storage.document_path(tenant, COLLECTION, self.key)
+            if isinstance(self.storage, LocalStorage) else None
+        )
 
     # -- persistence -------------------------------------------------------
     def load(self) -> dict[str, Any]:
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            data = self.storage.read_document(self.tenant, COLLECTION, self.key)
+        except StorageError:
             return _empty(self.repository)
-        if not isinstance(data, dict) or data.get("schema") != SCHEMA_VERSION:
+        if data is None or data.get("schema") != SCHEMA_VERSION:
             return _empty(self.repository)
         base = _empty(self.repository)
         base.update({key: data[key] for key in base if key in data})
@@ -494,15 +512,7 @@ class ArchitectureStore:
 
     def save(self, snapshot: dict[str, Any]) -> None:
         snapshot["updatedAt"] = now_iso()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle, temp = tempfile.mkstemp(dir=str(self.path.parent), prefix=".arch-", suffix=".tmp")
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                json.dump(snapshot, stream, indent=1, sort_keys=True)
-            os.replace(temp, self.path)
-        finally:
-            if os.path.exists(temp):
-                os.unlink(temp)
+        self.storage.write_document(self.tenant, COLLECTION, self.key, snapshot)
 
     # -- mutation ----------------------------------------------------------
     @staticmethod

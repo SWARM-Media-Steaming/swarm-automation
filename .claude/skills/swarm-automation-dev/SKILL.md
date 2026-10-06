@@ -76,6 +76,18 @@ Related, still-accurate mechanics:
   heuristic for the UI, not something the worker's own execution path
   branches on.)
 
+## Storage interface (web groundwork)
+
+`issue_worker/storage.py` is a tenant-scoped storage interface (checkpoints,
+documents, artifacts, execution history and token-usage records) with the
+local filesystem/SQLite behavior as `LocalStorage`. `Worker` derives its legacy
+`*_file` / `*_dir` attributes from it and its history facade and
+`ArchitectureStore` go through it; the on-disk layout and `SCHEMA_VERSION` are
+unchanged. `storage_contract.StorageContract` is the reusable contract suite
+(`test_storage.py` runs it locally), and `worker_entrypoint.py` is the image
+entrypoint. Keep `issue_worker/` stdlib-plus-siblings only. See
+`docs/web-architecture.md` and `.claude/rules/storage.md`.
+
 ## Engineering Knowledge / Ask SWARM
 
 Issue #291 adds a local Engineering Knowledge Platform on the same
