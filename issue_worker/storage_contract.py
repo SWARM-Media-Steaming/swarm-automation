@@ -233,6 +233,16 @@ class StorageContract:
         self.assertEqual(self.new_storage().read_artifact(DEFAULT_TENANT, "last-ai-output.log"), "cli result")
 
     # -- execution history and usage ---------------------------------------
+    def test_asking_whether_history_exists_creates_nothing(self):
+        self.assertFalse(self.storage.has_execution_history(OTHER_TENANT))
+        self.assertFalse(self.storage.has_execution_history(OTHER_TENANT))  # still absent after asking
+        self.storage.execution_history(OTHER_TENANT)
+        self.assertTrue(self.storage.has_execution_history(OTHER_TENANT))
+        self.assertTrue(self.new_storage().has_execution_history(OTHER_TENANT))
+        self.assertFalse(self.storage.has_execution_history(DEFAULT_TENANT))
+        with self.assertRaises(StorageError):
+            self.storage.has_execution_history("Not A Tenant")
+
     def test_history_lifecycle_and_resume_from_a_fresh_process(self):
         history = self.storage.execution_history(DEFAULT_TENANT)
         execution = history.create(execution_start(), NOW)
@@ -269,3 +279,55 @@ class StorageContract:
         self.assertIsNone(rows[1]["input_tokens"])  # missing counters stay unavailable, never zero
         self.assertEqual(len(history.token_usage_for_issue("o/r", 415)), 2)
         self.assertEqual(history.token_usage_for_issue("o/r", 1), [])
+
+    def test_history_import_is_idempotent_scoped_and_sanitized(self):
+        """The desktop importer's seam: rows keep their ids, a second run adds
+        nothing, a dry run writes nothing, an attempt clash renumbers."""
+        history = self.storage.execution_history(DEFAULT_TENANT)
+        existing = history.create(execution_start(issue=7), NOW)  # attempt 1 of issue 7 is taken here
+        row = lambda **extra: {  # noqa: E731
+            "repository": "o/r", "issue_number": 7, "issue_title": "T", "original_issue_body": "B",
+            "ai_provider": "claude", "started_at": NOW, "updated_at": NOW, "final_status": "completed",
+            "attempt_number": 1, **extra}
+        tables = {
+            "ai_executions": [
+                row(execution_id="imp-1", operational_notes='["token: ghp_%s"]' % ("a" * 30)),
+                row(execution_id="imp-2", issue_number=8),
+                row(execution_id=existing),
+            ],
+            "adversarial_rounds": [
+                {"round_id": "r1", "execution_id": "imp-1", "stage": "uat", "round_number": 0},
+                {"round_id": "r2", "execution_id": "not-imported", "stage": "uat", "round_number": 0},
+            ],
+            "adversarial_epochs": [{"epoch_id": "e1", "execution_id": "imp-1", "stage": "uat", "epoch_number": 1}],
+            "ai_token_usage": [
+                {"id": "t1", "execution_id": "imp-1", "repository": "o/r", "issue_number": 7, "input_tokens": 5},
+                {"id": "t2", "execution_id": "imp-1", "repository": "o/r", "issue_number": 7, "input_tokens": None},
+            ],
+            "jev_decisions": [{"decision_id": "d1", "execution_id": "imp-1", "decision": "ok"}],
+            "jev_score_comparisons": [{"comparison_id": "c1", "execution_id": "imp-1"}],
+        }
+        dry = history.import_records(tables, dry_run=True)
+        self.assertEqual(dry["ai_executions"], {"source": 3, "imported": 2, "existing": 1, "renumbered": 1, "orphaned": 0})
+        self.assertFalse(history.execution_exists("imp-1"))  # a dry run wrote nothing
+        first = history.import_records(tables)
+        self.assertEqual(first, dry)
+        self.assertEqual(first["adversarial_rounds"]["imported"], 1)
+        self.assertEqual(first["adversarial_rounds"]["orphaned"], 1)
+        self.assertEqual(first["ai_token_usage"]["imported"], 2)
+        again = history.import_records(tables)
+        for table, counts in again.items():
+            with self.subTest(table=table):
+                self.assertEqual(counts["imported"], 0)
+        self.assertEqual(again["ai_executions"]["existing"], 3)
+        self.assertTrue(self.new_storage().execution_history(DEFAULT_TENANT).execution_exists("imp-1"))
+        self.assertEqual(len(history.final_statuses_for_issue("o/r", 7)), 2)  # existing + renumbered imp-1
+        usage = history.token_usage_for_execution("imp-1")
+        self.assertEqual([record["id"] for record in usage], ["t1", "t2"])
+        self.assertIsNone(usage[1]["input_tokens"])  # unavailable stays unavailable
+        # Invisible to another tenant (redaction is asserted in test_desktop_import).
+        other = self.storage.execution_history(OTHER_TENANT)
+        self.assertFalse(other.execution_exists("imp-1"))
+        self.assertEqual(other.token_usage_for_issue("o/r", 7), [])
+        with self.assertRaises(ValueError):
+            history.import_records({"not_a_table": [{}]})

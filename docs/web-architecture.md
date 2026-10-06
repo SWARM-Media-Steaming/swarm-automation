@@ -3,9 +3,9 @@
 SWARM Automation gains a hosted, multi-tenant web version alongside the Tauri
 desktop app (tracked in #413). The desktop stays fully working; `ui/` and
 `issue_worker/` are shared. This document records the pieces as they land.
-It covers the storage seam and the web backend (API, auth, tenancy, provider
-keys, usage and quotas); the job runner and the Postgres/S3 implementations are
-added by their own issues.
+It covers the storage seam and its hosted Postgres/S3 implementation, the
+desktop data importer, and the web backend (API, auth, tenancy, provider keys,
+usage and quotas); the job runner is added by its own issue.
 
 ## Storage
 
@@ -30,7 +30,7 @@ implementation maps the tenant to a database tenant and an object-store prefix.
 | Group | Methods | Holds |
 | --- | --- | --- |
 | Checkpoints | `read/write/delete/list_checkpoint(s)` | Resumable per-issue state, a JSON object per `(kind, key)` |
-| Documents | `read/write/delete/list_document(s)` | Durable product data (`architecture_docs`, one snapshot per repository) |
+| Documents | `read/write/delete/list_document(s)` | Durable product data: `architecture_docs` (one snapshot per repository) and `tenant_config` (settings: key `app`, and `repo-<id>` per repository; written by the hosted backend and the desktop importer, never by the desktop itself) |
 | Artifacts | `write/append/read/delete/list_artifact(s)`, `scratch_path`, `publish_artifact` | Text logs and CLI scratch (`last-ai-output.log`, `last-ai-diagnostic.log`, `completed-issues`) |
 | Execution history | `execution_history(tenant)` | An `ExecutionHistoryStore`: `ai_executions`, adversarial rounds/epochs, Jev records and the per-prompt token-usage records (`ai_token_usage`) |
 
@@ -97,8 +97,9 @@ those local paths (they are interleaved with Git operations on the same
 checkout); moving them onto the interface calls is part of adding a remote
 implementation. Not covered yet and still local: the single-worker process lock
 (`worker.lock`), downloaded issue images, and the app-wide SQLite stores for
-complexity profiles, diagnostics and engineering knowledge. Postgres and
-S3-compatible implementations are a later issue.
+complexity profiles, diagnostics and engineering knowledge. The remote
+implementation is `RemoteStorage` (below); pointing the worker's checkpoint
+reads and writes at it is part of the job runner.
 
 ### Contract tests
 
@@ -120,6 +121,96 @@ with scratch publishing, the history lifecycle and token-usage idempotency.
 `issue_worker/test_storage.py` runs it against `LocalStorage` and adds the
 local-only checks: legacy file names and bytes, the unchanged history schema
 and migrations, worker path derivation, and the image-isolation tests.
+`test_storage_remote.py` runs the same contract against `RemoteStorage` three
+ways (below). The contract also pins `has_execution_history` (asking never
+provisions) and `import_records` (the importer's idempotent row copy).
+
+### Hosted storage: Postgres and S3
+
+`issue_worker/storage_remote.py` is `RemoteStorage(objects, database, prefix="",
+scratch_root=None)`. It is standard library only, like the rest of
+`issue_worker/`; it does not import a database driver or an S3 SDK.
+
+| Data | Where |
+| --- | --- |
+| Checkpoints | S3 object `<prefix>tenants/<tenant>/checkpoints/<kind>/<key>.json` (`current` for a singleton kind) |
+| Documents | `<prefix>tenants/<tenant>/documents/<collection>/<key>.json` |
+| Artifacts (logs, `completed-issues`) | `<prefix>tenants/<tenant>/artifacts/<name>` |
+| Execution history | Postgres schema `t_<tenant>` (shortened with a digest past 63 bytes), registered in `swarm_storage.tenants` |
+
+- **Objects.** JSON is written with the same indentation and key order as
+  `LocalStorage`, so a checkpoint is byte-identical in both. A PUT is atomic, so
+  readers never see a torn value. S3 has no append: `append_artifact` is a
+  read-modify-write guarded by `If-Match` / `If-None-Match` and retried on
+  contention (`StorageError` after eight lost races). The bucket must support
+  conditional writes (AWS S3 and MinIO do). `object_store.S3ObjectStore` signs
+  with Signature V4 over `urllib` (path-style addressing for MinIO, virtual-hosted
+  optional), refuses redirects, never puts credentials in a `repr` or error, and
+  refuses plain HTTP unless the host is loopback or `allow_insecure_http` is set.
+  `MemoryObjectStore` backs tests and single-process use.
+- **History.** `SqlExecutionHistory` subclasses the desktop's
+  `ExecutionHistoryRepository`, so every write path, the sanitizer and the
+  idempotency rules are the same code; only the connection, the creation script
+  and the two usage queries ordered by `rowid` differ. `storage_schema.py`
+  creates the final shape of migrations 1-10 directly and records versions
+  1..`SCHEMA_VERSION` in `schema_migrations` (so migrations 3, 5 and 9 are
+  visible as applied). Token counters are `BIGINT` and `ai_token_usage` has an
+  identity `seq` column for insertion order (Postgres has no `rowid`); the
+  schema-parity test fails if the desktop schema moves and this one does not.
+  `ai_execution_history_enabled` still gates everything through
+  `ExecutionHistoryService`.
+- **Tenant isolation.** A schema per tenant plus an object prefix per tenant:
+  every connection runs with `search_path` set to that tenant's schema, so none
+  of the repository's SQL can name another tenant's rows. Provisioning is
+  idempotent and serialised with an advisory lock; concurrent `create` calls are
+  serialised per tenant so attempt numbers stay unique.
+- **Errors.** Driver and socket failures are wrapped in `StorageError`, which
+  `ExecutionHistoryService` absorbs like `sqlite3.Error`.
+- **Driver injection.** `PostgresDatabase(connect)` takes a zero-argument callable
+  returning a DB-API 2.0 connection (autocommit off), e.g. `lambda:
+  psycopg.connect(dsn)`. `storage_factory.open_storage("hosted")` builds the whole
+  thing from `SWARM_STORAGE_*` variables (listed in its docstring) and loads the
+  driver named by `SWARM_STORAGE_POSTGRES_DRIVER` (`module:callable`) only when
+  set; the worker image bundles none.
+- **Local development.** `web/docker-compose.yml` starts Postgres 17 and MinIO
+  and creates the bucket (`docker compose -f web/docker-compose.yml up -d`).
+  Point `SWARM_STORAGE_POSTGRES_DSN` at `postgresql://swarm:swarm@localhost:5432/swarm`
+  and `SWARM_STORAGE_S3_ENDPOINT` at `http://localhost:9000` (loopback HTTP is
+  allowed). The always-on test suites need neither server: the S3 client is
+  exercised against an in-process server that verifies every signature, and
+  history runs on SQLite. Live Postgres is `SWARM_TEST_POSTGRES_DSN`.
+
+Tests: `test_storage_remote.py` runs `StorageContract` against (1) in-memory
+objects with SQLite history files, (2) `S3ObjectStore` against a local S3 test
+server, and (3) a live Postgres when `SWARM_TEST_POSTGRES_DSN` is set and
+`psycopg` is installed (`.github/workflows/storage-live.yml` runs it on every
+push and pull request). It adds the signature test vector, conditional-write and
+paged-listing tests, driver-error wrapping, schema parity with a freshly migrated
+desktop database, per-tenant schemas, concurrent provisioning and attempt
+numbers.
+
+### Platform schema
+
+`web/migrations/0001_platform.sql` (embedded as `swarm_web::schema::MIGRATIONS`)
+is the Postgres schema for what the `Store` trait holds: `web_users`,
+`web_sessions`, `tenants` (one per GitHub App installation), `tenant_memberships`,
+`tenant_provider_keys` (sealed keys and their metadata, no plaintext column),
+`tenant_plan_quotas`, `tenant_budgets`, `tenant_usage_ledger` (a `NULL` cost is
+unpriced, never zero), `tenant_provider_reports`, `tenant_jobs` (a row holds a
+concurrent-job slot while `active`) and `webhook_deliveries`. Tenant-scoped tables
+lead their key with `tenant_id` and cascade from `tenants`. The file is idempotent;
+apply it with `psql -f` or any runner. Per-tenant execution history is *not* here
+(it is the `t_<tenant>` schema above) and neither are settings, which are
+`tenant_config` documents in object storage so a worker job reads them beside its
+checkpoints. The Postgres `Store` that queries these tables is the next step;
+`memory::MemoryStore` remains the store until then.
+
+### Desktop data import
+
+`issue_worker/desktop_import.py` copies a desktop install into one tenant:
+configuration, execution history and architecture documentation. It is re-runnable
+and idempotent, has a `--dry-run`, and never imports credentials. See
+[desktop-import.md](desktop-import.md).
 
 ### Worker image entrypoint
 
@@ -274,8 +365,9 @@ events for a known active installation are recorded for the job runner.
 ### Not yet built
 
 Behind the seams above, by later issues of #413: the Postgres `Store` (the
-in-memory store used today loses state on restart and the binary says so at
-startup), the S3-backed worker `Storage`, the KMS `KeyWrapper`, the `JobRunner`
+schema exists, see "Platform schema", but the in-memory store used today still
+loses state on restart and the binary says so at startup), wiring the worker's
+own checkpoint file access to `RemoteStorage`, the KMS `KeyWrapper`, the `JobRunner`
 (Docker, ECS Fargate) that calls `Vault::job_environment` and the admission
 endpoints, Server-Sent Events streams (the `EVENTS` table in `ui/api.js` is
 still empty), and the UI screens that call the `web_*` commands.

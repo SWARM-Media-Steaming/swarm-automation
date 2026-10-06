@@ -56,7 +56,11 @@ KEYED_CHECKPOINTS: Mapping[str, str] = {
     "abandoned": "abandoned",
 }
 CHECKPOINT_KINDS = tuple(SINGLETON_CHECKPOINTS) + tuple(KEYED_CHECKPOINTS)
-DOCUMENT_COLLECTIONS = ("architecture_docs",)
+# ``tenant_config`` holds a tenant's settings (key ``app`` for the app-wide
+# configuration, ``repo-<id>`` per repository). The desktop keeps its settings
+# in ``config.json`` and never writes this collection; the hosted backend and
+# the desktop importer do.
+DOCUMENT_COLLECTIONS = ("architecture_docs", "tenant_config")
 _TENANT_DIRECTORY = "tenants"
 
 
@@ -103,6 +107,14 @@ class ExecutionHistoryStore(Protocol):
 
     def finish_jev_outcomes(self, execution_id: str, outcome: str) -> None: ...
 
+    def import_records(
+        self, tables: Mapping[str, Sequence[Mapping[str, Any]]], *, dry_run: bool = False
+    ) -> dict[str, dict[str, int]]:
+        """Idempotently copy rows exported from another history store (the
+        desktop importer). Returns ``{table: {source, imported, existing,
+        renumbered, orphaned}}``; ``dry_run`` reports without writing."""
+        ...
+
 
 def validate_tenant(tenant: str) -> str:
     if not isinstance(tenant, str) or not _TENANT_RE.fullmatch(tenant):
@@ -116,6 +128,39 @@ def validate_name(name: str, what: str = "name") -> str:
     if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
         raise StorageError(f"Invalid {what}: {name!r}")
     return name
+
+
+def check_checkpoint(kind: str, key: str) -> str:
+    """Validate a checkpoint address and return its key (``CURRENT`` for a
+    singleton kind). Shared by every implementation so the closed kind set and
+    the key grammar cannot drift between backends."""
+    if kind in SINGLETON_CHECKPOINTS:
+        if key != CURRENT:
+            raise StorageError(f"Checkpoint kind {kind!r} holds one document; key must be {CURRENT!r}")
+        return CURRENT
+    if kind in KEYED_CHECKPOINTS:
+        return validate_name(key, "checkpoint key")
+    raise StorageError(f"Unknown checkpoint kind: {kind!r}")
+
+
+def check_collection(collection: str) -> str:
+    if collection not in DOCUMENT_COLLECTIONS:
+        raise StorageError(f"Unknown document collection: {collection!r}")
+    return collection
+
+
+def check_artifact_name(name: str) -> str:
+    """Artifact names are flat words that cannot collide with a checkpoint
+    file, a document directory or the tenant subtree."""
+    validate_name(name, "artifact name")
+    if name in RESERVED_ARTIFACT_NAMES:
+        raise StorageError(f"Artifact name is reserved: {name!r}")
+    return name
+
+
+RESERVED_ARTIFACT_NAMES = frozenset(
+    {*SINGLETON_CHECKPOINTS.values(), *KEYED_CHECKPOINTS.values(), *DOCUMENT_COLLECTIONS, _TENANT_DIRECTORY}
+)
 
 
 class Storage(abc.ABC):
@@ -192,6 +237,13 @@ class Storage(abc.ABC):
         """The tenant's execution-history store (schema version and migrations
         3, 5 and 9 semantics are the implementation's responsibility)."""
 
+    def has_execution_history(self, tenant: str) -> bool:
+        """Whether the tenant's history store already exists, without creating
+        it (``execution_history`` provisions on first use). Implementations
+        that cannot tell answer ``True``."""
+        validate_tenant(tenant)
+        return True
+
 
 class LocalStorage(Storage):
     """Filesystem + SQLite implementation: the behavior the worker and desktop
@@ -229,13 +281,10 @@ class LocalStorage(Storage):
         """Where a checkpoint lives. The worker's legacy ``*_file`` / ``*_dir``
         attributes are derived from this so the layout has one owner."""
         base = self.tenant_root(tenant)
+        key = check_checkpoint(kind, key)
         if kind in SINGLETON_CHECKPOINTS:
-            if key != CURRENT:
-                raise StorageError(f"Checkpoint kind {kind!r} holds one document; key must be {CURRENT!r}")
             return base / SINGLETON_CHECKPOINTS[kind]
-        if kind in KEYED_CHECKPOINTS:
-            return base / KEYED_CHECKPOINTS[kind] / f"{validate_name(key, 'checkpoint key')}.json"
-        raise StorageError(f"Unknown checkpoint kind: {kind!r}")
+        return base / KEYED_CHECKPOINTS[kind] / f"{key}.json"
 
     def checkpoint_directory(self, tenant: str, kind: str) -> Path:
         if kind not in KEYED_CHECKPOINTS:
@@ -243,8 +292,7 @@ class LocalStorage(Storage):
         return self.tenant_root(tenant) / KEYED_CHECKPOINTS[kind]
 
     def document_directory(self, tenant: str, collection: str) -> Path:
-        if collection not in DOCUMENT_COLLECTIONS:
-            raise StorageError(f"Unknown document collection: {collection!r}")
+        check_collection(collection)
         validate_tenant(tenant)
         if tenant == DEFAULT_TENANT and collection in self.collection_dirs:
             return self.collection_dirs[collection]
@@ -254,10 +302,7 @@ class LocalStorage(Storage):
         return self.document_directory(tenant, collection) / f"{validate_name(key, 'document key')}.json"
 
     def artifact_path(self, tenant: str, name: str) -> Path:
-        validate_name(name, "artifact name")
-        reserved = {*SINGLETON_CHECKPOINTS.values(), *KEYED_CHECKPOINTS.values(), *DOCUMENT_COLLECTIONS, _TENANT_DIRECTORY}
-        if name in reserved:
-            raise StorageError(f"Artifact name is reserved: {name!r}")
+        check_artifact_name(name)
         return self.tenant_root(tenant) / name
 
     def history_database_path(self, tenant: str) -> Path:
@@ -330,12 +375,11 @@ class LocalStorage(Storage):
         base = self.tenant_root(tenant)
         if not base.is_dir():
             return []
-        reserved = {*SINGLETON_CHECKPOINTS.values(), *KEYED_CHECKPOINTS.values(), *DOCUMENT_COLLECTIONS, _TENANT_DIRECTORY}
         return sorted(
             entry.name
             for entry in base.iterdir()
             if entry.is_file()
-            and entry.name not in reserved
+            and entry.name not in RESERVED_ARTIFACT_NAMES
             and _NAME_RE.fullmatch(entry.name)
             and entry.suffix != ".sqlite3"
             and not entry.name.endswith(("-wal", "-shm"))
@@ -348,6 +392,9 @@ class LocalStorage(Storage):
         self.artifact_path(tenant, name)
 
     # -- execution history -------------------------------------------------
+    def has_execution_history(self, tenant: str) -> bool:
+        return tenant in self._histories or self.history_database_path(tenant).is_file()
+
     def execution_history(self, tenant: str) -> ExecutionHistoryStore:
         validate_tenant(tenant)
         if tenant not in self._histories:
