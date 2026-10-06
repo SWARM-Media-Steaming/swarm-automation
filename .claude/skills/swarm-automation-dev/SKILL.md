@@ -690,3 +690,18 @@ provider CLIs must not inherit that setting accidentally. Capture a provider's
 machine-readable stdout separately from stderr and parse only stdout; retain
 both streams in the private diagnostic file. Regression fixtures must include
 valid JSON stdout alongside noisy stderr.
+
+## UI transport adapter (desktop and web)
+
+`ui/` is shared by the Tauri desktop app and the planned hosted web app (#413).
+`ui/api.js` (`window.SwarmApi`) is the only place that touches `window.__TAURI__`,
+`fetch` or `EventSource`; `app.js` takes `invoke`/`listen` from it. Desktop
+delegates to Tauri unchanged; with no `window.__TAURI__` it uses `fetch('/api/v1/...')`
+and Server-Sent Events, driven by the `COMMANDS` / `EVENTS` data tables in that
+file. An unmapped command rejects with `UnavailableOnWebError`
+(`code: "not_available_on_web"`); an unmapped event resolves a no-op unlisten.
+Add a Tauri command or event on the desktop as before and add a table row only
+when the web backend serves it. `ui/api.test.js` runs the `app.js` controllers
+against mocked Tauri and mocked HTTP/SSE transports; keep both green when
+changing `ui/`. Keep `invoke("name"…)` call sites literal in `app.js` — several
+tests match them by source text.
