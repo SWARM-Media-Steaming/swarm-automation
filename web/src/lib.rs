@@ -15,6 +15,7 @@ pub mod memory;
 pub mod model;
 pub mod redact;
 pub mod routes;
+pub mod schema;
 pub mod secret;
 pub mod state;
 pub mod store;

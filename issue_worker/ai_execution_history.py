@@ -1735,6 +1735,86 @@ class ExecutionHistoryRepository:
                 (status, execution_id),
             )
 
+    def import_records(
+        self, tables: Mapping[str, Sequence[Mapping[str, Any]]], *, dry_run: bool = False
+    ) -> dict[str, dict[str, int]]:
+        """Copy history rows from another store (a desktop install) into this one.
+
+        Idempotent: every row keeps its source id, a row whose id is already
+        here is left alone, and a second run imports nothing. Text is passed
+        through the same sanitizer the live writers use. An execution whose
+        ``(repository, issue_number, attempt_number)`` is taken by a different
+        execution is renumbered to the next free attempt rather than rejected.
+        Child rows of an execution that is not here are skipped (``orphaned``).
+        Columns the target lacks are ignored and columns the source lacks take
+        their defaults, so an older or newer source imports cleanly. One
+        transaction: an error imports nothing. ``dry_run`` performs the whole
+        import and rolls it back, so the counts are exactly what a real run
+        would produce. Returns counts per table.
+        """
+        unknown = set(tables) - set(IMPORT_TABLES)
+        if unknown:
+            raise ValueError(f"Unsupported history tables: {sorted(unknown)}")
+        summary: dict[str, dict[str, int]] = {}
+        try:
+            with self.connect() as database:
+                database.execute("BEGIN IMMEDIATE")
+                known_executions: dict[str, bool] = {}
+                for table in IMPORT_TABLES:
+                    rows = list(tables.get(table, ()))
+                    counts = {"source": len(rows), "imported": 0, "existing": 0, "renumbered": 0, "orphaned": 0}
+                    summary[table] = counts
+                    if not rows:
+                        continue
+                    key = _IMPORT_KEYS[table]
+                    columns = [
+                        name for name in _table_columns(database, table) if name != "seq"
+                    ]
+                    for row in rows:
+                        record = {name: _import_value(row[name]) for name in columns if name in row}
+                        if not record.get(key):
+                            counts["orphaned"] += 1
+                            continue
+                        if table in ("adversarial_rounds", "adversarial_epochs"):
+                            owner = str(record.get("execution_id") or "")
+                            if owner not in known_executions:
+                                known_executions[owner] = database.execute(
+                                    "SELECT 1 FROM ai_executions WHERE execution_id = ?", (owner,)
+                                ).fetchone() is not None
+                            if not known_executions[owner]:
+                                counts["orphaned"] += 1
+                                continue
+                        if table == "ai_executions":
+                            known_executions[str(record[key])] = True
+                            if database.execute(
+                                "SELECT 1 FROM ai_executions WHERE execution_id = ?", (record[key],)
+                            ).fetchone() is not None:
+                                counts["existing"] += 1
+                                continue
+                            taken = database.execute(
+                                "SELECT 1 FROM ai_executions WHERE repository = ? AND issue_number = ? "
+                                "AND attempt_number = ?",
+                                (record.get("repository"), record.get("issue_number"), record.get("attempt_number")),
+                            ).fetchone()
+                            if taken is not None:
+                                record["attempt_number"] = database.execute(
+                                    "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM ai_executions "
+                                    "WHERE repository = ? AND issue_number = ?",
+                                    (record.get("repository"), record.get("issue_number")),
+                                ).fetchone()[0]
+                                counts["renumbered"] += 1
+                        names = ", ".join(record)
+                        slots = ", ".join("?" for _ in record)
+                        inserted = database.execute(
+                            f"INSERT OR IGNORE INTO {table} ({names}) VALUES ({slots})", tuple(record.values())
+                        ).rowcount
+                        counts["imported" if inserted == 1 else "existing"] += 1
+                if dry_run:
+                    raise _DryRunComplete
+        except _DryRunComplete:
+            pass
+        return summary
+
     def jev_feedback(
         self,
         repositories: Sequence[str] | str | None = None,
@@ -2279,6 +2359,41 @@ def summarize_router_matrix(
 def normalize_router_model(value: str) -> str:
     """Trim a router-model filter without treating model IDs as provider keys."""
     return sanitize_text(value).strip()[:120]
+
+
+IMPORT_TABLES = (
+    "ai_executions", "adversarial_rounds", "adversarial_epochs",
+    "ai_token_usage", "jev_decisions", "jev_score_comparisons",
+)
+_IMPORT_KEYS = {
+    "ai_executions": "execution_id", "adversarial_rounds": "round_id", "adversarial_epochs": "epoch_id",
+    "ai_token_usage": "id", "jev_decisions": "decision_id", "jev_score_comparisons": "comparison_id",
+}
+
+
+class _DryRunComplete(Exception):
+    """Unwinds the import transaction so a dry run writes nothing."""
+
+
+def _table_columns(database: Any, table: str) -> list[str]:
+    cursor = database.execute(f"SELECT * FROM {table} WHERE 1 = 0")
+    return [column[0] for column in cursor.description]
+
+
+def _import_value(value: Any) -> Any:
+    """One imported cell: text is redacted like a live write, JSON text keeps
+    its structure (only its string leaves are redacted)."""
+    if isinstance(value, bool):
+        return int(value)
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip()
+    if stripped[:1] in ("{", "["):
+        try:
+            return json.dumps(_json_sanitize(json.loads(value)))
+        except ValueError:
+            pass
+    return sanitize_text(value)
 
 
 def _serialize_routing(value: Any) -> str:
