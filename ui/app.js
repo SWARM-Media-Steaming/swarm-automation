@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const { invoke } = window.__TAURI__.core;
-  const { listen } = window.__TAURI__.event;
+  // Desktop (Tauri) or web (fetch/SSE), chosen in api.js.
+  const { invoke, listen } = window.SwarmApi;
 
   const state = {
     config: null,

@@ -17,8 +17,19 @@ rule intact.
 
 - Plain HTML/CSS/JS. No frontend framework, no bundler, no build step —
   `tauri.conf.json` points `frontendDist` straight at `ui/`.
-- `window.__TAURI__` is available globally (`withGlobalTauri`); all
-  backend calls go through `invoke`/`listen`, not fetch/XHR.
+- Every backend call goes through the transport adapter, `ui/api.js`
+  (`window.SwarmApi`): `invoke(name, args)` and `listen(event, cb)`. On the
+  desktop (`window.__TAURI__` present, `withGlobalTauri`) it delegates to Tauri
+  unchanged; on the web (absent) `invoke` becomes `fetch('/api/v1/...')` and
+  `listen` an `EventSource` (Server-Sent Events). The command → endpoint and
+  event → stream mapping is the `COMMANDS` / `EVENTS` data tables in that file;
+  an unmapped command rejects with `UnavailableOnWebError` (`code:
+  "not_available_on_web"`), which the UI must handle like any other error.
+  Nothing else in `ui/` touches `window.__TAURI__`, `fetch`, `XMLHttpRequest`
+  or `EventSource`.
+- Any `ui/` change must keep both transports working: new commands and events
+  get a table row when the web backend serves them, and `ui/api.test.js` runs
+  the app controllers against a mocked Tauri and a mocked HTTP/SSE transport.
 - Keep the three responsibilities in their own file: structure and
   data-attributes in `index.html`, all visual rules in `style.css`, all
   behavior in `app.js`. No inline `style="…"` and no inline `<script>`
