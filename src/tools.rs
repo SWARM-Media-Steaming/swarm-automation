@@ -1855,7 +1855,7 @@ with tempfile.TemporaryDirectory() as directory:
     path = os.path.join(directory, 'active_catalog.json')
     os.environ['SWARM_MODEL_CALIBRATION_CATALOG'] = path
     for old, new in a.listed_retirements().items():
-        agent = 'codex' if old.startswith('gpt-') else 'claude'
+        agent = 'codex' if old.startswith('gpt-') else 'grok' if old.startswith('grok-') else 'claude'
         for offered, suffix in ((offer, suffix) for offer in (False, True) for suffix in ('', '-20261003', '_20261003')):
             names = [name + suffix for name in ([old, new] if offered else [old])]
             rows = [{'agent': agent, 'model': new, 'input_cost': 2, 'output_cost': 10}]
