@@ -2,12 +2,17 @@
 
 SWARM Automation gains a hosted, multi-tenant web version alongside the Tauri
 desktop app (tracked in #413). The desktop stays fully working; `ui/` and
-`issue_worker/` are shared. This document records the pieces as they land.
-It covers the storage seam and its hosted Postgres/S3 implementation, the
-desktop data importer, the web backend (API, auth, tenancy, provider keys,
-usage and quotas), the job runner (one container per repository, Docker
-locally and ECS Fargate on AWS), and the REST and Server-Sent Events API that
-covers every desktop command.
+`issue_worker/` are shared. This document is the contract for the web path.
+
+| Section | What it answers |
+| --- | --- |
+| [Storage](#storage) | where the worker's state lives (local files or Postgres and S3) |
+| [Web backend](#web-backend-web) | the API, sign-in, tenants, provider keys, usage, webhooks, jobs |
+| [Local stack](#local-stack) | `docker compose up`, the acceptance flow, building images |
+| [API contract](#api-contract), [Server-Sent Events](#server-sent-events) | what a client may rely on |
+| [Tenancy model](#tenancy-model), [Runner abstraction](#runner-abstraction) | isolation and the one-container-per-job runtime |
+| [AWS mapping](#aws-mapping) | the Terraform in `web/infra/aws`, IAM and secrets |
+| [Threat model](#threat-model), [Decisions](#decisions), [Known gaps](#known-gaps) | what is defended, why it is built this way, what is not built yet |
 
 ## Storage
 
@@ -177,8 +182,10 @@ scratch_root=None)`. It is standard library only, like the rest of
   thing from `SWARM_STORAGE_*` variables (listed in its docstring) and loads the
   driver named by `SWARM_STORAGE_POSTGRES_DRIVER` (`module:callable`) only when
   set; the worker image bundles none.
-- **Local development.** `web/docker-compose.yml` starts Postgres 17 and MinIO
-  and creates the bucket (`docker compose -f web/docker-compose.yml up -d`).
+- **Local development.** The repository-root `docker-compose.yml` runs the whole
+  hosted stack ("Local stack" below). `web/docker-compose.yml` starts only
+  Postgres 17 and MinIO and creates the bucket
+  (`docker compose -f web/docker-compose.yml up -d`).
   Point `SWARM_STORAGE_POSTGRES_DSN` at `postgresql://swarm:swarm@localhost:5432/swarm`
   and `SWARM_STORAGE_S3_ENDPOINT` at `http://localhost:9000` (loopback HTTP is
   allowed). The always-on test suites need neither server: the S3 client is
@@ -207,7 +214,7 @@ lead their key with `tenant_id` and cascade from `tenants`. The file is idempote
 apply it with `psql -f` or any runner. Per-tenant execution history is *not* here
 (it is the `t_<tenant>` schema above) and neither are settings, which are
 `tenant_config` documents in object storage so a worker job reads them beside its
-checkpoints. The Postgres `Store` that queries these tables is the next step;
+checkpoints. The Postgres `Store` that queries these tables is a known gap;
 `memory::MemoryStore` remains the store until then.
 
 ### Desktop data import
@@ -325,7 +332,7 @@ drop. Envelope encryption: a random data key per secret seals it with
 AES-256-GCM; a `KeyWrapper` wraps the data key. `LocalKeyWrapper`
 (`SWARM_WEB_LOCAL_KEY`, base64 32 bytes) is the development wrapper. **KMS on
 AWS is the same trait with an AWS-backed implementation; it needs the AWS SDK
-and lands with the deployment work, and `SWARM_WEB_KMS_KEY_ID` is refused at
+and is listed under "Known gaps", and `SWARM_WEB_KMS_KEY_ID` is refused at
 startup until it exists rather than silently ignored.** `Vault::job_environment`
 is the only place plaintext leaves: it returns the one provider's variable
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`), plus
@@ -400,9 +407,18 @@ requires `SWARM_WEB_WORKER_IMAGE`, `SWARM_WEB_GITHUB_APP_ID` and
 intervals have defaults (1000 millis, 2048 MiB, 60 seconds, 60 seconds).
 There is no default job deadline; `SWARM_WEB_JOB_MAX_RUNTIME_SECS` is the only
 way to set one. Fargate also needs `SWARM_WEB_ECS_SUBNETS`. Storage variables
-named `SWARM_STORAGE_*` are forwarded into the container; the app private key
-and the ECS control-plane credentials are not. `web/docker-compose.jobs.yml`
-builds the fixture image for a local acceptance run.
+named `SWARM_STORAGE_*` (the names `storage_factory.py` reads, with the database
+DSN and the S3 key pair as secrets) are forwarded into the container; the app
+private key and the ECS control-plane credentials are not. The Fargate runner
+signs its ECS calls with the API task's own role when the ECS agent provides one
+(`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` / `_FULL_URI`, optional
+`AWS_CONTAINER_AUTHORIZATION_TOKEN`, refreshed every minute) and otherwise with
+`SWARM_WEB_ECS_ACCESS_KEY_ID` / `SWARM_WEB_ECS_SECRET_ACCESS_KEY`, which is for a
+non-AWS endpoint. On Fargate `SWARM_WEB_JOB_CPU_MILLIS` is in CPU units (1024 is
+one vCPU), not millicores. A PEM private key may be given on one line with a
+literal `\n` for each line break. `docker-compose.yml` runs all of this locally
+(see "Local stack"); `web/docker-compose.jobs.yml` builds the fixture image for a
+storage-only run.
 
 ### Jobs
 
@@ -649,12 +665,337 @@ Tests: `ui/web-account.test.js` (the logic, the controller over a mocked HTTP
 transport, the adapter's expiry hook, and markup and design-system conformance) and
 `ui/api.test.js` (both transports).
 
-### Not yet built
+## Local stack
 
-Behind the seams above, by later issues of #413: the Postgres `Store` (the
-schema exists, see "Platform schema", but the in-memory store used today still
-loses state on restart and the binary says so at startup), the KMS
-`KeyWrapper`, the worker-side operations listed as 501 above, the web screens for
-repository settings and history beyond the views above, and per-process (`uat:<repo>`) controls. Scheduling
-state lives in memory with that store. Checkpoints for a hosted job live in
-the object store via `job_checkpoint_sync.py`.
+`docker-compose.yml` at the repository root runs the whole hosted stack on one
+machine:
+
+```bash
+cp web/.env.example .env     # GitHub App values and SWARM_WEB_LOCAL_KEY
+docker compose up --build
+python3 scripts/web_smoke.py # in another terminal; no sign-in needed
+```
+
+| Service | Image | Role |
+| --- | --- | --- |
+| `postgres` | `postgres:17` | execution history (one schema per tenant) and the platform schema (`web/migrations`, applied on the first start) |
+| `minio`, `minio-bucket` | `minio/minio`, `minio/mc` | the S3-compatible object store and its `swarm-dev` bucket (checkpoints, logs, documents) |
+| `worker-image` | `web/worker/Dockerfile` | builds the image the runner starts for every job, then exits. `SWARM_WORKER_DOCKERFILE=web/worker/Dockerfile.fixture` swaps in the fixture worker that needs no provider CLI |
+| `api` | `web/Dockerfile` | the backend and the shared `ui/`, on `http://localhost:8080` |
+
+Every published port is bound to `127.0.0.1`. The API runs read-only with all
+capabilities dropped. It reaches Postgres and MinIO by service name, and so do the
+job containers it starts: the runner attaches each job to the `swarm-stack`
+network (`SWARM_WEB_DOCKER_NETWORK`) and gives it the same `SWARM_STORAGE_*`
+values, under the names `storage_factory.py` reads. Credentials in the file
+(`dev`/`devpassword`, `swarm`/`swarm`) are throwaway values for this machine.
+
+**The Docker socket.** `DockerJobRunner` starts job containers through the host's
+Docker, so the API container mounts `/var/run/docker.sock`. Whoever controls the
+API process can therefore start any container on that host, which is
+root-equivalent. That is acceptable for a developer's own machine and is why the
+stack only listens on loopback. Do not expose this stack, and do not use this
+runner for a shared or production host: use the Fargate runner (AWS mapping
+below), a remote or rootless Docker daemon, or both. On Linux set `DOCKER_GID` to
+the socket's group; the default (`0`) is what Docker Desktop and Rancher Desktop
+present.
+
+`web/docker-compose.yml` (Postgres and MinIO only, for the storage tests) and
+`web/docker-compose.jobs.yml` (the fixture image with the same isolation flags
+the runner applies) are still there for those narrower uses.
+
+### Acceptance flow
+
+The flow from #413, as a person runs it against the local stack. Steps 1-3 need a
+GitHub App you registered and, for step 5, a public URL for its webhook (a tunnel
+to `localhost:8080`); sign-in itself works without one. The right-hand column is
+what covers each step without a GitHub App.
+
+| # | Step | Expected | Automated coverage |
+| --- | --- | --- | --- |
+| 0 | `docker compose up --build`, `python3 scripts/web_smoke.py` | healthy, 8/8 checks | `test_web_deploy.py` (compose and smoke logic), CI `web-deploy` (smoke against the built binary) |
+| 1 | open `http://localhost:8080`, **Sign in with GitHub** | signed in, a tenant per installation, CSRF cookie set | `web/tests/auth_flow.rs` |
+| 2 | **GitHub App** page: install the App on a repository, **Re-check** | installation active | `web/tests/webhooks.rs`, `ui/web-account.test.js` |
+| 3 | **API keys**: save the provider key; set a budget on **Quota & budget** | key shows *configured* (never the value); budget shown | `web/tests/secrets.rs`, `web/tests/quotas.rs` |
+| 4 | save the repository's settings | `tenant_config` documents written, credential-shaped keys dropped | `web/tests/api_commands.rs`, `issue_worker/test_desktop_import.py` |
+| 5 | label an issue (webhook), or **Run now** | one container for the repository, key for that provider only | `web/tests/orchestrator.rs`, `web/tests/webhooks.rs` |
+| 6 | watch **Overview** | live job log lines over SSE, tokens redacted | `web/tests/sse.rs`, `web/tests/orchestrator.rs` |
+| 7 | the job delivers | branch pushed, PR opened, lifecycle comments on the issue | `web/worker/fixture_worker.py`, `issue_worker/test_job_launch.py` |
+| 8 | exit 13 / quota pause / exit 14 | relaunch from the stored checkpoint / wait / hold | `web/tests/orchestrator.rs`, `issue_worker/test_job_launch.py` |
+| 9 | open another tenant's URL | `404`, never `403` | `web/tests/tenant_isolation.rs` |
+| 10 | **Sign out** | session gone everywhere | `web/tests/auth_flow.rs` |
+
+With the fixture worker (`SWARM_WORKER_DOCKERFILE=web/worker/Dockerfile.fixture`,
+`SWARM_WORKER_IMAGE=swarm-automation-worker:fixture` in `.env`) step 7 delivers a
+commit without a provider CLI, which is how the acceptance run avoids spending
+provider quota.
+
+### Building and publishing images
+
+Building and publishing are **documented, not enabled**: no workflow here builds,
+pushes or deploys an image (GitHub Actions no longer publishes releases, see
+`.claude/rules/versioning.md`). A person with registry access does:
+
+```bash
+# from the repository root; the Fargate task definitions are X86_64
+docker build --platform linux/amd64 -f web/Dockerfile        -t swarm-automation-api:$TAG .
+docker build --platform linux/amd64 -f web/worker/Dockerfile -t swarm-automation-worker:$TAG .
+
+aws ecr get-login-password | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
+docker tag swarm-automation-api:$TAG    "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/swarm/api:$TAG"
+docker tag swarm-automation-worker:$TAG "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/swarm/worker:$TAG"
+docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/swarm/api:$TAG"
+docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/swarm/worker:$TAG"
+```
+
+Use the `VERSION` string (or a commit SHA) as `$TAG`: the ECR repositories are
+immutable-tag and scan on push, and `api_image` / `worker_image` take a full URI
+with that tag. Both Dockerfiles pin every tool they install (the worker image pins
+`gh`, Node and the three provider CLIs; both pin `psycopg`); bump the pins
+together and rebuild. Turning this into a workflow later needs an OIDC role, not
+stored AWS keys.
+
+## API contract
+
+Everything is under `/api/v1`; any other path is a static asset of `ui/`. Requests
+and responses are JSON. A change to a route is a change to this contract: the
+desktop's command table (`web/src/catalog.rs`) is the one source, `ui/api.js`
+mirrors it and `web/tests/api_catalog.rs` fails on drift, so the full route table
+is the one under "REST and SSE for the desktop's commands" above and is not
+repeated.
+
+- **Authentication.** A browser session: an `HttpOnly`, `SameSite=Lax` cookie
+  (`Secure` and `__Host-` over HTTPS). No bearer token in `localStorage`. The one
+  other credential is the operator's bearer token on `/api/v1/internal/...`, off
+  unless `SWARM_WEB_INTERNAL_TOKEN` is set, and the webhook's HMAC signature.
+- **CSRF.** Every non-`GET` route needs `X-CSRF-Token` (the value in `GET
+  /session` and the `swarm_csrf` cookie) and, when the browser sends an `Origin`,
+  it must be the configured origin. The signed webhook and the bearer-token
+  operator API are the only cookie-less writes.
+- **Tenancy.** The tenant is always the `{tenant}` path segment, re-checked for
+  membership on every request; it is never read from a body, header or query
+  string. A tenant the caller cannot reach is `404`.
+- **Roles.** `member` reads and runs jobs against the tenant's own budget;
+  `owner` changes settings, keys and budgets and does anything that merges,
+  promotes, files an issue, imports or activates (`403 owner_required`).
+- **Errors.** `{"error": "<message>", "code": "<code>"}`: `400 bad_request`, `401
+  unauthorized`, `403 owner_required | csrf_token | csrf_origin | tenant_inactive`,
+  `404 not_found`, `409` (a quota or concurrency denial from Run now, a webhook
+  `replay`), `501 not_available_yet`, `503 bridge_unconfigured | jobs_unconfigured`.
+  A body is at most 64 KiB and is never echoed in an error.
+- **Unavailable is not zero.** A figure the backend cannot know (remaining quota
+  with no budget and no provider report, history without a bridge) is `null` or a
+  `503`/`501` with the reason, never a made-up number.
+- **Public routes.** `GET /health`, `GET /session` (anonymous answer is
+  `{"authenticated": false, "login_url": ..., "install_url": ...}`), `GET /version`
+  and the OAuth redirect/callback. Everything else needs a session.
+- **Security headers** on every response: a strict CSP (no `unsafe-inline`),
+  `nosniff`, `frame-ancestors 'none'`, `no-referrer`, and HSTS over HTTPS.
+
+Test: `web/tests/api_commands.rs`, `api_catalog.rs`, `auth_flow.rs`,
+`tenant_isolation.rs`, `ui/api.test.js` (both transports) and the deployed-stack
+checks of `scripts/web_smoke.py`.
+
+## Server-Sent Events
+
+Live updates are Server-Sent Events, not WebSockets: one-way, over plain HTTP,
+reconnecting by themselves and carrying `Last-Event-ID`. `ui/api.js`'s `listen()`
+is an `EventSource` on the web and Tauri's `listen` on the desktop; both deliver
+the same payloads to the same handlers.
+
+| Stream | Event name | `data` (JSON) |
+| --- | --- | --- |
+| `GET /api/v1/events/automation-log` | `automation-log` | `{"source", "stream", "line", "timestamp", "tenant", "repository", "issue"}` |
+| `GET /api/v1/events/jobs` | `job-log` | `{"tenant", "repository", "issue", "line"}` |
+| `GET /api/v1/events/model-calibration` | `model-calibration-refreshed` | the calibration status document |
+| any | `resync` | `{"reason": "history_truncated"}` or `{"reason": "lagged", "missed": n}` |
+
+A frame is `id: <n>`, `event: <name>`, `data: <one JSON line>`, then a blank line;
+`: ready` opens the stream and `: heartbeat` follows every
+`SWARM_WEB_SSE_HEARTBEAT_SECS` (default 15). Ids are process-wide and increasing;
+a reconnect with `Last-Event-ID` is replayed from a bounded per-tenant ring (5000
+frames) without gaps or duplicates, and `resync` tells the client to refetch
+`GET /logs`. A slow reader gets `resync`, never an unbounded buffer. Streams are
+session-scoped (the signed-in user's tenants, re-checked every 30 s, ended by
+logout), so `listen()` needs no tenant parameter. Frames are scrubbed before they
+are stored or sent; log lines are otherwise verbatim, so the `Adversarial UAT for
+issue #...` and `Adversarial Cybersecurity for issue #...` boundary logs keep their
+format. Behind a load balancer the idle timeout must exceed the heartbeat (the ALB
+here is 120 s). Details and tests: "REST and SSE" above, `web/tests/sse.rs`.
+
+## Tenancy model
+
+A tenant is one GitHub App installation (a user account or an organization). Its
+id (`t` + 16 hex) is the same string in the platform database, the worker's
+storage grammar and every object key, so there is no mapping to get wrong. Isolation
+is structural and enforced in every layer a request touches:
+
+| Layer | How a tenant is kept apart |
+| --- | --- |
+| HTTP | `TenantAccess` proves membership in the path's tenant, `404` otherwise |
+| Platform store | every tenant-scoped `Store` method takes the tenant first; tables lead their key with `tenant_id` |
+| Provider keys | sealed with AES-256-GCM, bound to `(tenant, provider)`; one provider's variable per job |
+| Execution history | a Postgres schema per tenant (`t_<tenant>`), `search_path` set on every connection |
+| Objects | a validated prefix per tenant (`tenants/<tenant>/...`); keys come only from `validate_tenant` / `check_*` output |
+| Jobs | one container per repository; one repository-scoped GitHub installation token; one provider key; its own tmpfs workspace and `HOME` |
+| Events | per-tenant replay ring; a stream only carries the signed-in user's tenants |
+
+Roles are per tenant: **owner** (the installation's user, or an organization admin)
+and **member**. Memberships are re-synced from GitHub at every sign-in, and a
+suspended or deleted installation refuses writes and new jobs. Settings are
+`tenant_config` documents, written only by the hosted backend and
+`desktop_import.py`. The one exception to per-tenant credentials is the shared
+storage key a job holds on AWS (see the threat model and known gaps).
+
+## Runner abstraction
+
+`JobRunner` (`web/src/runner.rs`) is the only way a worker container starts. The
+orchestrator speaks to the trait: `start`, `status`, `cancel`, `pause`,
+`resume_running`, `resume_from_checkpoint` (always a new container), `logs` and
+`stream_logs`. `DockerJobRunner` and `EcsFargateJobRunner` consume one `JobSpec`
+(image, entrypoint, command, plain and secret environment, CPU, memory, optional
+deadline) and the same entrypoint, `issue_worker/job_launch.py`, so the worker
+cannot tell them apart.
+
+| | Docker (local) | ECS Fargate (AWS) |
+| --- | --- | --- |
+| Start | `docker run` with an env file (mode 0600, removed after start) | `RunTask` against the `<prefix>-worker` task definition, container `worker` overridden |
+| Secrets in transit | env file, never argv | container environment override; the repository token is minted per job |
+| Isolation | read-only root, uid 1000, `--cap-drop ALL`, `no-new-privileges`, pid and memory limits, tmpfs `/tmp`, `/workspace`, `HOME`, metadata address sunk | read-only root, uid 1000, all capabilities dropped, ephemeral volumes, no public IP, no execute-command, no inbound |
+| Cloud identity | none | an empty task role (denies the AWS control plane); no inherited credentials |
+| Pause | `docker pause` | `PauseTask` is sent; where unsupported the task is stopped and resumed from the checkpoint |
+| Control-plane auth | the host's Docker socket | the API task role (`AWS_CONTAINER_CREDENTIALS_*`), or a static key pair for a non-AWS endpoint |
+| CPU unit | millicores (`--cpus`) | Fargate CPU units (1024 = 1 vCPU): set `SWARM_WEB_JOB_CPU_MILLIS` accordingly |
+
+The orchestrator (`web/src/orchestrator.rs`) is webhook-driven with `tick` as the
+poll and the checkpoint resume. One repository has one active container; exit 13
+relaunches immediately from the `in-progress` checkpoint, exit 11 waits
+`SWARM_WEB_QUOTA_RESUME_SECS`, exit 14 holds until Run now, Resume, a trusted
+follow-up or a new image id. There is no default job deadline.
+
+## AWS mapping
+
+`web/infra/aws` is a Terraform root module (provider `hashicorp/aws`, plus
+`random`). **Nothing applies it**: CI runs `terraform fmt -check`, `init
+-backend=false` and `validate` with no credentials, and a person runs `plan` and
+`apply` (README there). Terraform over CDK because the repository has no Node build
+step, the resource set is fixed and modest, the diff is plain text, and format and
+validation need no AWS account.
+
+| Concern | AWS resource | File |
+| --- | --- | --- |
+| API | ECS cluster and Fargate service `<prefix>-api` behind an ALB (HTTPS, TLS 1.3 policy, `/api/v1/health`, 120 s idle timeout for SSE) | `ecs.tf`, `alb.tf` |
+| Job runner | Fargate task definition `<prefix>-worker`, started by `EcsFargateJobRunner` | `ecs.tf` |
+| Postgres | RDS PostgreSQL 17, private subnets, KMS, TLS enforced, backups, Multi-AZ | `rds.tf` |
+| Object storage | one S3 bucket: versioned, KMS, TLS-only, public access blocked | `s3.tf` |
+| Encryption | one KMS key (rotated) for S3, RDS, secrets, logs and ECR | `kms.tf` |
+| Secrets | Secrets Manager: the generated database DSN, and the GitHub App secrets, the sealing key and the storage key pair, filled by the operator | `secrets.tf` |
+| Images | two immutable, scanned ECR repositories | `ecr.tf` |
+| Network | VPC, public subnets for the ALB only, private subnets for everything else, one NAT, an S3 endpoint, one security group per tier | `network.tf` |
+| IAM | execution roles (API, jobs), the API task role, a permissionless job task role, a bucket-scoped storage user | `iam.tf` |
+
+| Role | May | May not |
+| --- | --- | --- |
+| API execution | pull the API image, write its logs, read the API's own secrets and decrypt them | anything else |
+| Job execution | pull the worker image, write job logs | read any secret |
+| API task | `RunTask` for the worker definition on this cluster, tag, describe and stop those tasks, pass exactly the two job roles | touch S3, secrets or KMS |
+| Job task | nothing; an explicit deny covers ECS, IAM, Secrets Manager, KMS, SSM, STS and ECR | everything |
+| Storage user | get/put/delete objects in the one bucket, use the KMS key through S3 only | any other service |
+
+How the API's environment is built from this: `SWARM_WEB_JOB_RUNNER=fargate`,
+`SWARM_WEB_ECS_CLUSTER`, `SWARM_WEB_ECS_TASK_DEFINITION` (the worker family),
+`SWARM_WEB_ECS_SUBNETS` and `SWARM_WEB_ECS_SECURITY_GROUPS` (the job group: no
+inbound, 443 and the database out), `SWARM_WEB_WORKER_IMAGE`, and the
+`SWARM_STORAGE_*` set (S3 over HTTPS with virtual-hosted addressing, the DSN with
+`sslmode=require`). Secrets arrive through ECS `secrets`, never as plain
+environment. `SWARM_WEB_KMS_KEY_ID` is deliberately not set: the build has no KMS
+key wrapper and refuses that setting, so tenants' provider keys are sealed with
+`SWARM_WEB_LOCAL_KEY` from Secrets Manager until the wrapper lands. The service
+starts at zero tasks and is limited to one: sessions are in memory.
+
+Cost: a NAT gateway, Multi-AZ RDS, an ALB and Fargate tasks are not free; a
+throwaway environment sets `protect_data = false` and `db_multi_az = false`.
+
+## Threat model
+
+Assets: tenants' provider API keys, their GitHub installation access, their source
+code and issue content, other tenants' data, and the operator's cloud account.
+Trust boundaries: browser to API, GitHub to API (webhooks), API to job container,
+job container to the repository's code, provider APIs and storage.
+
+| Threat | Mitigation | Residual risk |
+| --- | --- | --- |
+| A user reads or changes another tenant's data | `TenantAccess` (404), tenant-first store methods, per-tenant schema and prefix, bound key sealing, per-tenant event ring; `tenant_isolation.rs` iterates every catalog route | a job holds the shared storage key (below) |
+| Session theft, CSRF | `HttpOnly` `SameSite=Lax` cookie, hashed at rest, rotation on sign-in, CSRF token plus `Origin` check, strict CSP with no inline code, nothing in `localStorage` | an XSS-free `ui/` is a property to keep testing (`ui/web-account.test.js`) |
+| Provider key disclosure | write-only API, envelope encryption, `Secret` redaction, zeroize, canary tests; plaintext leaves only through `Vault::job_environment`, one provider | the sealing key is a Secrets Manager value until the KMS wrapper lands |
+| Forged or replayed webhook | HMAC verified over the raw body before any work, idempotent by delivery id and payload hash | none beyond the App secret |
+| Hostile repository or issue content steering a job | one container per repository, read-only root, uid 1000, no capabilities, no inbound, per-job tmpfs, fresh clone, a repository-scoped, short-lived installation token, no app private key and no AWS identity in the container, metadata address blocked, trusted-author gate for follow-ups | outbound 443 is open: a job can exfiltrate what it can read (its repository, its own provider key, its storage key) |
+| A job reads other tenants' objects or schemas | prefix and schema isolation in the worker's own code | the storage user's key and the database login are not per tenant. **Planned**: per-job STS session policies for `tenants/<id>/*` and a role per tenant schema |
+| Secret leakage through logs and SSE | log writer and event frames scrub tokens, key blocks, credentialed URLs, configured secrets; request logs carry no query string | a secret in an unusual shape is not matched; scrubbing is defence in depth, not a licence to log secrets |
+| Operator or CI credential in source | Terraform never holds the GitHub App key, the sealing key or the storage key (put by hand); `.env`, state and tfvars are git- and docker-ignored; a test scans the deployment files | the Terraform state holds the generated database password: use an encrypted, access-controlled backend |
+| Docker socket on the local stack | loopback-only ports, read-only API container, documented as dev only | root-equivalent on that host: never expose or share it |
+| Runaway cost or abuse | per-tenant concurrency, monthly spend cap and provider budgets checked before a job starts | no default job deadline (`SWARM_WEB_JOB_MAX_RUNTIME_SECS` opts in) |
+| Image supply chain | tools and drivers pinned, immutable ECR tags, scan on push | pins are bumped by hand; the base images float on their tag until pinned by digest |
+| Operator API misuse | disabled (404) without `SWARM_WEB_INTERNAL_TOKEN`; 24-character minimum; compared in constant time | the token is a bearer secret: keep it off the internet and rotate it |
+
+## Decisions
+
+- **Rust/axum in `web/`, a standalone Cargo project.** It ports the desktop's
+  `config.rs` and `tools.rs` logic and shares types and conventions. The root
+  `Cargo.toml` has no `[workspace]` and the desktop does not depend on `web/`.
+- **One shared `ui/` and one shared `issue_worker/`.** The transport adapter
+  (`ui/api.js`) is the only thing that differs; markup is `data-web-only` and
+  `data-desktop-only` attributes, not forks. Worker behaviour is unchanged: only
+  storage, transport and runtime plumbing moved.
+- **Postgres and S3-compatible storage behind `storage.py`.** The worker's seam is
+  the contract; local files stay byte-compatible in both directions. History is a
+  schema per tenant so the repository's own SQL cannot name another tenant's rows.
+- **Server-Sent Events, not WebSockets.** Traffic is server to client, it works
+  through the ALB and `EventSource` reconnects with `Last-Event-ID`.
+- **One container per repository job behind `JobRunner`.** Docker locally, Fargate
+  on AWS. No Kubernetes and no Lambda: a job runs for hours, needs a real
+  filesystem and `git`, and must be torn down afterwards.
+- **GitHub App for sign-in, installation tokens and webhooks.** One identity
+  provider, repository-scoped job tokens, no passwords.
+- **Bring your own provider keys, sealed per tenant.** Spend is the tenant's own;
+  the platform enforces budgets but never holds a shared provider key.
+- **Terraform, not CDK**, for the reasons above; and applied only by a human.
+- **A KMS key for data at rest, a local wrapper for provider keys, for now.** The
+  API refuses a KMS setting it cannot honour rather than silently ignoring it.
+- **A scoped storage user, not a job role.** The worker's S3 client signs with a
+  key and a job must not hold an AWS identity, so jobs get the storage user's key
+  through the API and the job's task role is empty. STS-scoped per-job credentials
+  are the follow-up.
+- **The compose stack mounts the Docker socket.** It is the only way the Docker
+  runner can run on a developer's machine; the threat model records what that
+  means.
+- **Images are built by a person, not CI.** GitHub Actions no longer publishes;
+  publishing moves to the web path later (OIDC, not stored keys).
+- **`VERSION` is untouched.** The worker owns it; this change is a patch-level
+  deployment addition behind existing settings.
+
+## Known gaps
+
+What is not built yet, by design of the phased work in #413:
+
+- **Postgres `Store`.** The schema exists and compose applies it, but the API
+  still keeps sessions, keys, usage and scheduling state in memory
+  (`memory::MemoryStore`) and says so at startup. A restart signs everyone out,
+  and the AWS service is limited to one task.
+- **KMS key wrapper.** `SWARM_WEB_KMS_KEY_ID` is refused until a `KeyWrapper` for
+  KMS exists.
+- **Per-tenant storage credentials for jobs** (STS session policy and a database
+  role per tenant), and a DNS-aware egress allowlist for job tasks
+  (`web/worker/egress-allowlist.txt`).
+- **Worker operations answering 501** (`web_bridge.UNAVAILABLE`): the knowledge
+  index, model calibration snapshots, diagnostics, and branch, merge and promotion
+  operations.
+- **Fargate log snapshots.** The runner can read CloudWatch Logs but the API does
+  not wire a log group, so the Overview reads the worker's own log artifacts and
+  the event stream.
+- **Web screens** for repository settings and history beyond the views listed
+  above, and per-process (`uat:<repo>`) controls.
+- **Images are not built in CI**, and the AWS module has been validated
+  (`terraform validate`) but never applied.
+
+The desktop stays the fallback until a human decides to retire it.

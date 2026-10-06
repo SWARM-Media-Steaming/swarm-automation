@@ -1,0 +1,26 @@
+# Every image here builds from the repository root (web/Dockerfile,
+# web/worker/Dockerfile*). Keep the context to the sources they COPY.
+.git
+.github
+.claude
+target
+web/target
+node_modules
+gen
+icons
+capabilities
+src
+tests
+docs
+scripts
+sweep.timestamp
+*.log
+.env
+.env.*
+web/.env
+web/.env.*
+**/__pycache__
+**/*.pyc
+web/infra/**/.terraform
+web/infra/**/*.tfstate*
+web/infra/**/*.tfvars

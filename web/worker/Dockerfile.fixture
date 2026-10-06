@@ -4,10 +4,13 @@
 #   docker build -f web/worker/Dockerfile.fixture -t swarm-automation-worker:fixture .
 FROM python:3.13-slim-bookworm
 
+ARG PSYCOPG_VERSION=3.2.9
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 1000 --create-home --shell /usr/sbin/nologin swarm
+    && pip install --no-cache-dir "psycopg[binary]==${PSYCOPG_VERSION}" \
+    && useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin swarm \
+    && install -d -o 1000 -g 1000 /home/swarm /workspace
 
 COPY issue_worker /opt/swarm/issue_worker
 COPY web/worker/fixture_worker.py /opt/swarm/fixture_worker.py
@@ -18,5 +21,6 @@ WORKDIR /workspace
 ENV HOME=/home/swarm \
     AWS_EC2_METADATA_DISABLED=true \
     SWARM_JOB_WORKER=/opt/swarm/fixture_worker.py \
+    SWARM_STORAGE_POSTGRES_DRIVER=psycopg:connect \
     PYTHONDONTWRITEBYTECODE=1
 ENTRYPOINT ["python3", "-I", "/opt/swarm/issue_worker/job_launch.py"]

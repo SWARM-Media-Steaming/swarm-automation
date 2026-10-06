@@ -204,6 +204,39 @@ When an agent starts an issue, a bounded knowledge context pack is injected
 automatically. Generated summaries are optional and off by default because they
 spend extra AI tokens. See [docs/engineering-knowledge.md](docs/engineering-knowledge.md).
 
+## Hosted web version
+
+Besides the desktop app, SWARM Automation has a hosted, multi-tenant web
+version in the same repository: the same `ui/` and the same `issue_worker/`,
+served by the Rust backend in `web/`. The desktop app is unchanged and remains
+the fallback.
+
+### Quick start (local stack)
+
+Needs Docker with Compose v2 and a GitHub App you own (a few minutes at
+<https://github.com/settings/apps/new>; `web/.env.example` lists the callback
+URL, permissions and events).
+
+```bash
+cp web/.env.example .env      # fill in the GitHub App values, then:
+openssl rand -base64 32       # paste the output as SWARM_WEB_LOCAL_KEY
+docker compose up --build     # API, Postgres, MinIO and the Docker job runner
+```
+
+Open <http://localhost:8080> and sign in with GitHub. In another terminal,
+`python3 scripts/web_smoke.py` checks the running stack without signing in.
+Add your provider API keys on the **API keys** page; they are write-only.
+The first build downloads the pinned provider CLIs for the worker image; set
+`SWARM_WORKER_DOCKERFILE=web/worker/Dockerfile.fixture` in `.env` to use a small
+fixture worker instead (the acceptance run does). Stop with `docker compose
+down`; add `-v` to also delete the database and object data.
+
+Everything about the stack (what the Docker socket mount means, the full
+acceptance flow, the API and event contract, the AWS mapping and the threat
+model) is in [docs/web-architecture.md](docs/web-architecture.md). The AWS
+infrastructure is Terraform in [web/infra/aws](web/infra/aws/README.md); it is
+reviewed and validated in CI but never applied by it.
+
 ## Branch safety model
 
 The default AI integration branch is `ai-main` (the recommended name). Before
@@ -296,6 +329,8 @@ src/            Rust backend (Tauri commands, process supervision, tool detectio
 ui/             Frontend (plain HTML/CSS/JS, no build step)
 issue_worker/   Vendored Python issue-worker implementation, bundled into every build
 web/            Hosted multi-tenant backend (Rust/axum, standalone Cargo project; see docs/web-architecture.md)
+web/infra/aws/  Terraform for the AWS deployment (reviewed, never applied by CI)
+docker-compose.yml  The whole hosted stack on one machine (API, Postgres, MinIO, Docker job runner)
 docs/           Architecture notes: Engineering Knowledge, model pricing, web architecture
 icons/          Application icons
 capabilities/   Tauri v2 permission manifest
@@ -398,6 +433,13 @@ platform-specific work before Linux or Windows releases.
 ```bash
 cargo test
 ```
+
+The hosted version has its own suites: `cargo test --locked` in `web/` (API,
+SSE, runners, orchestrator), the worker's Python tests
+(`python3 -m unittest discover -s issue_worker -p 'test_*.py'`, which include the
+storage contract and `test_web_deploy.py`, the compose/Terraform/CI contract),
+and `npm test` for the shared UI on both transports. CI also runs
+`terraform fmt`/`validate` and `docker compose config` on the deployment files.
 
 
 ### Automatic native prompt caching

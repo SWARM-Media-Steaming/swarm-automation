@@ -584,6 +584,9 @@ pub struct EcsFargateJobRunner {
     log_group: Option<String>,
     access_key: Option<Secret>,
     secret_key: Option<Secret>,
+    /// The ECS container-credentials endpoint of the API's own task role. Used
+    /// only when no static credentials are set. Never reachable from a job.
+    role_credentials: Option<RoleCredentialSource>,
     http: reqwest::Client,
     tasks: std::sync::Mutex<BTreeMap<String, String>>,
     terminal: std::sync::Mutex<BTreeMap<String, JobStatus>>,
@@ -608,6 +611,7 @@ impl EcsFargateJobRunner {
             log_group: None,
             access_key: None,
             secret_key: None,
+            role_credentials: None,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
@@ -626,6 +630,70 @@ impl EcsFargateJobRunner {
         self.access_key = Some(access_key);
         self.secret_key = Some(secret_key);
         self
+    }
+
+    /// Sign with the API task's own role (`AWS_CONTAINER_CREDENTIALS_*`) instead
+    /// of a stored key pair. `url` is the full credentials URL; `token` is the
+    /// optional `AWS_CONTAINER_AUTHORIZATION_TOKEN`.
+    pub fn with_role_credentials(mut self, url: impl Into<String>, token: Option<Secret>) -> Self {
+        self.role_credentials = Some(RoleCredentialSource {
+            url: url.into(),
+            token,
+            cached: tokio::sync::Mutex::new(None),
+        });
+        self
+    }
+
+    /// Static credentials win; otherwise the task role's, refreshed at most
+    /// every [`ROLE_CREDENTIAL_TTL`]; otherwise the request goes unsigned (a
+    /// local fake endpoint).
+    async fn credentials(&self) -> Result<Option<SigningCredentials>, RunnerError> {
+        if let (Some(access), Some(secret)) = (&self.access_key, &self.secret_key) {
+            return Ok(Some(SigningCredentials {
+                access_key: access.clone(),
+                secret_key: secret.clone(),
+                session_token: None,
+            }));
+        }
+        let Some(source) = &self.role_credentials else {
+            return Ok(None);
+        };
+        let mut cached = source.cached.lock().await;
+        if let Some((fetched, credentials)) = cached.as_ref() {
+            if fetched.elapsed() < ROLE_CREDENTIAL_TTL {
+                return Ok(Some(credentials.clone()));
+            }
+        }
+        let mut request = self.http.get(&source.url);
+        if let Some(token) = &source.token {
+            request = request.header("authorization", token.expose());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| RunnerError::new("the task role's credentials could not be fetched"))?;
+        if !response.status().is_success() {
+            return Err(RunnerError::new(
+                "the task role's credentials endpoint refused the request",
+            ));
+        }
+        let document: Value = response
+            .json()
+            .await
+            .map_err(|_| RunnerError::new("the task role's credentials were not valid JSON"))?;
+        let field = |name: &str| document[name].as_str().filter(|value| !value.is_empty());
+        let (Some(access), Some(secret)) = (field("AccessKeyId"), field("SecretAccessKey")) else {
+            return Err(RunnerError::new(
+                "the task role's credentials were incomplete",
+            ));
+        };
+        let credentials = SigningCredentials {
+            access_key: Secret::new(access),
+            secret_key: Secret::new(secret),
+            session_token: field("Token").map(Secret::new),
+        };
+        *cached = Some((std::time::Instant::now(), credentials.clone()));
+        Ok(Some(credentials))
     }
 
     fn run_task_body(
@@ -709,7 +777,8 @@ impl EcsFargateJobRunner {
             .header("x-amz-target", target)
             .header("x-amz-date", &amz_date)
             .body(payload.clone());
-        if let (Some(access), Some(secret)) = (&self.access_key, &self.secret_key) {
+        if let Some(credentials) = self.credentials().await? {
+            let token = credentials.session_token.as_ref().map(Secret::expose);
             let authorization = sign_v4(SigV4 {
                 host: &host,
                 amz_date: &amz_date,
@@ -717,10 +786,14 @@ impl EcsFargateJobRunner {
                 service: "ecs",
                 target,
                 payload: &payload,
-                access_key: access.expose(),
-                secret_key: secret.expose(),
+                access_key: credentials.access_key.expose(),
+                secret_key: credentials.secret_key.expose(),
+                session_token: token,
             });
             request = request.header("authorization", authorization);
+            if let Some(token) = token {
+                request = request.header("x-amz-security-token", token);
+            }
         }
         let response = request
             .send()
@@ -930,6 +1003,23 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// How long a fetched task-role credential is reused. The endpoint is local
+/// and cheap, and ECS rotates well after this.
+const ROLE_CREDENTIAL_TTL: Duration = Duration::from_secs(60);
+
+struct RoleCredentialSource {
+    url: String,
+    token: Option<Secret>,
+    cached: tokio::sync::Mutex<Option<(std::time::Instant, SigningCredentials)>>,
+}
+
+#[derive(Clone)]
+struct SigningCredentials {
+    access_key: Secret,
+    secret_key: Secret,
+    session_token: Option<Secret>,
+}
+
 struct SigV4<'a> {
     host: &'a str,
     amz_date: &'a str,
@@ -939,6 +1029,8 @@ struct SigV4<'a> {
     payload: &'a [u8],
     access_key: &'a str,
     secret_key: &'a str,
+    /// A temporary (role) credential's session token; signed as a header.
+    session_token: Option<&'a str>,
 }
 
 fn sign_v4(request: SigV4<'_>) -> String {
@@ -951,13 +1043,20 @@ fn sign_v4(request: SigV4<'_>) -> String {
         payload,
         access_key,
         secret_key,
+        session_token,
     } = request;
     let date = &amz_date[..8];
     let payload_hash = hex::encode(Sha256::digest(payload));
+    let (token_header, signed_headers) = match session_token {
+        Some(token) => (
+            format!("x-amz-security-token:{token}\n"),
+            "content-type;host;x-amz-date;x-amz-security-token;x-amz-target",
+        ),
+        None => (String::new(), "content-type;host;x-amz-date;x-amz-target"),
+    };
     let canonical_headers = format!(
-        "content-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-target:{target}\n"
+        "content-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\n{token_header}x-amz-target:{target}\n"
     );
-    let signed_headers = "content-type;host;x-amz-date;x-amz-target";
     let canonical = format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
     let scope = format!("{date}/{region}/{service}/aws4_request");
     let string_to_sign = format!(
@@ -1065,6 +1164,7 @@ mod tests {
             payload: b"{}",
             access_key: "AKIAEXAMPLE",
             secret_key: "secret-key-value",
+            session_token: None,
         });
         assert!(header.starts_with("AWS4-HMAC-SHA256 "));
         assert!(header.contains("Credential=AKIAEXAMPLE/20260101/us-east-1/ecs/aws4_request"));
@@ -1078,7 +1178,30 @@ mod tests {
             payload: b"{}",
             access_key: "AKIAEXAMPLE",
             secret_key: "secret-key-value",
+            session_token: None,
         });
         assert_eq!(header, again);
+    }
+
+    #[test]
+    fn a_session_token_is_a_signed_header_and_never_in_the_authorization_value() {
+        let sign = |token| {
+            sign_v4(SigV4 {
+                host: "ecs.us-east-1.amazonaws.com",
+                amz_date: "20260101T000000Z",
+                region: "us-east-1",
+                service: "ecs",
+                target: "AmazonEC2ContainerServiceV20141113.RunTask",
+                payload: b"{}",
+                access_key: "ASIAEXAMPLE",
+                secret_key: "secret-key-value",
+                session_token: token,
+            })
+        };
+        let with = sign(Some("session-token-value"));
+        assert!(with.contains("x-amz-security-token"));
+        assert!(!with.contains("session-token-value"));
+        assert_ne!(with, sign(None));
+        assert_ne!(with, sign(Some("another-token")));
     }
 }
