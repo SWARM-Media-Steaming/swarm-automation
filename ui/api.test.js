@@ -211,6 +211,83 @@ test("the shipped tables are well-formed data", () => {
   for (const [name, route] of Object.entries(api.EVENTS)) assert.match(route.path, /^\//, `${name} path is absolute`);
 });
 
+// ----- Hosted-account endpoints and CSRF -----------------------------------
+
+test("the web account commands map onto the backend's /api/v1 routes", async () => {
+  const http = mockHttp({
+    "GET /api/v1/session": { body: { authenticated: true } },
+    "GET /api/v1/tenants/t1abc/provider-keys": { body: { keys: [] } },
+    "PUT /api/v1/tenants/t1abc/provider-keys/model-data": { body: { configured: true } },
+    "DELETE /api/v1/tenants/t1abc/provider-keys/claude": { status: 204 },
+    "PUT /api/v1/tenants/t1abc/budgets": { body: {} },
+    "GET /api/v1/tenants/t1abc/usage": { body: {} },
+  });
+  const web = api.createApi({ fetch: http.fetch, csrfToken: () => "tok" });
+  assert.deepEqual(await web.invoke("web_session"), { authenticated: true });
+  await web.invoke("web_list_provider_keys", { tenant: "t1abc" });
+  await web.invoke("web_set_provider_key", { tenant: "t1abc", provider: "model-data", key: "sk-secret-value" });
+  assert.equal(await web.invoke("web_delete_provider_key", { tenant: "t1abc", provider: "claude" }), null);
+  await web.invoke("web_set_budgets", { tenant: "t1abc", minimum_remaining_percent: 10, provider_budgets_usd: { claude: 50 } });
+  await web.invoke("web_get_usage", { tenant: "t1abc" });
+  const put = http.requests[2];
+  assert.equal(put.init.body, JSON.stringify({ key: "sk-secret-value" }), "path args are consumed; only the key is in the body");
+  assert.equal(http.requests.length, 6);
+});
+
+test("web state-changing requests carry the CSRF token and reads do not", async () => {
+  const http = mockHttp({
+    "GET /api/v1/session": { body: {} },
+    "PUT /api/v1/tenants/t1/budgets": { body: {} },
+    "DELETE /api/v1/tenants/t1/provider-keys/grok": { status: 204 },
+    "POST /api/v1/auth/logout": { status: 204 },
+  });
+  const web = api.createApi({ fetch: http.fetch, csrfToken: () => "csrf-123" });
+  await web.invoke("web_session");
+  await web.invoke("web_set_budgets", { tenant: "t1", minimum_remaining_percent: 5 });
+  await web.invoke("web_delete_provider_key", { tenant: "t1", provider: "grok" });
+  await web.invoke("web_logout");
+  const headers = http.requests.map((r) => r.init.headers["X-CSRF-Token"]);
+  assert.deepEqual(headers, [undefined, "csrf-123", "csrf-123", "csrf-123"]);
+  assert.ok(http.requests.every((r) => r.init.credentials === "same-origin"), "cookies only go to this origin");
+
+  const anonymous = mockHttp({ "POST /api/v1/auth/logout": { status: 204 } });
+  await api.createApi({ fetch: anonymous.fetch }).invoke("web_logout");
+  assert.equal(anonymous.requests[0].init.headers["X-CSRF-Token"], undefined, "no token, no header");
+});
+
+test("the CSRF token is read from the script-readable cookie, never from storage", () => {
+  assert.equal(api.readCsrfToken("a=1; swarm_csrf=abc%2Bdef; b=2"), "abc+def");
+  assert.equal(api.readCsrfToken("__Host-swarm_csrf=secure-one; swarm_csrf=plain"), "secure-one", "the __Host- cookie wins over HTTPS");
+  assert.equal(api.readCsrfToken("swarm_session=not-readable-anyway"), "");
+  assert.equal(api.readCsrfToken(""), "");
+  assert.equal(api.readCsrfToken(undefined), "");
+  for (const file of ["api.js", "app.js"]) {
+    const source = fs.readFileSync(path.join(__dirname, file), "utf8");
+    assert.doesNotMatch(source, /localStorage|sessionStorage/, `${file} keeps no token in web storage`);
+  }
+});
+
+test("the default instance sends the CSRF cookie value from document.cookie", async () => {
+  const previous = globalThis.window;
+  const seen = [];
+  globalThis.window = {
+    document: { cookie: "swarm_csrf=from-cookie" },
+    fetch: async (url, init) => { seen.push(init.headers["X-CSRF-Token"]); return { ok: true, status: 204, text: async () => "" }; },
+  };
+  try {
+    await api.invoke("web_logout");
+    assert.deepEqual(seen, ["from-cookie"]);
+  } finally {
+    if (previous === undefined) delete globalThis.window; else globalThis.window = previous;
+  }
+});
+
+test("web-only account commands are never invoked by the desktop app code", () => {
+  for (const name of Object.keys(api.COMMANDS)) {
+    assert.doesNotMatch(app, new RegExp(`invoke\\("${name}"`), `${name} is web-only`);
+  }
+});
+
 // ----- app.js controllers run on both transports ---------------------------
 
 // The same controller code that ships in app.js, bound to each transport's

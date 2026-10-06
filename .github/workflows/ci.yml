@@ -25,9 +25,20 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            web
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      # The hosted backend is its own Cargo project (web/), not a workspace member.
+      - name: Web backend fmt, clippy and tests
+        working-directory: web
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --locked
       - name: Issue-worker Python tests
         working-directory: issue_worker
         run: python3 -m unittest discover -p 'test_*.py'

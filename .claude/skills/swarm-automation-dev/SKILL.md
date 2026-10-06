@@ -88,6 +88,21 @@ unchanged. `storage_contract.StorageContract` is the reusable contract suite
 entrypoint. Keep `issue_worker/` stdlib-plus-siblings only. See
 `docs/web-architecture.md` and `.claude/rules/storage.md`.
 
+## Web backend (`web/`)
+
+`web/` is the hosted multi-tenant backend, a standalone Rust/axum Cargo project
+beside the desktop (not a workspace member; the root `Cargo.toml` stays
+workspace-free). It serves `ui/` with a strict CSP and exposes `/api/v1`: GitHub
+App OAuth sign-in, `HttpOnly` cookie sessions with CSRF, tenants = App
+installations, write-only envelope-encrypted provider keys, usage/budget/quota
+accounting built on the worker's `token_usage.UsageRecord`, and a signed,
+idempotent GitHub webhook. Test it with `cargo test --locked` in `web/` (plus
+`cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`,
+which CI runs). The store is behind a `Store` trait; only the in-memory
+implementation exists so far (Postgres, S3, KMS and the job runner are later
+issues). `ui/api.js`'s `web_*` commands and CSRF header are its client side.
+See `docs/web-architecture.md` and `.claude/rules/web-backend.md`.
+
 ## Engineering Knowledge / Ask SWARM
 
 Issue #291 adds a local Engineering Knowledge Platform on the same
