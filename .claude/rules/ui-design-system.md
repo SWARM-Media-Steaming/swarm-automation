@@ -44,6 +44,16 @@ rule intact.
   behavior in `app.js`. No inline `style="…"` and no inline `<script>`
   blocks.
 
+- **Web-only and desktop-only markup are attributes, not forks.** The hosted
+  version's views (sign-in, account, API keys, GitHub App, quota) carry
+  `data-web-only`; desktop-only affordances (tray, folder pickers, local CLI
+  install and login) carry `data-desktop-only`. `app.js` sets
+  `body[data-transport="web"]` from `SwarmApi.transport()` and `style.css` does the
+  showing and hiding, so the desktop is unchanged. Web view logic lives in
+  `ui/web-account.js` (no DOM, tested without one); `app.js` renders it and never
+  names a `web_*` command. A secret field is `type="password"`, write-only and
+  cleared after every attempt.
+
 ### Design tokens
 
 - Every color, and the light/dark mode itself, comes from the CSS custom

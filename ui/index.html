@@ -23,13 +23,20 @@
           <button class="nav-item" data-view-target="knowledge"><span class="nav-icon">◎</span>Knowledge</button>
           <button class="nav-item" data-view-target="architecture"><span class="nav-icon">▦</span>Architecture</button>
           <button class="nav-item" data-view-target="feedback"><span class="nav-icon">◆</span>Feedback</button>
+          <button class="nav-item" data-view-target="signin" data-web-only data-signed-out-only><span class="nav-icon">→</span>Sign in</button>
+          <button class="nav-item" data-view-target="account" data-web-only data-signed-in-only><span class="nav-icon">☺</span>Account</button>
+          <button class="nav-item" data-view-target="keys" data-web-only data-signed-in-only><span class="nav-icon">⚿</span>API keys</button>
+          <button class="nav-item" data-view-target="github" data-web-only data-signed-in-only><span class="nav-icon">⌘</span>GitHub App</button>
+          <button class="nav-item" data-view-target="quota" data-web-only data-signed-in-only><span class="nav-icon">◔</span>Quota &amp; budget</button>
           <button class="nav-item" data-view-target="guides"><span class="nav-icon">◈</span>Guides</button>
           <button class="nav-item" data-view-target="debug"><span class="nav-icon">≡</span>Info &amp; Debug <span id="log-count" class="nav-count">0</span></button>
           <button class="nav-item" data-view-target="help"><span class="nav-icon">?</span>Help</button>
         </nav>
         <div class="sidebar-foot">
-          <div class="machine-state"><span class="pulse-dot"></span><span>Runs on this Mac</span></div>
-          <button id="hide-button" class="quiet-button">Hide to menu bar</button>
+          <div class="machine-state" data-desktop-only><span class="pulse-dot"></span><span>Runs on this Mac</span></div>
+          <button id="hide-button" class="quiet-button" data-desktop-only>Hide to menu bar</button>
+          <div class="machine-state" data-web-only><span class="pulse-dot"></span><span>Hosted by SWARM</span></div>
+          <button id="signout-button" class="quiet-button" data-web-only data-signed-in-only>Sign out</button>
         </div>
       </aside>
 
@@ -39,7 +46,8 @@
             <p class="eyebrow" id="profile-kicker">REPOSITORY PROFILE</p>
             <h1 id="page-title">Automation overview</h1>
           </div>
-          <div class="topbar-actions">
+          <div class="topbar-actions" data-signed-in-only>
+            <label class="repo-switcher" data-web-only>Tenant<select id="tenant-select" aria-label="Active tenant"></select></label>
             <label class="repo-switcher">Repository<select id="active-repo-select" aria-label="Active repository"></select></label>
             <span id="save-state" class="save-state">All changes saved</span>
             <button id="save-button" class="primary-button">Save configuration</button>
@@ -47,6 +55,10 @@
         </header>
 
         <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+        <div id="session-banner" class="banner warning hidden" role="alert" data-web-only>
+          <strong>Your session ended.</strong> Sign in again to keep working. Unsaved changes on this page stay here until you do.
+          <a id="session-banner-link" class="text-button" href="/api/v1/auth/github/login">Sign in again →</a>
+        </div>
 
 
         <section id="view-overview" class="view active">
@@ -122,7 +134,7 @@
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">MONITORED REPOSITORY</p><h3>GitHub source <button class="help-dot" data-help="repo-profile" aria-label="About repository settings">?</button></h3></div><div class="control-row"><button id="remove-repo" class="danger-button compact">Remove</button><span id="repo-valid-pill" class="status-pill stopped">Not checked</span></div></div>
               <div class="form-grid two"><label>GitHub repository <span class="req">*</span><input data-repo-config="github_repository" id="github-repository-input" required placeholder="https://github.com/owner/repository" /><small>Each repository is cloned and monitored independently.</small></label><label>Assignee <span class="req">*</span><input data-repo-config="assignee" required placeholder="octocat" /><small>Only assigned issues for this GitHub user enter the queue.</small></label><label class="toggle"><input type="checkbox" data-repo-config="enabled" /><span></span>Enabled</label></div>
-              <div class="workspace-row"><div><span class="workspace-label">Workspace</span><code id="workspace-path">—</code></div><div class="control-row"><button id="prepare-workspace" class="primary-button compact">Clone / update</button><button id="reveal-workspace" class="secondary-button compact">Reveal in Finder</button></div></div>
+              <div class="workspace-row" data-desktop-only><div><span class="workspace-label">Workspace</span><code id="workspace-path">—</code></div><div class="control-row"><button id="prepare-workspace" class="primary-button compact">Clone / update</button><button id="reveal-workspace" class="secondary-button compact">Reveal in Finder</button></div></div>
               <div id="repo-deferred-warning" class="banner warning hidden"></div>
               <div id="repo-inspection" class="repo-inspection"></div>
             </article>
@@ -130,7 +142,7 @@
           </div>
 
           <div class="settings-grid tab-panel" id="repository-panel-bots" role="tabpanel" aria-labelledby="repository-tab-bots" data-repository-panel="bots" hidden>
-            <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">BOT IDENTITIES</p><h3>Per-provider GitHub Apps <button class="help-dot" data-help="bot-identities" aria-label="About GitHub App bot identities">?</button></h3></div><span id="bot-config-pill" class="status-pill stopped">Not configured</span></div><p class="panel-copy">SWARM uses one GitHub bot account per AI provider so commits, reviews, comments, and merges stay attributable. Each bot app is created once, then installed on every GitHub account you point SWARM at — choose <strong>All repositories</strong> on the install screen so you never repeat this for another repo in the same account.</p><div id="bot-checklist" class="bot-checklist"></div><div class="control-row"><button id="setup-bots" class="primary-button">Set up GitHub Apps</button><button id="recheck-bots" class="secondary-button">Re-check</button><button id="verify-bots" class="secondary-button">Verify sign-in</button></div><div id="bot-results" class="verification-results"></div></article>
+            <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">BOT IDENTITIES</p><h3>Per-provider GitHub Apps <button class="help-dot" data-help="bot-identities" aria-label="About GitHub App bot identities">?</button></h3></div><span id="bot-config-pill" class="status-pill stopped">Not configured</span></div><p class="panel-copy">SWARM uses one GitHub bot account per AI provider so commits, reviews, comments, and merges stay attributable. Each bot app is created once, then installed on every GitHub account you point SWARM at — choose <strong>All repositories</strong> on the install screen so you never repeat this for another repo in the same account.</p><div id="bot-checklist" class="bot-checklist"></div><div class="control-row"><button id="setup-bots" class="primary-button" data-desktop-only>Set up GitHub Apps</button><button id="recheck-bots" class="secondary-button">Re-check</button><button id="verify-bots" class="secondary-button">Verify sign-in</button></div><div id="bot-results" class="verification-results"></div></article>
             <article class="panel span-two"><div class="panel-header"><div><p class="eyebrow">BRANCH PUSH ACCESS</p><h3>Who can merge into the human-owned branch <button class="help-dot" data-help="auto-approve-merge" aria-label="About branch push access">?</button></h3></div></div>
 <div class="branch-push-access">
   <div class="automation-flow-heading"><strong>Bot push access</strong><span id="branch-push-access-pill" class="status-pill stopped">Not checked</span></div>
@@ -328,6 +340,85 @@
           </div>
         </section>
 
+        <section id="view-signin" class="view" data-web-only>
+          <div class="section-intro"><div><p class="eyebrow">SIGN IN</p><h2>Sign in with GitHub</h2><p>SWARM Automation sign-in is the GitHub App's own authorization. Your GitHub token is used once to read who you are and which installations you can reach, then discarded.</p></div></div>
+          <article class="panel span-two">
+            <div class="panel-header"><div><p class="eyebrow">ACCESS</p><h3>Continue with GitHub <button class="help-dot" data-help="web-account" aria-label="About signing in and tenants">?</button></h3></div><span id="signin-state" class="status-pill stopped">Signed out</span></div>
+            <p id="signin-copy" class="panel-copy">You will be sent to GitHub to approve the SWARM Automation app, then returned here. Each GitHub App installation you can access is a separate tenant with its own keys, budgets and history.</p>
+            <div id="signin-error" class="banner warning hidden" role="alert"></div>
+            <div class="control-row"><a id="signin-link" class="primary-button" href="/api/v1/auth/github/login">Sign in with GitHub</a><a id="signin-install-link" class="secondary-button hidden" href="#" target="_blank" rel="noopener noreferrer">Install the GitHub App</a></div>
+          </article>
+        </section>
+
+        <section id="view-account" class="view" data-web-only>
+          <div class="section-intro"><div><p class="eyebrow">ACCOUNT</p><h2>Account, tenant and members</h2><p>The signed-in GitHub user, the tenant these pages act on, and who else can see it. Roles follow GitHub and are re-synced every time someone signs in.</p></div></div>
+          <div class="settings-grid">
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">SIGNED IN</p><h3>GitHub account <button class="help-dot" data-help="web-account" aria-label="About signing in and tenants">?</button></h3></div><span id="account-role-pill" class="status-pill stopped">—</span></div>
+              <div class="service-meta"><span>User</span><strong id="account-login">—</strong></div>
+              <p class="panel-copy">Sessions end on their own after a while; when that happens you are asked to sign in again.</p>
+              <div class="control-row"><button id="account-signout" type="button" class="secondary-button">Sign out</button></div>
+            </article>
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">TENANT</p><h3>Active tenant</h3></div><span id="account-tenant-pill" class="status-pill stopped">—</span></div>
+              <label>Tenant<select id="account-tenant-select" aria-label="Active tenant"></select></label>
+              <div class="service-meta"><span>Account type</span><strong id="account-tenant-type">—</strong></div>
+              <small id="account-tenant-note" class="field-hint"></small>
+            </article>
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">MEMBERS</p><h3>Who can access this tenant</h3></div><span id="account-member-count" class="score">0</span></div>
+              <p class="panel-copy">Members are read from GitHub: anyone who can reach the installation signs in as a member, and an installation's own user or an organization admin is an owner. Owners can save keys and budgets; members can view them. To change who has access, change it on GitHub.</p>
+              <div id="account-members-error" class="banner warning hidden" role="alert"></div>
+              <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Members of the active tenant</caption><thead><tr><th scope="col">GitHub user</th><th scope="col">Role</th></tr></thead><tbody id="account-members"></tbody></table></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-keys" class="view" data-web-only>
+          <div class="section-intro"><div><p class="eyebrow">PROVIDER KEYS</p><h2>Bring your own API keys</h2><p>Jobs run on this tenant's own provider accounts. A key is sealed with envelope encryption the moment it is saved and is never shown again.</p></div></div>
+          <div class="banner policy"><strong>Write-only</strong><span>You can replace or remove a key, but nobody, including you, can read one back. Do not paste a key anywhere else.</span></div>
+          <div id="keys-readonly" class="banner warning hidden" role="status"></div>
+          <article class="panel">
+            <div class="panel-header"><div><p class="eyebrow">KEYS</p><h3>Per-provider API keys <button class="help-dot" data-help="web-keys" aria-label="About provider API keys">?</button></h3></div></div>
+            <div id="keys-error" class="banner warning hidden" role="alert"></div>
+            <div id="key-list" class="checklist"></div>
+          </article>
+        </section>
+
+        <section id="view-github" class="view" data-web-only>
+          <div class="section-intro"><div><p class="eyebrow">GITHUB APP</p><h2>Connect and install the GitHub App</h2><p>The GitHub App signs you in, supplies short-lived installation tokens to jobs and delivers webhooks. Each installation is one tenant.</p></div></div>
+          <article class="panel">
+            <div class="panel-header"><div><p class="eyebrow">CONNECTION</p><h3>Installation status <button class="help-dot" data-help="web-github-app" aria-label="About the GitHub App installation">?</button></h3></div><span id="github-pill" class="status-pill stopped">Not connected</span></div>
+            <div id="github-checklist" class="checklist"></div>
+            <p class="panel-copy">On the install screen choose <strong>All repositories</strong>, so adding another repository later needs no further setup. Return here and use Re-check afterwards.</p>
+            <div class="control-row"><a id="github-install-link" class="primary-button hidden" href="#" target="_blank" rel="noopener noreferrer">Install on a GitHub account</a><button id="github-recheck" type="button" class="secondary-button">Re-check</button></div>
+            <small id="github-install-note" class="field-hint"></small>
+          </article>
+        </section>
+
+        <section id="view-quota" class="view" data-web-only>
+          <div class="section-intro"><div><p class="eyebrow">QUOTA &amp; BUDGET</p><h2>Usage, quotas and budgets</h2><p>Spend is measured from the usage the worker recorded for this tenant. A figure nobody reported is shown as — and is never counted as zero.</p></div></div>
+          <div id="quota-error" class="banner warning hidden" role="alert"></div>
+          <article class="panel">
+            <div class="panel-header"><div><p class="eyebrow">THIS MONTH</p><h3>Spend and plan limits <button class="help-dot" data-help="web-quota" aria-label="About quotas and budgets">?</button></h3></div><span id="quota-period" class="score">—</span></div>
+            <div class="usage-summary" id="quota-summary"></div>
+            <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Usage by provider</caption><thead><tr><th scope="col">Provider</th><th scope="col">Status</th><th scope="col" class="numeric">Remaining</th><th scope="col" class="numeric">Spend</th><th scope="col" class="numeric">Budget</th><th scope="col">Invocations</th></tr></thead><tbody id="quota-rows"></tbody></table></div>
+          </article>
+          <article class="panel">
+            <div class="panel-header"><div><p class="eyebrow">BUDGETS</p><h3>Budgets and reserve</h3></div></div>
+            <div id="quota-readonly" class="banner warning hidden" role="status"></div>
+            <form id="budget-form" class="stacked-form" novalidate>
+              <div class="form-grid three">
+                <label>Minimum remaining <div class="input-with-suffix"><input id="budget-minimum" type="number" min="0" max="100" step="1" data-budget="minimum" /><span>%</span></div><small>Jobs wait when a provider with a budget falls below this share.</small></label>
+                <label>Claude budget <div class="input-with-suffix"><input type="number" min="0" step="1" data-budget="claude" placeholder="No budget" /><span>USD</span></div></label>
+                <label>Codex budget <div class="input-with-suffix"><input type="number" min="0" step="1" data-budget="codex" placeholder="No budget" /><span>USD</span></div></label>
+                <label>Grok budget <div class="input-with-suffix"><input type="number" min="0" step="1" data-budget="grok" placeholder="No budget" /><span>USD</span></div></label>
+              </div>
+              <div class="control-row"><button id="budget-save" type="submit" class="primary-button">Save budgets</button><small id="budget-status" class="panel-copy" aria-live="polite"></small></div>
+            </form>
+          </article>
+        </section>
+
         <section id="view-guides" class="view">
           <div class="section-intro"><div><p class="eyebrow">GUIDES</p><h2>How SWARM decides</h2><p>Short references for the mechanisms that make choices on your behalf.</p></div></div>
           <div class="panel-tabs" role="tablist" aria-label="Guides">
@@ -514,6 +605,7 @@
     <script src="debug-diagnose.js"></script>
     <script src="engineering-knowledge.js"></script>
     <script src="architecture-docs.js"></script>
+    <script src="web-account.js"></script>
     <script src="version.js"></script>
     <script src="app.js"></script>
   </body>

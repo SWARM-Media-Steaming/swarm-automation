@@ -239,6 +239,8 @@
   //   fetch / EventSource   the web transport's primitives
   //   csrfToken             () => the CSRF token to send on state-changing requests
   //   commands / events     override the tables (tests, or a future backend)
+  //   onUnauthorized        (name) => void, called when a command other than
+  //                         `web_session` is answered 401: the session expired
   function createApi(env = {}) {
     const base = env.base === undefined ? API_BASE : env.base;
     const commands = env.commands || COMMANDS;
@@ -289,7 +291,10 @@
         throw new ApiError(`Could not reach the SWARM Automation service: ${error && error.message ? error.message : error}`, 0, null);
       }
       const body = await readBody(response);
-      if (!response.ok) throw new ApiError(failureMessage(response, body), response.status, body);
+      if (!response.ok) {
+        if (response.status === 401 && name !== "web_session" && typeof env.onUnauthorized === "function") env.onUnauthorized(name);
+        throw new ApiError(failureMessage(response, body), response.status, body);
+      }
       return body;
     }
 
@@ -321,11 +326,15 @@
       csrfToken: () => readCsrfToken(win && win.document ? win.document.cookie : ""),
       tenant: () => defaultTenant,
       rememberTenant: (id) => { defaultTenant = id; },
+      onUnauthorized: (name) => expiryListeners.slice().forEach((listener) => { try { listener(name); } catch (_) { /* a listener must not mask the 401 */ } }),
     });
   }
 
   // The default instance is rebuilt per call, so the chosen tenant lives here.
   let defaultTenant = "";
+  // Callbacks told that the web session is gone (a 401 from any command but
+  // `web_session`). The desktop never produces one.
+  const expiryListeners = [];
 
   return {
     API_BASE,
@@ -341,5 +350,6 @@
     transport: () => current().transport,
     setTenant: (id) => { defaultTenant = String(id || ""); },
     getTenant: () => defaultTenant,
+    onSessionExpired: (listener) => { if (typeof listener === "function") expiryListeners.push(listener); },
   };
 });

@@ -599,12 +599,62 @@ tenant 404, a member on an owner route 403, no CSRF 403; settings; the bridge),
 `web/tests/api_catalog.rs` (the drift checks above), `ui/api.test.js` (both
 transports) and `issue_worker/test_web_bridge.py` (the worker operations).
 
+### Web-only views in the shared `ui/` (#420)
+
+The same `ui/` runs on the desktop and the web, so the hosted version's screens
+are views of that app, not a second UI. The transport decides: `app.js` sets
+`document.body.dataset.transport = "web"` only when `SwarmApi.transport()` is
+`"web"`. `style.css` then shows every `[data-web-only]` element and hides every
+`[data-desktop-only]` one; on the desktop the opposite holds and nothing changes.
+Three more `body` markers drive the signed-in state: `data-session="signed-out"`
+hides `[data-signed-in-only]` and shows `[data-signed-out-only]`. An expired
+session keeps the signed-in layout and only raises the banner.
+
+| View | Nav | What it does | Commands |
+| --- | --- | --- | --- |
+| Sign in (`view-signin`) | signed out only | the GitHub App sign-in link; the install link when the operator published one | `web_session` |
+| Account (`view-account`) | signed in | the signed-in user, a tenant switcher (also in the top bar), the tenant's status and role, a read-only member list, Sign out | `web_session`, `web_list_members`, `web_logout` |
+| API keys (`view-keys`) | signed in | one write-only row per provider (`claude`, `codex`, `grok`, `model-data`): set, replace, remove, and when it was last changed | `web_list_provider_keys`, `web_set_provider_key`, `web_delete_provider_key` |
+| GitHub App (`view-github`) | signed in | sign-in, installation and active-installation checklist, the install link, Re-check | `web_session` |
+| Quota & budget (`view-quota`) | signed in | month spend, active jobs against the plan, the monthly cap, one row per provider, and the budget form | `web_get_quotas`, `web_get_usage`, `web_set_budgets` |
+
+Logic and state are `ui/web-account.js` (`SwarmWebAccount`), a DOM-free module
+whose controller takes `SwarmApi.invoke`; `app.js` only renders what it holds, and
+`app.js` never names a `web_*` command (`api.test.js` checks that). Rules the
+module keeps:
+
+- **Keys are write-only.** The input is `type="password"`, is cleared after every
+  attempt whether or not it was saved, and the value is not kept in the controller
+  state, a message or a log. A key is checked against the server's own shape rules
+  (`validate_key`) before it is sent; the server stays the authority.
+- **Owner-only writes.** Keys and budgets need an owner of an active tenant. A
+  member or a suspended tenant sees the same view read-only and no request is made.
+  The tenant is a path segment from the session, never typed by the user.
+- **Unavailable is not zero.** A provider with neither a budget nor a provider
+  report shows `—` and no meter; a failed `usage` or `quotas` request leaves its
+  figures `—`, not `$0.00`. Each tenant section loads independently, so one failing
+  endpoint names itself without blanking the rest.
+- **Session expiry.** `SwarmApi.onSessionExpired` is called for a 401 from any
+  command except `web_session`, and the page also re-reads the session every minute.
+  Either raises the "Your session ended" banner with a sign-in link; unsaved edits
+  stay on the page. No token is ever stored by the page (the CSRF value is read
+  from its cookie by `api.js`).
+- **Desktop-only affordances are hidden or replaced on the web:** hide to tray, the
+  "Runs on this Mac" footer (replaced by "Hosted by SWARM"), the workspace folder row
+  (prepare and reveal), the local bot setup button, and the provider CLI Install and
+  Sign in buttons. External links open in a new tab with `noopener,noreferrer`
+  instead of `open_external_url`.
+
+Tests: `ui/web-account.test.js` (the logic, the controller over a mocked HTTP
+transport, the adapter's expiry hook, and markup and design-system conformance) and
+`ui/api.test.js` (both transports).
+
 ### Not yet built
 
 Behind the seams above, by later issues of #413: the Postgres `Store` (the
 schema exists, see "Platform schema", but the in-memory store used today still
 loses state on restart and the binary says so at startup), the KMS
-`KeyWrapper`, the worker-side operations listed as 501 above, the web screens that
-call the `web_*` commands, and per-process (`uat:<repo>`) controls. Scheduling
+`KeyWrapper`, the worker-side operations listed as 501 above, the web screens for
+repository settings and history beyond the views above, and per-process (`uat:<repo>`) controls. Scheduling
 state lives in memory with that store. Checkpoints for a hosted job live in
 the object store via `job_checkpoint_sync.py`.
