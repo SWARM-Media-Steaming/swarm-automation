@@ -40,5 +40,26 @@ stays the one shared worker.
   tenants, users, sessions, sealed provider-key metadata, quotas, budgets, the
   usage ledger, jobs and webhook deliveries. `MemoryStore` is still the runtime
   store; worker history and objects stay in `issue_worker/storage_remote.py`.
+- `JobRunner` (`runner.rs`) is the only way a job container starts.
+  `DockerJobRunner` and `EcsFargateJobRunner` share `JobSpec`, the image and
+  `WORKER_ENTRYPOINT`. Docker is the local backend; Fargate is AWS. No
+  Kubernetes and no Lambda for worker jobs. Contract tests use a fake docker
+  CLI and a fake ECS endpoint. A live daemon is optional and must not be
+  required for `cargo test`.
+- The orchestrator (`orchestrator.rs`) is the web scheduler. It is
+  webhook-driven (`issues`, comments, labels, pull requests) with `tick` as
+  the poll and checkpoint resume. One container per repository. Exit 13 and
+  quota pauses launch a fresh container from the stored checkpoint. Exit 14
+  holds until Run now, Resume, a trusted follow-up, or a new image id. There
+  is no default 15-minute job deadline. The desktop cron installer stays.
+- A job's GitHub credential is one repository-scoped installation token from
+  `github_app_auth.py mint-repository-token` (PEM on stdin, not argv, not
+  cached). The container does not receive the app private key or cloud
+  credentials. `job_launch.py` hydrates and publishes checkpoints around the
+  unchanged worker.
+- Member routes under `/tenants/{tenant}/work/...` belong in
+  `tenant_isolation.rs`. `GET /events/jobs` is session-scoped because
+  `ui/api.js` `listen()` does not substitute path parameters. Logs and SSE
+  frames go through `redact_text`.
 - A behavior-changing web setting needs the `minor` label from a trusted author;
   the worker owns `VERSION`.

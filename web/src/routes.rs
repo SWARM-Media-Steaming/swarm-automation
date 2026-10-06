@@ -19,6 +19,7 @@ use tower_http::services::ServeDir;
 
 use crate::auth::{self, tenant_json, Authed, TenantAccess};
 use crate::error::ApiError;
+use crate::jobs_http;
 use crate::model::*;
 use crate::secret::Secret;
 use crate::state::AppState;
@@ -385,6 +386,31 @@ pub fn router(state: AppState) -> Router {
         .route(&format!("{tenant}/quotas"), get(get_quotas))
         .route(&format!("{tenant}/budgets"), put(put_budgets))
         .route(&format!("{tenant}/usage"), get(get_usage))
+        .route(
+            &format!("{tenant}/work/{{owner}}/{{repo}}/issues/{{issue}}"),
+            get(jobs_http::status),
+        )
+        .route(
+            &format!("{tenant}/work/{{owner}}/{{repo}}/issues/{{issue}}/run"),
+            post(jobs_http::run),
+        )
+        .route(
+            &format!("{tenant}/work/{{owner}}/{{repo}}/issues/{{issue}}/pause"),
+            post(jobs_http::pause),
+        )
+        .route(
+            &format!("{tenant}/work/{{owner}}/{{repo}}/issues/{{issue}}/resume"),
+            post(jobs_http::resume),
+        )
+        .route(
+            &format!("{tenant}/work/{{owner}}/{{repo}}/issues/{{issue}}/stop"),
+            post(jobs_http::stop),
+        )
+        .route(
+            &format!("{tenant}/work/{{owner}}/{{repo}}/issues/{{issue}}/logs"),
+            get(jobs_http::logs),
+        )
+        .route("/api/v1/events/jobs", get(jobs_http::events))
         .route(&format!("{internal}/usage"), post(internal_ingest))
         .route(&format!("{internal}/quotas"), put(internal_set_plan))
         .route(&format!("{internal}/jobs"), post(internal_admit))
