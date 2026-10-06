@@ -24,7 +24,12 @@ rule intact.
   `listen` an `EventSource` (Server-Sent Events). The command → endpoint and
   event → stream mapping is the `COMMANDS` / `EVENTS` data tables in that file;
   an unmapped command rejects with `UnavailableOnWebError` (`code:
-  "not_available_on_web"`), which the UI must handle like any other error.
+  "not_available_on_web"`), which the UI must handle like any other error. On
+  the web, state-changing requests carry the CSRF token the backend sets in a
+  script-readable cookie (`X-CSRF-Token`, added by `api.js`); the session cookie
+  is `HttpOnly`, and no token or key is ever kept in `localStorage`. The `web_*`
+  rows are the hosted account endpoints (`web/`) and are never invoked by the
+  desktop path.
   Nothing else in `ui/` touches `window.__TAURI__`, `fetch`, `XMLHttpRequest`
   or `EventSource`.
 - Any `ui/` change must keep both transports working: new commands and events

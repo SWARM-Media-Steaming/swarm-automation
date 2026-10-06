@@ -295,7 +295,8 @@ be read, the worker logs it and carries on with the normal queue.
 src/            Rust backend (Tauri commands, process supervision, tool detection)
 ui/             Frontend (plain HTML/CSS/JS, no build step)
 issue_worker/   Vendored Python issue-worker implementation, bundled into every build
-docs/           Architecture notes: Engineering Knowledge, model pricing
+web/            Hosted multi-tenant backend (Rust/axum, standalone Cargo project; see docs/web-architecture.md)
+docs/           Architecture notes: Engineering Knowledge, model pricing, web architecture
 icons/          Application icons
 capabilities/   Tauri v2 permission manifest
 ```
