@@ -35,5 +35,10 @@ stays the one shared worker.
   invent a number.
 - KMS is a `KeyWrapper` implementation, not a code path in handlers. Do not
   accept a KMS configuration this build cannot honor.
+- The platform schema is `web/migrations/*.sql`, embedded as
+  `swarm_web::schema::MIGRATIONS` and safe to apply twice (`psql -f`). It holds
+  tenants, users, sessions, sealed provider-key metadata, quotas, budgets, the
+  usage ledger, jobs and webhook deliveries. `MemoryStore` is still the runtime
+  store; worker history and objects stay in `issue_worker/storage_remote.py`.
 - A behavior-changing web setting needs the `minor` label from a trusted author;
   the worker owns `VERSION`.

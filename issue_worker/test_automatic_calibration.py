@@ -162,15 +162,15 @@ class AutomaticCalibrationTests(unittest.TestCase):
                 '--codex-effort', 'high', '--codex-router-effort', 'medium']
         self.assertEqual(scheduler.saved_routing_overrides(args), args)
 
-    def test_started_session_keeps_retired_model(self):
+    def test_started_session_reroutes_when_its_model_is_retired(self):
         from types import SimpleNamespace
         import swarm_issue_worker
         self.refresh(['gpt-6-sol', 'gpt-6-1-sol'])
         pinned = SimpleNamespace(key='codex', model='gpt-6-sol', effort='high', resume=True)
         fresh = SimpleNamespace(key='codex', model='gpt-6-1-sol', effort='high', resume=False)
         switch, reason = swarm_issue_worker.Worker.reroute_verdict(None, pinned, fresh, True)
-        self.assertFalse(switch)
-        self.assertIn('pinned', reason)
+        self.assertTrue(switch)
+        self.assertIn('retired', reason)
 
     def test_conflicting_aa_duplicates_keep_last_good_calibration(self):
         self.refresh(['gpt-6-sol'])
@@ -217,7 +217,12 @@ class AutomaticCalibrationTests(unittest.TestCase):
         rows = calibration.fetch_local_source()
         for old, successor in available.listed_retirements().items():
             with self.subTest(old=old):
-                agent = 'codex' if old.startswith('gpt-') else 'claude'
+                if old.startswith('gpt-'):
+                    agent = 'codex'
+                elif old.startswith('grok-'):
+                    agent = 'grok'
+                else:
+                    agent = 'claude'
                 dormant = model_lifecycle.policy_snapshot(rows, {agent: [old]})
                 self.assertNotIn(old, dormant['retirements'])
                 priced_rows = rows + [{'model': successor, 'agent': agent,

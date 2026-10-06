@@ -1,0 +1,51 @@
+name: Storage (live Postgres)
+
+# The hosted storage backend must pass the same contract as the local one on a
+# real Postgres. ci.yml runs the always-on suites (memory objects, a signing
+# S3 test server, SQLite); this workflow adds the Postgres-only ones. It is a
+# separate workflow because ci.yml's job is a macOS runner without service
+# containers. See docs/web-architecture.md ("Hosted storage").
+
+on:
+  push:
+    branches: [main, ai-main]
+  pull_request:
+    branches: [main, ai-main]
+  workflow_dispatch:
+
+concurrency:
+  group: storage-live-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: swarm
+          POSTGRES_PASSWORD: swarm
+          POSTGRES_DB: swarm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U swarm -d swarm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Test-only: the worker image itself is standard library only.
+      - run: python -m pip install "psycopg[binary]"
+      - name: Storage contract, importer and platform schema on Postgres
+        working-directory: issue_worker
+        env:
+          SWARM_TEST_POSTGRES_DSN: postgresql://swarm:swarm@localhost:5432/swarm_test
+        run: python -m unittest -v test_storage test_storage_remote test_desktop_import

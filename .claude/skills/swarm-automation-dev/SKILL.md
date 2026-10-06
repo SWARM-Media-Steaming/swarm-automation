@@ -88,6 +88,20 @@ unchanged. `storage_contract.StorageContract` is the reusable contract suite
 entrypoint. Keep `issue_worker/` stdlib-plus-siblings only. See
 `docs/web-architecture.md` and `.claude/rules/storage.md`.
 
+The hosted implementation is `storage_remote.RemoteStorage`: checkpoints, logs
+and documents are S3-compatible objects (`object_store.py`, a stdlib SigV4
+client plus an in-memory store) and execution history is a Postgres schema per
+tenant that reuses `ExecutionHistoryRepository` (`SqlExecutionHistory`,
+`storage_schema.py`). The DB driver is injected (`storage_factory`, named by
+`SWARM_STORAGE_POSTGRES_DRIVER`), so the image stays dependency-free. Its tests
+(`test_storage_remote.py`) run the contract on memory, a signing S3 test server
+and, with `SWARM_TEST_POSTGRES_DSN` + `psycopg`, a live Postgres (to run them
+locally: `docker compose -f web/docker-compose.yml up -d`, or a throwaway
+`postgresql@17` cluster with `LC_ALL=en_US.UTF-8`, and `pip install
+"psycopg[binary]"` into a venv outside the repo). `desktop_import.py` imports a desktop install's settings, architecture
+docs and history into a tenant (`docs/desktop-import.md`); settings live in the
+`tenant_config` document collection.
+
 ## Web backend (`web/`)
 
 `web/` is the hosted multi-tenant backend, a standalone Rust/axum Cargo project
@@ -99,8 +113,9 @@ accounting built on the worker's `token_usage.UsageRecord`, and a signed,
 idempotent GitHub webhook. Test it with `cargo test --locked` in `web/` (plus
 `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`,
 which CI runs). The store is behind a `Store` trait; only the in-memory
-implementation exists so far (Postgres, S3, KMS and the job runner are later
-issues). `ui/api.js`'s `web_*` commands and CSRF header are its client side.
+implementation exists so far. The Postgres platform schema is
+`web/migrations/*.sql` (embedded as `swarm_web::schema::MIGRATIONS`, applied by
+`psql -f`); the Postgres `Store`, KMS and the job runner are later issues. `ui/api.js`'s `web_*` commands and CSRF header are its client side.
 See `docs/web-architecture.md` and `.claude/rules/web-backend.md`.
 
 ## Engineering Knowledge / Ask SWARM
