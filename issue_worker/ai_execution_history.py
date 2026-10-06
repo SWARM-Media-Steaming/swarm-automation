@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import usage_report
+from storage import DEFAULT_TENANT, Storage, StorageError
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -1225,6 +1226,12 @@ class ExecutionHistoryRepository:
                     (repository,),
                 )
             )
+
+    def execution_exists(self, execution_id: str) -> bool:
+        with self.connect() as database:
+            return database.execute(
+                "SELECT 1 FROM ai_executions WHERE execution_id = ?", (execution_id,)
+            ).fetchone() is not None
 
     def final_statuses_for_issue(self, repository: str, issue_number: int) -> list[str]:
         """`final_status` of every recorded attempt for one issue, newest first.
@@ -2473,14 +2480,30 @@ def import_missing_issues(
     }
 
 
+# Failures the history facade absorbs: the local SQLite backend raises
+# sqlite3.Error, any other storage implementation raises StorageError.
+HISTORY_ERRORS = (sqlite3.Error, StorageError)
+
+
 class ExecutionHistoryService:
     """Optional facade so disabled history cannot affect issue processing."""
 
-    def __init__(self, enabled: bool, database_path: Path) -> None:
+    def __init__(
+        self, enabled: bool, database_path: Path, *,
+        storage: Storage | None = None, tenant: str = DEFAULT_TENANT,
+    ) -> None:
+        """With ``storage`` the backend is that tenant's ``execution_history``;
+        without one it is the local SQLite repository at ``database_path``."""
         self.error = ""
         try:
-            self.repository = ExecutionHistoryRepository(database_path) if enabled else None
-        except sqlite3.Error as error:
+            if not enabled:
+                self.repository = None
+            else:
+                self.repository = (
+                    storage.execution_history(tenant) if storage is not None
+                    else ExecutionHistoryRepository(database_path)
+                )
+        except HISTORY_ERRORS as error:
             # History is observability, never a reason to change issue delivery.
             self.repository = None
             self.error = sanitize_text(error)
@@ -2490,18 +2513,12 @@ class ExecutionHistoryService:
         if not self.repository:
             return ""
         try:
-            existing = False
-            if existing_id:
-                with self.repository.connect() as database:
-                    existing = database.execute(
-                        "SELECT 1 FROM ai_executions WHERE execution_id = ?", (existing_id,)
-                    ).fetchone() is not None
-            if existing:
+            if existing_id and self.repository.execution_exists(existing_id):
                 self.execution_id = existing_id
                 self.note("Execution resumed", now)
             else:
                 self.execution_id = self.repository.create(value, now)
-        except sqlite3.Error as error:
+        except HISTORY_ERRORS as error:
             self.error = sanitize_text(error)
             self.execution_id = ""
         return self.execution_id
@@ -2510,7 +2527,7 @@ class ExecutionHistoryService:
         if self.repository and self.execution_id:
             try:
                 self.repository.update(self.execution_id, now, **fields)
-            except sqlite3.Error as error:
+            except HISTORY_ERRORS as error:
                 self.error = sanitize_text(error)
 
     def final_statuses(self, repository: str, issue_number: int) -> list[str]:
@@ -2522,7 +2539,7 @@ class ExecutionHistoryService:
             return []
         try:
             return self.repository.final_statuses_for_issue(repository, issue_number)
-        except sqlite3.Error as error:
+        except HISTORY_ERRORS as error:
             self.error = sanitize_text(error)
             return []
 
@@ -2531,7 +2548,7 @@ class ExecutionHistoryService:
         if self.repository and self.execution_id:
             try:
                 self.repository.record_adversarial_round(self.execution_id, round_values)
-            except sqlite3.Error as error:
+            except HISTORY_ERRORS as error:
                 self.error = sanitize_text(error)
 
     def adversarial_epoch(self, summary: dict[str, Any]) -> None:
@@ -2539,21 +2556,21 @@ class ExecutionHistoryService:
         if self.repository and self.execution_id:
             try:
                 self.repository.record_adversarial_epoch(self.execution_id, summary)
-            except sqlite3.Error as error:
+            except HISTORY_ERRORS as error:
                 self.error = sanitize_text(error)
 
     def note(self, message: str, now: str) -> None:
         if self.repository and self.execution_id:
             try:
                 self.repository.append(self.execution_id, "operational_notes", message, now)
-            except sqlite3.Error as error:
+            except HISTORY_ERRORS as error:
                 self.error = sanitize_text(error)
 
     def warning(self, message: str, now: str) -> None:
         if self.repository and self.execution_id:
             try:
                 self.repository.append(self.execution_id, "warnings_errors", message, now)
-            except sqlite3.Error as error:
+            except HISTORY_ERRORS as error:
                 self.error = sanitize_text(error)
 
     def token_usage_batch(
@@ -2567,7 +2584,7 @@ class ExecutionHistoryService:
                 self.repository.record_token_usage_batch(
                     self.execution_id, repository_name, issue_number, events
                 )
-            except sqlite3.Error as error:
+            except HISTORY_ERRORS as error:
                 self.error = sanitize_text(error)
 
     def record_jev_decision(self, payload: Mapping[str, Any]) -> None:
@@ -2576,7 +2593,7 @@ class ExecutionHistoryService:
                 if self.execution_id and not payload.get("execution_id"):
                     payload = {**payload, "execution_id": self.execution_id}
                 self.repository.record_jev_decision(payload)
-            except sqlite3.Error as error:
+            except HISTORY_ERRORS as error:
                 self.error = sanitize_text(error)
 
     def record_jev_score_comparison(self, payload: Mapping[str, Any]) -> None:
@@ -2585,14 +2602,14 @@ class ExecutionHistoryService:
                 if self.execution_id and not payload.get("execution_id"):
                     payload = {**payload, "execution_id": self.execution_id}
                 self.repository.record_jev_score_comparison(payload)
-            except sqlite3.Error as error:
+            except HISTORY_ERRORS as error:
                 self.error = sanitize_text(error)
 
     def finish_jev_outcomes(self, outcome: str) -> None:
         if self.repository and self.execution_id:
             try:
                 self.repository.finish_jev_outcomes(self.execution_id, outcome)
-            except sqlite3.Error as error:
+            except HISTORY_ERRORS as error:
                 self.error = sanitize_text(error)
 
 

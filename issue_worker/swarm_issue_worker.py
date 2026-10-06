@@ -80,6 +80,7 @@ from adversarial_uat import (
     UAT_STAGE, AdversarialUatMixin, CAP_HIT_PR_LEGACY_NOTICE, CAP_HIT_PR_MARKER, CAP_HIT_PR_NOTICE,
 )
 from architecture_docs import ArchitectureDocsMixin
+from storage import DEFAULT_TENANT, LocalStorage, Storage
 from delivery_recovery import DeliveryRecoveryMixin, DeliveryRecoveryYield
 from integration_recovery import IntegrationRecoveryMixin
 from complexity_worker import ComplexityWorkerMixin
@@ -1111,15 +1112,20 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         self.state = config.state_dir
         self.state.mkdir(parents=True, exist_ok=True)
         self.lock_dir = self.state / "worker.lock"
-        self.completed_file = self.state / "completed-issues"
-        self.pending_file = self.state / "pending-delivery.json"
-        self.in_progress_file = self.state / "in-progress-issue.json"
-        self.integration_recovery_file = self.state / "integration-recovery.json"
-        self.paused_dir = self.state / "quota-paused-issues"
-        self.closed_paused_dir = self.state / "closed-paused-issues"
-        self.ai_output_file = self.state / "last-ai-output.log"
-        self.ai_diagnostic_file = self.state / "last-ai-diagnostic.log"
-        self.ai_prompt_file = self.state / "last-ai-prompt.txt"
+        # The storage layer owns where state lives (see storage.py). The worker
+        # still does its checkpoint and CLI-scratch I/O on these local paths,
+        # derived from that layout so the two cannot drift.
+        self.tenant = DEFAULT_TENANT
+        self.storage: Storage = LocalStorage(self.state, history_database=config.execution_history_db)
+        self.pending_file = self.storage.checkpoint_path(self.tenant, "pending-delivery")
+        self.in_progress_file = self.storage.checkpoint_path(self.tenant, "in-progress")
+        self.integration_recovery_file = self.storage.checkpoint_path(self.tenant, "integration-recovery")
+        self.paused_dir = self.storage.checkpoint_directory(self.tenant, "quota-paused")
+        self.closed_paused_dir = self.storage.checkpoint_directory(self.tenant, "closed-paused")
+        self.ai_output_file = self.storage.scratch_path(self.tenant, "last-ai-output.log")
+        self.ai_diagnostic_file = self.storage.scratch_path(self.tenant, "last-ai-diagnostic.log")
+        self.ai_prompt_file = self.storage.scratch_path(self.tenant, "last-ai-prompt.txt")
+        self.completed_file = self.storage.artifact_path(self.tenant, "completed-issues")
         self.apps = GitHubAppAuth(
             config.github_apps_config, config.openssl_bin, repository=config.github_repository
         )
@@ -1163,6 +1169,8 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         self.history = ExecutionHistoryService(
             config.ai_execution_history_enabled,
             config.execution_history_db,
+            storage=self.storage,
+            tenant=self.tenant,
         )
         if self.history.error:
             log(f"WARNING: AI execution history is unavailable: {self.history.error}")
@@ -6556,7 +6564,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         return pr_url
 
     def promotion_blocked_file(self) -> Path:
-        return self.state / "promotion-blocked.json"
+        return self.storage.checkpoint_path(self.tenant, "promotion-blocked")
 
     def promotion_is_blocked(self, pr_url: str, head_sha: str) -> bool:
         """Whether this exact promotion PR (at this head commit) was already found
