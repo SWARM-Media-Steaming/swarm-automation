@@ -4190,6 +4190,28 @@ class WorkerTestCase(unittest.TestCase):
             worker.git_ok("merge-base", "--is-ancestor", "main", "ai/claude/issue-410")
         )
 
+    def test_base_sync_ignores_build_output_hidden_only_by_integration_branch(self) -> None:
+        # `web/` is tracked only on ai-main, with its own .gitignore hiding
+        # `target/`. Checking out main would make that output look dirty.
+        self.git("switch", "-q", "ai-main")
+        (self.repo / "web").mkdir()
+        (self.repo / "web" / ".gitignore").write_text("target/\n", encoding="utf-8")
+        self.git("add", "web/.gitignore")
+        self.git("commit", "-q", "-m", "add web")
+        self.git("push", "-q", "origin", "ai-main")
+        (self.repo / "web" / "target").mkdir()
+        (self.repo / "web" / "target" / "build.bin").write_text("x", encoding="utf-8")
+
+        expected = self.git("rev-parse", "origin/main")
+        self.assertEqual(self.worker.synchronize_base_branch(), expected)
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+
+        # A checkout an earlier run left stuck on main recovers too.
+        self.git("switch", "-q", "main")
+        self.assertEqual(self.worker.synchronize_base_branch(), expected)
+        self.assertEqual(self.git("branch", "--show-current"), "ai-main")
+        self.assertTrue((self.repo / "web" / "target" / "build.bin").exists())
+
     def test_new_integration_branch_gets_a_deletion_ruleset_before_first_push(self) -> None:
         self.git("switch", "-q", "main")
         self.git("branch", "-D", "ai-main")

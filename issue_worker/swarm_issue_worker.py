@@ -5442,10 +5442,27 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         if not self.git_ok("show-ref", "--verify", f"refs/heads/{base}"):
             self.git("branch", base, f"{remote}/{base}")
         current = self.git("branch", "--show-current")
+        integ = self.config.integration_branch
+        if current == base and integ != base and self.worktree_status() and self.git_ok(
+            "show-ref", "--verify", f"refs/heads/{integ}"
+        ):
+            # An earlier run left the checkout resting on the base branch. Move
+            # to the integration branch (untracked files are untouched) so the
+            # mirror can advance without being checked out.
+            self.git("switch", integ)
+            current = integ
         if current != base:
-            if self.worktree_status():
-                raise WorkerError(f"Cannot synchronize {base} while the checkout is dirty on {current}")
-            self.git("switch", base)
+            # Advance the ref without checking it out. Switching to `base` can
+            # surface ignored build output (e.g. a `web/target` that only the
+            # integration branch's tracked `.gitignore` hides) as a dirty tree.
+            remote_base = self.git("rev-parse", f"{remote}/{base}")
+            if not self.git_ok("merge-base", "--is-ancestor", base, remote_base):
+                raise WorkerError(
+                    f"Local {base} has diverged from {remote}/{base}; refusing to create AI work until it is reconciled"
+                )
+            self.git("update-ref", f"refs/heads/{base}", remote_base)
+            log(f"Local {base} mirrors {remote}/{base} at {remote_base}.")
+            return remote_base
         if self.worktree_status():
             raise WorkerError(f"Cannot synchronize dirty {base}")
         remote_base = self.git("rev-parse", f"{remote}/{base}")
