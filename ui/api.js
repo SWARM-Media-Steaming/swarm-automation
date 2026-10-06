@@ -25,7 +25,25 @@
   // `{name}` in the path is filled from `args[name]` (URL-encoded) and consumed;
   // the remaining args go in the query string for GET/DELETE and as a JSON body
   // otherwise. `method` defaults to "POST".
-  const COMMANDS = {};
+  //
+  // The `web_*` rows are the account endpoints the hosted backend serves
+  // (`web/`, `docs/web-architecture.md`): sign-in state, the signed-in user's
+  // tenants, write-only provider keys, budgets and usage. They exist only on
+  // the web, so the desktop never invokes them. `{tenant}` is a tenant id from
+  // `web_session`; the server decides access from the session, never from args.
+  const COMMANDS = {
+    web_session: { method: "GET", path: "/session" },
+    web_logout: { method: "POST", path: "/auth/logout" },
+    web_list_tenants: { method: "GET", path: "/tenants" },
+    web_get_tenant: { method: "GET", path: "/tenants/{tenant}" },
+    web_list_members: { method: "GET", path: "/tenants/{tenant}/members" },
+    web_list_provider_keys: { method: "GET", path: "/tenants/{tenant}/provider-keys" },
+    web_set_provider_key: { method: "PUT", path: "/tenants/{tenant}/provider-keys/{provider}" },
+    web_delete_provider_key: { method: "DELETE", path: "/tenants/{tenant}/provider-keys/{provider}" },
+    web_get_quotas: { method: "GET", path: "/tenants/{tenant}/quotas" },
+    web_set_budgets: { method: "PUT", path: "/tenants/{tenant}/budgets" },
+    web_get_usage: { method: "GET", path: "/tenants/{tenant}/usage" },
+  };
 
   // Event name -> Server-Sent Events stream. One row per event the web backend
   // emits: { path: "/events/automation-log", sse: "automation-log" }. `sse` is
@@ -62,7 +80,23 @@
     return Object.prototype.hasOwnProperty.call(table, key);
   }
 
-  function buildRequest(base, route, args) {
+  // The web backend sets a script-readable CSRF cookie at sign-in (the session
+  // cookie itself is HttpOnly and never reaches JavaScript) and requires its
+  // value in this header on every state-changing request. Over HTTPS the cookie
+  // carries the `__Host-` prefix.
+  const CSRF_HEADER = "X-CSRF-Token";
+  const CSRF_COOKIES = ["__Host-swarm_csrf", "swarm_csrf"];
+
+  function readCsrfToken(cookieString) {
+    const pairs = String(cookieString || "").split(";").map((part) => part.trim());
+    for (const name of CSRF_COOKIES) {
+      const found = pairs.find((pair) => pair.startsWith(`${name}=`));
+      if (found) return decodeURIComponent(found.slice(name.length + 1));
+    }
+    return "";
+  }
+
+  function buildRequest(base, route, args, csrfToken) {
     const method = String(route.method || "POST").toUpperCase();
     const rest = { ...(args || {}) };
     const path = String(route.path).replace(/\{(\w+)\}/g, (_, key) => {
@@ -86,6 +120,7 @@
       init.headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(rest);
     }
+    if (csrfToken && method !== "GET") init.headers[CSRF_HEADER] = csrfToken;
     return { url, init };
   }
 
@@ -106,6 +141,7 @@
   // `env` is injectable so both transports can be tested without a browser:
   //   tauri        the `window.__TAURI__` object, or undefined for web
   //   fetch / EventSource   the web transport's primitives
+  //   csrfToken             () => the CSRF token to send on state-changing requests
   //   commands / events     override the tables (tests, or a future backend)
   function createApi(env = {}) {
     const base = env.base === undefined ? API_BASE : env.base;
@@ -119,7 +155,8 @@
       if (!has(commands, name)) throw new UnavailableOnWebError("command", name);
       const fetchFn = env.fetch;
       if (typeof fetchFn !== "function") throw new ApiError("This browser cannot reach the SWARM Automation service.", 0, null);
-      const { url, init } = buildRequest(base, commands[name], args);
+      const csrfToken = typeof env.csrfToken === "function" ? env.csrfToken() : "";
+      const { url, init } = buildRequest(base, commands[name], args, csrfToken);
       let response;
       try {
         response = await fetchFn(url, init);
@@ -156,6 +193,7 @@
       tauri: win && win.__TAURI__,
       fetch: win && typeof win.fetch === "function" ? win.fetch.bind(win) : undefined,
       EventSource: win && win.EventSource,
+      csrfToken: () => readCsrfToken(win && win.document ? win.document.cookie : ""),
     });
   }
 
@@ -166,6 +204,7 @@
     UnavailableOnWebError,
     ApiError,
     isUnavailableOnWeb,
+    readCsrfToken,
     createApi,
     invoke: (name, args) => current().invoke(name, args),
     listen: (event, callback) => current().listen(event, callback),

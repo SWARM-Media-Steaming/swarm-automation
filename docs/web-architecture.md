@@ -3,8 +3,9 @@
 SWARM Automation gains a hosted, multi-tenant web version alongside the Tauri
 desktop app (tracked in #413). The desktop stays fully working; `ui/` and
 `issue_worker/` are shared. This document records the pieces as they land.
-Today it covers the storage seam; later sections (web backend, job runner,
-auth) are added by their own issues.
+It covers the storage seam and the web backend (API, auth, tenancy, provider
+keys, usage and quotas); the job runner and the Postgres/S3 implementations are
+added by their own issues.
 
 ## Storage
 
@@ -125,3 +126,156 @@ and migrations, worker path derivation, and the image-isolation tests.
 `issue_worker/worker_entrypoint.py` runs the worker from a plain copy of
 `issue_worker/` (no package install, no `src/` or `ui/`) and keeps its exit
 codes. It is the command the future worker image runs.
+
+## Web backend (`web/`)
+
+`web/` is a standalone Rust/axum Cargo project (`swarm-web`): its own
+`Cargo.toml` and `Cargo.lock`, **not** a member of the desktop's package (the
+root `Cargo.toml` has no `[workspace]`; keep it that way). It was chosen over
+another language because the desktop's `src/config.rs` and `src/tools.rs` logic
+is being ported and the backend shares its types and conventions. `src/` is
+untouched. CI runs `cargo fmt`, `clippy -D warnings` and `cargo test --locked`
+in `web/` beside the desktop's.
+
+```
+GET  /api/v1/health
+GET  /api/v1/session                              who is signed in, tenants, CSRF token
+GET  /api/v1/auth/github/login | /callback        GitHub App OAuth (state + PKCE)
+POST /api/v1/auth/logout
+GET  /api/v1/tenants[/{tenant}[/members|/provider-keys|/quotas|/usage]]
+PUT  /api/v1/tenants/{tenant}/provider-keys/{provider}     write-only (owner)
+DEL  /api/v1/tenants/{tenant}/provider-keys/{provider}     (owner)
+PUT  /api/v1/tenants/{tenant}/budgets                      (owner)
+POST /api/v1/webhooks/github                      signed, idempotent
+     /api/v1/internal/tenants/{tenant}/usage|quotas|jobs   operator bearer token
+```
+
+Everything else under `/api/v1` is a JSON 404; any other path is a static asset
+from `ui/` (`SWARM_WEB_UI_DIR`, default `../ui`) with `*.test.js`, `*.md` and
+dotfiles unserved. The same assets run on the desktop and the web: the
+`web_*` rows in `ui/api.js`'s `COMMANDS` table map onto these routes. Every
+response carries a strict CSP (`default-src 'none'; script-src 'self'; style-src
+'self'; ...`, no `unsafe-inline`), `nosniff`, `frame-ancestors 'none'`,
+`no-referrer`, and HSTS over HTTPS. Logs are JSON lines through a scrubbing
+writer (`redact.rs`: provider and GitHub tokens, key blocks, bearer headers,
+credentialed URLs, signatures, configured secrets); request logs carry the path
+only, never the query string.
+
+### Sign-in, sessions and CSRF
+
+Sign-in is the GitHub App's user-to-server OAuth flow with a random `state`
+bound to the browser by an `HttpOnly` cookie and a PKCE S256 challenge. The
+user's GitHub token is used for the callback's three reads (`/user`,
+`/user/installations`, and the organization role) and dropped: it is never
+stored, logged or returned. The session is a 256-bit random id in an `HttpOnly`,
+`SameSite=Lax` cookie (`Secure` and `__Host-` prefixed when `SWARM_WEB_PUBLIC_URL`
+is `https`); the store keeps only its SHA-256. A new id is minted on every
+sign-in, sessions expire (`SWARM_WEB_SESSION_TTL_SECS`, default 8 h) and logout
+deletes the row. Nothing credential-like goes in `localStorage`.
+
+CSRF: every state-changing request needs the session's token in `X-CSRF-Token`
+(constant-time compare against the copy stored with the session) and, if the
+browser sends an `Origin`, it must be the configured origin. The token is
+delivered in a script-readable `swarm_csrf` cookie and in `GET /session`;
+`ui/api.js` echoes it. The check is in the `Authed` extractor, so a handler
+that needs a session cannot skip it.
+
+### Tenants, roles and isolation
+
+A tenant is a GitHub App installation, created on first sight at sign-in or by
+the `installation` webhook. Tenant ids match the worker storage grammar
+(`t` + 16 hex), so the same string names the database tenant and the
+object-store prefix. A user belongs to the tenants GitHub says they can access;
+every sign-in re-syncs memberships (access GitHub no longer grants is dropped,
+role changes follow). Roles: **owner** is the installation's own user account or
+an organization admin (needs the App's *Organization members: read*
+permission; without it an organization's users are members, never owners) and
+may write keys and budgets; **member** can read. Suspended or deleted
+installations (webhook) refuse writes and new jobs.
+
+Isolation is enforced in three places, each tested:
+
+1. **HTTP**: every `/tenants/{tenant}/...` handler takes a `TenantAccess`
+   extractor, which proves the signed-in user's membership in the path's tenant
+   and answers `404` otherwise, so ids cannot be probed. Tenant ids in bodies or
+   query strings are never read.
+2. **Store**: every tenant-scoped `Store` method takes the tenant first (the
+   same rule as `issue_worker/storage.py`) and can only address that tenant.
+3. **Crypto**: sealed provider keys are bound to `(tenant, provider)`, so a row
+   copied to another tenant or provider fails to decrypt.
+
+### Provider keys
+
+Per tenant: `claude`, `codex`, `grok` and `model-data` (the Artificial Analysis
+key). **Write-only**: `PUT` stores, `GET` returns only
+`{provider, configured, updated_at, updated_by}`, `DELETE` removes. A key is
+never returned, never logged (it lives in `Secret`, whose `Debug`/`Display`
+print a placeholder, and request errors never echo bodies) and is zeroized on
+drop. Envelope encryption: a random data key per secret seals it with
+AES-256-GCM; a `KeyWrapper` wraps the data key. `LocalKeyWrapper`
+(`SWARM_WEB_LOCAL_KEY`, base64 32 bytes) is the development wrapper. **KMS on
+AWS is the same trait with an AWS-backed implementation; it needs the AWS SDK
+and lands with the deployment work, and `SWARM_WEB_KMS_KEY_ID` is refused at
+startup until it exists rather than silently ignored.** `Vault::job_environment`
+is the only place plaintext leaves: it returns the one provider's variable
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`), plus
+`ARTIFICIAL_ANALYSIS_API_KEY` only for a job that fetches model data, never
+another provider's key. No HTTP route reaches it.
+
+### Usage, budgets and quotas
+
+The worker prices every invocation (`token_usage.UsageRecord`,
+`usage_report.py`); jobs post those rows to the operator-only
+`/internal/tenants/{tenant}/usage` and the backend sums them per tenant and
+month. The rule is `usage_report.py`'s: a row is priced spend only with some
+token counter **and** an `estimated_cost`; anything else is counted as
+*unpriced*, never as zero. Non-USD rows are refused. Re-posting a batch is
+idempotent (record ids are scoped to the tenant). `web/tests/fixtures/
+usage_record.json` is real `UsageRecord.to_dict()` output parsed from both
+Python (`test_web_usage_contract.py`) and Rust (`usage_contract.rs`).
+
+`minimum_remaining_percent` keeps its meaning. A provider's remaining headroom
+is the tenant's provider budget (owner-set, USD per month) minus spend, and/or
+a provider-reported limit when a job supplies one (`provider_limits`, valid for
+an hour); the lower wins. Status mirrors the worker's `ProviderUsage`: `0`
+usable, `1` below the minimum (no new job for that provider until the budget is
+raised or the month rolls over), `2` **unavailable**: no budget and no reported
+limit, `remaining_percent` is `null` and nothing is gated, never a fabricated
+number.
+
+Quotas are enforced by `POST /internal/tenants/{tenant}/jobs` before a job
+starts, in this order: tenant active, the provider's key present, monthly spend
+cap, provider budget, then an atomic concurrent-job slot (idempotent per job id;
+`DELETE .../jobs/{id}` releases it). Plan quotas (`max_concurrent_jobs`, default
+2; `monthly_spend_cap_usd`, default 100) are operator-set and only readable by a
+tenant; budgets are the owner's. The operator API needs
+`SWARM_WEB_INTERNAL_TOKEN` and is off (404) without it.
+
+### Webhooks
+
+`POST /api/v1/webhooks/github` verifies `X-Hub-Signature-256` (HMAC-SHA256 of
+the raw body, constant time) **before anything is stored**; a bad signature is a
+`401`. A delivery is then *claimed* by `X-GitHub-Delivery` and by payload hash:
+the same id again is acknowledged as a `duplicate` (`200`) and not re-applied; a
+captured signed body replayed under a new id is refused (`409 replay`). A
+processing failure releases the claim and answers 5xx so GitHub's retry runs.
+`installation` events create, suspend, unsuspend and delete tenants; other
+events for a known active installation are recorded for the job runner.
+
+### Configuration
+
+`SWARM_WEB_PUBLIC_URL`, `SWARM_WEB_GITHUB_CLIENT_ID`,
+`SWARM_WEB_GITHUB_CLIENT_SECRET`, `SWARM_WEB_GITHUB_WEBHOOK_SECRET` and
+`SWARM_WEB_LOCAL_KEY` are required; `SWARM_WEB_BIND` (default `127.0.0.1:8080`),
+`SWARM_WEB_UI_DIR`, `SWARM_WEB_GITHUB_APP_SLUG`, `SWARM_WEB_INTERNAL_TOKEN` and
+`SWARM_WEB_SESSION_TTL_SECS` are optional. Run it with
+`cargo run` in `web/` (tests: `cargo test --locked`).
+
+### Not yet built
+
+Behind the seams above, by later issues of #413: the Postgres `Store` (the
+in-memory store used today loses state on restart and the binary says so at
+startup), the S3-backed worker `Storage`, the KMS `KeyWrapper`, the `JobRunner`
+(Docker, ECS Fargate) that calls `Vault::job_environment` and the admission
+endpoints, Server-Sent Events streams (the `EVENTS` table in `ui/api.js` is
+still empty), and the UI screens that call the `web_*` commands.
