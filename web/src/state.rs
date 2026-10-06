@@ -1,12 +1,13 @@
 //! Shared application state.
 
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::crypto::KeyWrapper;
 use crate::github::GitHubClient;
+use crate::orchestrator::Orchestrator;
 use crate::store::Store;
 use crate::usage::Accounting;
 use crate::vault::Vault;
@@ -18,6 +19,9 @@ pub struct Inner {
     pub vault: Vault,
     pub accounting: Accounting,
     pub clock: Arc<dyn Clock>,
+    /// Attached after construction so the router and the process can share it.
+    /// `None` until a job runner is configured; webhook deliveries stay recorded.
+    pub jobs: Mutex<Option<Arc<Orchestrator>>>,
 }
 
 #[derive(Clone)]
@@ -40,7 +44,18 @@ impl AppState {
             vault,
             accounting,
             clock,
+            jobs: Mutex::new(None),
         }))
+    }
+
+    pub fn set_orchestrator(&self, orchestrator: Arc<Orchestrator>) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            *jobs = Some(orchestrator);
+        }
+    }
+
+    pub fn orchestrator(&self) -> Option<Arc<Orchestrator>> {
+        self.jobs.lock().ok().and_then(|jobs| jobs.clone())
     }
 }
 

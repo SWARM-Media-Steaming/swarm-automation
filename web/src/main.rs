@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use swarm_web::clock::SystemClock;
-use swarm_web::config::Config;
+use swarm_web::config::{Config, JobBackend};
 use swarm_web::github::HttpGitHub;
 use swarm_web::memory::MemoryStore;
+use swarm_web::orchestrator::{JobSettings, Orchestrator, OrchestratorDeps, PythonTokenMinter};
+use swarm_web::runner::{DockerJobRunner, EcsFargateJobRunner, JobRunner};
 use swarm_web::state::AppState;
 
 #[tokio::main]
@@ -40,6 +42,7 @@ async fn main() {
         Arc::new(wrapper),
         Arc::new(SystemClock),
     );
+    attach_jobs(&state);
     let listener = match tokio::net::TcpListener::bind(bind).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -58,4 +61,79 @@ async fn main() {
         eprintln!("swarm-web: server error: {error}");
         std::process::exit(1);
     }
+}
+
+fn attach_jobs(state: &AppState) {
+    let Some(jobs) = state.config.jobs.as_ref() else {
+        return;
+    };
+    let runner: Arc<dyn JobRunner> = match jobs.backend {
+        JobBackend::Docker => {
+            tracing::info!("job runner: docker");
+            Arc::new(DockerJobRunner::new(jobs.docker_bin.clone()))
+        }
+        JobBackend::Fargate => {
+            tracing::info!(cluster = %jobs.ecs_cluster, "job runner: fargate");
+            let runner = match EcsFargateJobRunner::new(
+                jobs.ecs_endpoint.clone(),
+                jobs.ecs_region.clone(),
+                jobs.ecs_cluster.clone(),
+                jobs.ecs_task_definition.clone(),
+                jobs.ecs_subnets.clone(),
+                jobs.ecs_security_groups.clone(),
+            ) {
+                Ok(runner) => runner,
+                Err(error) => {
+                    eprintln!("swarm-web: {error}");
+                    std::process::exit(2);
+                }
+            };
+            let runner = if let (Some(access), Some(secret)) =
+                (&jobs.ecs_access_key, &jobs.ecs_secret_key)
+            {
+                runner.with_static_credentials(access.clone(), secret.clone())
+            } else {
+                runner
+            };
+            Arc::new(runner)
+        }
+    };
+    let minter = Arc::new(PythonTokenMinter::new(
+        jobs.python.clone(),
+        jobs.worker_dir.join("github_app_auth.py"),
+    ));
+    let settings = JobSettings {
+        image: jobs.image.clone(),
+        provider: jobs.provider,
+        cpu_millis: jobs.cpu_millis,
+        memory_mib: jobs.memory_mib,
+        max_runtime_secs: jobs.max_runtime_secs,
+        quota_resume_secs: jobs.quota_resume_secs,
+        poll_secs: jobs.poll_secs,
+        network: jobs.docker_network.clone(),
+        app_id: jobs.app_id,
+        private_key: jobs.private_key.clone(),
+        trusted_authors: jobs.trusted_authors.iter().cloned().collect(),
+        plain_env: jobs.plain_env.clone(),
+        secret_env: jobs.secret_env.clone(),
+    };
+    let poll_secs = settings.poll_secs.max(1);
+    let orchestrator = Orchestrator::new(OrchestratorDeps {
+        runner,
+        minter,
+        store: state.store.clone(),
+        vault: state.vault.clone(),
+        accounting: state.accounting.clone(),
+        clock: state.clock.clone(),
+        settings,
+    });
+    state.set_orchestrator(orchestrator.clone());
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(poll_secs)).await;
+            if let Err(error) = orchestrator.tick().await {
+                tracing::warn!(error = %error, "job scheduler tick failed");
+            }
+        }
+    });
 }

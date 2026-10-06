@@ -1,0 +1,22 @@
+# Small image for the job-runner acceptance test. Same entrypoint as
+# web/worker/Dockerfile; SWARM_JOB_WORKER selects the delivery fixture instead
+# of the real worker. Build from the repository root:
+#   docker build -f web/worker/Dockerfile.fixture -t swarm-automation-worker:fixture .
+FROM python:3.13-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 1000 --create-home --shell /usr/sbin/nologin swarm
+
+COPY issue_worker /opt/swarm/issue_worker
+COPY web/worker/fixture_worker.py /opt/swarm/fixture_worker.py
+COPY web/worker/egress-allowlist.txt /opt/swarm/egress-allowlist.txt
+
+USER 1000:1000
+WORKDIR /workspace
+ENV HOME=/home/swarm \
+    AWS_EC2_METADATA_DISABLED=true \
+    SWARM_JOB_WORKER=/opt/swarm/fixture_worker.py \
+    PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["python3", "-I", "/opt/swarm/issue_worker/job_launch.py"]

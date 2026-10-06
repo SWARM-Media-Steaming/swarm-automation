@@ -1,10 +1,11 @@
 //! Process configuration, read from the environment (`SWARM_WEB_*`).
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use crate::crypto::LocalKeyWrapper;
-use crate::model::PlanQuotas;
+use crate::model::{PlanQuotas, Provider};
 use crate::secret::Secret;
 
 pub struct GitHubConfig {
@@ -30,6 +31,45 @@ pub struct Config {
     pub github: GitHubConfig,
     pub internal_token: Option<Secret>,
     pub default_plan: PlanQuotas,
+    /// `None` unless `SWARM_WEB_JOB_RUNNER` is `docker` or `fargate`.
+    pub jobs: Option<JobConfig>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum JobBackend {
+    Docker,
+    Fargate,
+}
+
+/// Runner configuration. Required only when the job runner is enabled, so a
+/// process that only serves the API keeps the original environment.
+pub struct JobConfig {
+    pub backend: JobBackend,
+    pub image: String,
+    pub docker_bin: PathBuf,
+    pub docker_network: String,
+    pub ecs_endpoint: String,
+    pub ecs_region: String,
+    pub ecs_cluster: String,
+    pub ecs_task_definition: String,
+    pub ecs_subnets: Vec<String>,
+    pub ecs_security_groups: Vec<String>,
+    pub ecs_access_key: Option<Secret>,
+    pub ecs_secret_key: Option<Secret>,
+    pub cpu_millis: u64,
+    pub memory_mib: u64,
+    /// `None` means a job is not killed for running a long time.
+    pub max_runtime_secs: Option<u64>,
+    pub quota_resume_secs: u64,
+    pub poll_secs: u64,
+    pub provider: Provider,
+    pub app_id: u64,
+    pub private_key: Secret,
+    pub python: PathBuf,
+    pub worker_dir: PathBuf,
+    pub trusted_authors: Vec<String>,
+    pub plain_env: BTreeMap<String, String>,
+    pub secret_env: BTreeMap<String, Secret>,
 }
 
 #[derive(Debug)]
@@ -141,6 +181,7 @@ impl Config {
                 max_concurrent_jobs: DEFAULT_MAX_CONCURRENT_JOBS,
                 monthly_spend_cap_usd: Some(DEFAULT_MONTHLY_SPEND_CAP_USD),
             },
+            jobs: load_jobs(get)?,
         };
         Ok((config, wrapper))
     }
@@ -152,12 +193,195 @@ impl Config {
         if let Some(token) = &self.internal_token {
             crate::redact::register_secret(token.expose());
         }
+        if let Some(jobs) = &self.jobs {
+            crate::redact::register_secret(jobs.private_key.expose());
+            for secret in jobs.secret_env.values() {
+                crate::redact::register_secret(secret.expose());
+            }
+            if let Some(secret) = &jobs.ecs_secret_key {
+                crate::redact::register_secret(secret.expose());
+            }
+        }
     }
+}
+
+fn optional(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    get(name)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_u64(value: &str, name: &str) -> Result<u64, ConfigError> {
+    value
+        .trim()
+        .parse()
+        .map_err(|_| ConfigError(format!("{name} must be a number")))
+}
+
+fn load_jobs(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<JobConfig>, ConfigError> {
+    let Some(backend_name) = optional(get, "SWARM_WEB_JOB_RUNNER") else {
+        return Ok(None);
+    };
+    let backend = match backend_name.as_str() {
+        "docker" => JobBackend::Docker,
+        "fargate" => JobBackend::Fargate,
+        _ => {
+            return Err(ConfigError(
+                "SWARM_WEB_JOB_RUNNER must be docker or fargate".into(),
+            ))
+        }
+    };
+    let image = optional(get, "SWARM_WEB_WORKER_IMAGE").ok_or_else(|| {
+        ConfigError("SWARM_WEB_WORKER_IMAGE is required when the job runner is enabled".into())
+    })?;
+    let app_id = parse_u64(
+        &optional(get, "SWARM_WEB_GITHUB_APP_ID").ok_or_else(|| {
+            ConfigError("SWARM_WEB_GITHUB_APP_ID is required when the job runner is enabled".into())
+        })?,
+        "SWARM_WEB_GITHUB_APP_ID",
+    )?;
+    let private_key = Secret::new(
+        optional(get, "SWARM_WEB_GITHUB_APP_PRIVATE_KEY").ok_or_else(|| {
+            ConfigError(
+                "SWARM_WEB_GITHUB_APP_PRIVATE_KEY is required when the job runner is enabled"
+                    .into(),
+            )
+        })?,
+    );
+    if !private_key.expose().contains("BEGIN") {
+        return Err(ConfigError(
+            "SWARM_WEB_GITHUB_APP_PRIVATE_KEY must be a PEM private key".into(),
+        ));
+    }
+    let provider = Provider::parse(
+        &optional(get, "SWARM_WEB_JOB_PROVIDER").unwrap_or_else(|| "claude".into()),
+    )
+    .filter(|provider| provider.runs_jobs())
+    .ok_or_else(|| ConfigError("SWARM_WEB_JOB_PROVIDER must be claude, codex or grok".into()))?;
+    let cpu_millis = match optional(get, "SWARM_WEB_JOB_CPU_MILLIS") {
+        Some(value) => parse_u64(&value, "SWARM_WEB_JOB_CPU_MILLIS")?,
+        None => 1000,
+    };
+    let memory_mib = match optional(get, "SWARM_WEB_JOB_MEMORY_MIB") {
+        Some(value) => parse_u64(&value, "SWARM_WEB_JOB_MEMORY_MIB")?,
+        None => 2048,
+    };
+    if cpu_millis == 0 || memory_mib == 0 {
+        return Err(ConfigError(
+            "job cpu and memory limits must be positive".into(),
+        ));
+    }
+    let max_runtime_secs = match optional(get, "SWARM_WEB_JOB_MAX_RUNTIME_SECS") {
+        Some(value) => Some(parse_u64(&value, "SWARM_WEB_JOB_MAX_RUNTIME_SECS")?),
+        None => None,
+    };
+    let quota_resume_secs = match optional(get, "SWARM_WEB_QUOTA_RESUME_SECS") {
+        Some(value) => parse_u64(&value, "SWARM_WEB_QUOTA_RESUME_SECS")?,
+        None => 60,
+    };
+    let poll_secs = match optional(get, "SWARM_WEB_POLL_SECS") {
+        Some(value) => parse_u64(&value, "SWARM_WEB_POLL_SECS")?,
+        None => 60,
+    };
+    let region = optional(get, "SWARM_WEB_ECS_REGION").unwrap_or_else(|| "us-east-1".into());
+    let endpoint = optional(get, "SWARM_WEB_ECS_ENDPOINT")
+        .unwrap_or_else(|| format!("https://ecs.{region}.amazonaws.com"));
+    let subnets: Vec<String> = optional(get, "SWARM_WEB_ECS_SUBNETS")
+        .map(|value| {
+            value
+                .split(',')
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if backend == JobBackend::Fargate && subnets.is_empty() {
+        return Err(ConfigError(
+            "SWARM_WEB_ECS_SUBNETS is required for the fargate runner".into(),
+        ));
+    }
+    let security_groups: Vec<String> = optional(get, "SWARM_WEB_ECS_SECURITY_GROUPS")
+        .map(|value| {
+            value
+                .split(',')
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let trusted_authors = optional(get, "SWARM_WEB_TRUSTED_AUTHORS")
+        .map(|value| {
+            value
+                .split(',')
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut plain_env = BTreeMap::new();
+    let mut secret_env = BTreeMap::new();
+    for name in [
+        "SWARM_STORAGE_BACKEND",
+        "SWARM_STORAGE_POSTGRES_DRIVER",
+        "SWARM_STORAGE_S3_ENDPOINT",
+        "SWARM_STORAGE_S3_BUCKET",
+        "SWARM_STORAGE_S3_REGION",
+        "SWARM_JOB_STORAGE",
+    ] {
+        if let Some(value) = optional(get, name) {
+            plain_env.insert(name.to_string(), value);
+        }
+    }
+    for name in [
+        "SWARM_STORAGE_POSTGRES_DSN",
+        "SWARM_STORAGE_S3_ACCESS_KEY",
+        "SWARM_STORAGE_S3_SECRET_KEY",
+    ] {
+        if let Some(value) = optional(get, name) {
+            secret_env.insert(name.to_string(), Secret::new(value));
+        }
+    }
+    Ok(Some(JobConfig {
+        backend,
+        image,
+        docker_bin: PathBuf::from(
+            optional(get, "SWARM_WEB_DOCKER_BIN").unwrap_or_else(|| "docker".into()),
+        ),
+        docker_network: optional(get, "SWARM_WEB_DOCKER_NETWORK")
+            .unwrap_or_else(|| "bridge".into()),
+        ecs_endpoint: endpoint,
+        ecs_region: region,
+        ecs_cluster: optional(get, "SWARM_WEB_ECS_CLUSTER").unwrap_or_else(|| "swarm".into()),
+        ecs_task_definition: optional(get, "SWARM_WEB_ECS_TASK_DEFINITION")
+            .unwrap_or_else(|| "swarm-worker".into()),
+        ecs_subnets: subnets,
+        ecs_security_groups: security_groups,
+        ecs_access_key: optional(get, "SWARM_WEB_ECS_ACCESS_KEY_ID").map(Secret::new),
+        ecs_secret_key: optional(get, "SWARM_WEB_ECS_SECRET_ACCESS_KEY").map(Secret::new),
+        cpu_millis,
+        memory_mib,
+        max_runtime_secs,
+        quota_resume_secs,
+        poll_secs,
+        provider,
+        app_id,
+        private_key,
+        python: PathBuf::from(
+            optional(get, "SWARM_WEB_PYTHON").unwrap_or_else(|| "python3".into()),
+        ),
+        worker_dir: PathBuf::from(
+            optional(get, "SWARM_WEB_WORKER_DIR").unwrap_or_else(|| "../issue_worker".into()),
+        ),
+        trusted_authors,
+        plain_env,
+        secret_env,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Provider;
     use base64::Engine;
     use std::collections::HashMap;
 
@@ -190,6 +414,31 @@ mod tests {
         assert!(config.cookie_secure());
         assert_eq!(config.default_plan.max_concurrent_jobs, 2);
         assert!(!format!("{:?}", config.github.client_secret).contains("client-secret-value"));
+        assert!(config.jobs.is_none());
+    }
+
+    #[test]
+    fn the_job_runner_is_optional_and_has_no_default_deadline() {
+        let error = match load(&env(&[("SWARM_WEB_JOB_RUNNER", "docker")])) {
+            Err(error) => error,
+            Ok(_) => panic!("enabling the runner without an image must fail"),
+        };
+        assert!(error.0.contains("SWARM_WEB_WORKER_IMAGE"));
+        let (config, _) = load(&env(&[
+            ("SWARM_WEB_JOB_RUNNER", "docker"),
+            ("SWARM_WEB_WORKER_IMAGE", "swarm-automation-worker"),
+            ("SWARM_WEB_GITHUB_APP_ID", "123"),
+            (
+                "SWARM_WEB_GITHUB_APP_PRIVATE_KEY",
+                "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----",
+            ),
+        ]))
+        .unwrap();
+        let jobs = config.jobs.expect("runner enabled");
+        assert!(jobs.max_runtime_secs.is_none());
+        assert_eq!(jobs.quota_resume_secs, 60);
+        assert_eq!(jobs.provider, Provider::Claude);
+        assert!(!format!("{:?}", jobs.private_key).contains("BEGIN"));
     }
 
     #[test]

@@ -84,8 +84,9 @@ local filesystem/SQLite behavior as `LocalStorage`. `Worker` derives its legacy
 `*_file` / `*_dir` attributes from it and its history facade and
 `ArchitectureStore` go through it; the on-disk layout and `SCHEMA_VERSION` are
 unchanged. `storage_contract.StorageContract` is the reusable contract suite
-(`test_storage.py` runs it locally), and `worker_entrypoint.py` is the image
-entrypoint. Keep `issue_worker/` stdlib-plus-siblings only. See
+(`test_storage.py` runs it locally). `worker_entrypoint.py` still runs the
+worker; the hosted image command is `job_launch.py`, which calls it. Keep
+`issue_worker/` stdlib-plus-siblings only. See
 `docs/web-architecture.md` and `.claude/rules/storage.md`.
 
 The hosted implementation is `storage_remote.RemoteStorage`: checkpoints, logs
@@ -102,6 +103,11 @@ locally: `docker compose -f web/docker-compose.yml up -d`, or a throwaway
 docs and history into a tenant (`docs/desktop-import.md`); settings live in the
 `tenant_config` document collection.
 
+`worker_entrypoint.py` is what a hosted container runs after `job_launch.py`
+prepares a fresh clone and copies checkpoints. The image command is
+`job_launch.py` (`web/worker/Dockerfile`). The worker still reads local
+checkpoint files as `DEFAULT_TENANT`; the hosted copy uses the real tenant id.
+
 ## Web backend (`web/`)
 
 `web/` is the hosted multi-tenant backend, a standalone Rust/axum Cargo project
@@ -115,8 +121,14 @@ idempotent GitHub webhook. Test it with `cargo test --locked` in `web/` (plus
 which CI runs). The store is behind a `Store` trait; only the in-memory
 implementation exists so far. The Postgres platform schema is
 `web/migrations/*.sql` (embedded as `swarm_web::schema::MIGRATIONS`, applied by
-`psql -f`); the Postgres `Store`, KMS and the job runner are later issues. `ui/api.js`'s `web_*` commands and CSRF header are its client side.
-See `docs/web-architecture.md` and `.claude/rules/web-backend.md`.
+`psql -f`); the Postgres `Store` and KMS `KeyWrapper` are later issues. Jobs
+run through `JobRunner` (`DockerJobRunner` locally, `EcsFargateJobRunner` on
+AWS): one container per repository, image `web/worker/Dockerfile`, entrypoint
+`issue_worker/job_launch.py`. The orchestrator resumes exit 13 and quota
+pauses on a fresh container and holds exit 14. There is no default 15-minute
+deadline. `ui/api.js` maps the `web_*` account and job commands and the
+`job-log` SSE event (`GET /api/v1/events/jobs`). See `docs/web-architecture.md`
+and `.claude/rules/web-backend.md`.
 
 ## Engineering Knowledge / Ask SWARM
 

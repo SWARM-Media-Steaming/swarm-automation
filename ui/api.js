@@ -43,14 +43,23 @@
     web_get_quotas: { method: "GET", path: "/tenants/{tenant}/quotas" },
     web_set_budgets: { method: "PUT", path: "/tenants/{tenant}/budgets" },
     web_get_usage: { method: "GET", path: "/tenants/{tenant}/usage" },
+    web_job_status: { method: "GET", path: "/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}" },
+    web_job_logs: { method: "GET", path: "/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}/logs" },
+    web_run_job: { method: "POST", path: "/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}/run" },
+    web_pause_job: { method: "POST", path: "/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}/pause" },
+    web_resume_job: { method: "POST", path: "/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}/resume" },
+    web_stop_job: { method: "POST", path: "/tenants/{tenant}/work/{owner}/{repo}/issues/{issue}/stop" },
   };
 
   // Event name -> Server-Sent Events stream. One row per event the web backend
   // emits: { path: "/events/automation-log", sse: "automation-log" }. `sse` is
   // the SSE `event:` type to listen for and defaults to the event name. Each
   // message's `data` is JSON and becomes the callback's `payload`, the same
-  // `{ payload }` shape Tauri delivers.
-  const EVENTS = {};
+  // `{ payload }` shape Tauri delivers. `listen()` does not substitute path
+  // parameters, so this stream is one static path and the payload names the tenant.
+  const EVENTS = {
+    "job-log": { path: "/events/jobs", sse: "job-log" },
+  };
 
   class UnavailableOnWebError extends Error {
     constructor(kind, name) {

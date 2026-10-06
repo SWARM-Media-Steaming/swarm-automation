@@ -13,6 +13,8 @@ Do not add a UI toggle, direct inference API or application source-context cache
 Run Python tests with `python3 -m unittest discover -s issue_worker -p 'test_*.py'`
 (the worker test module has a pytest hook-name conflict), frontend tests with
 `npm test`, and Rust checks with `cargo test --locked` when relevant (the hosted backend is a
-separate Cargo project: run it in `web/`, see `.claude/rules/web-backend.md`). Run checks
+separate Cargo project: run it in `web/`, see `.claude/rules/web-backend.md`). The web
+job runner and orchestrator live in `web/` (`docs/web-architecture.md`); the desktop
+cron installer is unchanged. Run checks
 in the foreground. Independent suites under `tests/adversarial/` belong to the
 adversarial tester; never weaken them to make a patch pass.
