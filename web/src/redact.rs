@@ -77,6 +77,33 @@ pub fn redact_text(input: &str) -> String {
         .into_owned()
 }
 
+/// Like [`redact_text`] without the `name=value` rule: only values that look
+/// like a credential (provider and GitHub tokens, key blocks, bearer headers,
+/// credentialed URLs, registered secrets) are replaced. For stored settings,
+/// where a prompt may legitimately say "state: draft".
+pub fn scrub_tokens(input: &str) -> String {
+    let mut text = input.to_string();
+    if let Ok(list) = known().read() {
+        for secret in list.iter() {
+            text = text.replace(secret.as_str(), PLACEHOLDER);
+        }
+    }
+    for pattern in &patterns().whole {
+        text = pattern.replace_all(&text, PLACEHOLDER).into_owned();
+    }
+    text
+}
+
+/// [`redact_text`] over every string in a JSON value (keys are left alone).
+pub fn redact_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => *text = redact_text(text),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(redact_value),
+        serde_json::Value::Object(map) => map.values_mut().for_each(redact_value),
+        _ => {}
+    }
+}
+
 /// A `tracing` writer that scrubs each formatted event before it is written.
 #[derive(Clone)]
 pub struct RedactingMakeWriter<M>(pub M);

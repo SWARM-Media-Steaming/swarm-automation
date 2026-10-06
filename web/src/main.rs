@@ -42,6 +42,7 @@ async fn main() {
         Arc::new(wrapper),
         Arc::new(SystemClock),
     );
+    attach_bridge(&state);
     attach_jobs(&state);
     let listener = match tokio::net::TcpListener::bind(bind).await {
         Ok(listener) => listener,
@@ -61,6 +62,19 @@ async fn main() {
         eprintln!("swarm-web: server error: {error}");
         std::process::exit(1);
     }
+}
+
+fn attach_bridge(state: &AppState) {
+    let Some(bridge) = state.config.bridge.as_ref() else {
+        tracing::warn!("worker bridge: off (history, usage and the other worker-computed endpoints answer 503)");
+        return;
+    };
+    tracing::info!("worker bridge: python");
+    state.set_bridge(Arc::new(swarm_web::bridge::ProcessBridge::new(
+        bridge.python.clone(),
+        bridge.worker_dir.clone(),
+        bridge.env.clone(),
+    )));
 }
 
 fn attach_jobs(state: &AppState) {

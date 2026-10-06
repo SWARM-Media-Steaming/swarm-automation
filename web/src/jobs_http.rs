@@ -2,15 +2,11 @@
 //! `TenantAccess`, never from the body. Missing orchestrator is a 404, the
 //! same answer a tenant the caller does not belong to gets.
 
-use std::collections::HashSet;
-use std::convert::Infallible;
-
 use axum::extract::{Path, State};
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::http::HeaderMap;
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::Serialize;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::StreamExt;
 
 use crate::auth::{Authed, TenantAccess};
 use crate::error::ApiError;
@@ -126,27 +122,29 @@ pub async fn logs(
 }
 
 /// One stream for every tenant the signed-in user belongs to. The path has no
-/// tenant parameter: `listen()` in `ui/api.js` does not substitute one.
+/// tenant parameter: `listen()` in `ui/api.js` does not substitute one. It is
+/// served from the event hub (`events.rs`): replay after `Last-Event-ID`,
+/// heartbeat, bounded backpressure.
 pub async fn events(
     State(state): State<AppState>,
     authed: Authed,
-) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let jobs = orchestrator(&state)?;
-    let allowed: HashSet<String> = state
-        .store
-        .tenants_for_user(&authed.user.id)
-        .await?
-        .into_iter()
-        .map(|(tenant, _)| tenant.id.to_string())
-        .collect();
-    let live = BroadcastStream::new(jobs.subscribe()).filter_map(move |item| {
-        let event = item.ok()?;
-        if !allowed.contains(&event.tenant) {
-            return None;
-        }
-        let data = serde_json::to_string(&event).ok()?;
-        Some(Ok(Event::default().event("job-log").data(data)))
-    });
-    let ready = tokio_stream::once(Ok(Event::default().comment("ready")));
-    Ok(Sse::new(ready.chain(live)).keep_alive(KeepAlive::default()))
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    crate::events::serve(state, authed, headers, "job-log").await
+}
+
+pub async fn automation_log(
+    State(state): State<AppState>,
+    authed: Authed,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    crate::events::serve(state, authed, headers, "automation-log").await
+}
+
+pub async fn calibration_events(
+    State(state): State<AppState>,
+    authed: Authed,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    crate::events::serve(state, authed, headers, "model-calibration-refreshed").await
 }

@@ -126,9 +126,18 @@ run through `JobRunner` (`DockerJobRunner` locally, `EcsFargateJobRunner` on
 AWS): one container per repository, image `web/worker/Dockerfile`, entrypoint
 `issue_worker/job_launch.py`. The orchestrator resumes exit 13 and quota
 pauses on a fresh container and holds exit 14. There is no default 15-minute
-deadline. `ui/api.js` maps the `web_*` account and job commands and the
-`job-log` SSE event (`GET /api/v1/events/jobs`). See `docs/web-architecture.md`
-and `.claude/rules/web-backend.md`.
+deadline. `ui/api.js` maps the `web_*` account and job commands and, since #419,
+every desktop command that has a web equivalent (the rest are listed as
+intentionally removed): `web/src/catalog.rs` is the single table, `api.rs` mounts
+it, `settings.rs` keeps the tenant's `tenant_config` documents, `bridge.rs` runs
+`issue_worker/web_bridge.py` for history, usage, grades, Jev feedback, architecture
+docs and the routing calculator, and `events.rs` serves the `automation-log`,
+`job-log` and `model-calibration-refreshed` SSE streams with `Last-Event-ID`
+resume, heartbeat and bounded backpressure. `ui/api.js` fills `{tenant}` from
+`SwarmApi.setTenant` or the session's first tenant because the desktop's call
+sites pass none. Operations the hosted deployment cannot serve yet answer 501
+(`web_bridge.UNAVAILABLE`). See `docs/web-architecture.md` and
+`.claude/rules/web-backend.md`.
 
 ## Engineering Knowledge / Ask SWARM
 

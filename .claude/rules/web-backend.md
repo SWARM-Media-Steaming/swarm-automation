@@ -61,5 +61,31 @@ stays the one shared worker.
   `tenant_isolation.rs`. `GET /events/jobs` is session-scoped because
   `ui/api.js` `listen()` does not substitute path parameters. Logs and SSE
   frames go through `redact_text`.
+- **The desktop's commands are one table.** `web/src/catalog.rs` says what the web
+  does with every `#[tauri::command]` and event: an endpoint, or `REMOVED` with a
+  reason. The router mounts its routes from it (`api.rs`), `ui/api.js`'s `COMMANDS`
+  / `EVENTS` mirror it and `docs/web-architecture.md` prints it; `api_catalog.rs`
+  fails on drift. Adding a desktop command means a catalog row (or a removal), an
+  adapter row, a docs row and a test; never hand-register a parallel route. Owner
+  routes (settings, merge, promote, file an issue, activate) say `Access::Owner`;
+  the tenant is only ever the path's, and `tenant_isolation.rs` already iterates
+  the catalog.
+- **Settings are `tenant_config` documents** written by `settings.rs` in the layout
+  `desktop_import.py` uses, with the same credential and machine-path stripping.
+  Do not let a credential-shaped key, a key block or a `*_bin`/`repo_dir` setting
+  into a saved document, and keep provider keys on the write-only routes.
+- **The worker computes what the desktop's Python helpers compute.** History, Jev
+  feedback, usage, prompt grades, architecture docs and the routing calculator are
+  operations of `issue_worker/web_bridge.py` reached through `bridge.rs` (stdin
+  JSON, cleared environment, one tenant, repository ids resolved from that tenant's
+  settings first). Add an operation there, not a second implementation in Rust. An
+  operation the hosted deployment cannot serve yet is declared in
+  `web_bridge.UNAVAILABLE` and answers 501 with its reason; never answer with
+  made-up data.
+- **SSE goes through `events.rs`.** Frames are redacted before they are stored,
+  ids are process-wide and replayable from the bounded per-tenant ring, a stream
+  is session-scoped with a heartbeat, and a slow client gets `resync`, never an
+  unbounded buffer. Log lines pass through verbatim (the `Adversarial UAT for issue
+  #...` / `Adversarial Cybersecurity for issue #...` formats the Overview replays).
 - A behavior-changing web setting needs the `minor` label from a trusted author;
   the worker owns `VERSION`.
