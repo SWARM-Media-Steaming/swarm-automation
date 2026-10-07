@@ -57,6 +57,17 @@ variable "trusted_authors" {
   default     = []
 }
 
+variable "bootstrap_admins" {
+  description = "GitHub logins or numeric ids that may become the first platform admin: the first one to sign in while no admin exists. Prefer ids; empty the list once admins exist."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for entry in var.bootstrap_admins : can(regex("^(@?[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?|[0-9]+)$", entry))])
+    error_message = "bootstrap_admins entries must be GitHub logins or numeric ids."
+  }
+}
+
 variable "job_provider" {
   description = "Provider whose key a job receives: claude, codex or grok."
   type        = string

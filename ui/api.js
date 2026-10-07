@@ -52,6 +52,11 @@
     web_list_repositories: { method: "GET", path: "/tenants/{tenant}/repos" },
     web_get_repo_config: { method: "GET", path: "/tenants/{tenant}/repos/{repoId}/config" },
     web_save_repo_config: { method: "PUT", path: "/tenants/{tenant}/repos/{repoId}/config" },
+    // Platform administration (web/src/admin.rs): not tenant-scoped, and the
+    // server answers 404 to anyone who is not a platform admin.
+    web_admin_list_users: { method: "GET", path: "/admin/users" },
+    web_admin_promote_user: { method: "POST", path: "/admin/users/{userId}/promote" },
+    web_admin_demote_user: { method: "POST", path: "/admin/users/{userId}/demote" },
     // The desktop's own commands, by the name the UI already invokes. A
     // `*_background` twin shares its command's row. `{tenant}` is not passed by
     // those call sites: the adapter fills it from the active tenant (below).

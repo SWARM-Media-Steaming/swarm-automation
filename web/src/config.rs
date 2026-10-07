@@ -44,6 +44,55 @@ pub struct Config {
     pub sse_heartbeat_secs: u64,
     /// What `app_version` answers (`SWARM_WEB_APP_VERSION`, else the crate's).
     pub app_version: String,
+    /// `SWARM_WEB_BOOTSTRAP_ADMINS`: who may become the first platform admin.
+    pub bootstrap_admins: Vec<BootstrapAdmin>,
+}
+
+/// One entry of `SWARM_WEB_BOOTSTRAP_ADMINS`: a GitHub account named by its
+/// numeric id (stable) or its login (case-insensitive; a renamed login can be
+/// taken by someone else, so the id is the safer spelling).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BootstrapAdmin {
+    Id(u64),
+    /// Lowercase.
+    Login(String),
+}
+
+impl BootstrapAdmin {
+    /// An all-digit entry is an id; anything else is a login (`@` optional).
+    pub fn parse(entry: &str) -> Result<BootstrapAdmin, ConfigError> {
+        let bad = || {
+            ConfigError(format!(
+                "SWARM_WEB_BOOTSTRAP_ADMINS entries must be GitHub logins or numeric ids, not {entry:?}"
+            ))
+        };
+        if !entry.is_empty() && entry.bytes().all(|b| b.is_ascii_digit()) {
+            return entry.parse().map(BootstrapAdmin::Id).map_err(|_| bad());
+        }
+        let login = entry.strip_prefix('@').unwrap_or(entry);
+        let valid = !login.is_empty()
+            && login.len() <= 39
+            && !login.starts_with('-')
+            && !login.ends_with('-')
+            && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if valid {
+            Ok(BootstrapAdmin::Login(login.to_ascii_lowercase()))
+        } else {
+            Err(bad())
+        }
+    }
+
+    /// Whether this entry names the person who just signed in. Only a GitHub
+    /// identity can match: another provider's `subject` is a different namespace.
+    pub fn matches(&self, profile: &crate::model::IdentityProfile) -> bool {
+        if profile.provider != "github" {
+            return false;
+        }
+        match self {
+            BootstrapAdmin::Id(id) => profile.subject == id.to_string(),
+            BootstrapAdmin::Login(login) => profile.login.eq_ignore_ascii_case(login),
+        }
+    }
 }
 
 /// Where identity, tenants, sessions, keys, usage, jobs and deliveries live.
@@ -224,8 +273,16 @@ impl Config {
             },
             app_version: optional(get, "SWARM_WEB_APP_VERSION")
                 .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+            bootstrap_admins: load_bootstrap_admins(get)?,
         };
         Ok((config, wrapper))
+    }
+
+    /// Whether `SWARM_WEB_BOOTSTRAP_ADMINS` names this sign-in.
+    pub fn is_bootstrap_admin(&self, profile: &crate::model::IdentityProfile) -> bool {
+        self.bootstrap_admins
+            .iter()
+            .any(|entry| entry.matches(profile))
     }
 
     /// Register every configured secret with the log scrubber.
@@ -270,6 +327,22 @@ fn load_store(get: &dyn Fn(&str) -> Option<String>) -> Result<StoreConfig, Confi
             "SWARM_WEB_STORE must be memory or postgres".into(),
         )),
     }
+}
+
+/// Comma or whitespace separated, so a Compose `.env` line and a Terraform
+/// `join(",", ...)` both work. An invalid entry stops the start rather than
+/// silently leaving the platform without its admin.
+fn load_bootstrap_admins(
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<BootstrapAdmin>, ConfigError> {
+    let Some(value) = optional(get, "SWARM_WEB_BOOTSTRAP_ADMINS") else {
+        return Ok(Vec::new());
+    };
+    value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|entry| !entry.is_empty())
+        .map(BootstrapAdmin::parse)
+        .collect()
 }
 
 fn load_bridge(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<BridgeConfig>, ConfigError> {
@@ -511,6 +584,77 @@ mod tests {
 
     fn load(map: &HashMap<String, String>) -> Result<(Config, LocalKeyWrapper), ConfigError> {
         Config::from_lookup(&|name| map.get(name).cloned())
+    }
+
+    fn profile(provider: &str, subject: &str, login: &str) -> crate::model::IdentityProfile {
+        crate::model::IdentityProfile {
+            provider: provider.into(),
+            subject: subject.into(),
+            login: login.into(),
+            display_name: None,
+            avatar_url: None,
+        }
+    }
+
+    #[test]
+    fn bootstrap_admins_are_empty_by_default() {
+        let (config, _) = load(&env(&[])).unwrap();
+        assert!(config.bootstrap_admins.is_empty());
+        assert!(!config.is_bootstrap_admin(&profile("github", "1", "octocat")));
+        let (config, _) = load(&env(&[("SWARM_WEB_BOOTSTRAP_ADMINS", "  ,  ")])).unwrap();
+        assert!(config.bootstrap_admins.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_admins_are_logins_or_numeric_ids() {
+        let (config, _) = load(&env(&[(
+            "SWARM_WEB_BOOTSTRAP_ADMINS",
+            "Octo-Cat, @hubot 583231\n42",
+        )]))
+        .unwrap();
+        assert_eq!(
+            config.bootstrap_admins,
+            vec![
+                BootstrapAdmin::Login("octo-cat".into()),
+                BootstrapAdmin::Login("hubot".into()),
+                BootstrapAdmin::Id(583231),
+                BootstrapAdmin::Id(42),
+            ]
+        );
+        assert!(config.is_bootstrap_admin(&profile("github", "9", "OCTO-CAT")));
+        assert!(config.is_bootstrap_admin(&profile("github", "583231", "renamed")));
+        assert!(!config.is_bootstrap_admin(&profile("github", "7", "someone-else")));
+    }
+
+    #[test]
+    fn a_bootstrap_entry_only_matches_a_github_identity() {
+        let (config, _) = load(&env(&[("SWARM_WEB_BOOTSTRAP_ADMINS", "octocat,583231")])).unwrap();
+        assert!(!config.is_bootstrap_admin(&profile("oidc", "583231", "x")));
+        assert!(!config.is_bootstrap_admin(&profile("oidc", "9", "octocat")));
+        // A prefix or substring is not a match.
+        assert!(!config.is_bootstrap_admin(&profile("github", "5832310", "octocats")));
+    }
+
+    #[test]
+    fn an_invalid_bootstrap_entry_stops_the_start() {
+        for bad in [
+            "octo cat!",
+            "-lead",
+            "trail-",
+            "a/b",
+            "ünï",
+            &"x".repeat(40),
+            "99999999999999999999999",
+        ] {
+            let error = match load(&env(&[(
+                "SWARM_WEB_BOOTSTRAP_ADMINS",
+                &format!("ok,{bad}"),
+            )])) {
+                Ok(_) => panic!("{bad:?} must be refused"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("SWARM_WEB_BOOTSTRAP_ADMINS"), "{error}");
+        }
     }
 
     #[test]
