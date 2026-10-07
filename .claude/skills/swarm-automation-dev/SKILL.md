@@ -804,3 +804,13 @@ DOM-free, tested in `ui/web-account.test.js`); `app.js` only renders it and must
 name a `web_*` command. A provider key is write-only: clear its input after every
 attempt and keep it out of state, messages and logs. See "Web-only views" in
 `docs/web-architecture.md`.
+
+## Issue dependencies
+
+`issue_worker/issue_dependencies.py` parses `Depends on` / `Blocked by` / `Requires`
+`#N` (and same-owner `owner/repo#N`) from the issue body and trusted-author comments.
+`Worker.gate_on_dependencies` runs inside `select_issue` for first-pass issues only:
+an unmet dependency (open, closed unmerged, unknown after a GitHub error) skips that
+issue for the tick, a cycle is reported, and everything else keeps priority/oldest
+order. Comments use the `waiting`, `dependency-released` and `dependency-cycle`
+markers; no label is applied. See `docs/issue-dependencies.md`.
