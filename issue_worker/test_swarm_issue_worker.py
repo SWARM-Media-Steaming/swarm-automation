@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+from issue_context import dependency_context_text
 import datetime as dt
 import io
 import json
@@ -2828,6 +2829,109 @@ class WorkerTestCase(unittest.TestCase):
             selected = self.worker.select_issue()
         assert selected is not None
         self.assertEqual(selected.number, 40)
+
+    def _gated(self, bodies, states, comments=None, *, dependency_status=None):
+        """Select with issue bodies; ``states`` maps dependency number to (state, merged)."""
+        issues = []
+        for number, body in bodies.items():
+            payload = self.issue_payload(number)
+            payload["body"] = body
+            issues.append(payload)
+        posted = []
+
+        def api_get(endpoint):
+            number = int(endpoint.rsplit("/", 1)[1])
+            if endpoint.split("/")[-2] == "pulls":
+                return {"merged": True, "number": number, "title": f"Merged {number}", "base": {"ref": "ai-main"},
+                        "head": {"ref": f"ai/claude/issue-{number - 1000}"}}
+            state, merged = states[number]
+            if state == "error":
+                raise WorkerError("GitHub is unreachable")
+            return {"state": state, "title": f"Prereq {number}"}
+
+        def api_list(endpoint, fields=None):
+            if endpoint.endswith("/timeline"):
+                number = int(endpoint.split("/")[-2])
+                return [{"event": "cross-referenced", "source": {"issue": {
+                    "number": number + 1000, "pull_request": {"url": "u"},
+                    "repository": {"full_name": self.worker.config.github_repository}}}}] if states[number][1] else []
+            return []
+
+        def pulls(endpoint):
+            return api_get(endpoint)
+
+        def fake_comments(number):
+            return list((comments or {}).get(number, []))
+
+        self.worker.config = dataclasses.replace(self.worker.config, integration_branch="ai-main")
+        with (
+            mock.patch.object(self.worker, "assigned_issues", return_value=issues),
+            mock.patch.object(self.worker, "comments", side_effect=fake_comments),
+            mock.patch.object(self.worker.github, "api_get", side_effect=lambda e: pulls(e)),
+            mock.patch.object(self.worker.github, "api_list", side_effect=api_list),
+            mock.patch.object(self.worker.github, "gh", side_effect=lambda args, provider=None, input_text=None: (posted.append((args, input_text)) if args[:2] == ["issue", "comment"] else None) or ""),
+        ):
+            selected = self.worker.select_issue()
+        return selected, posted
+
+    def test_issue_waits_while_dependency_is_open_and_others_still_run(self) -> None:
+        selected, posted = self._gated(
+            {40: "Depends on #10", 50: ""}, {10: ("open", False)}
+        )
+        assert selected is not None
+        self.assertEqual(selected.number, 50)
+        self.assertEqual(len(posted), 1)
+        self.assertIn("swarm-issue-worker:waiting:issue:40;on:", posted[0][1])
+
+    def test_waiting_comment_is_not_repeated(self) -> None:
+        existing = {40: [{"body": f"<!-- swarm-issue-worker:waiting:issue:40;on:{self.worker.config.github_repository}#10 -->", "user": {"login": "x"}}]}
+        selected, posted = self._gated({40: "Depends on #10"}, {10: ("open", False)}, existing)
+        self.assertIsNone(selected)
+        self.assertEqual(posted, [])
+
+    def test_closed_unmerged_dependency_blocks(self) -> None:
+        selected, _ = self._gated({40: "Blocked by #10"}, {10: ("closed", False)})
+        self.assertIsNone(selected)
+
+    def test_merged_dependency_releases_with_context_and_one_note(self) -> None:
+        repo = self.worker.config.github_repository
+        existing = {40: [{"body": f"<!-- swarm-issue-worker:waiting:issue:40;on:{repo}#10 -->", "user": {"login": "x"}}]}
+        selected, posted = self._gated({40: "Requires #10"}, {10: ("closed", True)}, existing)
+        assert selected is not None
+        self.assertEqual(selected.number, 40)
+        self.assertEqual(selected.dependencies[0]["label"], "#10")
+        self.assertEqual(selected.dependencies[0]["pull_title"], "Merged 1010")
+        self.assertEqual(len(posted), 1)
+        self.assertIn("dependency-released:issue:40", posted[0][1])
+
+    def test_priority_and_oldest_first_preserved_among_eligible(self) -> None:
+        selected, _ = self._gated(
+            {20: "Depends on #10", 30: "", 31: ""}, {10: ("open", False)}
+        )
+        assert selected is not None
+        self.assertEqual(selected.number, 30)
+
+    def test_dependency_cycle_is_reported_not_waited_on(self) -> None:
+        selected, posted = self._gated({1: "Depends on #2", 2: "Depends on #1", 3: ""}, {})
+        assert selected is not None
+        self.assertEqual(selected.number, 3)
+        self.assertEqual(sorted(args[1].split("issue:")[1][0] for args in posted), ["1", "2"])
+        self.assertTrue(all("dependency-cycle" in text for _, text in posted))
+
+    def test_github_error_defers_issue_without_raising_or_commenting(self) -> None:
+        selected, posted = self._gated({40: "Depends on #10", 50: ""}, {10: ("error", False)})
+        assert selected is not None
+        self.assertEqual(selected.number, 50)
+        self.assertEqual(posted, [])
+
+    def test_comment_post_failure_does_not_abort_tick(self) -> None:
+        with mock.patch.object(self.worker.github, "gh", side_effect=WorkerError("nope")):
+            self.worker.post_dependency_comment(5, "m", "body", [])
+
+    def test_dependency_context_appears_in_prompt(self) -> None:
+        selected, _ = self._gated({40: "Depends on #10"}, {10: ("closed", True)})
+        assert selected is not None
+        self.assertIn("Prerequisite issues already merged", dependency_context_text(selected.dependencies))
 
     def test_lower_fresh_issue_beats_higher_followup_issue(self) -> None:
         self.worker.completed_file.write_text("55\n", encoding="utf-8")

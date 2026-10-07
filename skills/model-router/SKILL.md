@@ -50,6 +50,10 @@ scoring engine fit together, and `.claude/skills/swarm-automation-dev/SKILL.md`'
 
 ### Jev interaction
 
+Issue dependencies (`Depends on #N`) gate selection and add a bounded `[prerequisites]`
+block to the issue context as retrieved context only; they never change the
+complexity vector, the scoring formula or `SCORING_VERSION`.
+
 When Jev is enabled, it supplies bounded typed signals such as task type,
 complexity, security risk, and expected success to the existing Swarm router.
 Jev is also asked which available model is the least expensive one that can do
