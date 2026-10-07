@@ -349,6 +349,32 @@
           </div>
         </section>
 
+        <section id="view-landing" class="view landing" data-web-only>
+          <div class="landing-nav"><div class="brand-lockup"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>SWARM</strong><small>Automation</small></div></div><a id="landing-login-top" class="secondary-button compact" href="/api/v1/auth/github/login">Log in</a></div>
+          <div class="landing-hero">
+            <p class="eyebrow">AI ISSUE WORKERS</p>
+            <h2>Label an issue. Get a pull request.</h2>
+            <p class="landing-lede">SWARM Automation hands your GitHub backlog to Claude, Codex and Grok, picks the cheapest model that can do the job, has independent reviewers try to break the result, and delivers a pull request you can trust.</p>
+            <div class="control-row"><a id="landing-login" class="primary-button" href="/api/v1/auth/github/login">Log in with GitHub</a><a class="secondary-button" href="#landing-chat">Ask how it works</a></div>
+          </div>
+          <div class="landing-features">
+            <article class="panel"><p class="eyebrow">AUTOMATE</p><h3>Issues to pull requests</h3><p class="panel-copy">Every issue gets its own branch, a clear status comment at each step, and a reviewable pull request.</p></article>
+            <article class="panel"><p class="eyebrow">SAVE</p><h3>Cost-first routing</h3><p class="panel-copy">Each task is scored against your repository so the least expensive capable model and effort does the work.</p></article>
+            <article class="panel"><p class="eyebrow">TRUST</p><h3>Adversarial review</h3><p class="panel-copy">Independent testers and a security agent challenge each change before it reaches you.</p></article>
+          </div>
+          <article class="panel landing-chat" id="landing-chat">
+            <div class="panel-header"><div><p class="eyebrow">ASK SWARM</p><h3>Questions about how it works?</h3></div><span class="status-pill running">Text answers only</span></div>
+            <div id="landing-messages" class="chat-messages" aria-live="polite" role="log"></div>
+            <div id="landing-suggestions" class="chat-suggestions"></div>
+            <form id="landing-form" class="chat-form" autocomplete="off">
+              <label class="sr-only" for="landing-input">Ask a question about SWARM Automation</label>
+              <textarea id="landing-input" rows="1" maxlength="400" placeholder="Ask how SWARM Automation works…"></textarea>
+              <button type="submit" class="primary-button">Send</button>
+            </form>
+            <p class="panel-copy chat-note">This assistant only explains how SWARM Automation works. It never writes code, opens links or runs anything.</p>
+          </article>
+        </section>
+
         <section id="view-signin" class="view" data-web-only>
           <div class="section-intro"><div><p class="eyebrow">SIGN IN</p><h2>Sign in with GitHub</h2><p>SWARM Automation sign-in is the GitHub App's own authorization. Your GitHub token is used once to read who you are and which installations you can reach, then discarded.</p></div></div>
           <article class="panel span-two">
@@ -666,6 +692,7 @@
     <script src="engineering-knowledge.js"></script>
     <script src="architecture-docs.js"></script>
     <script src="web-account.js"></script>
+    <script src="landing.js"></script>
     <script src="version.js"></script>
     <script src="app.js"></script>
   </body>
