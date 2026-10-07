@@ -14,6 +14,7 @@ pub mod crypto;
 pub mod error;
 pub mod events;
 pub mod github;
+pub mod identity;
 pub mod jobs_http;
 pub mod lifecycle;
 pub mod logging;

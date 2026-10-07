@@ -195,9 +195,17 @@ async fn tenant_ids_cannot_be_probed_or_smuggled() {
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK);
-    // Listing shows only the caller's tenants.
+    // Listing shows only the caller's tenants: the installation's and her own
+    // personal one, never another user's.
     let listed = alice.get("/api/v1/tenants").await.json();
-    assert_eq!(listed["tenants"].as_array().unwrap().len(), 1);
+    let ids: Vec<_> = listed["tenants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&tenant_a) && ids.contains(&alice.personal_tenant().await));
 }
 
 #[tokio::test]
@@ -288,13 +296,11 @@ async fn losing_access_on_github_removes_access_here() {
             .status,
         StatusCode::NOT_FOUND
     );
-    assert_eq!(
-        carol.get("/api/v1/tenants").await.json()["tenants"]
-            .as_array()
-            .unwrap()
-            .len(),
-        0
-    );
+    // Only her own personal tenant is left.
+    let left = carol.get("/api/v1/tenants").await.json();
+    let left = left["tenants"].as_array().unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["account_type"], "Personal");
 
     // A role change on GitHub is followed too (owner demoted to member).
     w.app.github.set_installations(
@@ -452,7 +458,19 @@ async fn the_store_only_answers_for_the_tenant_it_is_asked_about() {
 }
 
 async fn alice_user_id(w: &World) -> String {
-    w.app.store.upsert_user(1, "alice").await.unwrap().id
+    w.app
+        .store
+        .register_identity(&swarm_web::model::IdentityProfile {
+            provider: "github".into(),
+            subject: "1".into(),
+            login: "alice".into(),
+            display_name: None,
+            avatar_url: None,
+        })
+        .await
+        .unwrap()
+        .user
+        .id
 }
 
 #[tokio::test]

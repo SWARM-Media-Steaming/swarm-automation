@@ -20,6 +20,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0003_tenant_documents",
         include_str!("../migrations/0003_tenant_documents.sql"),
     ),
+    (
+        "0004_personal_tenants",
+        include_str!("../migrations/0004_personal_tenants.sql"),
+    ),
 ];
 
 #[cfg(test)]
@@ -80,6 +84,7 @@ mod tests {
                 let upper = statement.to_uppercase();
                 let idempotent = upper.starts_with("CREATE TABLE IF NOT EXISTS")
                     || upper.starts_with("CREATE INDEX IF NOT EXISTS")
+                    || upper.starts_with("CREATE UNIQUE INDEX IF NOT EXISTS")
                     || (upper.starts_with("ALTER TABLE")
                         && upper.contains(" ADD COLUMN IF NOT EXISTS "))
                     || (upper.starts_with("DO $$") && upper.contains("IF EXISTS (SELECT")
@@ -212,6 +217,19 @@ mod tests {
         assert!(first_column.starts_with("tenant_id"));
         assert!(statement.contains("REFERENCES tenants (tenant_id) ON DELETE CASCADE"));
         assert!(statement.contains("PRIMARY KEY (tenant_id, collection, doc_key)"));
+    }
+
+    #[test]
+    fn personal_tenants_need_no_installation_and_are_unique_per_owner() {
+        let sql = MIGRATIONS[3].1;
+        assert!(sql.contains("ALTER COLUMN installation_id DROP NOT NULL"));
+        let index = statements(sql)
+            .into_iter()
+            .find(|s| s.starts_with("CREATE UNIQUE INDEX IF NOT EXISTS tenants_personal_owner_idx"))
+            .expect("the one-personal-tenant-per-owner index is missing");
+        assert!(index.contains("ON tenants (owner_user_id) WHERE installation_id IS NULL"));
+        let lower = sql.to_lowercase();
+        assert!(!lower.contains("schema_migrations") && !lower.contains("swarm_storage"));
     }
 
     #[test]

@@ -30,11 +30,15 @@ async fn a_user_signs_in_with_github_and_sees_their_tenant() {
     assert_eq!(body["authenticated"], true);
     assert_eq!(body["user"]["login"], "alice");
     assert_eq!(body["csrf_token"], alice.csrf.as_str());
+    assert_eq!(body["user"]["display_name"], "alice Display");
+    // The personal tenant (#440) and the one the App installation created.
     let tenants = body["tenants"].as_array().unwrap();
-    assert_eq!(tenants.len(), 1);
-    assert_eq!(tenants[0]["account_login"], "alice");
-    assert_eq!(tenants[0]["role"], "owner");
-    assert_eq!(tenants[0]["status"], "active");
+    assert_eq!(tenants.len(), 2);
+    for tenant in tenants {
+        assert_eq!(tenant["account_login"], "alice");
+        assert_eq!(tenant["role"], "owner");
+        assert_eq!(tenant["status"], "active");
+    }
 
     let id = alice.tenant_for("alice").await;
     let tenant = alice.get(&format!("/api/v1/tenants/{id}")).await;

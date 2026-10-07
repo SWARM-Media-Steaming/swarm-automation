@@ -563,11 +563,18 @@ impl Orchestrator {
         plan: &LaunchPlan,
     ) -> Result<&'static str, JobError> {
         let repository = format!("{}/{}", plan.key.owner, plan.key.repo);
+        // A personal tenant has no installation to mint a repository token from.
+        let Some(installation_id) = tenant.installation_id else {
+            return Err(JobError::Conflict(
+                "This tenant has no GitHub App installation, so a job cannot get repository access."
+                    .into(),
+            ));
+        };
         let token = self
             .minter
             .mint(TokenRequest {
                 app_id: self.settings.app_id,
-                installation_id: tenant.installation_id,
+                installation_id,
                 private_key_pem: self.settings.private_key.clone(),
                 repository: repository.clone(),
                 provider: self.settings.provider.as_str().to_string(),

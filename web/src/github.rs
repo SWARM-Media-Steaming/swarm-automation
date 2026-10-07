@@ -1,16 +1,22 @@
 //! GitHub App sign-in and webhook verification.
 //!
-//! Sign-in is the GitHub App's user-to-server OAuth flow. Tenants are the App's
-//! installations (the same installations `issue_worker/github_app_auth.py`
-//! mints installation tokens for). The user's OAuth token is used for the
-//! callback's three reads and then dropped: it is never stored or returned.
+//! Sign-in is the GitHub App's user-to-server OAuth flow, exposed to the
+//! callback as the one [`IdentityProvider`] this build implements
+//! ([`GitHubIdentity`]). Besides the personal tenant every user gets, tenants
+//! are the App's installations (the same installations
+//! `issue_worker/github_app_auth.py` mints installation tokens for). The user's
+//! OAuth token is used for the callback's three reads and then dropped: it is
+//! never stored or returned.
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 
-use crate::model::{InstallationInfo, Role};
+use std::sync::Arc;
+
+use crate::identity::{IdentityError, IdentityProvider};
+use crate::model::{IdentityProfile, InstallationInfo, Role};
 use crate::secret::Secret;
 
 #[derive(Debug)]
@@ -28,6 +34,8 @@ impl std::error::Error for GitHubError {}
 pub struct GitHubUser {
     pub id: u64,
     pub login: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 /// What the backend needs from GitHub. A trait so tests (and a future GitHub
@@ -49,6 +57,87 @@ pub trait GitHubClient: Send + Sync {
         token: &Secret,
         user: &GitHubUser,
     ) -> Result<Vec<InstallationInfo>, GitHubError>;
+}
+
+/// The `github` [`IdentityProvider`]: the App's OAuth flow over a
+/// [`GitHubClient`]. The subject is the numeric GitHub id, which survives a
+/// rename of the login.
+pub struct GitHubIdentity {
+    client: Arc<dyn GitHubClient>,
+    web_base: String,
+    client_id: String,
+}
+
+impl GitHubIdentity {
+    pub const ID: &'static str = "github";
+
+    pub fn new(client: Arc<dyn GitHubClient>, web_base: String, client_id: String) -> Self {
+        GitHubIdentity {
+            client,
+            web_base,
+            client_id,
+        }
+    }
+}
+
+impl From<GitHubError> for IdentityError {
+    fn from(error: GitHubError) -> Self {
+        IdentityError(error.0)
+    }
+}
+
+#[async_trait]
+impl IdentityProvider for GitHubIdentity {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
+    fn authorize_url(&self, redirect_uri: &str, state: &str, code_challenge: &str) -> String {
+        authorize_url(
+            &self.web_base,
+            &self.client_id,
+            redirect_uri,
+            state,
+            code_challenge,
+        )
+    }
+
+    async fn exchange_code(
+        &self,
+        code: &str,
+        redirect_uri: &str,
+        code_verifier: &str,
+    ) -> Result<Secret, IdentityError> {
+        Ok(self
+            .client
+            .exchange_code(code, redirect_uri, code_verifier)
+            .await?)
+    }
+
+    async fn profile(&self, token: &Secret) -> Result<IdentityProfile, IdentityError> {
+        let user = self.client.user(token).await?;
+        Ok(IdentityProfile {
+            provider: Self::ID.into(),
+            subject: user.id.to_string(),
+            login: user.login,
+            display_name: user.name,
+            avatar_url: user.avatar_url,
+        })
+    }
+
+    async fn installations(
+        &self,
+        token: &Secret,
+        profile: &IdentityProfile,
+    ) -> Result<Vec<InstallationInfo>, IdentityError> {
+        let user = GitHubUser {
+            id: profile.subject.parse().unwrap_or(0),
+            login: profile.login.clone(),
+            name: None,
+            avatar_url: None,
+        };
+        Ok(self.client.installations(token, &user).await?)
+    }
 }
 
 /// The authorize URL for the App's sign-in: `state` binds the round trip to the
@@ -171,6 +260,8 @@ struct TokenResponse {
 struct UserResponse {
     id: u64,
     login: String,
+    name: Option<String>,
+    avatar_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +331,8 @@ impl GitHubClient for HttpGitHub {
         Ok(GitHubUser {
             id: user.id,
             login: user.login,
+            name: user.name,
+            avatar_url: user.avatar_url,
         })
     }
 

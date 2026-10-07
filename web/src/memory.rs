@@ -24,7 +24,10 @@ struct TenantData {
 #[derive(Debug, Default)]
 struct Inner {
     users: HashMap<String, User>,
-    user_by_github: HashMap<u64, String>,
+    /// (provider, subject) -> user id, the `user_identities` key.
+    identities: HashMap<(String, String), String>,
+    /// user id -> the tenant created for them at first sign-in.
+    personal_tenants: HashMap<String, TenantId>,
     sessions: HashMap<String, Session>,
     tenants: HashMap<TenantId, Tenant>,
     tenant_by_installation: HashMap<u64, TenantId>,
@@ -49,11 +52,37 @@ impl MemoryStore {
             .map_err(|_| StoreError("store lock poisoned".into()))
     }
 
+    /// How many users the store holds (tests that prove a failed sign-in left
+    /// nothing behind).
+    pub fn user_count(&self) -> usize {
+        self.inner.lock().expect("store lock").users.len()
+    }
+
+    pub fn tenant_count(&self) -> usize {
+        self.inner.lock().expect("store lock").tenants.len()
+    }
+
+    /// The id of the user whose current login is `login`, for tests.
+    pub fn user_of_login(&self, login: &str) -> String {
+        let inner = self.inner.lock().expect("store lock");
+        let mut found = inner.users.values().filter(|u| u.login == login);
+        let user = found.next().expect("a user with that login");
+        assert!(found.next().is_none(), "one user per login");
+        user.id.clone()
+    }
+
     /// Everything the store holds, as text, for tests that prove no plaintext
     /// secret is retained.
     pub fn debug_dump(&self) -> String {
         format!("{:?}", self.inner.lock().expect("store lock"))
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn tenant_data<'a>(inner: &'a mut Inner, tenant: &TenantId) -> StoreResult<&'a mut TenantData> {
@@ -65,24 +94,64 @@ fn tenant_data<'a>(inner: &'a mut Inner, tenant: &TenantId) -> StoreResult<&'a m
 
 #[async_trait]
 impl Store for MemoryStore {
-    async fn upsert_user(&self, github_id: u64, login: &str) -> StoreResult<User> {
-        let mut inner = self.lock()?;
-        if let Some(id) = inner.user_by_github.get(&github_id).cloned() {
-            let user = inner
-                .users
-                .get_mut(&id)
-                .ok_or_else(|| StoreError("dangling user".into()))?;
-            user.login = login.to_string();
-            return Ok(user.clone());
+    async fn register_identity(&self, profile: &IdentityProfile) -> StoreResult<Registration> {
+        // The same refusals the `user_identities` CHECK constraints make.
+        if profile.provider.is_empty() || profile.subject.is_empty() {
+            return Err(StoreError("invalid identity".into()));
         }
-        let user = User {
-            id: format!("u{}", random_hex(8)),
-            github_id,
-            login: login.to_string(),
+        // The whole registration happens under one lock and mutates only after
+        // every step that can fail, so it is atomic like the Postgres transaction.
+        let mut inner = self.lock()?;
+        let key = (profile.provider.clone(), profile.subject.clone());
+        let now = unix_now();
+        let existing = inner.identities.get(&key).cloned();
+        let first_sign_in = existing.is_none();
+        let user_id = existing.unwrap_or_else(|| format!("u{}", random_hex(8)));
+        let tenant_id = match inner.personal_tenants.get(&user_id).cloned() {
+            Some(id) => id,
+            None => (1..)
+                .map(|attempt| TenantId::personal(&profile.login, attempt))
+                .find(|id| !inner.tenants.contains_key(id))
+                .expect("an unbounded range has a free id"),
         };
-        inner.user_by_github.insert(github_id, user.id.clone());
-        inner.users.insert(user.id.clone(), user.clone());
-        Ok(user)
+        let user = User {
+            id: user_id.clone(),
+            login: profile.login.clone(),
+            display_name: profile.display_name.clone(),
+            avatar_url: profile.avatar_url.clone(),
+            last_login_at: Some(now),
+        };
+        inner.identities.insert(key, user_id.clone());
+        inner.users.insert(user_id.clone(), user.clone());
+        let tenant = match inner.tenants.get_mut(&tenant_id) {
+            Some(existing) => {
+                existing.account_login = profile.login.clone();
+                existing.clone()
+            }
+            None => {
+                let tenant = Tenant {
+                    id: tenant_id.clone(),
+                    installation_id: None,
+                    account_login: profile.login.clone(),
+                    account_type: PERSONAL_ACCOUNT_TYPE.to_string(),
+                    status: TenantStatus::Active,
+                };
+                inner.tenants.insert(tenant_id.clone(), tenant.clone());
+                inner.data.insert(tenant_id.clone(), TenantData::default());
+                inner
+                    .personal_tenants
+                    .insert(user_id.clone(), tenant_id.clone());
+                tenant
+            }
+        };
+        tenant_data(&mut inner, &tenant_id)?
+            .members
+            .insert(user_id, Role::Owner);
+        Ok(Registration {
+            user,
+            tenant,
+            first_sign_in,
+        })
     }
 
     async fn user(&self, user_id: &str) -> StoreResult<Option<User>> {
@@ -132,7 +201,7 @@ impl Store for MemoryStore {
             .expect("generated tenant ids are valid");
         let tenant = Tenant {
             id: id.clone(),
-            installation_id,
+            installation_id: Some(installation_id),
             account_login: account_login.to_string(),
             account_type: account_type.to_string(),
             status: TenantStatus::Active,
