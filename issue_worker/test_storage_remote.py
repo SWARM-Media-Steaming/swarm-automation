@@ -223,10 +223,23 @@ def apply_sql(connection, sql: str) -> None:
 
     psycopg prepares each ``execute`` and rejects several commands in one
     string. The platform migrations are comment-prefixed and contain no
-    semicolons inside literals, matching ``web/src/schema.rs``.
+    semicolons inside literals, matching ``web/src/schema.rs``; a ``$$`` body
+    (a DO block) is one statement.
     """
     code = "\n".join(line for line in sql.splitlines() if not line.strip().startswith("--"))
-    for statement in code.split(";"):
+    parts = code.split("$$")
+    statements, current = [], ""
+    for index, part in enumerate(parts):
+        if index % 2:  # inside a $$ body: keep its semicolons
+            current += "$$" + part + "$$"
+            continue
+        pieces = part.split(";")
+        current += pieces[0]
+        for piece in pieces[1:]:
+            statements.append(current)
+            current = piece
+    statements.append(current)
+    for statement in statements:
         statement = statement.strip()
         if statement:
             connection.execute(statement)
@@ -738,11 +751,12 @@ class PlatformSchemaTests(unittest.TestCase):
         for path in sorted(self.MIGRATIONS.glob("*.sql")):
             apply_sql(self.connection, path.read_text(encoding="utf-8"))
         self.assertEqual(self.tables(), before)
-        self.assertTrue({"tenants", "web_users", "web_sessions", "tenant_memberships", "tenant_provider_keys",
+        self.assertTrue({"tenants", "users", "sessions", "user_identities", "admin_audit_log", "tenant_memberships", "tenant_provider_keys",
                          "tenant_plan_quotas", "tenant_budgets", "tenant_usage_ledger", "tenant_provider_reports",
                          "tenant_jobs", "webhook_deliveries"} <= before)
         self.assertEqual(self.connection.execute("SELECT version FROM platform_migrations").fetchall(),
-                         [("0001_platform",)])
+                         [("0001_platform",), ("0002_identity",)])
+        self.assertFalse({"web_users", "web_sessions"} & before)
 
     def test_tenant_rows_cascade_and_are_constrained(self):
         psycopg = _psycopg()
@@ -765,6 +779,86 @@ class PlatformSchemaTests(unittest.TestCase):
         run("DELETE FROM tenants WHERE tenant_id = 'acme'")
         for table in ("tenant_provider_keys", "tenant_usage_ledger", "tenant_jobs"):
             self.assertEqual(run(f"SELECT count(*) FROM {table}").fetchone()[0], 0, table)
+
+
+    def test_identity_migration_upgrades_a_0001_database_and_backfills(self):
+        run = self.connection.execute
+        self.connection.execute("DROP SCHEMA IF EXISTS %s CASCADE" % self.SCHEMA)
+        self.connection.execute("CREATE SCHEMA %s" % self.SCHEMA)
+        self.connection.execute("SET search_path TO %s" % self.SCHEMA)
+        files = sorted(self.MIGRATIONS.glob("*.sql"))
+        apply_sql(self.connection, files[0].read_text(encoding="utf-8"))
+        run("INSERT INTO web_users (id, github_id, login) VALUES ('u1', 4242, 'octo')")
+        run("INSERT INTO web_sessions VALUES ('h', 'u1', 'c', 99)")
+        for path in files[1:] + files[1:]:  # the second pass is the re-run
+            apply_sql(self.connection, path.read_text(encoding="utf-8"))
+        self.assertEqual(run("SELECT provider, subject, login FROM user_identities WHERE user_id = 'u1'").fetchall(),
+                         [("github", "4242", "octo")])
+        self.assertEqual(run("SELECT count(*) FROM sessions WHERE user_id = 'u1'").fetchone()[0], 1)
+        columns = {row[0] for row in run(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = %s AND table_name = 'users'",
+            (self.SCHEMA,))}
+        self.assertTrue({"display_name", "avatar_url", "email", "is_platform_admin", "created_at",
+                         "last_login_at"} <= columns)
+        self.assertFalse({"github_id", "login"} & columns)
+        self.assertIs(run("SELECT is_platform_admin FROM users").fetchone()[0], False)
+
+    def test_identity_constraints_reject_orphans_and_duplicates(self):
+        psycopg = _psycopg()
+        run = self.connection.execute
+        run("INSERT INTO users (id) VALUES ('u1')")
+        run("INSERT INTO users (id) VALUES ('u2')")
+        run("INSERT INTO tenants (tenant_id, installation_id, account_login, account_type, owner_user_id) "
+            "VALUES ('acme', 1, 'acme', 'User', 'u1')")
+        run("INSERT INTO user_identities (user_id, provider, subject, login) VALUES ('u1', 'github', '1', 'a')")
+        run("INSERT INTO tenant_memberships VALUES ('acme', 'u1', 'owner')")
+        for bad in (
+            "INSERT INTO user_identities (user_id, provider, subject, login) VALUES ('ghost', 'github', '2', 'g')",
+            "INSERT INTO user_identities (user_id, provider, subject, login) VALUES ('u2', 'github', '1', 'dup')",
+            "INSERT INTO tenant_memberships VALUES ('acme', 'u1', 'member')",
+            "INSERT INTO tenant_memberships VALUES ('acme', 'u2', 'admin')",
+            "INSERT INTO tenant_memberships VALUES ('acme', 'ghost', 'member')",
+            "INSERT INTO tenant_memberships VALUES ('nobody', 'u2', 'member')",
+            "INSERT INTO tenants (tenant_id, installation_id, account_login, account_type, owner_user_id) "
+            "VALUES ('b', 2, 'b', 'User', 'ghost')",
+            "INSERT INTO sessions VALUES ('t', 'ghost', 'c', 1)",
+            "INSERT INTO admin_audit_log (actor_user_id, target_user_id, action) VALUES ('ghost', 'u1', 'x')",
+            "INSERT INTO admin_audit_log (actor_user_id, target_user_id, action) VALUES ('u1', 'ghost', 'x')",
+        ):
+            with self.subTest(statement=bad[:70]), self.assertRaises(psycopg.errors.Error):
+                run(bad)
+        # The same subject under another provider is a different identity.
+        run("INSERT INTO user_identities (user_id, provider, subject, login) VALUES ('u2', 'oidc', '1', 'b')")
+
+    def test_deleting_a_user_cascades_and_keeps_tenant_and_audit_rows(self):
+        run = self.connection.execute
+        run("INSERT INTO users (id) VALUES ('u1')")
+        run("INSERT INTO users (id) VALUES ('u2')")
+        run("INSERT INTO tenants (tenant_id, installation_id, account_login, account_type, owner_user_id) "
+            "VALUES ('acme', 1, 'acme', 'User', 'u1')")
+        run("INSERT INTO user_identities (user_id, provider, subject, login) VALUES ('u1', 'github', '1', 'a')")
+        run("INSERT INTO sessions VALUES ('t', 'u1', 'c', 1)")
+        run("INSERT INTO tenant_memberships VALUES ('acme', 'u1', 'owner')")
+        run("INSERT INTO admin_audit_log (actor_user_id, target_user_id, action) VALUES ('u2', 'u1', 'suspend')")
+        run("DELETE FROM users WHERE id = 'u1'")
+        for table in ("user_identities", "sessions", "tenant_memberships"):
+            self.assertEqual(run(f"SELECT count(*) FROM {table}").fetchone()[0], 0, table)
+        self.assertEqual(run("SELECT owner_user_id FROM tenants").fetchone()[0], None)
+        self.assertEqual(run("SELECT actor_user_id, target_user_id FROM admin_audit_log").fetchone(), ("u2", None))
+
+    def test_every_foreign_key_column_is_indexed(self):
+        rows = self.connection.execute(
+            """SELECT c.conrelid::regclass::text, a.attname
+               FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+               WHERE c.contype = 'f' AND c.connamespace = %s::regnamespace""", (self.SCHEMA,)).fetchall()
+        self.assertTrue(rows)
+        for table, column in rows:
+            table = table.split(".")[-1]
+            indexed = self.connection.execute(
+                """SELECT 1 FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+                   WHERE i.indrelid = %s::regclass AND a.attname = %s""",
+                (f"{self.SCHEMA}.{table}", column)).fetchone()
+            self.assertIsNotNone(indexed, f"{table}.{column} has no index")
 
 
 if __name__ == "__main__":

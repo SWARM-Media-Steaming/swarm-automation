@@ -37,7 +37,8 @@ stays the one shared worker.
   accept a KMS configuration this build cannot honor.
 - The platform schema is `web/migrations/*.sql`, embedded as
   `swarm_web::schema::MIGRATIONS` and safe to apply twice (`psql -f`). It holds
-  tenants, users, sessions, sealed provider-key metadata, quotas, budgets, the
+  tenants, users (+ `user_identities`: GitHub is the only provider, never a
+  password), sessions, memberships, the admin audit log, sealed provider-key metadata, quotas, budgets, the
   usage ledger, jobs and webhook deliveries. `MemoryStore` is still the runtime
   store; worker history and objects stay in `issue_worker/storage_remote.py`.
 - `JobRunner` (`runner.rs`) is the only way a job container starts.
