@@ -183,6 +183,19 @@ impl Store for MemoryStore {
         Ok(self.lock()?.users.get(user_id).cloned())
     }
 
+    async fn identities_for_user(&self, user_id: &str) -> StoreResult<Vec<(String, String)>> {
+        let inner = self.lock()?;
+        let login = inner.users.get(user_id).map(|u| u.login.clone());
+        let mut out: Vec<(String, String)> = inner
+            .identities
+            .iter()
+            .filter(|(_, owner)| owner.as_str() == user_id)
+            .map(|((provider, _), _)| (provider.clone(), login.clone().unwrap_or_default()))
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
     async fn bootstrap_platform_admin(&self, user_id: &str) -> StoreResult<bool> {
         let mut inner = self.lock()?;
         if inner.admin_count() > 0 {

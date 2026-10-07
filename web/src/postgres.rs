@@ -457,6 +457,17 @@ impl Store for PostgresStore {
         Ok(rows.first().and_then(user_from))
     }
 
+    async fn identities_for_user(&self, user_id: &str) -> StoreResult<Vec<(String, String)>> {
+        let rows = self
+            .query(
+                "SELECT provider, login FROM user_identities WHERE user_id = $1
+                 ORDER BY provider, login",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
     async fn bootstrap_platform_admin(&self, user_id: &str) -> StoreResult<bool> {
         let mut client = self.client().await?;
         let tx = client.transaction().await.map_err(fail)?;

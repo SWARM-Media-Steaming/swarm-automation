@@ -53,6 +53,9 @@ pub trait Store: Send + Sync {
     /// `admin.bootstrap` audit row. `false` (and no change) when an admin
     /// already exists (the user may be that admin), or the user is unknown.
     async fn bootstrap_platform_admin(&self, user_id: &str) -> StoreResult<bool>;
+    /// How `user_id` signs in: provider and handle only (never the subject,
+    /// which is the provider's internal id), ordered by provider then login.
+    async fn identities_for_user(&self, user_id: &str) -> StoreResult<Vec<(String, String)>>;
     /// Every user, by login. Only the `Admin` extractor's routes call it.
     async fn platform_users(&self) -> StoreResult<Vec<User>>;
     /// Promote or demote `target_id` on behalf of `actor_id`, writing an audit

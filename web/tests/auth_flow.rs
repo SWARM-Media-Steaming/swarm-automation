@@ -393,3 +393,37 @@ async fn sessions_expire_and_each_sign_in_mints_a_new_one() {
         false
     );
 }
+
+#[tokio::test]
+async fn me_is_the_session_users_profile_and_nothing_secret() {
+    let app = TestApp::new();
+    alice(&app);
+    assert_eq!(
+        app.get("/api/v1/me").await.status,
+        StatusCode::UNAUTHORIZED,
+        "no session, no profile"
+    );
+    let alice = app.sign_in("code-alice").await;
+    let me = alice.get("/api/v1/me").await;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.text());
+    let body = me.json();
+    assert_eq!(body["login"], "alice");
+    assert_eq!(body["display_name"], "alice Display");
+    assert_eq!(body["tenant"], alice.personal_tenant().await.as_str());
+    assert_eq!(body["role"], "owner");
+    assert_eq!(body["is_platform_admin"], false);
+    assert_eq!(
+        body["identities"],
+        serde_json::json!([{ "provider": "github", "login": "alice" }])
+    );
+    assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
+    let text = me.text();
+    assert!(
+        !text.contains(alice.csrf.as_str()),
+        "no CSRF token in the profile"
+    );
+    assert!(
+        !text.contains("subject") && !text.contains("token"),
+        "{text}"
+    );
+}

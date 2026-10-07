@@ -33,6 +33,7 @@
   // `web_session`; the server decides access from the session, never from args.
   const COMMANDS = {
     web_session: { method: "GET", path: "/session" },
+    web_me: { method: "GET", path: "/me" },
     web_logout: { method: "POST", path: "/auth/logout" },
     web_list_tenants: { method: "GET", path: "/tenants" },
     web_get_tenant: { method: "GET", path: "/tenants/{tenant}" },
