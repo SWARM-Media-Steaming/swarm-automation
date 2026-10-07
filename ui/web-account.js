@@ -38,6 +38,61 @@
     return PROVIDERS.find((provider) => provider.id === id) || null;
   }
 
+  // ----- Avatar menu ---------------------------------------------------------
+
+  // The top-right menu. Every entry opens a view of the view-switcher (`view` is
+  // the `data-view-target`/`pageTitles` key); Admin is shown to platform admins
+  // only and there is deliberately no Billing entry. `signout` is an action, not a view.
+  const MENU_ITEMS = [
+    { id: "profile", label: "Profile", view: "profile" },
+    { id: "settings", label: "Settings", view: "repository" },
+    { id: "account", label: "Account", view: "account" },
+    { id: "admin", label: "Admin", view: "admin", adminOnly: true },
+    { id: "signout", label: "Sign out", action: "signout" },
+  ];
+
+  // `GET /me`, reduced to what the menu shows. Anything unexpected is "no
+  // profile", so the avatar stays hidden rather than showing a half-built one.
+  function profileView(body) {
+    const value = body && typeof body === "object" ? body : {};
+    if (typeof value.login !== "string" || !value.login) return null;
+    const login = value.login;
+    const displayName = typeof value.display_name === "string" && value.display_name.trim() ? value.display_name.trim() : login;
+    return {
+      login,
+      displayName,
+      avatarUrl: safeHttpsUrl(value.avatar_url),
+      initials: initialsOf(displayName, login),
+      tenant: typeof value.tenant === "string" ? value.tenant : "",
+      role: value.role === "owner" ? "owner" : "member",
+      isAdmin: value.is_platform_admin === true,
+    };
+  }
+
+  // Up to two letters: first letters of the first two words of the name, or the
+  // first letters of the login when the name is empty.
+  function initialsOf(name, login) {
+    const words = String(name || "").split(/\s+/).filter(Boolean);
+    const letters = words.length > 1 ? [words[0], words[1]] : [String(name || login || "?")];
+    const text = words.length > 1 ? letters.map((word) => Array.from(word)[0]).join("") : Array.from(letters[0]).slice(0, 2).join("");
+    return text.toUpperCase();
+  }
+
+  function menuItems(profile) {
+    return MENU_ITEMS.filter((item) => !item.adminOnly || Boolean(profile && profile.isAdmin));
+  }
+
+  // Keyboard navigation inside the open menu (wraps around). Returns the new
+  // index, or -1 when the key is not a navigation key.
+  function nextMenuIndex(current, key, count) {
+    if (!count) return -1;
+    if (key === "Home") return 0;
+    if (key === "End") return count - 1;
+    if (key === "ArrowDown") return current < 0 ? 0 : (current + 1) % count;
+    if (key === "ArrowUp") return current < 0 ? count - 1 : (current - 1 + count) % count;
+    return -1;
+  }
+
   // ----- Session -------------------------------------------------------------
 
   // `GET /session` answers 200 either way. Anything unexpected is treated as
@@ -278,6 +333,8 @@
       errors: {},
       expired: false,
       loaded: false,
+      profile: null,
+      adminUsers: [],
     };
 
     function fail(section, error) {
@@ -309,6 +366,35 @@
         rememberTenant(state.tenant.id);
       }
       return state;
+    }
+
+    // The menu's profile. A failure leaves the avatar hidden; it never blocks
+    // the rest of the page. A 401 is the session ending, like any other command.
+    async function loadProfile() {
+      try {
+        state.profile = profileView(await invoke("web_me"));
+      } catch (error) {
+        state.profile = null;
+        if (isUnauthorized(error)) state.expired = true;
+      }
+      return state.profile;
+    }
+
+    // Platform admin user list for the Admin view (the server answers 404 to
+    // anyone who is not an admin, which shows as an error, never as data).
+    async function loadAdminUsers() {
+      if (!state.profile || !state.profile.isAdmin) { state.adminUsers = []; return state.adminUsers; }
+      try {
+        const body = await invoke("web_admin_list_users");
+        state.adminUsers = (body && Array.isArray(body.users) ? body.users : [])
+          .filter((user) => user && typeof user.login === "string")
+          .map((user) => ({ login: user.login, displayName: String(user.display_name || user.login), isAdmin: user.is_platform_admin === true }));
+        delete state.errors.admin;
+      } catch (error) {
+        state.adminUsers = [];
+        state.errors.admin = messageOf(error);
+      }
+      return state.adminUsers;
     }
 
     async function loadTenantData() {
@@ -401,6 +487,8 @@
       state.tenant = null;
       state.expired = false;
       state.loaded = false;
+      state.profile = null;
+      state.adminUsers = [];
       state.members = [];
       state.keys = keyRows(null);
       state.quota = quotaView(null, null);
@@ -414,7 +502,7 @@
       state.session = { ...state.session, authenticated: false };
     }
 
-    return { state, loadSession, loadTenantData, selectTenant, saveKey, removeKey, saveBudgets, signOut, markExpired };
+    return { state, loadSession, loadProfile, loadAdminUsers, loadTenantData, selectTenant, saveKey, removeKey, saveBudgets, signOut, markExpired };
   }
 
   return {
@@ -424,6 +512,11 @@
     MIN_KEY_LENGTH,
     MAX_KEY_LENGTH,
     providerById,
+    MENU_ITEMS,
+    profileView,
+    initialsOf,
+    menuItems,
+    nextMenuIndex,
     interpretSession,
     pickTenant,
     roleLabel,

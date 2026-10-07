@@ -24,10 +24,12 @@
           <button class="nav-item" data-view-target="architecture"><span class="nav-icon">▦</span>Architecture</button>
           <button class="nav-item" data-view-target="feedback"><span class="nav-icon">◆</span>Feedback</button>
           <button class="nav-item" data-view-target="signin" data-web-only data-signed-out-only><span class="nav-icon">→</span>Sign in</button>
+          <button class="nav-item" data-view-target="profile" data-web-only data-signed-in-only><span class="nav-icon">◉</span>Profile</button>
           <button class="nav-item" data-view-target="account" data-web-only data-signed-in-only><span class="nav-icon">☺</span>Account</button>
           <button class="nav-item" data-view-target="keys" data-web-only data-signed-in-only><span class="nav-icon">⚿</span>API keys</button>
           <button class="nav-item" data-view-target="github" data-web-only data-signed-in-only><span class="nav-icon">⌘</span>GitHub App</button>
           <button class="nav-item" data-view-target="quota" data-web-only data-signed-in-only><span class="nav-icon">◔</span>Quota &amp; budget</button>
+          <button class="nav-item" data-view-target="admin" data-web-only data-admin-only><span class="nav-icon">⚙</span>Admin</button>
           <button class="nav-item" data-view-target="guides"><span class="nav-icon">◈</span>Guides</button>
           <button class="nav-item" data-view-target="debug"><span class="nav-icon">≡</span>Info &amp; Debug <span id="log-count" class="nav-count">0</span></button>
           <button class="nav-item" data-view-target="help"><span class="nav-icon">?</span>Help</button>
@@ -51,6 +53,13 @@
             <label class="repo-switcher">Repository<select id="active-repo-select" aria-label="Active repository"></select></label>
             <span id="save-state" class="save-state">All changes saved</span>
             <button id="save-button" class="primary-button">Save configuration</button>
+            <div class="avatar-menu" id="avatar-menu" data-web-only data-profile-only>
+              <button id="avatar-button" class="avatar-button" type="button" aria-label="Account menu" aria-haspopup="menu" aria-expanded="false" aria-controls="avatar-dropdown"><img id="avatar-image" class="avatar-image hidden" alt=""><span id="avatar-initials" class="avatar-initials" aria-hidden="true"></span></button>
+              <div id="avatar-dropdown" class="avatar-dropdown hidden" role="menu" aria-label="Account menu">
+                <div class="avatar-identity"><strong id="avatar-name"></strong><span id="avatar-login"></span><span id="avatar-tenant"></span></div>
+                <div id="avatar-items" class="avatar-items"></div>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -370,6 +379,29 @@
               <p class="panel-copy">Members are read from GitHub: anyone who can reach the installation signs in as a member, and an installation's own user or an organization admin is an owner. Owners can save keys and budgets; members can view them. To change who has access, change it on GitHub.</p>
               <div id="account-members-error" class="banner warning hidden" role="alert"></div>
               <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Members of the active tenant</caption><thead><tr><th scope="col">GitHub user</th><th scope="col">Role</th></tr></thead><tbody id="account-members"></tbody></table></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-profile" class="view" data-web-only>
+          <div class="section-intro"><div><p class="eyebrow">PROFILE</p><h2>Your profile</h2><p>The GitHub identity you signed in with and the tenant these pages act on by default.</p></div></div>
+          <div class="settings-grid">
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">SIGNED IN</p><h3>GitHub profile</h3></div><span id="profile-role-pill" class="status-pill stopped">—</span></div>
+              <div class="service-meta"><span>Name</span><strong id="profile-name">—</strong></div>
+              <div class="service-meta"><span>GitHub user</span><strong id="profile-login">—</strong></div>
+              <div class="service-meta"><span>Personal tenant</span><strong id="profile-tenant">—</strong></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-admin" class="view" data-web-only>
+          <div class="section-intro"><div><p class="eyebrow">ADMIN</p><h2>Platform administration</h2><p>Platform admins are listed here. Promoting and demoting stays an audited server action; platform admin is separate from owning a tenant.</p></div></div>
+          <div class="settings-grid">
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">USERS</p><h3>Platform users</h3></div><span id="admin-user-count" class="score">0</span></div>
+              <div id="admin-users-error" class="banner warning hidden" role="alert"></div>
+              <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Platform users</caption><thead><tr><th scope="col">GitHub user</th><th scope="col">Role</th></tr></thead><tbody id="admin-users"></tbody></table></div>
             </article>
           </div>
         </section>
