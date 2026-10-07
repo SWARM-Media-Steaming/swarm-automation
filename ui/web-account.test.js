@@ -620,7 +620,8 @@ test("keyboard navigation wraps and ignores other keys", () => {
 test("the controller loads the profile over web_me, hides it on failure and clears it on sign-out", async () => {
   const { controller, http } = controllerFor({
     "GET /api/v1/me": { body: { ...PROFILE, is_platform_admin: true } },
-    "GET /api/v1/admin/users": { body: { users: [{ login: "octocat", display_name: "Octo Cat", is_platform_admin: true }, { login: "x" }] } },
+    "GET /api/v1/admin/users": { body: { users: [{ id: "u1", login: "octocat", display_name: "Octo Cat", is_platform_admin: true }, { id: "u2", login: "x" }] } },
+    "GET /api/v1/admin/audit-log": { body: { entries: [] } },
     "POST /api/v1/auth/logout": { status: 204 },
   });
   assert.equal((await controller.loadProfile()).isAdmin, true);
@@ -655,4 +656,92 @@ test("the avatar menu markup is web-only, accessible, token-styled and driven by
   assert.match(app, /key === "Escape"/);
   assert.match(app, /menu\.contains\(event\.target\)/);
   assert.doesNotMatch(app, /invoke\("web_/);
+});
+
+// ----- Profile, Account and Admin views (#444) ---------------------------------
+
+const ADMIN_ME = { ...PROFILE, login: "octocat", is_platform_admin: true, identities: [{ provider: "github", login: "octocat", subject: "999", token: "secret" }, { provider: 3 }] };
+const USERS = { users: [{ id: "u1", login: "octocat", display_name: "Octo Cat", is_platform_admin: true, last_login_at: 1767225600 }, { id: "u2", login: "bob", is_platform_admin: false }] };
+
+test("the profile keeps provider and login of each identity and nothing else", () => {
+  const view = account.profileView(ADMIN_ME);
+  assert.deepEqual(view.identities, [{ provider: "github", label: "GitHub", login: "octocat" }]);
+  assert.deepEqual(account.profileView({ ...PROFILE, identities: undefined }).identities, []);
+});
+
+test("admin rows mark the signed-in admin, and audit rows resolve deleted users and unknown actions", () => {
+  const rows = account.adminUserRows(USERS, "octocat");
+  assert.deepEqual(rows.map((row) => [row.login, row.isSelf, row.isAdmin]), [["octocat", true, true], ["bob", false, false]]);
+  assert.equal(rows[0].lastLogin, "2026-01-01 00:00 UTC");
+  assert.equal(rows[1].lastLogin, "—");
+  const audit = account.auditRows({ entries: [{ id: 2, action: "admin.demote", actor_login: "a", target_login: null, created_at: 1767225600 }, { id: 1, action: "admin.other", actor_login: "a", target_login: "b" }] });
+  assert.deepEqual(audit.map((row) => [row.action, row.target]), [["Demoted from admin", "(deleted user)"], ["admin.other", "b"]]);
+});
+
+test("the confirm prompt warns when demoting yourself", () => {
+  const [self, other] = account.adminUserRows(USERS, "octocat");
+  assert.match(account.adminChangePrompt(self, false).body, /your own account/);
+  assert.doesNotMatch(account.adminChangePrompt(other, false).body, /your own account/);
+  assert.equal(account.adminChangePrompt(other, true).danger, false);
+  assert.equal(account.adminChangePrompt(other, false).danger, true);
+});
+
+test("promote and demote call the admin routes with CSRF, then reload users and audit", async () => {
+  let promoted = false;
+  const { controller, http } = controllerFor({
+    "GET /api/v1/me": { body: ADMIN_ME },
+    "GET /api/v1/admin/users": () => ({ body: { users: USERS.users.map((u) => (u.id === "u2" && promoted ? { ...u, is_platform_admin: true } : u)) } }),
+    "GET /api/v1/admin/audit-log": { body: { entries: [{ id: 1, action: "admin.promote", actor_login: "octocat", target_login: "bob", created_at: 1 }] } },
+    "POST /api/v1/admin/users/u2/promote": () => { promoted = true; return { body: { changed: true } }; },
+  });
+  await controller.loadProfile();
+  await controller.loadAdminUsers();
+  const result = await controller.setAdmin("u2", true);
+  assert.equal(result.ok, true);
+  assert.equal(controller.state.adminUsers.find((u) => u.login === "bob").isAdmin, true);
+  assert.equal(controller.state.audit.length, 1);
+  const post = http.requests.find((r) => r.init.method === "POST");
+  assert.ok(post.init.headers["X-CSRF-Token"], "a state change carries the CSRF token");
+  assert.equal((await controller.setAdmin("nobody", true)).ok, false);
+});
+
+test("the last-admin refusal and a 404 surface as messages, never as a change", async () => {
+  const { controller } = controllerFor({
+    "GET /api/v1/me": { body: ADMIN_ME },
+    "GET /api/v1/admin/users": { body: USERS },
+    "GET /api/v1/admin/audit-log": { body: { entries: [] } },
+    "POST /api/v1/admin/users/u1/demote": { status: 409, body: { error: "This is the last platform admin. Promote another user first.", code: "conflict" } },
+    "POST /api/v1/admin/users/u2/demote": { status: 404, body: { error: "Not found.", code: "not_found" } },
+  });
+  await controller.loadProfile();
+  await controller.loadAdminUsers();
+  const refused = await controller.setAdmin("u1", false);
+  assert.equal(refused.ok, false);
+  assert.match(refused.message, /last platform admin/);
+  assert.equal(controller.state.profile.isAdmin, true);
+  assert.equal((await controller.setAdmin("u2", false)).notAdmin, true);
+});
+
+test("an audit-log failure does not hide the user list", async () => {
+  const { controller } = controllerFor({ "GET /api/v1/me": { body: ADMIN_ME }, "GET /api/v1/admin/users": { body: USERS }, "GET /api/v1/admin/audit-log": { status: 500, body: { error: "boom" } } });
+  await controller.loadProfile();
+  assert.equal((await controller.loadAdminUsers()).length, 2);
+  assert.deepEqual(controller.state.audit, []);
+  assert.equal(controller.state.errors.audit, "boom");
+});
+
+test("non-admins cannot reach Admin and the new views use the standard shape", () => {
+  assert.match(app, /view === "admin" && !\(webAccount && webAccount\.state\.profile && webAccount\.state\.profile\.isAdmin\)\) view = "profile"/);
+  assert.match(html, /data-view-target="admin" data-web-only data-admin-only/);
+  for (const id of ["profile", "account", "admin"]) {
+    const section = html.slice(html.indexOf(`<section id="view-${id}"`)).split("</section>")[0];
+    assert.match(section, /<p class="eyebrow">[A-Z]+<\/p><h2>/, `${id} opens with an eyebrow and h2`);
+    assert.match(section, /class="panel/);
+  }
+  assert.match(html, /id="admin-confirm-modal" class="modal-overlay" hidden role="dialog" aria-modal="true"/);
+  assert.match(html, /id="admin-users"/);
+  assert.match(html, /id="admin-audit"/);
+  assert.match(html, /id="account-identities"/);
+  assert.doesNotMatch(app, /invoke\("web_/);
+  assert.doesNotMatch(html, /style="/);
 });

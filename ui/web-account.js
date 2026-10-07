@@ -66,7 +66,57 @@
       tenant: typeof value.tenant === "string" ? value.tenant : "",
       role: value.role === "owner" ? "owner" : "member",
       isAdmin: value.is_platform_admin === true,
+      identities: identityRows(value.identities),
     };
+  }
+
+  // Connected sign-in identities: provider and handle only, as `/me` sends them.
+  function identityRows(list) {
+    return (Array.isArray(list) ? list : [])
+      .filter((item) => item && typeof item.provider === "string" && typeof item.login === "string")
+      .map((item) => ({ provider: item.provider, label: item.provider === "github" ? "GitHub" : item.provider, login: item.login }));
+  }
+
+  // The Admin view's user rows. `self` marks the signed-in admin; the server
+  // still decides (last admin, unknown user), the UI only words the question.
+  function adminUserRows(body, selfLogin) {
+    return (body && Array.isArray(body.users) ? body.users : [])
+      .filter((user) => user && typeof user.login === "string" && typeof user.id === "string")
+      .map((user) => ({
+        id: user.id,
+        login: user.login,
+        displayName: String(user.display_name || user.login),
+        isAdmin: user.is_platform_admin === true,
+        isSelf: user.login === selfLogin,
+        lastLogin: timeText(user.last_login_at),
+      }));
+  }
+
+  function timeText(seconds) {
+    return typeof seconds === "number" && seconds > 0 ? new Date(seconds * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "—";
+  }
+
+  const AUDIT_LABELS = { "admin.bootstrap": "Became the first admin", "admin.promote": "Promoted to admin", "admin.demote": "Demoted from admin" };
+
+  function auditRows(body) {
+    return (body && Array.isArray(body.entries) ? body.entries : [])
+      .filter((entry) => entry && typeof entry.action === "string")
+      .map((entry) => ({
+        id: entry.id,
+        action: AUDIT_LABELS[entry.action] || entry.action,
+        actor: typeof entry.actor_login === "string" ? entry.actor_login : "(deleted user)",
+        target: typeof entry.target_login === "string" ? entry.target_login : "(deleted user)",
+        when: timeText(entry.created_at),
+      }));
+  }
+
+  // The confirm dialog's wording for promoting or demoting `user`.
+  function adminChangePrompt(user, makeAdmin) {
+    if (makeAdmin) {
+      return { title: `Promote ${user.login}?`, body: `${user.login} will be able to list users, promote and demote platform admins, and read the audit log. This is recorded in the audit log.`, confirm: "Promote", danger: false };
+    }
+    const own = user.isSelf ? " This is your own account: you will lose access to this view immediately." : "";
+    return { title: `Demote ${user.login}?`, body: `${user.login} will no longer be a platform admin. This is recorded in the audit log.${own}`, confirm: "Demote", danger: true };
   }
 
   // Up to two letters: first letters of the first two words of the name, or the
@@ -335,6 +385,7 @@
       loaded: false,
       profile: null,
       adminUsers: [],
+      audit: [],
     };
 
     function fail(section, error) {
@@ -383,18 +434,40 @@
     // Platform admin user list for the Admin view (the server answers 404 to
     // anyone who is not an admin, which shows as an error, never as data).
     async function loadAdminUsers() {
-      if (!state.profile || !state.profile.isAdmin) { state.adminUsers = []; return state.adminUsers; }
+      if (!state.profile || !state.profile.isAdmin) { state.adminUsers = []; state.audit = []; return state.adminUsers; }
       try {
-        const body = await invoke("web_admin_list_users");
-        state.adminUsers = (body && Array.isArray(body.users) ? body.users : [])
-          .filter((user) => user && typeof user.login === "string")
-          .map((user) => ({ login: user.login, displayName: String(user.display_name || user.login), isAdmin: user.is_platform_admin === true }));
+        state.adminUsers = adminUserRows(await invoke("web_admin_list_users"), state.profile.login);
         delete state.errors.admin;
       } catch (error) {
         state.adminUsers = [];
         state.errors.admin = messageOf(error);
+        if (isUnauthorized(error)) state.expired = true;
+      }
+      try {
+        state.audit = auditRows(await invoke("web_admin_audit_log"));
+        delete state.errors.audit;
+      } catch (error) {
+        state.audit = [];
+        state.errors.audit = messageOf(error);
       }
       return state.adminUsers;
+    }
+
+    // Promote or demote one user, then reload the list and the audit log. The
+    // last-admin refusal (409) comes back as its server message. Demoting
+    // yourself drops the profile's admin flag, which hides the view.
+    async function setAdmin(userId, makeAdmin) {
+      const user = state.adminUsers.find((row) => row.id === userId);
+      if (!user) return { ok: false, message: "Unknown user." };
+      try {
+        await invoke(makeAdmin ? "web_admin_promote_user" : "web_admin_demote_user", { userId });
+      } catch (error) {
+        if (isUnauthorized(error)) state.expired = true;
+        return { ok: false, message: messageOf(error), notAdmin: error && error.status === 404 };
+      }
+      if (user.isSelf && !makeAdmin) await loadProfile();
+      await loadAdminUsers();
+      return { ok: true, message: makeAdmin ? `${user.login} is now a platform admin.` : `${user.login} is no longer a platform admin.` };
     }
 
     async function loadTenantData() {
@@ -489,6 +562,7 @@
       state.loaded = false;
       state.profile = null;
       state.adminUsers = [];
+      state.audit = [];
       state.members = [];
       state.keys = keyRows(null);
       state.quota = quotaView(null, null);
@@ -502,7 +576,7 @@
       state.session = { ...state.session, authenticated: false };
     }
 
-    return { state, loadSession, loadProfile, loadAdminUsers, loadTenantData, selectTenant, saveKey, removeKey, saveBudgets, signOut, markExpired };
+    return { state, loadSession, loadProfile, loadAdminUsers, setAdmin, loadTenantData, selectTenant, saveKey, removeKey, saveBudgets, signOut, markExpired };
   }
 
   return {
@@ -514,6 +588,10 @@
     providerById,
     MENU_ITEMS,
     profileView,
+    identityRows,
+    adminUserRows,
+    auditRows,
+    adminChangePrompt,
     initialsOf,
     menuItems,
     nextMenuIndex,

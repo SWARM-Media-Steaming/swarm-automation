@@ -501,7 +501,7 @@ async fn the_admin_api_never_returns_secrets_or_session_data() {
 
 #[tokio::test]
 async fn the_admin_routes_come_from_the_catalog_and_are_all_exercised_here() {
-    assert_eq!(ADMIN_ROUTES.len(), 3);
+    assert_eq!(ADMIN_ROUTES.len(), 4);
     let app = world("alice");
     let alice = app.sign_in("code-alice").await;
     app.sign_in("code-bob").await;
@@ -513,5 +513,38 @@ async fn the_admin_routes_come_from_the_catalog_and_are_all_exercised_here() {
             "{method} {path}: {}",
             reply.text()
         );
+    }
+}
+
+#[tokio::test]
+async fn the_audit_log_route_lists_newest_first_with_logins_and_no_internals() {
+    let app = world("alice");
+    let alice = app.sign_in("code-alice").await;
+    app.sign_in("code-bob").await;
+    alice.send(Method::POST, &promote(&app, "bob"), None).await;
+    let reply = alice.get("/api/v1/admin/audit-log").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let entries = reply.json()["entries"].as_array().unwrap().clone();
+    let summary: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            (
+                e["action"].as_str().unwrap(),
+                e["actor_login"].as_str().unwrap(),
+                e["target_login"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("admin.promote", "alice", "bob"),
+            ("admin.bootstrap", "alice", "alice")
+        ]
+    );
+    assert!(entries[0]["created_at"].is_u64());
+    let text = reply.text().to_lowercase();
+    for forbidden in ["csrf", "token", "session", "detail"] {
+        assert!(!text.contains(forbidden), "{forbidden}: {text}");
     }
 }

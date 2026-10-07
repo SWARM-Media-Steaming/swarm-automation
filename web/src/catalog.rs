@@ -450,6 +450,7 @@ pub const ROUTES: &[Route] = &[
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AdminAction {
     ListUsers,
+    AuditLog,
     Promote,
     Demote,
 }
@@ -471,6 +472,12 @@ pub const ADMIN_ROUTES: &[AdminRoute] = &[
         method: "GET",
         path: "/admin/users",
         action: AdminAction::ListUsers,
+    },
+    AdminRoute {
+        command: "web_admin_audit_log",
+        method: "GET",
+        path: "/admin/audit-log",
+        action: AdminAction::AuditLog,
     },
     AdminRoute {
         command: "web_admin_promote_user",

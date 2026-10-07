@@ -497,3 +497,17 @@ test("web_me is a plain session GET on the web and a Tauri command on the deskto
   assert.equal(desktop.transport, "tauri");
   assert.deepEqual(await desktop.invoke("web_me"), profile, "the desktop adapter delegates unchanged");
 });
+
+// ----- Admin audit log: both transports (#444) --------------------------------
+
+test("web_admin_audit_log is a plain admin GET on the web and delegates unchanged on the desktop", async () => {
+  const body = { entries: [{ id: 1, action: "admin.promote", actor_login: "a", target_login: "b", created_at: 1 }] };
+  const http = mockHttp({ "GET /api/v1/admin/audit-log": { body } });
+  const web = api.createApi({ fetch: http.fetch, csrfToken: () => "tok" });
+  assert.deepEqual(await web.invoke("web_admin_audit_log"), body);
+  assert.ok(!/\{tenant\}/.test(JSON.stringify(api.COMMANDS.web_admin_audit_log)), "platform-wide, not tenant-scoped");
+  const tauri = mockTauri({ web_admin_audit_log: () => body });
+  const desktop = api.createApi({ tauri });
+  assert.deepEqual(await desktop.invoke("web_admin_audit_log"), body);
+  assert.equal(tauri.calls.invoke[0][0], "web_admin_audit_log");
+});
