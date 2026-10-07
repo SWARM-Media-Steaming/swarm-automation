@@ -358,7 +358,15 @@ class AwsInfrastructureTests(unittest.TestCase):
             self.assertIn(name, ecs, f"ecs.tf does not supply {name}")
         self.assertIn("SWARM_WEB_ECS_SUBNETS", ecs)
 
-    def test_one_api_task_while_state_is_in_memory(self):
+    def test_the_deployments_select_the_postgres_store(self):
+        # config.rs: SWARM_WEB_STORE=postgres reads SWARM_STORAGE_POSTGRES_DSN.
+        self.assertIn("SWARM_WEB_STORE: postgres", service_block("api"))
+        self.assertTrue(assigns(read(TERRAFORM / "ecs.tf"), "SWARM_WEB_STORE", '"postgres"'))
+        self.assertIn("SWARM_STORAGE_POSTGRES_DSN", service_block("api"))
+        self.assertIn("SWARM_STORAGE_POSTGRES_DSN", read(TERRAFORM / "ecs.tf"))
+        self.assertIn("SWARM_WEB_STORE", read(WEB / "src" / "config.rs"))
+
+    def test_one_api_task_while_runtime_state_is_per_process(self):
         variables = read(TERRAFORM / "variables.tf")
         self.assertRegex(variables, r'variable "api_desired_count"[^}]*default\s*=\s*0')
         self.assertIn("<= 1", variables)

@@ -26,6 +26,7 @@ locals {
   # refuses a KMS configuration it cannot honor.
   api_environment = {
     SWARM_WEB_BIND                = "0.0.0.0:8080"
+    SWARM_WEB_STORE               = "postgres"
     SWARM_WEB_PUBLIC_URL          = local.public_url
     SWARM_WEB_GITHUB_CLIENT_ID    = var.github_client_id
     SWARM_WEB_GITHUB_APP_ID       = tostring(var.github_app_id)

@@ -119,6 +119,11 @@ services:
       SWARM_WEB_WORKER_IMAGE: ${SWARM_WORKER_IMAGE:-swarm-automation-worker:local}
       SWARM_WEB_DOCKER_NETWORK: swarm-stack
       SWARM_WEB_POLL_SECS: ${SWARM_WEB_POLL_SECS:-60}
+      # Identity, tenants, sessions, keys, usage and job slots live in the
+      # Postgres below (migrations apply at start); sessions survive a restart.
+      # The DSN is SWARM_STORAGE_POSTGRES_DSN, one setting for the API's own
+      # tables and the worker's history.
+      SWARM_WEB_STORE: postgres
       # Hosted storage, shared by the bridge and every job container. The job
       # containers sit on the same network, so the hostnames below resolve for
       # them too.

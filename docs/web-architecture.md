@@ -233,8 +233,27 @@ in order): `0002` guards each step on the catalog, and drops the empty
 worker schema (`t_<tenant>`, `SCHEMA_VERSION`) is untouched. Per-tenant
 execution history is *not* here (it is the `t_<tenant>` schema above) and neither
 are settings, which are `tenant_config` documents in object storage so a worker
-job reads them beside its checkpoints. The Postgres `Store` that queries these
-tables is a known gap; `memory::MemoryStore` remains the store until then.
+job reads them beside its checkpoints. `0003_tenant_documents` adds
+`tenant_documents` (the `Store`'s tenant documents: tenant first in the key,
+cascading from `tenants`).
+
+### Postgres `Store`
+
+`postgres::PostgresStore` implements the `Store` trait over these tables
+(`tokio-postgres` behind a `deadpool` pool; the worker's Python side keeps its
+own driver). `SWARM_WEB_STORE=postgres` selects it and takes the connection
+string from `SWARM_STORAGE_POSTGRES_DSN` (one database serves the platform
+tables and the worker's `t_<tenant>` history schemas); unset or `memory` keeps
+`MemoryStore`, which tests use. At start the API applies every migration not
+recorded in `platform_migrations`, in order, in one transaction under an
+advisory lock, so concurrent starts do not race and a restart changes nothing.
+Sessions, sign-ins, memberships and sealed keys therefore survive an API
+restart. `sslmode=disable` connects in clear; any other mode encrypts but, like
+libpq `require`, does not verify the server certificate (the DSN Terraform
+writes asks for exactly that). Errors become `StoreError` with the SQLSTATE and
+message only: never the DSN or a row value. `tests/store_contract.rs` runs one
+contract against `MemoryStore` and, when `SWARM_TEST_POSTGRES_DSN` is set (CI's
+`storage-live` workflow), against Postgres, plus a restart test.
 
 ### Desktop data import
 
@@ -930,7 +949,9 @@ inbound, 443 and the database out), `SWARM_WEB_WORKER_IMAGE`, and the
 environment. `SWARM_WEB_KMS_KEY_ID` is deliberately not set: the build has no KMS
 key wrapper and refuses that setting, so tenants' provider keys are sealed with
 `SWARM_WEB_LOCAL_KEY` from Secrets Manager until the wrapper lands. The service
-starts at zero tasks and is limited to one: sessions are in memory.
+starts at zero tasks and is limited to one: the SSE replay rings and the job
+scheduler are per process (identity, tenants, sessions, keys, usage and job
+slots are in Postgres, `SWARM_WEB_STORE=postgres`).
 
 Cost: a NAT gateway, Multi-AZ RDS, an ALB and Fargate tasks are not free; a
 throwaway environment sets `protect_data = false` and `db_multi_az = false`.
@@ -997,10 +1018,10 @@ job container to the repository's code, provider APIs and storage.
 
 What is not built yet, by design of the phased work in #413:
 
-- **Postgres `Store`.** The schema exists and compose applies it, but the API
-  still keeps sessions, keys, usage and scheduling state in memory
-  (`memory::MemoryStore`) and says so at startup. A restart signs everyone out,
-  and the AWS service is limited to one task.
+- **Per-process runtime state.** The Postgres `Store` holds identity, tenants,
+  sessions, keys, usage and job slots, but the SSE replay rings (`events.rs`)
+  and the scheduler's in-flight bookkeeping are still per process, so the AWS
+  service stays limited to one task until those move too.
 - **KMS key wrapper.** `SWARM_WEB_KMS_KEY_ID` is refused until a `KeyWrapper` for
   KMS exists.
 - **Per-tenant storage credentials for jobs** (STS session policy and a database

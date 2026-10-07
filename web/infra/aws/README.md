@@ -59,9 +59,11 @@ piece answers a requirement and what is not yet covered.
 
 ## Known limits (also in the docs)
 
-- The API still keeps sessions, provider keys and usage in memory
-  (`MemoryStore`); the Postgres `Store` is a later step. Hence one API task and
-  `api_desired_count <= 1`. Restarting it signs everyone out.
+- Identity, tenants, sessions, provider keys, usage and job slots are in
+  Postgres (`SWARM_WEB_STORE=postgres`; the API applies `web/migrations` at
+  start), so a restart keeps sessions. The SSE replay rings and the job
+  scheduler are still per process, hence one API task and
+  `api_desired_count <= 1`.
 - The KMS key encrypts data at rest but is not yet a provider-key wrapper in the
   API; the API wraps with `SWARM_WEB_LOCAL_KEY` from Secrets Manager.
 - A job holds the storage user's key (the worker's S3 client signs with a key,

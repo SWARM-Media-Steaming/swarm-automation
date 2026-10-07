@@ -31,6 +31,10 @@ pub struct Config {
     pub github: GitHubConfig,
     pub internal_token: Option<Secret>,
     pub default_plan: PlanQuotas,
+    /// `SWARM_WEB_STORE`: `memory` (default) or `postgres`, which reads the
+    /// connection string from `SWARM_STORAGE_POSTGRES_DSN` (the setting the
+    /// worker's hosted storage uses, so one database serves both).
+    pub store: StoreConfig,
     /// `None` unless `SWARM_WEB_JOB_RUNNER` is `docker` or `fargate`.
     pub jobs: Option<JobConfig>,
     /// `None` unless `SWARM_WEB_BRIDGE=python`: how history, usage and the other
@@ -40,6 +44,14 @@ pub struct Config {
     pub sse_heartbeat_secs: u64,
     /// What `app_version` answers (`SWARM_WEB_APP_VERSION`, else the crate's).
     pub app_version: String,
+}
+
+/// Where identity, tenants, sessions, keys, usage, jobs and deliveries live.
+pub enum StoreConfig {
+    /// `memory::MemoryStore`: development and tests; lost on restart.
+    Memory,
+    /// `postgres::PostgresStore` over the platform schema (`web/migrations`).
+    Postgres { dsn: Secret },
 }
 
 pub struct BridgeConfig {
@@ -103,6 +115,14 @@ pub const DEFAULT_MONTHLY_SPEND_CAP_USD: f64 = 100.0;
 pub const DEFAULT_SESSION_TTL_SECS: u64 = 8 * 60 * 60;
 
 impl Config {
+    /// A log-safe name of the configured store.
+    pub fn store_label(&self) -> &'static str {
+        match self.store {
+            StoreConfig::Memory => "memory",
+            StoreConfig::Postgres { .. } => "postgres",
+        }
+    }
+
     pub fn cookie_secure(&self) -> bool {
         self.public_url.starts_with("https://")
     }
@@ -191,6 +211,7 @@ impl Config {
                 api_base: "https://api.github.com".into(),
             },
             internal_token,
+            store: load_store(get)?,
             default_plan: PlanQuotas {
                 max_concurrent_jobs: DEFAULT_MAX_CONCURRENT_JOBS,
                 monthly_spend_cap_usd: Some(DEFAULT_MONTHLY_SPEND_CAP_USD),
@@ -214,6 +235,9 @@ impl Config {
         if let Some(token) = &self.internal_token {
             crate::redact::register_secret(token.expose());
         }
+        if let StoreConfig::Postgres { dsn } = &self.store {
+            crate::redact::register_secret(dsn.expose());
+        }
         if let Some(bridge) = &self.bridge {
             for secret in bridge.env.values() {
                 crate::redact::register_secret(secret.expose());
@@ -228,6 +252,23 @@ impl Config {
                 crate::redact::register_secret(secret.expose());
             }
         }
+    }
+}
+
+fn load_store(get: &dyn Fn(&str) -> Option<String>) -> Result<StoreConfig, ConfigError> {
+    match optional(get, "SWARM_WEB_STORE").as_deref() {
+        None | Some("memory") => Ok(StoreConfig::Memory),
+        Some("postgres") => match optional(get, "SWARM_STORAGE_POSTGRES_DSN") {
+            Some(dsn) => Ok(StoreConfig::Postgres {
+                dsn: Secret::new(dsn),
+            }),
+            None => Err(ConfigError(
+                "SWARM_WEB_STORE=postgres requires SWARM_STORAGE_POSTGRES_DSN".into(),
+            )),
+        },
+        Some(_) => Err(ConfigError(
+            "SWARM_WEB_STORE must be memory or postgres".into(),
+        )),
     }
 }
 
@@ -504,6 +545,29 @@ mod tests {
         assert_eq!(jobs.quota_resume_secs, 60);
         assert_eq!(jobs.provider, Provider::Claude);
         assert!(!format!("{:?}", jobs.private_key).contains("BEGIN"));
+    }
+
+    #[test]
+    fn the_store_defaults_to_memory_and_postgres_needs_its_dsn() {
+        let (config, _) = load(&env(&[])).unwrap();
+        assert!(matches!(config.store, StoreConfig::Memory));
+        let error = match load(&env(&[("SWARM_WEB_STORE", "postgres")])) {
+            Err(error) => error,
+            Ok(_) => panic!("postgres without a DSN must fail"),
+        };
+        assert!(error.0.contains("SWARM_STORAGE_POSTGRES_DSN"));
+        let dsn = "postgresql://u:hunter2-secret@db/swarm";
+        let (config, _) = load(&env(&[
+            ("SWARM_WEB_STORE", "postgres"),
+            ("SWARM_STORAGE_POSTGRES_DSN", dsn),
+        ]))
+        .unwrap();
+        match &config.store {
+            StoreConfig::Postgres { dsn: held } => assert_eq!(held.expose(), dsn),
+            StoreConfig::Memory => panic!("postgres was selected"),
+        }
+        assert!(!format!("{:?}", config.store_label()).contains("hunter2"));
+        assert!(load(&env(&[("SWARM_WEB_STORE", "sqlite")])).is_err());
     }
 
     #[test]
