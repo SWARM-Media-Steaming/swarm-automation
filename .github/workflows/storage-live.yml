@@ -44,6 +44,17 @@ jobs:
           python-version: "3.13"
       # Test-only: the worker image itself is standard library only.
       - run: python -m pip install "psycopg[binary]"
+      # The web backend's Postgres Store runs the same contract as MemoryStore,
+      # plus the sessions-survive-a-restart test (web/tests/store_contract.rs).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: web
+      - name: Web Store contract on Postgres
+        working-directory: web
+        env:
+          SWARM_TEST_POSTGRES_DSN: postgresql://swarm:swarm@localhost:5432/swarm_test?sslmode=disable
+        run: cargo test --locked --test store_contract
       - name: Storage contract, importer and platform schema on Postgres
         working-directory: issue_worker
         env:

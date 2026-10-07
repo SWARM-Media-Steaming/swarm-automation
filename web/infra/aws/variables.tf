@@ -123,13 +123,13 @@ variable "bucket_name" {
 # --- compute ---------------------------------------------------------------
 
 variable "api_desired_count" {
-  description = "API tasks. Keep 0 until the secrets are populated (README), then 1. The in-memory store is per process, so more than 1 is unsupported until the Postgres store lands."
+  description = "API tasks. Keep 0 until the secrets are populated (README), then 1. Identity, tenants and sessions are in Postgres, but the live-event replay rings and the job scheduler are still per process, so more than 1 is unsupported."
   type        = number
   default     = 0
 
   validation {
     condition     = var.api_desired_count >= 0 && var.api_desired_count <= 1
-    error_message = "api_desired_count must be 0 or 1 while the API keeps sessions in memory."
+    error_message = "api_desired_count must be 0 or 1 while the SSE rings and the scheduler are per process."
   }
 }
 

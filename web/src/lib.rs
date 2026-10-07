@@ -20,6 +20,7 @@ pub mod logging;
 pub mod memory;
 pub mod model;
 pub mod orchestrator;
+pub mod postgres;
 pub mod redact;
 pub mod routes;
 pub mod runner;

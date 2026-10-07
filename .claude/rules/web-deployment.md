@@ -27,8 +27,11 @@ contract; `issue_worker/test_web_deploy.py` pins it.
   stops the worker task definition's tasks and passes the two job roles.
 - **Do not configure what the build cannot honour.** Do not set
   `SWARM_WEB_KMS_KEY_ID` until a KMS `KeyWrapper` exists; do not raise the API past
-  one task or `api_desired_count` past 1 until the Postgres `Store` replaces
-  `MemoryStore`.
+  one task or `api_desired_count` past 1. The Postgres `Store`
+  (`SWARM_WEB_STORE=postgres`) now holds identity, tenants, sessions, keys, usage
+  and job slots, but the SSE replay rings and the scheduler are per process:
+  keep the cap until those move too, then update the Terraform validation, its
+  test and the docs together.
 - **A job starts clean on any runtime.** The worker images ship an empty
   `/home/swarm` and `/workspace` owned by uid 1000 (no `--create-home` skeleton),
   because `job_launch.py` refuses a non-empty one and Fargate volumes copy the
