@@ -118,10 +118,12 @@ installations, write-only envelope-encrypted provider keys, usage/budget/quota
 accounting built on the worker's `token_usage.UsageRecord`, and a signed,
 idempotent GitHub webhook. Test it with `cargo test --locked` in `web/` (plus
 `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`,
-which CI runs). The store is behind a `Store` trait; only the in-memory
-implementation exists so far. The Postgres platform schema is
-`web/migrations/*.sql` (embedded as `swarm_web::schema::MIGRATIONS`, applied by
-`psql -f`); the Postgres `Store` and KMS `KeyWrapper` are known gaps. Jobs
+which CI runs). The store is behind a `Store` trait: `MemoryStore` for tests and
+`postgres::PostgresStore` (`SWARM_WEB_STORE=postgres`, DSN from
+`SWARM_STORAGE_POSTGRES_DSN`, migrations applied at start). Both pass
+`web/tests/store_contract.rs`; export `SWARM_TEST_POSTGRES_DSN` to run it on
+Postgres. The platform schema is `web/migrations/*.sql` (embedded as
+`swarm_web::schema::MIGRATIONS`); the KMS `KeyWrapper` is a known gap. Jobs
 run through `JobRunner` (`DockerJobRunner` locally, `EcsFargateJobRunner` on
 AWS): one container per repository, image `web/worker/Dockerfile`, entrypoint
 `issue_worker/job_launch.py`. The orchestrator resumes exit 13 and quota

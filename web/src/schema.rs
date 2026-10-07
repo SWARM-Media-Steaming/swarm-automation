@@ -3,8 +3,8 @@
 //! The SQL lives in `migrations/` so `psql -f` and any migration runner can apply
 //! it; this module embeds it so the binary can too, and pins its shape in tests
 //! that need no database. `issue_worker/test_storage_remote.py` applies the same
-//! files to a live Postgres. Only the schema is here: the Postgres `Store` that
-//! queries it is a later step, so `memory::MemoryStore` remains the store.
+//! files to a live Postgres. `postgres::PostgresStore` applies [`MIGRATIONS`] at
+//! startup (each version once, under an advisory lock) and queries these tables.
 
 /// `(version, sql)` in the order they must be applied.
 pub const MIGRATIONS: &[(&str, &str)] = &[
@@ -15,6 +15,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0002_identity",
         include_str!("../migrations/0002_identity.sql"),
+    ),
+    (
+        "0003_tenant_documents",
+        include_str!("../migrations/0003_tenant_documents.sql"),
     ),
 ];
 
@@ -195,6 +199,19 @@ mod tests {
                 "{index}"
             );
         }
+    }
+
+    #[test]
+    fn documents_migration_is_tenant_scoped_and_cascades() {
+        let sql = MIGRATIONS[2].1;
+        let statement = statements(sql)
+            .into_iter()
+            .find(|s| s.starts_with("CREATE TABLE IF NOT EXISTS tenant_documents "))
+            .expect("tenant_documents is missing");
+        let first_column = statement.lines().nth(1).unwrap_or_default().trim();
+        assert!(first_column.starts_with("tenant_id"));
+        assert!(statement.contains("REFERENCES tenants (tenant_id) ON DELETE CASCADE"));
+        assert!(statement.contains("PRIMARY KEY (tenant_id, collection, doc_key)"));
     }
 
     #[test]

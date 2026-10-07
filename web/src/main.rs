@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
 use swarm_web::clock::SystemClock;
-use swarm_web::config::{Config, JobBackend};
+use swarm_web::config::{Config, JobBackend, StoreConfig};
 use swarm_web::github::HttpGitHub;
 use swarm_web::memory::MemoryStore;
 use swarm_web::orchestrator::{JobSettings, Orchestrator, OrchestratorDeps, PythonTokenMinter};
+use swarm_web::postgres::PostgresStore;
 use swarm_web::runner::{DockerJobRunner, EcsFargateJobRunner, JobRunner};
 use swarm_web::state::AppState;
+use swarm_web::store::Store;
 
 #[tokio::main]
 async fn main() {
@@ -31,13 +33,28 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    // Development store. The Postgres implementation of `Store` replaces this
-    // behind the same trait; until then nothing survives a restart.
-    tracing::warn!("using the in-memory store: sign-ins, keys and usage are lost on restart");
+    let store: Arc<dyn Store> = match &config.store {
+        StoreConfig::Memory => {
+            tracing::warn!(
+                "using the in-memory store: sign-ins, keys and usage are lost on restart"
+            );
+            Arc::new(MemoryStore::new())
+        }
+        StoreConfig::Postgres { dsn } => match PostgresStore::connect(dsn.expose()).await {
+            Ok(store) => {
+                tracing::info!("store: postgres (migrations applied)");
+                Arc::new(store)
+            }
+            Err(error) => {
+                eprintln!("swarm-web: {error}");
+                std::process::exit(2);
+            }
+        },
+    };
     let bind = config.bind;
     let state = AppState::new(
         config,
-        Arc::new(MemoryStore::new()),
+        store,
         Arc::new(github),
         Arc::new(wrapper),
         Arc::new(SystemClock),

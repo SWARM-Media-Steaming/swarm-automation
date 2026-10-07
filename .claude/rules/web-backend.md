@@ -39,8 +39,9 @@ stays the one shared worker.
   `swarm_web::schema::MIGRATIONS` and safe to apply twice (`psql -f`). It holds
   tenants, users (+ `user_identities`: GitHub is the only provider, never a
   password), sessions, memberships, the admin audit log, sealed provider-key metadata, quotas, budgets, the
-  usage ledger, jobs and webhook deliveries. `MemoryStore` is still the runtime
-  store; worker history and objects stay in `issue_worker/storage_remote.py`.
+  usage ledger, jobs, tenant documents and webhook deliveries. `postgres::PostgresStore` is the runtime store
+  (`SWARM_WEB_STORE=postgres`, migrations applied at start) and `MemoryStore`
+  serves tests; a `Store` change must pass `tests/store_contract.rs` on both; worker history and objects stay in `issue_worker/storage_remote.py`.
 - `JobRunner` (`runner.rs`) is the only way a job container starts.
   `DockerJobRunner` and `EcsFargateJobRunner` share `JobSpec`, the image and
   `WORKER_ENTRYPOINT`. Docker is the local backend; Fargate is AWS. No
