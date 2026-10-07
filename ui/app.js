@@ -405,6 +405,8 @@
   }
 
   function navigate(view) {
+    // The Admin view is for platform admins only; anyone else lands on Profile.
+    if (view === "admin" && !(webAccount && webAccount.state.profile && webAccount.state.profile.isAdmin)) view = "profile";
     document.querySelectorAll(".nav-item").forEach((button) => {
       button.classList.toggle("active", button.dataset.viewTarget === view);
     });
@@ -6082,6 +6084,7 @@
     renderWebQuota();
     renderAvatarMenu();
     renderWebProfile();
+    renderWebIdentities();
     renderWebAdmin();
   }
 
@@ -6188,26 +6191,101 @@
     byId("profile-name").textContent = profile ? profile.displayName : "—";
     byId("profile-login").textContent = profile ? `@${profile.login}` : "—";
     byId("profile-tenant").textContent = profile && profile.tenant ? profile.tenant : "—";
+    const role = profile ? window.SwarmWebAccount.roleLabel(profile.role) : "—";
+    byId("profile-role").textContent = role;
     const pill = byId("profile-role-pill");
     pill.className = `status-pill ${profile && profile.role === "owner" ? "running" : "stopped"}`;
-    pill.textContent = profile ? window.SwarmWebAccount.roleLabel(profile.role) : "—";
+    pill.textContent = role;
+    const image = byId("profile-avatar-image");
+    image.classList.toggle("hidden", !(profile && profile.avatarUrl));
+    if (profile && profile.avatarUrl) image.src = profile.avatarUrl; else image.removeAttribute("src");
+    image.onerror = () => image.classList.add("hidden");
+    byId("profile-avatar-initials").textContent = profile ? profile.initials : "";
+  }
+
+  function renderWebIdentities() {
+    const { profile } = webAccount.state;
+    const identities = profile ? profile.identities : [];
+    const list = byId("account-identities");
+    list.replaceChildren();
+    identities.forEach((identity) => {
+      const item = document.createElement("li");
+      item.append(webNode("span", "", identity.label), webNode("strong", "", `@${identity.login}`));
+      list.appendChild(item);
+    });
+    byId("account-identity-count").textContent = String(identities.length);
   }
 
   function renderWebAdmin() {
-    const { adminUsers, errors } = webAccount.state;
+    const { adminUsers, audit, errors } = webAccount.state;
     const body = byId("admin-users");
     body.replaceChildren();
     adminUsers.forEach((user) => {
       const row = document.createElement("tr");
       const name = document.createElement("td");
       name.appendChild(webNode("strong", "", user.login));
+      if (user.isSelf) name.appendChild(webNode("small", "", "You"));
       const role = document.createElement("td");
       role.appendChild(webPill(user.isAdmin ? "Platform admin" : "User", user.isAdmin ? "running" : "stopped"));
-      row.append(name, role);
+      const action = webNode("td", "row-actions");
+      const toggle = button(user.isAdmin ? "Demote" : "Promote", user.isAdmin ? "danger-button compact" : "secondary-button compact", () => void changeAdmin(user, !user.isAdmin));
+      toggle.type = "button";
+      toggle.setAttribute("aria-label", `${user.isAdmin ? "Demote" : "Promote"} ${user.login}`);
+      action.appendChild(toggle);
+      row.append(name, role, webNode("td", "", user.lastLogin), action);
       body.appendChild(row);
     });
     byId("admin-user-count").textContent = String(adminUsers.length);
     setWebNotice("admin-users-error", errors.admin ? `Could not load users: ${errors.admin}` : "");
+    const log = byId("admin-audit");
+    log.replaceChildren();
+    audit.forEach((entry) => {
+      const row = document.createElement("tr");
+      row.append(webNode("td", "", entry.when), webNode("td", "", entry.action), webNode("td", "", entry.actor), webNode("td", "", entry.target));
+      log.appendChild(row);
+    });
+    byId("admin-audit-count").textContent = String(audit.length);
+    setWebNotice("admin-audit-error", errors.audit ? `Could not load the audit log: ${errors.audit}` : "");
+  }
+
+  // The confirm dialog is the help modal's shape: an overlay, a close button,
+  // Escape and a click outside to cancel. Resolves true only on the confirm button.
+  function confirmAdminChange(prompt) {
+    return new Promise((resolve) => {
+      const modal = byId("admin-confirm-modal");
+      const ok = byId("admin-confirm-ok");
+      byId("admin-confirm-title").textContent = prompt.title;
+      byId("admin-confirm-body").textContent = prompt.body;
+      ok.textContent = prompt.confirm;
+      ok.className = prompt.danger ? "danger-button" : "primary-button";
+      const finish = (answer) => {
+        modal.hidden = true;
+        modal.removeEventListener("click", onOverlay);
+        document.removeEventListener("keydown", onKey);
+        ok.onclick = null;
+        byId("admin-confirm-cancel").onclick = null;
+        byId("admin-confirm-close").onclick = null;
+        resolve(answer);
+      };
+      const onOverlay = (event) => { if (event.target === modal) finish(false); };
+      const onKey = (event) => { if (event.key === "Escape") finish(false); };
+      ok.onclick = () => finish(true);
+      byId("admin-confirm-cancel").onclick = () => finish(false);
+      byId("admin-confirm-close").onclick = () => finish(false);
+      modal.addEventListener("click", onOverlay);
+      document.addEventListener("keydown", onKey);
+      modal.hidden = false;
+      byId("admin-confirm-cancel").focus();
+    });
+  }
+
+  async function changeAdmin(user, makeAdmin) {
+    if (!(await confirmAdminChange(window.SwarmWebAccount.adminChangePrompt(user, makeAdmin)))) return;
+    const result = await webAccount.setAdmin(user.id, makeAdmin);
+    showToast(result.message, result.ok ? "success" : "error");
+    renderWebAccount();
+    // A demotion of yourself (or a 404) means this view is no longer yours.
+    if ((result.ok || result.notAdmin) && !(webAccount.state.profile && webAccount.state.profile.isAdmin)) navigate("profile");
   }
 
   function bindAvatarMenuEvents() {
@@ -6239,6 +6317,7 @@
     });
     byId("signout-button").addEventListener("click", () => void signOutWeb());
     byId("account-signout").addEventListener("click", () => void signOutWeb());
+    byId("account-session-signout").addEventListener("click", () => void signOutWeb());
     byId("github-recheck").addEventListener("click", () => withBusy("github-recheck", () => refreshWebAccount(), { progress: "Checking GitHub…" }));
     byId("budget-form").addEventListener("submit", (event) => void submitWebBudgets(event));
     // Any command answered 401 means the session ended mid-use.

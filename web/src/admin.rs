@@ -35,6 +35,7 @@ pub fn mount(mut router: Router<AppState>) -> Router<AppState> {
     for route in catalog::ADMIN_ROUTES {
         let handler = match route.action {
             AdminAction::ListUsers => get(list_users),
+            AdminAction::AuditLog => get(audit_log),
             AdminAction::Promote => post(promote),
             AdminAction::Demote => post(demote),
         };
@@ -52,6 +53,38 @@ async fn list_users(State(state): State<AppState>, _admin: Admin) -> Result<Json
         .map(user_json)
         .collect();
     Ok(Json(json!({ "users": users })))
+}
+
+/// How many audit rows the Admin view gets (newest first).
+const AUDIT_LIMIT: usize = 50;
+
+/// The recent audit trail: action, who and when. Logins are resolved from the
+/// user list (`null` once the user is gone); the free-form `detail` stays server side.
+async fn audit_log(State(state): State<AppState>, _admin: Admin) -> Result<Json<Value>, ApiError> {
+    let logins: std::collections::HashMap<String, String> = state
+        .store
+        .platform_users()
+        .await?
+        .into_iter()
+        .map(|user| (user.id, user.login))
+        .collect();
+    let login = |id: &Option<String>| id.as_ref().and_then(|id| logins.get(id)).cloned();
+    let entries: Vec<Value> = state
+        .store
+        .admin_audit_log(AUDIT_LIMIT)
+        .await?
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "action": row.action,
+                "actor_login": login(&row.actor_user_id),
+                "target_login": login(&row.target_user_id),
+                "created_at": row.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "entries": entries })))
 }
 
 async fn promote(
