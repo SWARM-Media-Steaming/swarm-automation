@@ -294,6 +294,23 @@ async fn insert_audit(
     Ok(())
 }
 
+/// An audit row with no target user (platform configuration changes).
+async fn insert_config_audit(
+    tx: &deadpool_postgres::Transaction<'_>,
+    actor_id: &str,
+    action: &str,
+    detail: Value,
+) -> StoreResult<()> {
+    tx.execute(
+        "INSERT INTO admin_audit_log (actor_user_id, target_user_id, action, detail)
+         VALUES ($1, NULL, $2, $3)",
+        &[&actor_id, &action, &detail],
+    )
+    .await
+    .map_err(fail)?;
+    Ok(())
+}
+
 const TENANT_COLUMNS: &str = "tenant_id, installation_id, account_login, account_type, status";
 
 #[async_trait]
@@ -787,6 +804,230 @@ impl Store for PostgresStore {
                 })
             })
             .collect()
+    }
+
+    async fn model_blacklist(&self) -> StoreResult<Vec<BlacklistEntry>> {
+        let rows = self
+            .query(
+                "SELECT model, superseded_by, reason, updated_at, updated_by
+                 FROM model_blacklist ORDER BY model",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| BlacklistEntry {
+                model: row.get("model"),
+                superseded_by: row.get("superseded_by"),
+                reason: row.get("reason"),
+                updated_at: unint(row.get("updated_at")),
+                updated_by: row.get("updated_by"),
+            })
+            .collect())
+    }
+
+    async fn put_blacklist_entry(
+        &self,
+        actor_id: &str,
+        entry: BlacklistEntry,
+    ) -> StoreResult<bool> {
+        let updated = int(entry.updated_at)?;
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(fail)?;
+        // `xmax = 0` is true only for a freshly inserted row.
+        let rows = tx
+            .query(
+                "INSERT INTO model_blacklist (model, superseded_by, reason, updated_at, updated_by)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (model) DO UPDATE SET
+                     superseded_by = EXCLUDED.superseded_by,
+                     reason = EXCLUDED.reason,
+                     updated_at = EXCLUDED.updated_at,
+                     updated_by = EXCLUDED.updated_by
+                 RETURNING (xmax = 0) AS created",
+                &[
+                    &entry.model,
+                    &entry.superseded_by,
+                    &entry.reason,
+                    &updated,
+                    &entry.updated_by,
+                ],
+            )
+            .await
+            .map_err(fail)?;
+        let created: bool = rows.first().map(|row| row.get("created")).unwrap_or(false);
+        insert_config_audit(
+            &tx,
+            actor_id,
+            AUDIT_BLACKLIST_SET,
+            serde_json::json!({ "model": entry.model, "superseded_by": entry.superseded_by }),
+        )
+        .await?;
+        tx.commit().await.map_err(fail)?;
+        Ok(created)
+    }
+
+    async fn delete_blacklist_entry(&self, actor_id: &str, model: &str) -> StoreResult<bool> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(fail)?;
+        let removed = tx
+            .execute("DELETE FROM model_blacklist WHERE model = $1", &[&model])
+            .await
+            .map_err(fail)?
+            > 0;
+        if removed {
+            insert_config_audit(
+                &tx,
+                actor_id,
+                AUDIT_BLACKLIST_REMOVE,
+                serde_json::json!({ "model": model }),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(fail)?;
+        Ok(removed)
+    }
+
+    async fn put_platform_key(
+        &self,
+        actor_id: &str,
+        purpose: KeyPurpose,
+        provider: Provider,
+        sealed: SealedSecret,
+        updated_by: &str,
+        updated_at: u64,
+    ) -> StoreResult<()> {
+        let updated = int(updated_at)?;
+        let version = i16::from(sealed.version);
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(fail)?;
+        tx.execute(
+            "INSERT INTO platform_provider_keys
+                 (purpose, provider, format_version, wrapper_key_id, wrapped_data_key,
+                  ciphertext, updated_at, updated_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (purpose, provider) DO UPDATE SET
+                 format_version = EXCLUDED.format_version,
+                 wrapper_key_id = EXCLUDED.wrapper_key_id,
+                 wrapped_data_key = EXCLUDED.wrapped_data_key,
+                 ciphertext = EXCLUDED.ciphertext,
+                 updated_at = EXCLUDED.updated_at,
+                 updated_by = EXCLUDED.updated_by",
+            &[
+                &purpose.as_str(),
+                &provider.as_str(),
+                &version,
+                &sealed.wrapper_key_id,
+                &sealed.wrapped_data_key,
+                &sealed.ciphertext,
+                &updated,
+                &updated_by,
+            ],
+        )
+        .await
+        .map_err(fail)?;
+        insert_config_audit(
+            &tx,
+            actor_id,
+            AUDIT_PLATFORM_KEY_SET,
+            serde_json::json!({ "purpose": purpose.as_str(), "provider": provider.as_str() }),
+        )
+        .await?;
+        tx.commit().await.map_err(fail)?;
+        Ok(())
+    }
+
+    async fn platform_key(
+        &self,
+        purpose: KeyPurpose,
+        provider: Provider,
+    ) -> StoreResult<Option<StoredKey>> {
+        let rows = self
+            .query(
+                "SELECT format_version, wrapper_key_id, wrapped_data_key, ciphertext,
+                        updated_at, updated_by
+                 FROM platform_provider_keys WHERE purpose = $1 AND provider = $2",
+                &[&purpose.as_str(), &provider.as_str()],
+            )
+            .await?;
+        Ok(rows.first().map(|row| StoredKey {
+            sealed: SealedSecret {
+                version: u8::try_from(row.get::<_, i16>("format_version")).unwrap_or(0),
+                wrapper_key_id: row.get("wrapper_key_id"),
+                wrapped_data_key: row.get("wrapped_data_key"),
+                ciphertext: row.get("ciphertext"),
+            },
+            updated_at: unint(row.get("updated_at")),
+            updated_by: row.get("updated_by"),
+        }))
+    }
+
+    async fn delete_platform_key(
+        &self,
+        actor_id: &str,
+        purpose: KeyPurpose,
+        provider: Provider,
+    ) -> StoreResult<bool> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(fail)?;
+        let removed = tx
+            .execute(
+                "DELETE FROM platform_provider_keys WHERE purpose = $1 AND provider = $2",
+                &[&purpose.as_str(), &provider.as_str()],
+            )
+            .await
+            .map_err(fail)?
+            > 0;
+        if removed {
+            insert_config_audit(
+                &tx,
+                actor_id,
+                AUDIT_PLATFORM_KEY_REMOVE,
+                serde_json::json!({ "purpose": purpose.as_str(), "provider": provider.as_str() }),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(fail)?;
+        Ok(removed)
+    }
+
+    async fn platform_key_meta(&self) -> StoreResult<Vec<PlatformKeyMeta>> {
+        let rows = self
+            .query(
+                "SELECT purpose, provider, updated_at, updated_by FROM platform_provider_keys",
+                &[],
+            )
+            .await?;
+        let mut stored = std::collections::BTreeMap::new();
+        for row in &rows {
+            let purpose = KeyPurpose::parse(&row.get::<_, String>("purpose"))
+                .ok_or_else(|| StoreError("unknown key purpose in store".into()))?;
+            stored.insert(
+                (purpose, provider_of(&row.get::<_, String>("provider"))?),
+                (
+                    unint(row.get("updated_at")),
+                    row.get::<_, String>("updated_by"),
+                ),
+            );
+        }
+        Ok(KeyPurpose::ALL
+            .iter()
+            .flat_map(|purpose| {
+                Provider::ALL
+                    .iter()
+                    .map(move |provider| (*purpose, *provider))
+            })
+            .map(|(purpose, provider)| {
+                let entry = stored.get(&(purpose, provider));
+                PlatformKeyMeta {
+                    purpose,
+                    provider,
+                    configured: entry.is_some(),
+                    updated_at: entry.map(|(at, _)| *at),
+                    updated_by: entry.map(|(_, by)| by.clone()),
+                }
+            })
+            .collect())
     }
 
     async fn put_provider_key(

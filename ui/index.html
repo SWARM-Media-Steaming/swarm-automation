@@ -446,7 +446,26 @@
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">AUDIT LOG</p><h3>Recent admin changes</h3></div><span id="admin-audit-count" class="score">0</span></div>
               <div id="admin-audit-error" class="banner warning hidden" role="alert"></div>
-              <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Recent platform admin changes, newest first</caption><thead><tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">By</th><th scope="col">User</th></tr></thead><tbody id="admin-audit"></tbody></table></div>
+              <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Recent platform admin changes, newest first</caption><thead><tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">By</th><th scope="col">Subject</th></tr></thead><tbody id="admin-audit"></tbody></table></div>
+            </article>
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">MODEL BLACKLIST</p><h3>Retired models <button class="help-dot" data-help="web-admin-blacklist" aria-label="About the model blacklist">?</button></h3></div><span id="admin-blacklist-count" class="score">0</span></div>
+              <div id="admin-blacklist-error" class="banner warning hidden" role="alert"></div>
+              <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Blacklisted models</caption><thead><tr><th scope="col">Model</th><th scope="col">Successor</th><th scope="col">Reason</th><th scope="col">Updated</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="admin-blacklist"></tbody></table></div>
+              <form id="admin-blacklist-form" class="stacked-form" novalidate>
+                <div class="form-grid three">
+                  <label>Model <input id="admin-blacklist-model" type="text" autocomplete="off" spellcheck="false" placeholder="claude-haiku-4-5" /></label>
+                  <label>Successor <input id="admin-blacklist-successor" type="text" autocomplete="off" spellcheck="false" placeholder="Optional" /><small>Leave empty to ban the model outright.</small></label>
+                  <label>Reason <input id="admin-blacklist-reason" type="text" autocomplete="off" maxlength="300" placeholder="Optional" /></label>
+                </div>
+                <div class="control-row"><button id="admin-blacklist-save" type="submit" class="primary-button">Save entry</button><small id="admin-blacklist-status" class="field-hint" role="status"></small></div>
+              </form>
+            </article>
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">PLATFORM KEYS</p><h3>Provider API keys <button class="help-dot" data-help="web-admin-keys" aria-label="About platform provider keys">?</button></h3></div></div>
+              <div class="banner policy"><strong>Write-only</strong><span>A key is sealed when saved and never shown again. These are the platform's own keys, separate from every tenant's.</span></div>
+              <div id="admin-keys-error" class="banner warning hidden" role="alert"></div>
+              <div id="admin-key-list" class="checklist"></div>
             </article>
           </div>
         </section>

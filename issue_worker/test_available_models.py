@@ -278,3 +278,27 @@ class WorkerFlagTests(AvailableModelsTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostedBlacklistTests(AvailableModelsTestCase):
+    """A hosted job's admin-managed list (environment) replaces the bundled file."""
+
+    def setUp(self):
+        super().setUp()
+        available_models.listed_retirements.cache_clear()
+        self.addCleanup(available_models.listed_retirements.cache_clear)
+
+    def test_bundled_file_lists_haiku_4_5_with_its_successor(self):
+        listed = available_models.listed_retirements()
+        self.assertEqual(listed.get("claude-haiku-4-5"), "claude-haiku-5-5")
+
+    def test_environment_document_replaces_the_bundled_file(self):
+        document = json.dumps({"models": [{"model": "Some-Model-1", "superseded_by": ""}]})
+        with mock.patch.dict("os.environ", {available_models.BLACKLIST_ENV: document}):
+            available_models.listed_retirements.cache_clear()
+            self.assertEqual(available_models.listed_retirements(), {"some-model-1": ""})
+
+    def test_malformed_environment_document_degrades_to_no_entries(self):
+        with mock.patch.dict("os.environ", {available_models.BLACKLIST_ENV: "{not json"}):
+            available_models.listed_retirements.cache_clear()
+            self.assertEqual(available_models.listed_retirements(), {})

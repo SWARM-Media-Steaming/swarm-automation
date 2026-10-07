@@ -59,6 +59,12 @@
     web_admin_audit_log: { method: "GET", path: "/admin/audit-log" },
     web_admin_promote_user: { method: "POST", path: "/admin/users/{userId}/promote" },
     web_admin_demote_user: { method: "POST", path: "/admin/users/{userId}/demote" },
+    web_admin_list_model_blacklist: { method: "GET", path: "/admin/model-blacklist" },
+    web_admin_put_model_blacklist: { method: "PUT", path: "/admin/model-blacklist/{model}" },
+    web_admin_delete_model_blacklist: { method: "DELETE", path: "/admin/model-blacklist/{model}" },
+    web_admin_list_platform_keys: { method: "GET", path: "/admin/provider-keys" },
+    web_admin_set_platform_key: { method: "PUT", path: "/admin/provider-keys/{purpose}/{provider}" },
+    web_admin_delete_platform_key: { method: "DELETE", path: "/admin/provider-keys/{purpose}/{provider}" },
     // The desktop's own commands, by the name the UI already invokes. A
     // `*_background` twin shares its command's row. `{tenant}` is not passed by
     // those call sites: the adapter fills it from the active tenant (below).

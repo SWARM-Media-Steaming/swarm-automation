@@ -916,7 +916,7 @@ fn fallback_efforts(id: &str) -> Vec<String> {
 fn fallback_models(id: &str) -> Vec<ModelInfo> {
     let (values, default_effort): (&[&str], &str) = match id {
         "claude" => (
-            &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"],
+            &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
             "",
         ),
         "codex" => (&["gpt-5.6-luna"], "medium"),
@@ -1675,6 +1675,7 @@ mod tests {
             "claude-opus-5",
             "claude-fable-5",
             "claude-opus-4-7-20251001",
+            "claude-haiku-4-5",
         ] {
             assert!(is_blacklisted(old), "{old} should be blacklisted");
         }
@@ -1682,7 +1683,7 @@ mod tests {
             "claude-sonnet-5-5",
             "claude-opus-5-5",
             "claude-fable-5-1",
-            "claude-haiku-4-5",
+            "claude-haiku-5-5",
             "gpt-5.6-sol",
             "grok-4.6",
         ] {

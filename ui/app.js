@@ -332,6 +332,16 @@
       html: "<p>Hosted jobs run on <strong>your own</strong> provider accounts. Paste a key for each provider you want jobs to use. It is encrypted for this tenant and provider the moment it is saved.</p><p>Keys are <strong>write-only</strong>: the page shows whether one is set and when it was last changed, never the key. To change a key, save a new one; to stop using a provider, remove it. A job receives only the one provider's key it needs.</p><p>The Model data key is optional and unlocks benchmark and price refreshes. Never paste a key into an issue, a comment or a log.</p>",
       links: [],
     },
+    "web-admin-blacklist": {
+      title: "Model blacklist",
+      html: "<p>A blacklisted model is retired from routing, upgrades, option lists and saved selections. The list lives in the platform database and every job starts with the current copy.</p><p>With a <strong>successor</strong>, the entry stays dormant until the successor is offered by the provider CLI and priced; until then the model remains routable. With <strong>no successor</strong>, the ban applies at once.</p><p>Removing an entry restores the model. Every change is recorded in the audit log.</p>",
+      links: [],
+    },
+    "web-admin-keys": {
+      title: "Platform provider keys",
+      html: "<p>These keys belong to the platform, not to a tenant. <strong>Platform</strong> keys serve cross-cutting AI concerns such as routing, complexity analysis and Jev. <strong>Swarm automation</strong> keys serve the automation itself.</p><p>Keys are <strong>write-only</strong>: the page shows whether one is set, never the key. Save a new one to replace it. Every change is recorded in the audit log.</p>",
+      links: [],
+    },
     "web-github-app": {
       title: "GitHub App installation",
       html: "<p>The GitHub App signs you in, gives each job a short-lived token scoped to one repository, and delivers webhooks. Install it on every GitHub account or organization whose repositories SWARM should work on.</p><p>On GitHub's install screen choose <strong>All repositories</strong> so adding another repository later needs no further setup. Come back here and use <strong>Re-check</strong>; a finished installation appears as a new tenant.</p><p>If an installation is suspended or removed on GitHub, its tenant turns read-only here until it is active again.</p>",
@@ -6273,6 +6283,94 @@
     });
     byId("admin-audit-count").textContent = String(audit.length);
     setWebNotice("admin-audit-error", errors.audit ? `Could not load the audit log: ${errors.audit}` : "");
+    renderWebAdminBlacklist();
+    renderWebAdminKeys();
+  }
+
+  function renderWebAdminBlacklist() {
+    const { blacklist, errors } = webAccount.state;
+    const body = byId("admin-blacklist");
+    body.replaceChildren();
+    blacklist.forEach((entry) => {
+      const row = document.createElement("tr");
+      const name = document.createElement("td");
+      name.appendChild(webNode("strong", "", entry.model));
+      const action = webNode("td", "row-actions");
+      const remove = button("Remove", "danger-button compact", () => void removeAdminBlacklist(entry.model));
+      remove.setAttribute("aria-label", `Remove ${entry.model} from the blacklist`);
+      action.appendChild(remove);
+      row.append(name, webNode("td", "", entry.successor || "None (banned outright)"), webNode("td", "", entry.reason || "—"), webNode("td", "", entry.updatedBy ? `${entry.updated} by ${entry.updatedBy}` : entry.updated), action);
+      body.appendChild(row);
+    });
+    byId("admin-blacklist-count").textContent = String(blacklist.length);
+    setWebNotice("admin-blacklist-error", errors.blacklist ? `Could not load the blacklist: ${errors.blacklist}` : "");
+  }
+
+  function renderWebAdminKeys() {
+    const { platformKeys, errors } = webAccount.state;
+    setWebNotice("admin-keys-error", errors.platformKeys ? `Could not load the keys: ${errors.platformKeys}` : "");
+    const list = byId("admin-key-list");
+    // Keep what is being typed: a reload after another row's save must not clear it.
+    if (list.contains(document.activeElement)) return;
+    list.replaceChildren();
+    platformKeys.forEach((row) => {
+      const item = webNode("div", "key-row");
+      const title = webNode("div", "key-row-title");
+      title.append(webNode("strong", "", `${row.purposeLabel}: ${row.label}`), webPill(row.status, row.tone));
+      const detail = webNode("div", "key-row-detail", row.detail || row.hint);
+      const field = webNode("div", "key-row-field");
+      const input = document.createElement("input");
+      input.type = "password";
+      input.id = `admin-key-input-${row.purpose}-${row.provider}`;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.placeholder = row.configured ? "Paste a new key to replace it" : "Paste a key";
+      input.setAttribute("aria-label", `${row.purposeLabel} ${row.label} API key`);
+      field.appendChild(input);
+      const actions = webNode("div", "control-row");
+      actions.appendChild(button(row.configured ? "Replace" : "Save", "secondary-button compact", () => void saveAdminKey(row, input)));
+      if (row.configured) actions.appendChild(button("Remove", "text-button compact", () => void removeAdminKey(row)));
+      item.append(title, detail, field, actions);
+      list.appendChild(item);
+    });
+  }
+
+  function afterAdminConfig(result) {
+    showToast(result.message, result.ok ? "success" : "error");
+    if (result.expired) renderWebSession();
+    else renderWebAccount();
+    if (result.notAdmin) navigate("profile");
+  }
+
+  async function submitAdminBlacklist(event) {
+    event.preventDefault();
+    await withBusy("admin-blacklist", async () => {
+      const result = await webAccount.saveBlacklistEntry(byId("admin-blacklist-model").value, byId("admin-blacklist-successor").value, byId("admin-blacklist-reason").value);
+      byId("admin-blacklist-status").textContent = result.message;
+      if (result.ok) ["model", "successor", "reason"].forEach((field) => { byId(`admin-blacklist-${field}`).value = ""; });
+      afterAdminConfig(result);
+    }, { progress: "Saving the entry…" });
+  }
+
+  async function removeAdminBlacklist(model) {
+    const confirmed = await confirmAdminChange({ title: `Remove ${model}?`, body: `${model} becomes routable again once nothing else retires it. This is recorded in the audit log.`, confirm: "Remove", danger: true });
+    if (!confirmed) return;
+    await withBusy("admin-blacklist", async () => afterAdminConfig(await webAccount.removeBlacklistEntry(model)), { progress: "Removing the entry…" });
+  }
+
+  async function saveAdminKey(row, input) {
+    await withBusy(`admin-key-${row.id}`, async () => {
+      const result = await webAccount.savePlatformKey(row.purpose, row.provider, input.value);
+      // The value leaves the field whether or not the save worked.
+      input.value = "";
+      afterAdminConfig(result);
+    }, { progress: "Saving the key…" });
+  }
+
+  async function removeAdminKey(row) {
+    const confirmed = await confirmAdminChange({ title: `Remove the ${row.purposeLabel} ${row.label} key?`, body: "Anything using that key stops until a new one is saved. This is recorded in the audit log.", confirm: "Remove", danger: true });
+    if (!confirmed) return;
+    await withBusy(`admin-key-${row.id}`, async () => afterAdminConfig(await webAccount.removePlatformKey(row.purpose, row.provider)), { progress: "Removing the key…" });
   }
 
   // The confirm dialog is the help modal's shape: an overlay, a close button,
@@ -6347,6 +6445,7 @@
     byId("account-session-signout").addEventListener("click", () => void signOutWeb());
     byId("github-recheck").addEventListener("click", () => withBusy("github-recheck", () => refreshWebAccount(), { progress: "Checking GitHub…" }));
     byId("budget-form").addEventListener("submit", (event) => void submitWebBudgets(event));
+    byId("admin-blacklist-form").addEventListener("submit", (event) => void submitAdminBlacklist(event));
     // Any command answered 401 means the session ended mid-use.
     window.SwarmApi.onSessionExpired(() => {
       webAccount.markExpired();

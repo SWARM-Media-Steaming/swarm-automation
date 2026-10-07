@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -47,6 +48,7 @@ class DiscoveredModel:
 # Retirements: older releases and the successor that replaces each. The one
 # list is shared with the desktop app, which embeds the same file; an entry is
 # in force only while its successor is offered and priced (``blacklist``).
+BLACKLIST_ENV = "SWARM_MODEL_BLACKLIST_JSON"
 BLACKLIST_PATH = Path(__file__).resolve().parent.parent / "skills" / "model-router" / "model-blacklist.json"
 BUNDLED_CATALOG_PATH = BLACKLIST_PATH.parent / "models.yaml"
 
@@ -129,7 +131,11 @@ def listed_retirements() -> dict[str, str]:
     routing must degrade, never stall, on a bad list.
     """
     try:
-        rows = json.loads(BLACKLIST_PATH.read_text(encoding="utf-8")).get("models") or []
+        # A hosted job carries the admin-managed list (database) in the
+        # environment; the desktop and a bare worker read the bundled file.
+        hosted = os.environ.get(BLACKLIST_ENV, "").strip()
+        document = hosted or BLACKLIST_PATH.read_text(encoding="utf-8")
+        rows = json.loads(document).get("models") or []
     except (OSError, ValueError, AttributeError):
         return {}
     listed: dict[str, str] = {}

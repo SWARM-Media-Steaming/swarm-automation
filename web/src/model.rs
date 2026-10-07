@@ -325,6 +325,80 @@ pub struct AuditEntry {
 pub const AUDIT_ADMIN_BOOTSTRAP: &str = "admin.bootstrap";
 pub const AUDIT_ADMIN_PROMOTE: &str = "admin.promote";
 pub const AUDIT_ADMIN_DEMOTE: &str = "admin.demote";
+pub const AUDIT_BLACKLIST_SET: &str = "admin.blacklist.set";
+pub const AUDIT_BLACKLIST_REMOVE: &str = "admin.blacklist.remove";
+pub const AUDIT_PLATFORM_KEY_SET: &str = "admin.platform_key.set";
+pub const AUDIT_PLATFORM_KEY_REMOVE: &str = "admin.platform_key.remove";
+
+/// One retired model (`model_blacklist`). `superseded_by` is empty when none is
+/// named; the entry then applies outright, as in `model-blacklist.json`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BlacklistEntry {
+    pub model: String,
+    pub superseded_by: String,
+    pub reason: String,
+    pub updated_at: u64,
+    pub updated_by: String,
+}
+
+/// What a platform provider key is used for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyPurpose {
+    /// Cross-cutting AI concerns: routing, complexity analysis, Jev.
+    Platform,
+    /// Swarm automation concerns.
+    Automation,
+}
+
+impl KeyPurpose {
+    pub const ALL: [KeyPurpose; 2] = [KeyPurpose::Platform, KeyPurpose::Automation];
+
+    pub fn parse(value: &str) -> Option<KeyPurpose> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "platform" => Some(KeyPurpose::Platform),
+            "automation" => Some(KeyPurpose::Automation),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeyPurpose::Platform => "platform",
+            KeyPurpose::Automation => "automation",
+        }
+    }
+
+    /// The job environment variable carrying this purpose's key for `provider`.
+    /// Distinct from the tenant's own `Provider::env_var` so a platform key can
+    /// never stand in for (or shadow) a tenant's key.
+    pub fn env_var(self, provider: Provider) -> &'static str {
+        match (self, provider) {
+            (KeyPurpose::Platform, Provider::Claude) => "SWARM_PLATFORM_ANTHROPIC_API_KEY",
+            (KeyPurpose::Platform, Provider::Codex) => "SWARM_PLATFORM_OPENAI_API_KEY",
+            (KeyPurpose::Platform, Provider::Grok) => "SWARM_PLATFORM_XAI_API_KEY",
+            (KeyPurpose::Platform, Provider::ModelData) => {
+                "SWARM_PLATFORM_ARTIFICIAL_ANALYSIS_API_KEY"
+            }
+            (KeyPurpose::Automation, Provider::Claude) => "SWARM_AUTOMATION_ANTHROPIC_API_KEY",
+            (KeyPurpose::Automation, Provider::Codex) => "SWARM_AUTOMATION_OPENAI_API_KEY",
+            (KeyPurpose::Automation, Provider::Grok) => "SWARM_AUTOMATION_XAI_API_KEY",
+            (KeyPurpose::Automation, Provider::ModelData) => {
+                "SWARM_AUTOMATION_ARTIFICIAL_ANALYSIS_API_KEY"
+            }
+        }
+    }
+}
+
+/// Metadata about a platform provider key. Never contains the key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PlatformKeyMeta {
+    pub purpose: KeyPurpose,
+    pub provider: Provider,
+    pub configured: bool,
+    pub updated_at: Option<u64>,
+    pub updated_by: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeliveryClaim {

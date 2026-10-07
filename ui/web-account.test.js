@@ -745,3 +745,59 @@ test("non-admins cannot reach Admin and the new views use the standard shape", (
   assert.doesNotMatch(app, /invoke\("web_/);
   assert.doesNotMatch(html, /style="/);
 });
+
+// ----- Admin: model blacklist and platform keys ----------------------------------
+
+test("blacklist and platform key rows are shaped from the server's metadata only", () => {
+  const rows = account.blacklistRows({ models: [{ model: "claude-haiku-4-5", superseded_by: "claude-haiku-5-5", reason: "Older.", updated_at: 1767225600, updated_by: "octocat" }, { nope: 1 }] });
+  assert.deepEqual(rows.map((row) => [row.model, row.successor, row.updatedBy]), [["claude-haiku-4-5", "claude-haiku-5-5", "octocat"]]);
+  const keys = account.platformKeyRows({ keys: [{ purpose: "automation", provider: "grok", configured: true, updated_at: 1767225600, updated_by: "octocat" }] });
+  assert.equal(keys.length, account.KEY_PURPOSES.length * 4, "a row per purpose and provider, set or not");
+  assert.deepEqual(keys.filter((row) => row.configured).map((row) => row.id), ["automation/grok"]);
+  assert.ok(keys.every((row) => !("key" in row)));
+});
+
+test("blacklist entries are checked before they are sent", () => {
+  assert.equal(account.validateBlacklistEntry("Claude-Haiku-4-5", "", "").model, "claude-haiku-4-5");
+  for (const [model, successor, reason] of [["", "", ""], ["bad name", "", ""], ["m", "m", ""], ["m", "has space", ""], ["m", "", "x".repeat(301)]]) {
+    assert.equal(account.validateBlacklistEntry(model, successor, reason).ok, false, `${model}|${successor}`);
+  }
+});
+
+test("saving and removing a blacklist entry and a platform key use the admin routes with CSRF and never echo the key", async () => {
+  const secret = "sk-ant-platform-canary-0123456789";
+  const { controller, http } = controllerFor({
+    "GET /api/v1/me": { body: ADMIN_ME },
+    "GET /api/v1/admin/users": { body: USERS },
+    "GET /api/v1/admin/audit-log": { body: { entries: [] } },
+    "GET /api/v1/admin/model-blacklist": { body: { models: [] } },
+    "GET /api/v1/admin/provider-keys": { body: { keys: [] } },
+    "PUT /api/v1/admin/model-blacklist/claude-haiku-4-5": { body: { created: true } },
+    "DELETE /api/v1/admin/model-blacklist/claude-haiku-4-5": { status: 204 },
+    "PUT /api/v1/admin/provider-keys/platform/claude": { body: { configured: true } },
+    "DELETE /api/v1/admin/provider-keys/platform/claude": { status: 204 },
+  });
+  await controller.loadProfile();
+  await controller.loadAdminUsers();
+  assert.equal((await controller.saveBlacklistEntry("claude-haiku-4-5", "claude-haiku-5-5", "Older")).ok, true);
+  const put = http.requests.find((r) => r.url.endsWith("/admin/model-blacklist/claude-haiku-4-5") && r.init.method === "PUT");
+  assert.deepEqual(JSON.parse(put.init.body), { superseded_by: "claude-haiku-5-5", reason: "Older" });
+  assert.ok(put.init.headers["X-CSRF-Token"]);
+  assert.equal((await controller.removeBlacklistEntry("claude-haiku-4-5")).ok, true);
+
+  const saved = await controller.savePlatformKey("platform", "claude", secret);
+  assert.equal(saved.ok, true);
+  assert.ok(!saved.message.includes(secret));
+  assert.equal((await controller.savePlatformKey("platform", "claude", "short")).ok, false);
+  assert.equal((await controller.savePlatformKey("nobody", "claude", secret)).ok, false);
+  assert.equal((await controller.removePlatformKey("platform", "claude")).ok, true);
+  assert.ok(!JSON.stringify(controller.state).includes(secret), "the key is never kept in the page state");
+});
+
+test("a non-admin never asks for the admin configuration", async () => {
+  const { controller, http } = controllerFor({ "GET /api/v1/me": { body: PROFILE } });
+  await controller.loadProfile();
+  await controller.loadAdminUsers();
+  assert.deepEqual(controller.state.blacklist, []);
+  assert.ok(!http.requests.some((request) => request.url.includes("/admin/")));
+});

@@ -585,12 +585,19 @@ impl Orchestrator {
             .vault
             .job_environment(&tenant.id, self.settings.provider, false)
             .await?;
+        let platform = self.vault.platform_environment().await?;
+        let blacklist = self.store.model_blacklist().await?;
         let mut secret_env = self.settings.secret_env.clone();
         secret_env.insert("GH_TOKEN".into(), token);
-        for (name, value) in environment.expose() {
+        for (name, value) in environment.expose().into_iter().chain(platform.expose()) {
             secret_env.insert(name.to_string(), Secret::new(value));
         }
         let mut plain_env = self.settings.plain_env.clone();
+        // The admin-managed blacklist replaces the bundled file for this job.
+        plain_env.insert(
+            "SWARM_MODEL_BLACKLIST_JSON".into(),
+            crate::admin::blacklist_document(&blacklist).to_string(),
+        );
         plain_env.insert("SWARM_TENANT".into(), tenant.id.to_string());
         plain_env.insert("SWARM_GITHUB_REPOSITORY".into(), repository.clone());
         plain_env.insert(

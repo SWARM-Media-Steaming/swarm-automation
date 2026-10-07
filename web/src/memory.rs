@@ -36,6 +36,10 @@ struct Inner {
     hash_delivery: HashMap<String, String>,
     /// `admin_audit_log`, oldest first.
     audit: Vec<AuditEntry>,
+    /// `model_blacklist`.
+    blacklist: BTreeMap<String, BlacklistEntry>,
+    /// `platform_provider_keys`.
+    platform_keys: BTreeMap<(KeyPurpose, Provider), StoredKey>,
 }
 
 impl Inner {
@@ -49,6 +53,21 @@ impl Inner {
             id,
             actor_user_id: Some(actor.to_string()),
             target_user_id: Some(target.to_string()),
+            action: action.to_string(),
+            detail,
+            created_at: unix_now(),
+        });
+    }
+}
+
+impl Inner {
+    /// An audit row with no target user (platform configuration changes).
+    fn config_audit(&mut self, actor: &str, action: &str, detail: serde_json::Value) {
+        let id = self.audit.len() as i64 + 1;
+        self.audit.push(AuditEntry {
+            id,
+            actor_user_id: Some(actor.to_string()),
+            target_user_id: None,
             action: action.to_string(),
             detail,
             created_at: unix_now(),
@@ -410,6 +429,114 @@ impl Store for MemoryStore {
             .collect();
         out.sort_by(|a, b| a.login.cmp(&b.login));
         Ok(out)
+    }
+
+    async fn model_blacklist(&self) -> StoreResult<Vec<BlacklistEntry>> {
+        Ok(self.lock()?.blacklist.values().cloned().collect())
+    }
+
+    async fn put_blacklist_entry(
+        &self,
+        actor_id: &str,
+        entry: BlacklistEntry,
+    ) -> StoreResult<bool> {
+        let mut inner = self.lock()?;
+        let detail =
+            serde_json::json!({ "model": entry.model, "superseded_by": entry.superseded_by });
+        let created = inner.blacklist.insert(entry.model.clone(), entry).is_none();
+        inner.config_audit(actor_id, AUDIT_BLACKLIST_SET, detail);
+        Ok(created)
+    }
+
+    async fn delete_blacklist_entry(&self, actor_id: &str, model: &str) -> StoreResult<bool> {
+        let mut inner = self.lock()?;
+        let removed = inner.blacklist.remove(model).is_some();
+        if removed {
+            inner.config_audit(
+                actor_id,
+                AUDIT_BLACKLIST_REMOVE,
+                serde_json::json!({ "model": model }),
+            );
+        }
+        Ok(removed)
+    }
+
+    async fn put_platform_key(
+        &self,
+        actor_id: &str,
+        purpose: KeyPurpose,
+        provider: Provider,
+        sealed: SealedSecret,
+        updated_by: &str,
+        updated_at: u64,
+    ) -> StoreResult<()> {
+        let mut inner = self.lock()?;
+        inner.platform_keys.insert(
+            (purpose, provider),
+            StoredKey {
+                sealed,
+                updated_at,
+                updated_by: updated_by.to_string(),
+            },
+        );
+        inner.config_audit(
+            actor_id,
+            AUDIT_PLATFORM_KEY_SET,
+            serde_json::json!({ "purpose": purpose.as_str(), "provider": provider.as_str() }),
+        );
+        Ok(())
+    }
+
+    async fn platform_key(
+        &self,
+        purpose: KeyPurpose,
+        provider: Provider,
+    ) -> StoreResult<Option<StoredKey>> {
+        Ok(self
+            .lock()?
+            .platform_keys
+            .get(&(purpose, provider))
+            .cloned())
+    }
+
+    async fn delete_platform_key(
+        &self,
+        actor_id: &str,
+        purpose: KeyPurpose,
+        provider: Provider,
+    ) -> StoreResult<bool> {
+        let mut inner = self.lock()?;
+        let removed = inner.platform_keys.remove(&(purpose, provider)).is_some();
+        if removed {
+            inner.config_audit(
+                actor_id,
+                AUDIT_PLATFORM_KEY_REMOVE,
+                serde_json::json!({ "purpose": purpose.as_str(), "provider": provider.as_str() }),
+            );
+        }
+        Ok(removed)
+    }
+
+    async fn platform_key_meta(&self) -> StoreResult<Vec<PlatformKeyMeta>> {
+        let inner = self.lock()?;
+        Ok(KeyPurpose::ALL
+            .iter()
+            .flat_map(|purpose| {
+                Provider::ALL
+                    .iter()
+                    .map(move |provider| (*purpose, *provider))
+            })
+            .map(|(purpose, provider)| {
+                let stored = inner.platform_keys.get(&(purpose, provider));
+                PlatformKeyMeta {
+                    purpose,
+                    provider,
+                    configured: stored.is_some(),
+                    updated_at: stored.map(|k| k.updated_at),
+                    updated_by: stored.map(|k| k.updated_by.clone()),
+                }
+            })
+            .collect())
     }
 
     async fn put_provider_key(

@@ -453,6 +453,12 @@ pub enum AdminAction {
     AuditLog,
     Promote,
     Demote,
+    ListBlacklist,
+    PutBlacklist,
+    DeleteBlacklist,
+    ListPlatformKeys,
+    PutPlatformKey,
+    DeletePlatformKey,
 }
 
 /// A platform-administration endpoint. Not a desktop command and not tenant
@@ -490,6 +496,42 @@ pub const ADMIN_ROUTES: &[AdminRoute] = &[
         method: "POST",
         path: "/admin/users/{userId}/demote",
         action: AdminAction::Demote,
+    },
+    AdminRoute {
+        command: "web_admin_list_model_blacklist",
+        method: "GET",
+        path: "/admin/model-blacklist",
+        action: AdminAction::ListBlacklist,
+    },
+    AdminRoute {
+        command: "web_admin_put_model_blacklist",
+        method: "PUT",
+        path: "/admin/model-blacklist/{model}",
+        action: AdminAction::PutBlacklist,
+    },
+    AdminRoute {
+        command: "web_admin_delete_model_blacklist",
+        method: "DELETE",
+        path: "/admin/model-blacklist/{model}",
+        action: AdminAction::DeleteBlacklist,
+    },
+    AdminRoute {
+        command: "web_admin_list_platform_keys",
+        method: "GET",
+        path: "/admin/provider-keys",
+        action: AdminAction::ListPlatformKeys,
+    },
+    AdminRoute {
+        command: "web_admin_set_platform_key",
+        method: "PUT",
+        path: "/admin/provider-keys/{purpose}/{provider}",
+        action: AdminAction::PutPlatformKey,
+    },
+    AdminRoute {
+        command: "web_admin_delete_platform_key",
+        method: "DELETE",
+        path: "/admin/provider-keys/{purpose}/{provider}",
+        action: AdminAction::DeletePlatformKey,
     },
 ];
 

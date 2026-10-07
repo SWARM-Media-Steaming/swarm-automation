@@ -96,7 +96,15 @@
     return typeof seconds === "number" && seconds > 0 ? new Date(seconds * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "—";
   }
 
-  const AUDIT_LABELS = { "admin.bootstrap": "Became the first admin", "admin.promote": "Promoted to admin", "admin.demote": "Demoted from admin" };
+  const AUDIT_LABELS = {
+    "admin.bootstrap": "Became the first admin",
+    "admin.promote": "Promoted to admin",
+    "admin.demote": "Demoted from admin",
+    "admin.blacklist.set": "Saved a blacklist entry",
+    "admin.blacklist.remove": "Removed a blacklist entry",
+    "admin.platform_key.set": "Saved a platform key",
+    "admin.platform_key.remove": "Removed a platform key",
+  };
 
   function auditRows(body) {
     return (body && Array.isArray(body.entries) ? body.entries : [])
@@ -105,9 +113,65 @@
         id: entry.id,
         action: AUDIT_LABELS[entry.action] || entry.action,
         actor: typeof entry.actor_login === "string" ? entry.actor_login : "(deleted user)",
-        target: typeof entry.target_login === "string" ? entry.target_login : "(deleted user)",
+        // A configuration change names its model or key instead of a user.
+        target: typeof entry.target_login === "string" ? entry.target_login
+          : typeof entry.subject === "string" ? entry.subject : "(deleted user)",
         when: timeText(entry.created_at),
       }));
+  }
+
+  // ----- Platform configuration (admin) --------------------------------------------
+
+  // `purpose` mirrors `web/src/model.rs::KeyPurpose`.
+  const KEY_PURPOSES = [
+    { id: "platform", label: "Platform", hint: "Cross-cutting AI concerns: routing, complexity analysis and Jev." },
+    { id: "automation", label: "Swarm automation", hint: "Swarm automation concerns." },
+  ];
+
+  function blacklistRows(body) {
+    return (body && Array.isArray(body.models) ? body.models : [])
+      .filter((entry) => entry && typeof entry.model === "string")
+      .map((entry) => ({
+        model: entry.model,
+        successor: typeof entry.superseded_by === "string" ? entry.superseded_by : "",
+        reason: typeof entry.reason === "string" ? entry.reason : "",
+        updated: timeText(entry.updated_at),
+        updatedBy: typeof entry.updated_by === "string" ? entry.updated_by : "",
+      }));
+  }
+
+  // One row per purpose and provider, in the order the server lists them.
+  function platformKeyRows(body) {
+    const listed = body && Array.isArray(body.keys) ? body.keys : [];
+    return KEY_PURPOSES.flatMap((purpose) => PROVIDERS.map((provider) => {
+      const meta = listed.find((entry) => entry && entry.purpose === purpose.id && entry.provider === provider.id) || {};
+      const configured = meta.configured === true;
+      return {
+        id: `${purpose.id}/${provider.id}`,
+        purpose: purpose.id,
+        purposeLabel: purpose.label,
+        provider: provider.id,
+        label: provider.label,
+        hint: provider.hint,
+        configured,
+        status: configured ? "Configured" : "Not set",
+        tone: configured ? "running" : "stopped",
+        detail: configured ? [meta.updated_at && `Updated ${timeText(meta.updated_at)}`, typeof meta.updated_by === "string" && meta.updated_by && `by ${meta.updated_by}`].filter(Boolean).join(" ") : "",
+      };
+    }));
+  }
+
+  // Mirrors `web/src/admin.rs::model_slug`; the server remains the authority.
+  function validateBlacklistEntry(model, successor, reason) {
+    const slug = /^[a-z0-9._:-]{1,100}$/;
+    const name = String(model ?? "").trim().toLowerCase();
+    const next = String(successor ?? "").trim().toLowerCase();
+    const why = String(reason ?? "").trim();
+    if (!slug.test(name)) return { ok: false, message: "Name the model with letters, digits, dots, dashes, colons or underscores." };
+    if (next && !slug.test(next)) return { ok: false, message: "The successor uses letters, digits, dots, dashes, colons or underscores." };
+    if (next === name) return { ok: false, message: "A model cannot be its own successor." };
+    if (why.length > 300) return { ok: false, message: "Keep the reason under 300 characters." };
+    return { ok: true, model: name, successor: next, reason: why, message: "" };
   }
 
   // The confirm dialog's wording for promoting or demoting `user`.
@@ -386,6 +450,8 @@
       profile: null,
       adminUsers: [],
       audit: [],
+      blacklist: [],
+      platformKeys: platformKeyRows(null),
     };
 
     function fail(section, error) {
@@ -434,7 +500,7 @@
     // Platform admin user list for the Admin view (the server answers 404 to
     // anyone who is not an admin, which shows as an error, never as data).
     async function loadAdminUsers() {
-      if (!state.profile || !state.profile.isAdmin) { state.adminUsers = []; state.audit = []; return state.adminUsers; }
+      if (!state.profile || !state.profile.isAdmin) { state.adminUsers = []; state.audit = []; state.blacklist = []; state.platformKeys = platformKeyRows(null); return state.adminUsers; }
       try {
         state.adminUsers = adminUserRows(await invoke("web_admin_list_users"), state.profile.login);
         delete state.errors.admin;
@@ -450,7 +516,78 @@
         state.audit = [];
         state.errors.audit = messageOf(error);
       }
+      await loadAdminConfig();
       return state.adminUsers;
+    }
+
+    // The model blacklist and the platform keys (metadata only) for the Admin view.
+    async function loadAdminConfig() {
+      try {
+        state.blacklist = blacklistRows(await invoke("web_admin_list_model_blacklist"));
+        delete state.errors.blacklist;
+      } catch (error) {
+        state.blacklist = [];
+        state.errors.blacklist = messageOf(error);
+      }
+      try {
+        state.platformKeys = platformKeyRows(await invoke("web_admin_list_platform_keys"));
+        delete state.errors.platformKeys;
+      } catch (error) {
+        state.platformKeys = platformKeyRows(null);
+        state.errors.platformKeys = messageOf(error);
+      }
+    }
+
+    async function afterAdminConfigChange(message) {
+      await loadAdminConfig();
+      try { state.audit = auditRows(await invoke("web_admin_audit_log")); } catch (error) { /* the list reloads next time */ }
+      return { ok: true, message };
+    }
+
+    function adminFailure(error) {
+      if (isUnauthorized(error)) state.expired = true;
+      return { ok: false, expired: state.expired, message: messageOf(error), notAdmin: error && error.status === 404 };
+    }
+
+    async function saveBlacklistEntry(model, successor, reason) {
+      const checked = validateBlacklistEntry(model, successor, reason);
+      if (!checked.ok) return checked;
+      try {
+        await invoke("web_admin_put_model_blacklist", { model: checked.model, superseded_by: checked.successor, reason: checked.reason });
+      } catch (error) {
+        return adminFailure(error);
+      }
+      return afterAdminConfigChange(`${checked.model} is on the blacklist.`);
+    }
+
+    async function removeBlacklistEntry(model) {
+      try {
+        await invoke("web_admin_delete_model_blacklist", { model });
+      } catch (error) {
+        return adminFailure(error);
+      }
+      return afterAdminConfigChange(`${model} is off the blacklist.`);
+    }
+
+    async function savePlatformKey(purpose, provider, value) {
+      if (!KEY_PURPOSES.some((entry) => entry.id === purpose) || !providerById(provider)) return { ok: false, message: "Unknown key." };
+      const checked = validateKey(value);
+      if (!checked.ok) return { ok: false, message: checked.message };
+      try {
+        await invoke("web_admin_set_platform_key", { purpose, provider, key: checked.key });
+      } catch (error) {
+        return adminFailure(error);
+      }
+      return afterAdminConfigChange(`${providerById(provider).label} ${purpose} key saved.`);
+    }
+
+    async function removePlatformKey(purpose, provider) {
+      try {
+        await invoke("web_admin_delete_platform_key", { purpose, provider });
+      } catch (error) {
+        return adminFailure(error);
+      }
+      return afterAdminConfigChange(`${providerById(provider).label} ${purpose} key removed.`);
     }
 
     // Promote or demote one user, then reload the list and the audit log. The
@@ -563,6 +700,8 @@
       state.profile = null;
       state.adminUsers = [];
       state.audit = [];
+      state.blacklist = [];
+      state.platformKeys = platformKeyRows(null);
       state.members = [];
       state.keys = keyRows(null);
       state.quota = quotaView(null, null);
@@ -576,7 +715,7 @@
       state.session = { ...state.session, authenticated: false };
     }
 
-    return { state, loadSession, loadProfile, loadAdminUsers, setAdmin, loadTenantData, selectTenant, saveKey, removeKey, saveBudgets, signOut, markExpired };
+    return { state, loadSession, loadProfile, loadAdminUsers, setAdmin, saveBlacklistEntry, removeBlacklistEntry, savePlatformKey, removePlatformKey, loadTenantData, selectTenant, saveKey, removeKey, saveBudgets, signOut, markExpired };
   }
 
   return {
@@ -590,6 +729,10 @@
     profileView,
     identityRows,
     adminUserRows,
+    blacklistRows,
+    platformKeyRows,
+    validateBlacklistEntry,
+    KEY_PURPOSES,
     auditRows,
     adminChangePrompt,
     initialsOf,

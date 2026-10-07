@@ -24,6 +24,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0004_personal_tenants",
         include_str!("../migrations/0004_personal_tenants.sql"),
     ),
+    (
+        "0005_platform_admin_config",
+        include_str!("../migrations/0005_platform_admin_config.sql"),
+    ),
 ];
 
 #[cfg(test)]

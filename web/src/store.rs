@@ -71,6 +71,41 @@ pub trait Store: Send + Sync {
     /// The newest audit rows first, at most `limit`.
     async fn admin_audit_log(&self, limit: usize) -> StoreResult<Vec<AuditEntry>>;
 
+    // ---- platform configuration (admin-managed, not tenant data) --------
+    /// Every blacklist entry, by model.
+    async fn model_blacklist(&self) -> StoreResult<Vec<BlacklistEntry>>;
+    /// Add or replace an entry, writing an `admin.blacklist.set` audit row in
+    /// the same step. `true` when the model was new.
+    async fn put_blacklist_entry(&self, actor_id: &str, entry: BlacklistEntry)
+        -> StoreResult<bool>;
+    /// Remove an entry (audited). `false` when it was not listed.
+    async fn delete_blacklist_entry(&self, actor_id: &str, model: &str) -> StoreResult<bool>;
+    /// Seal-and-store a platform key (audited; the detail names the purpose and
+    /// provider, never the key).
+    async fn put_platform_key(
+        &self,
+        actor_id: &str,
+        purpose: KeyPurpose,
+        provider: Provider,
+        sealed: SealedSecret,
+        updated_by: &str,
+        updated_at: u64,
+    ) -> StoreResult<()>;
+    async fn platform_key(
+        &self,
+        purpose: KeyPurpose,
+        provider: Provider,
+    ) -> StoreResult<Option<StoredKey>>;
+    /// Remove a platform key (audited). `false` when none was stored.
+    async fn delete_platform_key(
+        &self,
+        actor_id: &str,
+        purpose: KeyPurpose,
+        provider: Provider,
+    ) -> StoreResult<bool>;
+    /// One row per purpose and provider, configured or not.
+    async fn platform_key_meta(&self) -> StoreResult<Vec<PlatformKeyMeta>>;
+
     // ---- tenants and membership ---------------------------------------
     /// One tenant per GitHub App installation; creating is idempotent.
     async fn upsert_installation_tenant(

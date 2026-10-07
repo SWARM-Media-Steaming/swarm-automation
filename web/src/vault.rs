@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::clock::Clock;
 use crate::crypto::{open, seal, secret_aad, KeyWrapper};
 use crate::error::ApiError;
-use crate::model::{KeyMeta, Provider, TenantId};
+use crate::model::{KeyMeta, KeyPurpose, PlatformKeyMeta, Provider, TenantId};
 use crate::secret::Secret;
 use crate::store::Store;
 
@@ -121,6 +121,80 @@ impl Vault {
         let text = String::from_utf8(plaintext.to_vec())
             .map_err(|_| ApiError::Internal("a stored provider key was not valid text".into()))?;
         Ok(Some(Secret::new(text)))
+    }
+
+    /// The additional data the platform key's seal is bound to (never a tenant id).
+    fn platform_aad(purpose: KeyPurpose, provider: Provider) -> Vec<u8> {
+        secret_aad(&format!("platform:{}", purpose.as_str()), provider.as_str())
+    }
+
+    /// Encrypt and store a platform key (admin-managed; audited by the store).
+    pub async fn put_platform(
+        &self,
+        actor_id: &str,
+        purpose: KeyPurpose,
+        provider: Provider,
+        key: &Secret,
+        updated_by: &str,
+    ) -> Result<(), ApiError> {
+        let sealed = seal(
+            self.wrapper.as_ref(),
+            key.expose().as_bytes(),
+            &Self::platform_aad(purpose, provider),
+        )
+        .await?;
+        self.store
+            .put_platform_key(
+                actor_id,
+                purpose,
+                provider,
+                sealed,
+                updated_by,
+                self.clock.now_secs(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_platform(
+        &self,
+        actor_id: &str,
+        purpose: KeyPurpose,
+        provider: Provider,
+    ) -> Result<bool, ApiError> {
+        Ok(self
+            .store
+            .delete_platform_key(actor_id, purpose, provider)
+            .await?)
+    }
+
+    /// Which platform keys are configured, never the keys.
+    pub async fn list_platform(&self) -> Result<Vec<PlatformKeyMeta>, ApiError> {
+        Ok(self.store.platform_key_meta().await?)
+    }
+
+    /// Every configured platform key as job variables (`SWARM_PLATFORM_*` and
+    /// `SWARM_AUTOMATION_*`). These never share a name with a tenant's own key.
+    pub async fn platform_environment(&self) -> Result<JobEnvironment, ApiError> {
+        let mut vars = Vec::new();
+        for purpose in KeyPurpose::ALL {
+            for provider in Provider::ALL {
+                let Some(stored) = self.store.platform_key(purpose, provider).await? else {
+                    continue;
+                };
+                let plaintext = open(
+                    self.wrapper.as_ref(),
+                    &stored.sealed,
+                    &Self::platform_aad(purpose, provider),
+                )
+                .await?;
+                let text = String::from_utf8(plaintext.to_vec()).map_err(|_| {
+                    ApiError::Internal("a stored platform key was not valid text".into())
+                })?;
+                vars.push((purpose.env_var(provider), Secret::new(text)));
+            }
+        }
+        Ok(JobEnvironment { vars })
     }
 
     /// The environment for one job of `tenant` running on `provider`: exactly

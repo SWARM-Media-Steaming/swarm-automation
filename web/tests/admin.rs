@@ -356,7 +356,11 @@ fn admin_requests(app: &TestApp) -> Vec<(Method, String)> {
         .map(|route| {
             (
                 Method::from_bytes(route.method.as_bytes()).unwrap(),
-                catalog::admin_full_path(route).replace("{userId}", &target),
+                catalog::admin_full_path(route)
+                    .replace("{userId}", &target)
+                    .replace("{model}", "claude-haiku-4-5")
+                    .replace("{purpose}", "platform")
+                    .replace("{provider}", "claude"),
             )
         })
         .collect()
@@ -501,11 +505,15 @@ async fn the_admin_api_never_returns_secrets_or_session_data() {
 
 #[tokio::test]
 async fn the_admin_routes_come_from_the_catalog_and_are_all_exercised_here() {
-    assert_eq!(ADMIN_ROUTES.len(), 4);
+    assert_eq!(ADMIN_ROUTES.len(), 10);
     let app = world("alice");
     let alice = app.sign_in("code-alice").await;
     app.sign_in("code-bob").await;
-    for (method, path) in admin_requests(&app) {
+    // The blacklist and platform-key writes need a body and are exercised below.
+    for (method, path) in admin_requests(&app).into_iter().filter(|(method, path)| {
+        !(path.contains("/model-blacklist/") || path.contains("/provider-keys/"))
+            || method == Method::GET
+    }) {
         let reply = alice.send(method.clone(), &path, None).await;
         assert_eq!(
             reply.status,
@@ -547,4 +555,235 @@ async fn the_audit_log_route_lists_newest_first_with_logins_and_no_internals() {
     for forbidden in ["csrf", "token", "session", "detail"] {
         assert!(!text.contains(forbidden), "{forbidden}: {text}");
     }
+}
+
+// ---- model blacklist and platform keys -----------------------------------------
+
+const PLATFORM_KEY: &str = "sk-ant-platform-canary-0123456789";
+
+#[tokio::test]
+async fn an_admin_manages_the_model_blacklist_and_each_change_is_audited() {
+    let app = world("alice");
+    let alice = app.sign_in("code-alice").await;
+    assert_eq!(
+        alice.get("/api/v1/admin/model-blacklist").await.json()["models"],
+        json!([])
+    );
+
+    let put = alice
+        .put(
+            "/api/v1/admin/model-blacklist/Claude-Haiku-4-5",
+            json!({ "superseded_by": "claude-haiku-5-5", "reason": "Older Haiku." }),
+        )
+        .await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.text());
+    assert_eq!(put.json()["created"], true);
+    assert_eq!(put.json()["entry"]["model"], "claude-haiku-4-5");
+    assert_eq!(put.json()["entry"]["updated_by"], "alice");
+
+    // Replacing the entry (no successor now) is an update, not a second row.
+    let again = alice
+        .put(
+            "/api/v1/admin/model-blacklist/claude-haiku-4-5",
+            json!({ "reason": "Banned outright." }),
+        )
+        .await;
+    assert_eq!(again.json()["created"], false);
+    let listed = alice.get("/api/v1/admin/model-blacklist").await.json();
+    assert_eq!(listed["models"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["models"][0]["superseded_by"], "");
+
+    let removed = alice
+        .delete("/api/v1/admin/model-blacklist/claude-haiku-4-5")
+        .await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        alice
+            .delete("/api/v1/admin/model-blacklist/claude-haiku-4-5")
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+
+    let log = alice.get("/api/v1/admin/audit-log").await.json();
+    let rows: Vec<(String, Option<String>)> = log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["action"].as_str().unwrap().to_string(),
+                e["subject"].as_str().map(str::to_string),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows[..3],
+        [
+            (
+                "admin.blacklist.remove".to_string(),
+                Some("claude-haiku-4-5".to_string())
+            ),
+            (
+                "admin.blacklist.set".to_string(),
+                Some("claude-haiku-4-5".to_string())
+            ),
+            (
+                "admin.blacklist.set".to_string(),
+                Some("claude-haiku-4-5".to_string())
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn blacklist_input_is_validated() {
+    let app = world("alice");
+    let alice = app.sign_in("code-alice").await;
+    for (path, body) in [
+        ("/api/v1/admin/model-blacklist/bad%20name", json!({})),
+        (
+            "/api/v1/admin/model-blacklist/m",
+            json!({ "superseded_by": "m" }),
+        ),
+        (
+            "/api/v1/admin/model-blacklist/m",
+            json!({ "superseded_by": "has space" }),
+        ),
+        (
+            "/api/v1/admin/model-blacklist/m",
+            json!({ "reason": "line\nbreak" }),
+        ),
+        (
+            "/api/v1/admin/model-blacklist/m",
+            json!({ "reason": "x".repeat(301) }),
+        ),
+    ] {
+        let reply = alice.put(path, body.clone()).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{path} {body}");
+    }
+    assert_eq!(
+        alice.get("/api/v1/admin/model-blacklist").await.json()["models"],
+        json!([])
+    );
+}
+
+#[tokio::test]
+async fn platform_keys_are_write_only_sealed_and_audited() {
+    let (logs, _guard) = common::capture_logs(false);
+    let app = world("alice");
+    let alice = app.sign_in("code-alice").await;
+    let before = alice.get("/api/v1/admin/provider-keys").await.json();
+    let keys = before["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 8, "two purposes x four providers");
+    assert!(keys.iter().all(|k| k["configured"] == false));
+
+    let put = alice
+        .put(
+            "/api/v1/admin/provider-keys/automation/claude",
+            json!({ "key": PLATFORM_KEY }),
+        )
+        .await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.text());
+    assert_eq!(put.json()["configured"], true);
+    assert_eq!(put.json()["purpose"], "automation");
+
+    let after = alice.get("/api/v1/admin/provider-keys").await;
+    let configured: Vec<_> = after.json()["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|k| k["configured"] == true)
+        .map(|k| {
+            (
+                k["purpose"].as_str().unwrap().to_string(),
+                k["provider"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        configured,
+        vec![("automation".to_string(), "claude".to_string())]
+    );
+
+    // The key is in no response, audit row or log line.
+    let audit = alice.get("/api/v1/admin/audit-log").await;
+    for text in [put.text(), after.text(), audit.text(), logs.text()] {
+        assert!(!text.contains(PLATFORM_KEY), "{text}");
+    }
+    assert_eq!(
+        audit.json()["entries"][0]["action"],
+        "admin.platform_key.set"
+    );
+    assert_eq!(audit.json()["entries"][0]["subject"], "automation/claude");
+
+    assert_eq!(
+        alice
+            .delete("/api/v1/admin/provider-keys/automation/claude")
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        alice
+            .delete("/api/v1/admin/provider-keys/automation/claude")
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn platform_key_input_is_validated_and_never_echoed() {
+    let app = world("alice");
+    let alice = app.sign_in("code-alice").await;
+    let cases = [
+        (
+            "/api/v1/admin/provider-keys/nobody/claude",
+            json!({ "key": PLATFORM_KEY }),
+        ),
+        (
+            "/api/v1/admin/provider-keys/platform/gemini",
+            json!({ "key": PLATFORM_KEY }),
+        ),
+        (
+            "/api/v1/admin/provider-keys/platform/claude",
+            json!({ "key": "short" }),
+        ),
+        (
+            "/api/v1/admin/provider-keys/platform/claude",
+            json!({ "key": "has space inside-the-key" }),
+        ),
+    ];
+    for (path, body) in cases {
+        let reply = alice.put(path, body).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{path}");
+        assert!(!reply.text().contains(PLATFORM_KEY));
+    }
+    let after = alice.get("/api/v1/admin/provider-keys").await.json();
+    assert!(after["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|k| k["configured"] == false));
+}
+
+#[tokio::test]
+async fn platform_keys_reach_a_job_only_under_their_own_variable_names() {
+    use swarm_web::model::{KeyPurpose, Provider};
+    let app = world("alice");
+    let alice = app.sign_in("code-alice").await;
+    alice
+        .put(
+            "/api/v1/admin/provider-keys/platform/codex",
+            json!({ "key": PLATFORM_KEY }),
+        )
+        .await;
+    let environment = app.state.vault.platform_environment().await.unwrap();
+    assert_eq!(
+        environment.names(),
+        vec![KeyPurpose::Platform.env_var(Provider::Codex)]
+    );
+    assert!(!environment.names().contains(&Provider::Codex.env_var()));
+    assert!(!format!("{environment:?}").contains(PLATFORM_KEY));
 }

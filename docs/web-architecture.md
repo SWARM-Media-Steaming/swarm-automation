@@ -299,6 +299,10 @@ POST /api/v1/auth/logout
 GET  /api/v1/admin/users                          platform admin only (404 for anyone else)
 GET  /api/v1/admin/audit-log                      platform admin only, newest 50 rows
 POST /api/v1/admin/users/{userId}/promote|demote  platform admin only, audited
+GET  /api/v1/admin/model-blacklist                platform admin only (database-driven blacklist)
+PUT|DEL /api/v1/admin/model-blacklist/{model}     platform admin only, audited
+GET  /api/v1/admin/provider-keys                  platform admin only, metadata only
+PUT|DEL /api/v1/admin/provider-keys/{purpose}/{provider}  platform admin only, write-only, audited
 GET  /api/v1/tenants[/{tenant}[/members|/provider-keys|/quotas|/usage]]
 PUT  /api/v1/tenants/{tenant}/provider-keys/{provider}     write-only (owner)
 DEL  /api/v1/tenants/{tenant}/provider-keys/{provider}     (owner)
@@ -398,6 +402,12 @@ route that does not exist, so the admin API is not discoverable.
 | `web_admin_audit_log` | `GET /api/v1/admin/audit-log` | platform admin | the newest 50 audit rows: `id`, `action`, `actor_login`, `target_login` (`null` once deleted), `created_at`; never the free-form detail |
 | `web_admin_promote_user` | `POST /api/v1/admin/users/{userId}/promote` | platform admin | make the user an admin; `{"user": ..., "changed": bool}` |
 | `web_admin_demote_user` | `POST /api/v1/admin/users/{userId}/demote` | platform admin | remove the flag; `409` for the last admin |
+| `web_admin_list_model_blacklist` | `GET /api/v1/admin/model-blacklist` | platform admin | every entry: `model`, `superseded_by` (`""` = none), `reason`, `updated_at`, `updated_by` |
+| `web_admin_put_model_blacklist` | `PUT /api/v1/admin/model-blacklist/{model}` | platform admin | add or replace an entry from `{superseded_by?, reason?}`; `{"entry": ..., "created": bool}` |
+| `web_admin_delete_model_blacklist` | `DELETE /api/v1/admin/model-blacklist/{model}` | platform admin | remove an entry; `404` when not listed |
+| `web_admin_list_platform_keys` | `GET /api/v1/admin/provider-keys` | platform admin | one row per purpose and provider: `configured`, `updated_at`, `updated_by`; never a key |
+| `web_admin_set_platform_key` | `PUT /api/v1/admin/provider-keys/{purpose}/{provider}` | platform admin | store `{key}` sealed (write-only); returns the metadata row |
+| `web_admin_delete_platform_key` | `DELETE /api/v1/admin/provider-keys/{purpose}/{provider}` | platform admin | remove the key; `404` when none |
 
 These routes are `catalog::ADMIN_ROUTES` (not tenant routes and not desktop
 commands, so they are not in the table above); `api_catalog.rs` checks them
@@ -405,6 +415,34 @@ against `ui/api.js` and this page, and `tests/admin.rs` runs every one as an
 anonymous caller, a non-admin and an admin. Promoting an admin or demoting a
 non-admin is `200` with `changed: false` and writes nothing. An unknown user is
 `404`.
+
+### Platform configuration (`0005_platform_admin_config`)
+
+Two admin-managed tables replace configuration that used to be a file or an
+environment value:
+
+- `model_blacklist` is the database form of
+  `skills/model-router/model-blacklist.json` (same fields: `model`,
+  `superseded_by`, `reason`). The migration seeds it once from the bundled file's
+  entries (guarded on its own version row, so a deleted entry stays deleted when
+  the file is applied again). Entries stay conditional exactly as the file's are
+  (`model-blacklist.md`): one with a successor is dormant until the successor is
+  CLI offered and priced; one with none applies outright. Each job container gets
+  the current list as `SWARM_MODEL_BLACKLIST_JSON` (not a secret), which
+  `available_models.listed_retirements` reads in place of the file. The desktop
+  keeps reading the bundled file.
+- `platform_provider_keys` holds provider API keys the platform itself uses,
+  sealed like tenant keys (AAD bound to `platform:<purpose>` and the provider).
+  `purpose` is `platform` (cross-cutting AI concerns: routing, complexity
+  analysis, Jev) or `automation` (Swarm automation concerns). They are write-only
+  (no route returns one) and reach a job only as `SWARM_PLATFORM_<PROVIDER>_API_KEY`
+  / `SWARM_AUTOMATION_<PROVIDER>_API_KEY` (`KeyPurpose::env_var`), never under a
+  tenant key's name. The worker does not read these variables yet.
+
+Every change writes an `admin_audit_log` row in the same transaction
+(`admin.blacklist.set|remove`, `admin.platform_key.set|remove`; no target user;
+detail holds the model, or the purpose and provider, never a key). The audit
+route shows that as `subject`.
 
 **The last admin cannot be demoted** (`409 conflict`, by anyone, including that
 admin). The check and the update are one step under a Postgres advisory lock

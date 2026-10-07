@@ -291,6 +291,98 @@ async fn provider_keys_are_sealed_and_isolated(store: &dyn Store) {
         .unwrap());
 }
 
+/// Platform configuration is global, so the assertions find their own rows (the
+/// Postgres migration seeds the blacklist and other runs share the database).
+async fn platform_blacklist_and_keys_are_audited_and_replaceable(store: &dyn Store) {
+    let admin = user(store).await;
+    let model = format!("contract-model-{}", random_hex(4));
+    let entry = |successor: &str, at: u64| BlacklistEntry {
+        model: model.clone(),
+        superseded_by: successor.into(),
+        reason: "because".into(),
+        updated_at: at,
+        updated_by: "alice".into(),
+    };
+    let find = |list: Vec<BlacklistEntry>| list.into_iter().find(|e| e.model == model);
+
+    assert!(find(store.model_blacklist().await.unwrap()).is_none());
+    assert!(store
+        .put_blacklist_entry(&admin.id, entry("next", 1))
+        .await
+        .unwrap());
+    assert!(
+        !store
+            .put_blacklist_entry(&admin.id, entry("", 2))
+            .await
+            .unwrap(),
+        "a second put replaces"
+    );
+    assert_eq!(
+        find(store.model_blacklist().await.unwrap()),
+        Some(entry("", 2))
+    );
+    assert!(store
+        .delete_blacklist_entry(&admin.id, &model)
+        .await
+        .unwrap());
+    assert!(!store
+        .delete_blacklist_entry(&admin.id, &model)
+        .await
+        .unwrap());
+    assert!(find(store.model_blacklist().await.unwrap()).is_none());
+
+    let mine: Vec<_> = store
+        .admin_audit_log(500)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.actor_user_id.as_deref() == Some(admin.id.as_str()))
+        .map(|row| (row.action, row.target_user_id))
+        .collect();
+    assert_eq!(
+        mine,
+        vec![
+            (AUDIT_BLACKLIST_REMOVE.to_string(), None),
+            (AUDIT_BLACKLIST_SET.to_string(), None),
+            (AUDIT_BLACKLIST_SET.to_string(), None),
+        ],
+        "the failed second delete wrote nothing"
+    );
+
+    let (purpose, provider) = (KeyPurpose::Platform, Provider::ModelData);
+    store
+        .put_platform_key(&admin.id, purpose, provider, sealed(1), "alice", 10)
+        .await
+        .unwrap();
+    store
+        .put_platform_key(&admin.id, purpose, provider, sealed(2), "bob", 20)
+        .await
+        .unwrap();
+    let stored = store
+        .platform_key(purpose, provider)
+        .await
+        .unwrap()
+        .expect("key");
+    assert_eq!(stored.sealed, sealed(2));
+    assert_eq!((stored.updated_at, stored.updated_by.as_str()), (20, "bob"));
+    let meta = store.platform_key_meta().await.unwrap();
+    assert_eq!(meta.len(), KeyPurpose::ALL.len() * Provider::ALL.len());
+    assert!(
+        meta.iter()
+            .find(|m| m.purpose == purpose && m.provider == provider)
+            .unwrap()
+            .configured
+    );
+    assert!(store
+        .delete_platform_key(&admin.id, purpose, provider)
+        .await
+        .unwrap());
+    assert!(!store
+        .delete_platform_key(&admin.id, purpose, provider)
+        .await
+        .unwrap());
+}
+
 async fn quotas_budgets_usage_and_reports(store: &dyn Store) {
     let a = tenant(store).await;
     let b = tenant(store).await;
@@ -841,6 +933,7 @@ async fn contract(store: std::sync::Arc<dyn Store>) {
     identities_list_provider_and_login_only(store.as_ref()).await;
     tenants_and_membership(store.as_ref()).await;
     provider_keys_are_sealed_and_isolated(store.as_ref()).await;
+    platform_blacklist_and_keys_are_audited_and_replaceable(store.as_ref()).await;
     quotas_budgets_usage_and_reports(store.as_ref()).await;
     job_slots(store.as_ref()).await;
     concurrent_reservations_respect_the_limit(store.clone()).await;
