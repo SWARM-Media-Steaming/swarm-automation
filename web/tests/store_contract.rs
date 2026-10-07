@@ -24,11 +24,30 @@ fn session(user: &User, ttl_from: u64, expires_at: u64) -> Session {
     }
 }
 
+fn profile(subject: u64, login: &str) -> IdentityProfile {
+    IdentityProfile {
+        provider: "github".into(),
+        subject: subject.to_string(),
+        login: login.into(),
+        display_name: Some(format!("{login} Display")),
+        avatar_url: Some(format!("https://avatars.test/u/{subject}")),
+    }
+}
+
+/// A login no other test (or earlier run, against a shared database) used, so
+/// its personal tenant id is exactly the slug.
+fn fresh_login() -> String {
+    format!("user-{}", random_hex(6))
+}
+
+async fn register(store: &dyn Store, profile: &IdentityProfile) -> Registration {
+    store.register_identity(profile).await.expect("register")
+}
+
 async fn user(store: &dyn Store) -> User {
-    store
-        .upsert_user(installation(), &format!("login-{}", random_hex(4)))
+    register(store, &profile(installation(), &fresh_login()))
         .await
-        .expect("user")
+        .user
 }
 
 async fn tenant(store: &dyn Store) -> Tenant {
@@ -49,16 +68,13 @@ fn sealed(tag: u8) -> SealedSecret {
 
 async fn identity_and_sessions(store: &dyn Store) {
     let github_id = installation();
-    let first = store.upsert_user(github_id, "first-login").await.unwrap();
-    let again = store.upsert_user(github_id, "renamed").await.unwrap();
-    assert_eq!(first.id, again.id, "one person per GitHub id");
+    let login = fresh_login();
+    let first = register(store, &profile(github_id, &login)).await.user;
+    let again = register(store, &profile(github_id, "renamed")).await.user;
+    assert_eq!(first.id, again.id, "one person per (provider, subject)");
     assert_eq!(again.login, "renamed");
-    assert_eq!(again.github_id, github_id);
     let stored = store.user(&first.id).await.unwrap().expect("stored user");
-    assert_eq!(
-        (stored.github_id, stored.login.as_str()),
-        (github_id, "renamed")
-    );
+    assert_eq!(stored, again);
     assert!(store.user("u-missing").await.unwrap().is_none());
 
     let live = session(&first, 1, u64::MAX / 4);
@@ -172,7 +188,15 @@ async fn tenants_and_membership(store: &dyn Store) {
         Some(Role::Owner)
     );
 
-    let mut expected = vec![created.id.clone(), other.id.clone()];
+    let personal = store
+        .tenants_for_user(&alice.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|(t, _)| t.installation_id.is_none())
+        .expect("alice's personal tenant")
+        .0;
+    let mut expected = vec![created.id.clone(), other.id.clone(), personal.id.clone()];
     expected.sort();
     let listed = store.tenants_for_user(&alice.id).await.unwrap();
     assert_eq!(
@@ -558,7 +582,240 @@ async fn webhook_deliveries(store: &dyn Store) {
     store.release_delivery("never-claimed").await.unwrap();
 }
 
+fn personal_of(registration: &Registration) -> &Tenant {
+    assert_eq!(registration.tenant.installation_id, None);
+    assert_eq!(registration.tenant.account_type, PERSONAL_ACCOUNT_TYPE);
+    assert_eq!(registration.tenant.status, TenantStatus::Active);
+    &registration.tenant
+}
+
+async fn first_sign_in_registers_user_identity_tenant_and_owner(store: &dyn Store) {
+    let login = fresh_login();
+    let subject = installation();
+    let first = register(store, &profile(subject, &login)).await;
+    assert!(first.first_sign_in);
+    let tenant = personal_of(&first);
+    assert_eq!(
+        tenant.id.as_str(),
+        login,
+        "the tenant id is the slugified login"
+    );
+    assert_eq!(tenant.account_login, login);
+    assert_eq!(first.user.login, login);
+    assert_eq!(
+        first.user.display_name.as_deref(),
+        Some(format!("{login} Display").as_str())
+    );
+    assert_eq!(
+        first.user.avatar_url.as_deref(),
+        Some(format!("https://avatars.test/u/{subject}").as_str())
+    );
+    assert!(first.user.last_login_at.is_some());
+    assert_eq!(
+        store.user(&first.user.id).await.unwrap().unwrap(),
+        first.user
+    );
+    assert_eq!(store.tenant(&tenant.id).await.unwrap().unwrap(), *tenant);
+    assert_eq!(
+        store.role_in(&tenant.id, &first.user.id).await.unwrap(),
+        Some(Role::Owner)
+    );
+    let listed = store.tenants_for_user(&first.user.id).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (listed[0].0.id.clone(), listed[0].1),
+        (tenant.id.clone(), Role::Owner)
+    );
+    let members = store.members(&tenant.id).await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(
+        (members[0].login.as_str(), members[0].role),
+        (login.as_str(), Role::Owner)
+    );
+}
+
+async fn repeat_sign_in_matches_on_provider_and_subject(store: &dyn Store) {
+    let login = fresh_login();
+    let subject = installation();
+    let first = register(store, &profile(subject, &login)).await;
+    let mut changed = profile(subject, &login);
+    changed.display_name = Some("New Name".into());
+    changed.avatar_url = None;
+    let again = register(store, &changed).await;
+    assert!(!again.first_sign_in);
+    assert_eq!(again.user.id, first.user.id);
+    assert_eq!(again.tenant, first.tenant, "no second tenant");
+    assert_eq!(again.user.display_name.as_deref(), Some("New Name"));
+    assert_eq!(again.user.avatar_url, None);
+    assert!(again.user.last_login_at >= first.user.last_login_at);
+    assert_eq!(
+        store.user(&again.user.id).await.unwrap().unwrap(),
+        again.user
+    );
+    assert_eq!(
+        store.tenants_for_user(&first.user.id).await.unwrap().len(),
+        1
+    );
+    // The same subject under another provider is another person.
+    let mut elsewhere = profile(subject, &login);
+    elsewhere.provider = "oidc-example".into();
+    let other = register(store, &elsewhere).await;
+    assert!(other.first_sign_in);
+    assert_ne!(other.user.id, first.user.id);
+    assert_ne!(other.tenant.id, first.tenant.id);
+}
+
+async fn a_renamed_login_keeps_the_tenant_id(store: &dyn Store) {
+    let login = fresh_login();
+    let renamed = fresh_login();
+    let subject = installation();
+    let first = register(store, &profile(subject, &login)).await;
+    let again = register(store, &profile(subject, &renamed)).await;
+    assert_eq!(again.user.id, first.user.id);
+    assert_eq!(
+        again.tenant.id, first.tenant.id,
+        "the tenant id never follows a rename"
+    );
+    assert_eq!(again.tenant.id.as_str(), login);
+    assert_eq!(again.user.login, renamed);
+    assert_eq!(
+        again.tenant.account_login, renamed,
+        "the displayed account does"
+    );
+    assert_eq!(
+        store.user(&first.user.id).await.unwrap().unwrap().login,
+        renamed
+    );
+    assert_eq!(
+        store.members(&first.tenant.id).await.unwrap()[0].login,
+        renamed
+    );
+    // A different person who now holds the old login gets a different tenant.
+    let newcomer = register(store, &profile(installation(), &login)).await;
+    assert_ne!(newcomer.tenant.id, first.tenant.id);
+    assert_eq!(newcomer.tenant.id.as_str(), format!("{login}-2"));
+}
+
+async fn a_taken_tenant_id_is_deduplicated(store: &dyn Store) {
+    let login = fresh_login();
+    let one = register(store, &profile(installation(), &login)).await;
+    let two = register(store, &profile(installation(), &login)).await;
+    let three = register(store, &profile(installation(), &login)).await;
+    assert_eq!(one.tenant.id.as_str(), login);
+    assert_eq!(two.tenant.id.as_str(), format!("{login}-2"));
+    assert_eq!(three.tenant.id.as_str(), format!("{login}-3"));
+    // An id some other kind of tenant already holds is taken too.
+    let installed = tenant(store).await;
+    let squatter = register(store, &profile(installation(), installed.id.as_str())).await;
+    assert_eq!(squatter.tenant.id.as_str(), format!("{}-2", installed.id));
+    // Logins that slugify to the same id collide the same way.
+    let base = fresh_login();
+    let shouty = base.to_uppercase();
+    let a = register(store, &profile(installation(), &base)).await;
+    let b = register(store, &profile(installation(), &shouty)).await;
+    assert_eq!(a.tenant.id.as_str(), base);
+    assert_eq!(b.tenant.id.as_str(), format!("{base}-2"));
+    // An id that cannot be a slug at all still gets a valid one.
+    let odd = register(store, &profile(installation(), "日本語")).await;
+    assert!(odd.tenant.id.as_str().starts_with("user"));
+    // Each person owns only their own tenant.
+    for registration in [&one, &two, &three] {
+        let listed = store.tenants_for_user(&registration.user.id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0.id, registration.tenant.id);
+    }
+}
+
+async fn concurrent_first_sign_ins_register_one_user_and_one_tenant(store: &dyn Store) {
+    let login = fresh_login();
+    let subject = installation();
+    let who = profile(subject, &login);
+    let (a, b, c, d, e, f) = tokio::join!(
+        store.register_identity(&who),
+        store.register_identity(&who),
+        store.register_identity(&who),
+        store.register_identity(&who),
+        store.register_identity(&who),
+        store.register_identity(&who),
+    );
+    let all: Vec<Registration> = [a, b, c, d, e, f]
+        .into_iter()
+        .map(|r| r.expect("a racing sign-in must not fail"))
+        .collect();
+    assert_eq!(
+        all.iter().filter(|r| r.first_sign_in).count(),
+        1,
+        "exactly one creates the user"
+    );
+    for r in &all {
+        assert_eq!(r.user.id, all[0].user.id);
+        assert_eq!(r.tenant.id, all[0].tenant.id);
+    }
+    assert_eq!(all[0].tenant.id.as_str(), login);
+    let listed = store.tenants_for_user(&all[0].user.id).await.unwrap();
+    assert_eq!(listed.len(), 1, "one personal tenant");
+    assert_eq!(store.members(&all[0].tenant.id).await.unwrap().len(), 1);
+
+    // Different people whose logins collide, at the same moment: every one gets
+    // a tenant of their own.
+    let shared = fresh_login();
+    let people: Vec<IdentityProfile> = (0..4).map(|_| profile(installation(), &shared)).collect();
+    let (a, b, c, d) = tokio::join!(
+        store.register_identity(&people[0]),
+        store.register_identity(&people[1]),
+        store.register_identity(&people[2]),
+        store.register_identity(&people[3]),
+    );
+    let mut ids: Vec<String> = [a, b, c, d]
+        .into_iter()
+        .map(|r| r.expect("racing registrations").tenant.id.to_string())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 4, "four people, four tenants: {ids:?}");
+    assert!(ids.iter().all(|id| id.starts_with(&shared)));
+}
+
+async fn a_failed_registration_leaves_nothing_behind(store: &dyn Store) {
+    let login = fresh_login();
+    // An empty subject violates the identity's own constraint, after the user,
+    // tenant and membership statements have run in Postgres.
+    let mut broken = profile(installation(), &login);
+    broken.subject = String::new();
+    assert!(store.register_identity(&broken).await.is_err());
+    let mut broken = profile(installation(), &login);
+    broken.provider = String::new();
+    assert!(store.register_identity(&broken).await.is_err());
+    // Nothing remains: the next registration of that login gets the plain id.
+    let next = register(store, &profile(installation(), &login)).await;
+    assert!(next.first_sign_in);
+    assert_eq!(
+        next.tenant.id.as_str(),
+        login,
+        "the failed attempt kept no tenant"
+    );
+    assert_eq!(
+        store.tenants_for_user(&next.user.id).await.unwrap().len(),
+        1
+    );
+    // The error says what failed, not who was signing in.
+    let mut broken = profile(installation(), &login);
+    broken.subject = String::new();
+    let message = store
+        .register_identity(&broken)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!message.contains(&login), "{message}");
+}
+
 async fn contract(store: std::sync::Arc<dyn Store>) {
+    first_sign_in_registers_user_identity_tenant_and_owner(store.as_ref()).await;
+    repeat_sign_in_matches_on_provider_and_subject(store.as_ref()).await;
+    a_renamed_login_keeps_the_tenant_id(store.as_ref()).await;
+    a_taken_tenant_id_is_deduplicated(store.as_ref()).await;
+    concurrent_first_sign_ins_register_one_user_and_one_tenant(store.as_ref()).await;
+    a_failed_registration_leaves_nothing_behind(store.as_ref()).await;
     identity_and_sessions(store.as_ref()).await;
     tenants_and_membership(store.as_ref()).await;
     provider_keys_are_sealed_and_isolated(store.as_ref()).await;

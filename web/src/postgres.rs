@@ -78,7 +78,7 @@ fn tenant_from(row: &Row) -> StoreResult<Tenant> {
     };
     Ok(Tenant {
         id: tenant_of(row.get("tenant_id"))?,
-        installation_id: unint(row.get("installation_id")),
+        installation_id: row.get::<_, Option<i64>>("installation_id").map(unint),
         account_login: row.get("account_login"),
         account_type: row.get("account_type"),
         status,
@@ -259,80 +259,171 @@ const TENANT_COLUMNS: &str = "tenant_id, installation_id, account_login, account
 
 #[async_trait]
 impl Store for PostgresStore {
-    async fn upsert_user(&self, github_id: u64, login: &str) -> StoreResult<User> {
-        let subject = github_id.to_string();
+    async fn register_identity(&self, profile: &IdentityProfile) -> StoreResult<Registration> {
         let mut client = self.client().await?;
+        // Dropping the transaction on any early return rolls it back.
         let tx = client.transaction().await.map_err(fail)?;
-        // Serialise first sign-ins of one identity so only one creates the user.
+        // Serialise sign-ins of one identity so a first sign-in happens once and
+        // a concurrent twin waits, then finds the committed rows.
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtext($1))",
-            &[&format!("swarm-web-user:{subject}")],
+            &[&format!(
+                "swarm-web-identity:{}:{}",
+                profile.provider, profile.subject
+            )],
         )
         .await
         .map_err(fail)?;
         let existing = tx
             .query_opt(
-                "SELECT user_id FROM user_identities WHERE provider = 'github' AND subject = $1",
-                &[&subject],
+                "SELECT user_id FROM user_identities WHERE provider = $1 AND subject = $2",
+                &[&profile.provider, &profile.subject],
             )
             .await
             .map_err(fail)?;
-        let id = match existing {
+        let first_sign_in = existing.is_none();
+        let (user_id, last_login) = match existing {
             Some(row) => {
                 let id: String = row.get("user_id");
                 tx.execute(
-                    "UPDATE user_identities SET login = $2 WHERE provider = 'github' AND subject = $1",
-                    &[&subject, &login],
+                    "UPDATE user_identities SET login = $3 WHERE provider = $1 AND subject = $2",
+                    &[&profile.provider, &profile.subject, &profile.login],
                 )
                 .await
                 .map_err(fail)?;
-                tx.execute(
-                    "UPDATE users SET last_login_at = now() WHERE id = $1",
-                    &[&id],
-                )
-                .await
-                .map_err(fail)?;
-                id
+                let row = tx
+                    .query_one(
+                        "UPDATE users SET display_name = $2, avatar_url = $3, last_login_at = now()
+                         WHERE id = $1 RETURNING (extract(epoch FROM last_login_at))::bigint AS at",
+                        &[&id, &profile.display_name, &profile.avatar_url],
+                    )
+                    .await
+                    .map_err(fail)?;
+                (id, row.get::<_, i64>("at"))
             }
             None => {
                 let id = format!("u{}", random_hex(8));
-                tx.execute(
-                    "INSERT INTO users (id, last_login_at) VALUES ($1, now())",
-                    &[&id],
-                )
-                .await
-                .map_err(fail)?;
-                tx.execute(
-                    "INSERT INTO user_identities (user_id, provider, subject, login)
-                     VALUES ($1, 'github', $2, $3)",
-                    &[&id, &subject, &login],
-                )
-                .await
-                .map_err(fail)?;
-                id
+                let row = tx
+                    .query_one(
+                        "INSERT INTO users (id, display_name, avatar_url, last_login_at)
+                         VALUES ($1, $2, $3, now())
+                         RETURNING (extract(epoch FROM last_login_at))::bigint AS at",
+                        &[&id, &profile.display_name, &profile.avatar_url],
+                    )
+                    .await
+                    .map_err(fail)?;
+                (id, row.get::<_, i64>("at"))
             }
         };
+
+        let personal = tx
+            .query_opt(
+                &format!(
+                    "SELECT {TENANT_COLUMNS} FROM tenants
+                     WHERE owner_user_id = $1 AND installation_id IS NULL"
+                ),
+                &[&user_id],
+            )
+            .await
+            .map_err(fail)?;
+        let tenant = match personal {
+            Some(row) => {
+                // The id never follows a rename; the displayed account does.
+                let mut tenant = tenant_from(&row)?;
+                tx.execute(
+                    "UPDATE tenants SET account_login = $2 WHERE tenant_id = $1",
+                    &[&tenant.id.as_str(), &profile.login],
+                )
+                .await
+                .map_err(fail)?;
+                tenant.account_login = profile.login.clone();
+                tenant
+            }
+            None => {
+                let mut created = None;
+                for attempt in 1.. {
+                    let id = TenantId::personal(&profile.login, attempt);
+                    // A taken id (maybe taken by a transaction still in flight,
+                    // which this waits on) inserts nothing: try the next one.
+                    let inserted = tx
+                        .execute(
+                            "INSERT INTO tenants
+                                 (tenant_id, installation_id, account_login, account_type, owner_user_id)
+                             VALUES ($1, NULL, $2, $3, $4)
+                             ON CONFLICT (tenant_id) DO NOTHING",
+                            &[&id.as_str(), &profile.login, &PERSONAL_ACCOUNT_TYPE, &user_id],
+                        )
+                        .await
+                        .map_err(fail)?;
+                    if inserted == 1 {
+                        created = Some(id);
+                        break;
+                    }
+                }
+                Tenant {
+                    id: created.expect("the loop only exits with an id"),
+                    installation_id: None,
+                    account_login: profile.login.clone(),
+                    account_type: PERSONAL_ACCOUNT_TYPE.to_string(),
+                    status: TenantStatus::Active,
+                }
+            }
+        };
+        tx.execute(
+            "INSERT INTO tenant_memberships (tenant_id, user_id, role) VALUES ($1, $2, 'owner')
+             ON CONFLICT (tenant_id, user_id) DO UPDATE SET role = 'owner'",
+            &[&tenant.id.as_str(), &user_id],
+        )
+        .await
+        .map_err(fail)?;
+        if first_sign_in {
+            // Last, so the identity's own constraints can still undo the rest.
+            tx.execute(
+                "INSERT INTO user_identities (user_id, provider, subject, login)
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &user_id,
+                    &profile.provider,
+                    &profile.subject,
+                    &profile.login,
+                ],
+            )
+            .await
+            .map_err(fail)?;
+        }
         tx.commit().await.map_err(fail)?;
-        Ok(User {
-            id,
-            github_id,
-            login: login.to_string(),
+        Ok(Registration {
+            user: User {
+                id: user_id,
+                login: profile.login.clone(),
+                display_name: profile.display_name.clone(),
+                avatar_url: profile.avatar_url.clone(),
+                last_login_at: Some(unint(last_login)),
+            },
+            tenant,
+            first_sign_in,
         })
     }
 
     async fn user(&self, user_id: &str) -> StoreResult<Option<User>> {
         let rows = self
             .query(
-                "SELECT u.id, i.subject, i.login FROM users u
-                 JOIN user_identities i ON i.user_id = u.id AND i.provider = 'github'
-                 WHERE u.id = $1",
+                "SELECT u.id, u.display_name, u.avatar_url,
+                        (extract(epoch FROM u.last_login_at))::bigint AS at,
+                        (SELECT i.login FROM user_identities i
+                          WHERE i.user_id = u.id ORDER BY i.id LIMIT 1) AS login
+                 FROM users u WHERE u.id = $1",
                 &[&user_id],
             )
             .await?;
-        Ok(rows.first().map(|row| User {
-            id: row.get("id"),
-            github_id: row.get::<_, String>("subject").parse().unwrap_or(0),
-            login: row.get("login"),
+        Ok(rows.first().and_then(|row| {
+            Some(User {
+                id: row.get("id"),
+                login: row.get::<_, Option<String>>("login")?,
+                display_name: row.get("display_name"),
+                avatar_url: row.get("avatar_url"),
+                last_login_at: row.get::<_, Option<i64>>("at").map(unint),
+            })
         }))
     }
 
@@ -505,7 +596,8 @@ impl Store for PostgresStore {
             .query(
                 "SELECT i.login, m.role
                  FROM tenant_memberships m
-                 JOIN user_identities i ON i.user_id = m.user_id AND i.provider = 'github'
+                 JOIN LATERAL (SELECT login FROM user_identities
+                                WHERE user_id = m.user_id ORDER BY id LIMIT 1) i ON true
                  WHERE m.tenant_id = $1
                  ORDER BY i.login COLLATE \"C\"",
                 &[&tenant.as_str()],

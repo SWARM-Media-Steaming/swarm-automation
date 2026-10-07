@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::SealedSecret;
+use crate::crypto::{random_hex, SealedSecret};
 
 /// A tenant id. Matches the worker storage's tenant id grammar
 /// (`issue_worker/storage.py`: `[a-z0-9][a-z0-9_-]{0,62}`), so the same string
@@ -27,7 +27,38 @@ impl TenantId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The id of a personal tenant: the login slugified to the grammar, and for
+    /// `attempt` 1 that is all. A taken id is retried with `attempt` 2, 3, ... as
+    /// a `-<attempt>` suffix (after [`PERSONAL_ID_ATTEMPTS`], a random one, so a
+    /// crowded name still terminates). Only lowercase letters, digits, `_` and
+    /// `-` survive; the id starts with a letter or digit and fits 63 characters.
+    pub fn personal(login: &str, attempt: u32) -> TenantId {
+        let mut slug = String::new();
+        for c in login.chars() {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+                slug.push(c);
+            } else if !slug.ends_with('-') {
+                slug.push('-');
+            }
+        }
+        let slug = slug.trim_matches(['-', '_']);
+        let slug = if slug.is_empty() { "user" } else { slug };
+        let suffix = match attempt {
+            0 | 1 => String::new(),
+            n if n <= PERSONAL_ID_ATTEMPTS => format!("-{n}"),
+            _ => format!("-{}", random_hex(4)),
+        };
+        // The slug is ASCII, so cutting at a byte offset is safe.
+        let room = 63 - suffix.len();
+        let cut = slug[..slug.len().min(room)].trim_end_matches(['-', '_']);
+        TenantId::parse(&format!("{cut}{suffix}")).expect("a slugified id is valid")
+    }
 }
+
+/// How many numbered ids ([`TenantId::personal`]) are tried before random ones.
+pub const PERSONAL_ID_ATTEMPTS: u32 = 50;
 
 impl fmt::Display for TenantId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -107,9 +138,39 @@ pub enum TenantStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct User {
     pub id: String,
-    pub github_id: u64,
+    /// The handle at the user's last sign-in (the provider's `login`).
     pub login: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    /// Unix seconds of the last sign-in.
+    pub last_login_at: Option<u64>,
 }
+
+/// What an identity provider says about a person after a successful sign-in:
+/// the provider's stable `subject` (the numeric GitHub id as text) and the
+/// profile fields that are refreshed on every sign-in. It never carries a token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityProfile {
+    pub provider: String,
+    pub subject: String,
+    pub login: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+/// The outcome of [`crate::store::Store::register_identity`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Registration {
+    pub user: User,
+    /// The user's personal tenant (their Owner membership is already stored).
+    pub tenant: Tenant,
+    /// `true` when this call created the user, so it was their first sign-in.
+    pub first_sign_in: bool,
+}
+
+/// `Tenant::account_type` of the tenant every user gets at first sign-in. It has
+/// no GitHub App installation.
+pub const PERSONAL_ACCOUNT_TYPE: &str = "Personal";
 
 #[derive(Clone, Debug)]
 pub struct Session {
@@ -123,7 +184,8 @@ pub struct Session {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tenant {
     pub id: TenantId,
-    pub installation_id: u64,
+    /// `None` for a personal tenant, which no GitHub App installation backs.
+    pub installation_id: Option<u64>,
     pub account_login: String,
     pub account_type: String,
     pub status: TenantStatus,
@@ -237,4 +299,62 @@ pub enum DeliveryClaim {
     Duplicate,
     /// A different delivery id carrying a payload that was already accepted.
     Replay,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(login: &str, attempt: u32) -> String {
+        TenantId::personal(login, attempt).to_string()
+    }
+
+    #[test]
+    fn a_personal_id_is_the_slugified_login() {
+        assert_eq!(id("octocat", 1), "octocat");
+        assert_eq!(id("Octo-Cat", 1), "octo-cat");
+        assert_eq!(id("octo-cat[bot]", 1), "octo-cat-bot");
+        assert_eq!(id("-weird__name-", 1), "weird__name");
+        assert_eq!(id("a  b..c", 1), "a-b-c");
+        assert_eq!(id("ünï", 1), "n");
+        assert_eq!(id("日本語", 1), "user");
+        assert_eq!(id("", 1), "user");
+        assert_eq!(id("___", 1), "user");
+    }
+
+    #[test]
+    fn a_taken_id_gets_a_numbered_suffix_and_then_a_random_one() {
+        assert_eq!(id("alice", 0), "alice");
+        assert_eq!(id("alice", 2), "alice-2");
+        assert_eq!(id("alice", 50), "alice-50");
+        let random = id("alice", 51);
+        assert!(random.starts_with("alice-") && random.len() == "alice-".len() + 8);
+        assert_ne!(
+            random,
+            id("alice", 51),
+            "past the numbered ids the suffix is random"
+        );
+    }
+
+    #[test]
+    fn every_personal_id_fits_the_tenant_grammar() {
+        let long = "x".repeat(200);
+        for login in [
+            long.as_str(),
+            "a",
+            "0",
+            "-",
+            "A-B_C",
+            "xx-".repeat(40).as_str(),
+        ] {
+            for attempt in [1, 2, 9, 50, 51] {
+                let id = TenantId::personal(login, attempt);
+                assert!(id.as_str().len() <= 63, "{id}");
+                assert_eq!(TenantId::parse(id.as_str()).as_ref(), Some(&id));
+            }
+        }
+        assert_eq!(id(&long, 1).len(), 63);
+        assert_eq!(id(&long, 2).len(), 63);
+        assert!(id(&long, 2).ends_with("-2"));
+    }
 }

@@ -374,8 +374,8 @@ pub fn router(state: AppState) -> Router {
     let api = api
         .route("/api/v1/health", get(health))
         .route("/api/v1/session", get(auth::session))
-        .route("/api/v1/auth/github/login", get(auth::login))
-        .route("/api/v1/auth/github/callback", get(auth::callback))
+        .route("/api/v1/auth/{provider}/login", get(auth::login))
+        .route("/api/v1/auth/{provider}/callback", get(auth::callback))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/tenants", get(list_tenants))
         .route(tenant, get(get_tenant))
