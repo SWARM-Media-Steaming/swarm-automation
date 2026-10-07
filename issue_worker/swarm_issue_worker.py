@@ -127,7 +127,8 @@ from dynamic_router import (
     run_provider_router,
 )
 from jev_cli import JevSettings, settings_from_mapping
-from issue_context import build_issue_context, issue_context_settings_from
+import issue_dependencies as deps
+from issue_context import build_issue_context, dependency_context_text, issue_context_settings_from
 from decision_engine import (
     CompositeDecisionEngine,
     DecisionType,
@@ -819,6 +820,9 @@ class IssueContext:
     # True for the issue filed by the CI monitor and handed straight to this
     # run, so it is never also picked up by ``select_issue`` in the same pass.
     ci_monitor: bool = False
+    # Satisfied prerequisite issues (label, title, merged PR title, changed
+    # files) shown to the AI as bounded, sanitized reference context.
+    dependencies: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -1157,6 +1161,8 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         # read:project permission does not cause repeated GraphQL calls.
         self._project_priorities: dict[int, str | None] = {}
         self._project_priority_warning_logged = False
+        self._dependency_context: dict[int, list[dict[str, Any]]] = {}
+        self._dependency_logged: set[int] = set()
         # Raw provider CLI output (JSON/JSONL) of the most recent AI
         # invocation, set by each `_run_<provider>` method regardless of exit
         # status so a failed call's usage can still be recorded (issue #280).
@@ -3244,7 +3250,8 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             payload.setdefault("issue_number", self.issue.number)
             if normalize_decision_type(decision_type) in ISSUE_CONTEXT_DECISION_TYPES:
                 payload.setdefault("issue_context", build_issue_context(
-                    self.issue.body, issue_context_settings_from(self.config.jev)))
+                    self.issue.body, issue_context_settings_from(self.config.jev),
+                    dependencies=self.issue.dependencies))
         payload.setdefault("repository", self.config.github_repository)
         result = self.decision_engine().evaluate(decision_type, payload)
         result = self.expand_partial_context(result, decision_type, payload)
@@ -3302,7 +3309,9 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             or result.source != "low_confidence"
         ):
             return result
-        expanded = build_issue_context(self.issue.body, issue_context_settings_from(self.config.jev).expanded())
+        expanded = build_issue_context(
+            self.issue.body, issue_context_settings_from(self.config.jev).expanded(),
+            dependencies=self.issue.dependencies)
         expanded["metadata"]["expandedRetry"] = True
         payload["issue_context"] = expanded
         retry = self.decision_engine().evaluate(decision_type, payload)
@@ -3787,6 +3796,112 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         )
         return True
 
+    def gate_on_dependencies(
+        self, ready: list[tuple[int, str, dict[str, Any], dict[str, Any] | None]]
+    ) -> list[tuple[int, str, dict[str, Any], dict[str, Any] | None]]:
+        """Drop first-pass issues whose ``Depends on #N`` prerequisites are not merged.
+
+        Re-evaluated every tick. Follow-ups are never gated (their work began
+        long ago). A GitHub failure leaves the issue waiting for the next tick;
+        it never raises, never marks the issue failed and never blocks others.
+        """
+        self._dependency_context = {}
+        repository = self.config.github_repository
+        parsed: dict[int, list[deps.DependencyRef]] = {}
+        for number, work_type, remote, _ in ready:
+            if work_type != "initial":
+                continue
+            try:
+                refs, truncated = deps.issue_dependencies(
+                    remote.get("body"),
+                    self.comments(number),
+                    self.trusted_followup_authors,
+                    repository,
+                    number,
+                )
+            except Exception as error:  # dependency parsing must never block selection
+                self.log_dependency_once(number, f"could not read dependencies ({error}); treating as none.")
+                continue
+            if truncated:
+                self.log_dependency_once(
+                    number, f"lists more than {deps.MAX_DEPENDENCIES} dependencies; only the first are honored."
+                )
+            if refs:
+                parsed[number] = refs
+        if not parsed:
+            return ready
+        resolver = deps.DependencyResolver(
+            self.github.api_get,
+            self.github.api_list,
+            (self.config.integration_branch, self.config.base_branch),
+        )
+        graph = {
+            number: {ref.number for ref in refs if ref.repository == repository} & set(parsed)
+            for number, refs in parsed.items()
+        }
+        cyclic = deps.find_cycle_members(graph)
+        blocked: set[int] = set()
+        for number, refs in parsed.items():
+            states = [resolver.resolve(ref) for ref in refs]
+            for state in states:
+                if state.ref.repository == repository and state.ref.number in cyclic and number in cyclic:
+                    state.status = deps.DEADLOCK
+            waiting = [state for state in states if not state.satisfied]
+            comments = self.comments(number) if not self.config.dry_run else []
+            bodies = [str(comment.get("body") or "") for comment in comments]
+            if number in cyclic:
+                blocked.add(number)
+                members = sorted(cyclic & set(graph[number]) | {number})
+                self.log_dependency_once(number, f"is in a dependency cycle ({', '.join(f'#{m}' for m in members)}); skipping.")
+                self.post_dependency_comment(
+                    number, deps.cycle_marker(number, members), deps.render_cycle_comment(number, members), bodies
+                )
+                continue
+            if waiting:
+                blocked.add(number)
+                names = ", ".join(f"{state.ref.label(repository)} ({state.status})" for state in waiting)
+                self.log_dependency_once(number, f"is waiting on {names}; skipping this tick.")
+                known = [state for state in waiting if state.status != deps.UNKNOWN]
+                if known and deps.needs_waiting_comment(bodies, number, [state.ref for state in waiting]):
+                    self.post_dependency_comment(
+                        number, "", deps.render_waiting_comment(number, waiting, repository), bodies, check=False
+                    )
+                continue
+            if deps.needs_released_comment(bodies, number):
+                self.post_dependency_comment(
+                    number, "", deps.render_released_comment(number, refs, repository), bodies, check=False
+                )
+            self._dependency_context[number] = [
+                {
+                    "label": state.ref.label(repository),
+                    "title": state.title,
+                    "pull_title": state.pull_title,
+                    "files": resolver.changed_files(state, 12),
+                }
+                for state in states
+            ]
+        return [item for item in ready if item[0] not in blocked]
+
+    def log_dependency_once(self, number: int, message: str) -> None:
+        if number not in self._dependency_logged:
+            self._dependency_logged.add(number)
+            log(f"Issue #{number} {message}")
+
+    def post_dependency_comment(
+        self, number: int, marker: str, body: str, existing: Sequence[str], *, check: bool = True
+    ) -> None:
+        """Post one dependency lifecycle comment; a GitHub failure is logged and retried next tick."""
+        if self.config.dry_run or (check and any(marker in text for text in existing)):
+            return
+        try:
+            self.github.gh(
+                ["issue", "comment", str(number), "--repo", self.config.github_repository, "--body-file", "-"],
+                None,
+                body,
+            )
+        except Exception as error:
+            log(f"WARNING: Could not post the dependency notice on issue #{number}; will retry: {error}")
+
     def select_issue(self) -> IssueContext | None:
         # A resumable in-progress issue always wins; otherwise the next issue is
         # the highest-priority ready one (see ``priority_rank``), breaking ties by
@@ -3850,6 +3965,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
                 )
             ready.append((number, "followup", candidate, metadata))
 
+        ready = self.gate_on_dependencies(ready)
         if ready:
             # Honor issue priority first (Urgent > High > Medium > Low; no
             # priority label counts as Low), then fall back to lowest issue
@@ -3865,6 +3981,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
                     body=str(remote.get("body") or ""),
                     labels=issue_labels(remote),
                     url=str(remote["html_url"]),
+                    dependencies=self._dependency_context.get(int(remote["number"]), []),
                 )
             assert metadata is not None
             return IssueContext(
@@ -4364,6 +4481,9 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
                 "(including its security/ subtree) or suites with origin=adversarial-security in "
                 ".swarm/tests.json."
             )
+        dependency_text = dependency_context_text(self.issue.dependencies)
+        if dependency_text and not question_issue:
+            lines.extend(["", dependency_text])
         lines.append(self.complexity_prompt_note())
         if self.config.update_claude_assets_enabled and not question_issue:
             lines.append(

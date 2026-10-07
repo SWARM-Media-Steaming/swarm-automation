@@ -203,6 +203,13 @@ Limits are set by `SWARM_JEV_CONTEXT_MAX_RAW_CHARS`, `..._MAX_SUMMARY_CHARS`,
 `..._MAX_EXCERPT_CHARS`, `..._SUMMARY_TIMEOUT_SECONDS`, `..._SUMMARY_RETRIES`
 (or the matching `--jev-context-*` worker flags).
 
+Satisfied issue dependencies (see `docs/issue-dependencies.md`) are appended as a
+separate `[prerequisites]` part: each prerequisite's number, title, merged PR title
+and changed files, sanitized, flattened to one line and capped at 1,800 characters.
+It is retrieved context only, outside the summary/excerpt budgets and their order.
+The dependency count is not a routing input and the scoring formula and
+`SCORING_VERSION` are unchanged.
+
 ## Implementation authority
 
 This document describes the contract. The exact enforcement remains in
