@@ -317,6 +317,12 @@ POST /api/v1/webhooks/github                      signed, idempotent
 Everything else under `/api/v1` is a JSON 404; any other path is a static asset
 from `ui/` (`SWARM_WEB_UI_DIR`, default `../ui`) with `*.test.js`, `*.md` and
 dotfiles unserved. The same assets run on the desktop and the web: the
+The signed-out landing page (`#view-landing`, `ui/landing.js`) is what an
+unauthenticated visitor sees: a marketing hero, a Log in button and an "Ask SWARM"
+chat box. The chat is not a model and makes no request: `SwarmLanding.reply`
+picks a fixed paragraph about how the app works by keyword, and refuses code,
+running anything, links, prompt-injection and off-topic questions.
+
 `web_*` rows in `ui/api.js`'s `COMMANDS` table map onto these routes. Every
 response carries a strict CSP (`default-src 'none'; script-src 'self'; style-src
 'self'; ...`, no `unsafe-inline`), `nosniff`, `frame-ancestors 'none'`,
