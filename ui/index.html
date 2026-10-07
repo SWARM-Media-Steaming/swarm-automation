@@ -369,6 +369,17 @@
               <div class="control-row"><button id="account-signout" type="button" class="secondary-button">Sign out</button></div>
             </article>
             <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">IDENTITIES</p><h3>Connected identities</h3></div><span id="account-identity-count" class="score">0</span></div>
+              <p class="panel-copy">How you sign in. Only the provider and handle are shown; no token is ever displayed.</p>
+              <ul id="account-identities" class="plain-list"></ul>
+            </article>
+            <article class="panel">
+              <div class="panel-header"><div><p class="eyebrow">SESSIONS</p><h3>Active sessions</h3></div></div>
+              <div class="service-meta"><span>This browser</span><span class="status-pill running">Current</span></div>
+              <p class="panel-copy">Other sessions cannot be listed or revoked yet. Signing out ends this one.</p>
+              <div class="control-row"><button id="account-session-signout" type="button" class="danger-button compact">Revoke this session</button></div>
+            </article>
+            <article class="panel">
               <div class="panel-header"><div><p class="eyebrow">TENANT</p><h3>Active tenant</h3></div><span id="account-tenant-pill" class="status-pill stopped">—</span></div>
               <label>Tenant<select id="account-tenant-select" aria-label="Active tenant"></select></label>
               <div class="service-meta"><span>Account type</span><strong id="account-tenant-type">—</strong></div>
@@ -388,9 +399,12 @@
           <div class="settings-grid">
             <article class="panel">
               <div class="panel-header"><div><p class="eyebrow">SIGNED IN</p><h3>GitHub profile</h3></div><span id="profile-role-pill" class="status-pill stopped">—</span></div>
+              <div class="profile-avatar"><img id="profile-avatar-image" class="avatar-image hidden" alt=""><span id="profile-avatar-initials" class="avatar-initials" aria-hidden="true"></span></div>
               <div class="service-meta"><span>Name</span><strong id="profile-name">—</strong></div>
               <div class="service-meta"><span>GitHub user</span><strong id="profile-login">—</strong></div>
               <div class="service-meta"><span>Personal tenant</span><strong id="profile-tenant">—</strong></div>
+              <div class="service-meta"><span>Role in that tenant</span><strong id="profile-role">—</strong></div>
+              <p class="panel-copy">Read-only: this comes from GitHub and changes when you change it there.</p>
             </article>
           </div>
         </section>
@@ -401,7 +415,12 @@
             <article class="panel span-two">
               <div class="panel-header"><div><p class="eyebrow">USERS</p><h3>Platform users</h3></div><span id="admin-user-count" class="score">0</span></div>
               <div id="admin-users-error" class="banner warning hidden" role="alert"></div>
-              <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Platform users</caption><thead><tr><th scope="col">GitHub user</th><th scope="col">Role</th></tr></thead><tbody id="admin-users"></tbody></table></div>
+              <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Platform users</caption><thead><tr><th scope="col">GitHub user</th><th scope="col">Role</th><th scope="col">Last sign-in</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="admin-users"></tbody></table></div>
+            </article>
+            <article class="panel span-two">
+              <div class="panel-header"><div><p class="eyebrow">AUDIT LOG</p><h3>Recent admin changes</h3></div><span id="admin-audit-count" class="score">0</span></div>
+              <div id="admin-audit-error" class="banner warning hidden" role="alert"></div>
+              <div class="usage-table-wrap"><table class="usage-table"><caption class="sr-only">Recent platform admin changes, newest first</caption><thead><tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">By</th><th scope="col">User</th></tr></thead><tbody id="admin-audit"></tbody></table></div>
             </article>
           </div>
         </section>
@@ -559,6 +578,15 @@
         <h2 id="help-modal-title"></h2>
         <div id="help-modal-body"></div>
         <div id="help-modal-links" class="link-row"></div>
+      </div>
+    </div>
+
+    <div id="admin-confirm-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="admin-confirm-title">
+      <div class="modal">
+        <button id="admin-confirm-close" class="modal-close" aria-label="Close">×</button>
+        <h2 id="admin-confirm-title"></h2>
+        <p id="admin-confirm-body" class="panel-copy"></p>
+        <div class="control-row"><button id="admin-confirm-cancel" type="button" class="secondary-button">Cancel</button><button id="admin-confirm-ok" type="button" class="primary-button"></button></div>
       </div>
     </div>
 

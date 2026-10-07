@@ -56,6 +56,7 @@
     // Platform administration (web/src/admin.rs): not tenant-scoped, and the
     // server answers 404 to anyone who is not a platform admin.
     web_admin_list_users: { method: "GET", path: "/admin/users" },
+    web_admin_audit_log: { method: "GET", path: "/admin/audit-log" },
     web_admin_promote_user: { method: "POST", path: "/admin/users/{userId}/promote" },
     web_admin_demote_user: { method: "POST", path: "/admin/users/{userId}/demote" },
     // The desktop's own commands, by the name the UI already invokes. A

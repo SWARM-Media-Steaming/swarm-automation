@@ -297,6 +297,7 @@ GET  /api/v1/me                                   the signed-in user's profile (
 GET  /api/v1/auth/{provider}/login | /callback    identity-provider OAuth (state + PKCE); only `github` exists
 POST /api/v1/auth/logout
 GET  /api/v1/admin/users                          platform admin only (404 for anyone else)
+GET  /api/v1/admin/audit-log                      platform admin only, newest 50 rows
 POST /api/v1/admin/users/{userId}/promote|demote  platform admin only, audited
 GET  /api/v1/tenants[/{tenant}[/members|/provider-keys|/quotas|/usage]]
 PUT  /api/v1/tenants/{tenant}/provider-keys/{provider}     write-only (owner)
@@ -388,6 +389,7 @@ route that does not exist, so the admin API is not discoverable.
 | Command (`ui/api.js`) | Endpoint | Access | Does |
 | --- | --- | --- | --- |
 | `web_admin_list_users` | `GET /api/v1/admin/users` | platform admin | every user: `id`, `login`, `display_name`, `avatar_url`, `last_login_at`, `is_platform_admin`, by login |
+| `web_admin_audit_log` | `GET /api/v1/admin/audit-log` | platform admin | the newest 50 audit rows: `id`, `action`, `actor_login`, `target_login` (`null` once deleted), `created_at`; never the free-form detail |
 | `web_admin_promote_user` | `POST /api/v1/admin/users/{userId}/promote` | platform admin | make the user an admin; `{"user": ..., "changed": bool}` |
 | `web_admin_demote_user` | `POST /api/v1/admin/users/{userId}/demote` | platform admin | remove the flag; `409` for the last admin |
 
@@ -930,8 +932,14 @@ repeated.
   Admin (platform admins only) and Sign out, with no Billing. It is `data-web-only`
   markup rendered by `app.js` from `ui/web-account.js` (`profileView`, `menuItems`,
   `nextMenuIndex`, `loadProfile`); items open the `profile`, `repository`,
-  `account` and `admin` views of the view-switcher. The Admin view lists
-  `web_admin_list_users` and is requested only when `/me` says admin.
+  `account` and `admin` views of the view-switcher. The Profile view is read-only
+  (avatar, name, login, personal tenant, role). Account lists the connected
+  identities from `/me` and the current session with a sign-out ("Revoke this
+  session"); other sessions are not listed until the backend offers them. The
+  Admin view (`navigate` sends non-admins to Profile; the server still answers
+  404) lists `web_admin_list_users` with Promote/Demote behind a confirm dialog
+  (the last-admin 409 shows as a toast) and the recent `web_admin_audit_log`. It
+  is requested only when `/me` says admin.
 - **Public routes.** `GET /health`, `GET /session` (anonymous answer is
   `{"authenticated": false, "login_url": ..., "install_url": ...}`), `GET /version`
   and the OAuth redirect/callback. Everything else needs a session.
