@@ -126,6 +126,46 @@ fn the_adapter_table_matches_the_catalog_exactly() {
 }
 
 #[test]
+fn the_admin_routes_are_in_the_adapter_and_the_docs() {
+    let js = js_commands();
+    let docs = repo("docs/web-architecture.md");
+    for route in catalog::ADMIN_ROUTES {
+        assert!(
+            route.command.starts_with("web_admin_"),
+            "{} is a web-only command",
+            route.command
+        );
+        assert_eq!(
+            js.get(route.command),
+            Some(&(route.method.to_string(), route.path.to_string())),
+            "ui/api.js row for {}",
+            route.command
+        );
+        let row = format!("`{} {}`", route.method, catalog::admin_full_path(route));
+        assert!(
+            docs.contains(&row),
+            "docs/web-architecture.md is missing {row}"
+        );
+        assert!(
+            docs.contains(&format!("`{}`", route.command)),
+            "docs do not name {}",
+            route.command
+        );
+    }
+    // Nothing in the adapter claims to be an admin command the backend lacks.
+    for name in js.keys().filter(|name| name.starts_with("web_admin_")) {
+        assert!(
+            catalog::ADMIN_ROUTES.iter().any(|r| r.command == name),
+            "{name} is in ui/api.js but not in catalog::ADMIN_ROUTES"
+        );
+    }
+    // Admin routes are platform-wide: never under a tenant.
+    for route in catalog::ADMIN_ROUTES {
+        assert!(!route.path.contains("{tenant}"), "{}", route.path);
+    }
+}
+
+#[test]
 fn every_desktop_event_is_streamed_or_listed_as_removed() {
     let js = js_events();
     for event in catalog::EVENTS {

@@ -255,6 +255,45 @@ impl PostgresStore {
     }
 }
 
+/// Advisory-lock key serialising every change to who is a platform admin.
+const ADMIN_LOCK: &str = "swarm-web-platform-admins";
+
+/// The columns [`user_from`] reads. `login` is the first identity's.
+const USER_SELECT: &str = "SELECT u.id, u.display_name, u.avatar_url, u.is_platform_admin,
+        (extract(epoch FROM u.last_login_at))::bigint AS at,
+        (SELECT i.login FROM user_identities i
+          WHERE i.user_id = u.id ORDER BY i.id LIMIT 1) AS login
+    FROM users u";
+
+/// `None` for a user with no identity (it has no handle to show and cannot sign in).
+fn user_from(row: &Row) -> Option<User> {
+    Some(User {
+        id: row.get("id"),
+        login: row.get::<_, Option<String>>("login")?,
+        display_name: row.get("display_name"),
+        avatar_url: row.get("avatar_url"),
+        last_login_at: row.get::<_, Option<i64>>("at").map(unint),
+        is_platform_admin: row.get("is_platform_admin"),
+    })
+}
+
+async fn insert_audit(
+    tx: &deadpool_postgres::Transaction<'_>,
+    actor_id: &str,
+    target_id: &str,
+    action: &str,
+    detail: Value,
+) -> StoreResult<()> {
+    tx.execute(
+        "INSERT INTO admin_audit_log (actor_user_id, target_user_id, action, detail)
+         VALUES ($1, $2, $3, $4)",
+        &[&actor_id, &target_id, &action, &detail],
+    )
+    .await
+    .map_err(fail)?;
+    Ok(())
+}
+
 const TENANT_COLUMNS: &str = "tenant_id, installation_id, account_login, account_type, status";
 
 #[async_trait]
@@ -282,7 +321,7 @@ impl Store for PostgresStore {
             .await
             .map_err(fail)?;
         let first_sign_in = existing.is_none();
-        let (user_id, last_login) = match existing {
+        let (user_id, last_login, is_admin) = match existing {
             Some(row) => {
                 let id: String = row.get("user_id");
                 tx.execute(
@@ -294,12 +333,17 @@ impl Store for PostgresStore {
                 let row = tx
                     .query_one(
                         "UPDATE users SET display_name = $2, avatar_url = $3, last_login_at = now()
-                         WHERE id = $1 RETURNING (extract(epoch FROM last_login_at))::bigint AS at",
+                         WHERE id = $1 RETURNING (extract(epoch FROM last_login_at))::bigint AS at,
+                                                 is_platform_admin",
                         &[&id, &profile.display_name, &profile.avatar_url],
                     )
                     .await
                     .map_err(fail)?;
-                (id, row.get::<_, i64>("at"))
+                (
+                    id,
+                    row.get::<_, i64>("at"),
+                    row.get::<_, bool>("is_platform_admin"),
+                )
             }
             None => {
                 let id = format!("u{}", random_hex(8));
@@ -312,7 +356,7 @@ impl Store for PostgresStore {
                     )
                     .await
                     .map_err(fail)?;
-                (id, row.get::<_, i64>("at"))
+                (id, row.get::<_, i64>("at"), false)
             }
         };
 
@@ -399,6 +443,7 @@ impl Store for PostgresStore {
                 display_name: profile.display_name.clone(),
                 avatar_url: profile.avatar_url.clone(),
                 last_login_at: Some(unint(last_login)),
+                is_platform_admin: is_admin,
             },
             tenant,
             first_sign_in,
@@ -407,24 +452,144 @@ impl Store for PostgresStore {
 
     async fn user(&self, user_id: &str) -> StoreResult<Option<User>> {
         let rows = self
-            .query(
-                "SELECT u.id, u.display_name, u.avatar_url,
-                        (extract(epoch FROM u.last_login_at))::bigint AS at,
-                        (SELECT i.login FROM user_identities i
-                          WHERE i.user_id = u.id ORDER BY i.id LIMIT 1) AS login
-                 FROM users u WHERE u.id = $1",
+            .query(&format!("{USER_SELECT} WHERE u.id = $1"), &[&user_id])
+            .await?;
+        Ok(rows.first().and_then(user_from))
+    }
+
+    async fn bootstrap_platform_admin(&self, user_id: &str) -> StoreResult<bool> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(fail)?;
+        // The same lock as `set_platform_admin`, so "no admin exists" cannot
+        // change between the check and the update.
+        tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&ADMIN_LOCK])
+            .await
+            .map_err(fail)?;
+        let admins: i64 = tx
+            .query_one("SELECT count(*) FROM users WHERE is_platform_admin", &[])
+            .await
+            .map_err(fail)?
+            .get(0);
+        if admins > 0 {
+            return Ok(false);
+        }
+        let promoted = tx
+            .query_opt(
+                "UPDATE users SET is_platform_admin = true WHERE id = $1
+                 RETURNING (SELECT i.login FROM user_identities i
+                             WHERE i.user_id = users.id ORDER BY i.id LIMIT 1) AS login",
                 &[&user_id],
             )
+            .await
+            .map_err(fail)?;
+        let Some(row) = promoted else {
+            return Ok(false);
+        };
+        let login: Option<String> = row.get("login");
+        insert_audit(
+            &tx,
+            user_id,
+            user_id,
+            AUDIT_ADMIN_BOOTSTRAP,
+            serde_json::json!({ "target_login": login }),
+        )
+        .await?;
+        tx.commit().await.map_err(fail)?;
+        Ok(true)
+    }
+
+    async fn platform_users(&self) -> StoreResult<Vec<User>> {
+        let rows = self
+            .query(
+                // `login` is an output column, which ORDER BY can only use
+                // bare, so the select is wrapped to sort case-insensitively.
+                &format!("SELECT * FROM ({USER_SELECT}) AS listed ORDER BY lower(login), id"),
+                &[],
+            )
             .await?;
-        Ok(rows.first().and_then(|row| {
-            Some(User {
-                id: row.get("id"),
-                login: row.get::<_, Option<String>>("login")?,
-                display_name: row.get("display_name"),
-                avatar_url: row.get("avatar_url"),
-                last_login_at: row.get::<_, Option<i64>>("at").map(unint),
-            })
+        Ok(rows.iter().filter_map(user_from).collect())
+    }
+
+    async fn set_platform_admin(
+        &self,
+        actor_id: &str,
+        target_id: &str,
+        admin: bool,
+    ) -> StoreResult<AdminChange> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(fail)?;
+        // Serialises every admin change: two demotions cannot both see "two
+        // admins" and leave none.
+        tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&ADMIN_LOCK])
+            .await
+            .map_err(fail)?;
+        let rows = tx
+            .query(&format!("{USER_SELECT} WHERE u.id = $1"), &[&target_id])
+            .await
+            .map_err(fail)?;
+        let Some(current) = rows.first().and_then(user_from) else {
+            return Ok(AdminChange::UnknownUser);
+        };
+        if current.is_platform_admin == admin {
+            return Ok(AdminChange::Unchanged(current));
+        }
+        if !admin {
+            let admins: i64 = tx
+                .query_one("SELECT count(*) FROM users WHERE is_platform_admin", &[])
+                .await
+                .map_err(fail)?
+                .get(0);
+            if admins <= 1 {
+                return Ok(AdminChange::LastAdmin);
+            }
+        }
+        tx.execute(
+            "UPDATE users SET is_platform_admin = $2 WHERE id = $1",
+            &[&target_id, &admin],
+        )
+        .await
+        .map_err(fail)?;
+        let action = if admin {
+            AUDIT_ADMIN_PROMOTE
+        } else {
+            AUDIT_ADMIN_DEMOTE
+        };
+        insert_audit(
+            &tx,
+            actor_id,
+            target_id,
+            action,
+            serde_json::json!({ "target_login": current.login }),
+        )
+        .await?;
+        tx.commit().await.map_err(fail)?;
+        Ok(AdminChange::Changed(User {
+            is_platform_admin: admin,
+            ..current
         }))
+    }
+
+    async fn admin_audit_log(&self, limit: usize) -> StoreResult<Vec<AuditEntry>> {
+        let limit = int(limit as u64)?;
+        let rows = self
+            .query(
+                "SELECT id, actor_user_id, target_user_id, action, detail,
+                        (extract(epoch FROM created_at))::bigint AS at
+                 FROM admin_audit_log ORDER BY id DESC LIMIT $1",
+                &[&limit],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| AuditEntry {
+                id: row.get("id"),
+                actor_user_id: row.get("actor_user_id"),
+                target_user_id: row.get("target_user_id"),
+                action: row.get("action"),
+                detail: row.get("detail"),
+                created_at: unint(row.get("at")),
+            })
+            .collect())
     }
 
     async fn create_session(&self, session: Session) -> StoreResult<()> {

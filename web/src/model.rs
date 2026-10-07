@@ -144,6 +144,9 @@ pub struct User {
     pub avatar_url: Option<String>,
     /// Unix seconds of the last sign-in.
     pub last_login_at: Option<u64>,
+    /// A platform administrator (`users.is_platform_admin`): someone who runs
+    /// the hosted service. Not a tenant [`Role::Owner`], which is per tenant.
+    pub is_platform_admin: bool,
 }
 
 /// What an identity provider says about a person after a successful sign-in:
@@ -291,6 +294,37 @@ pub struct ProviderReport {
     #[serde(default)]
     pub reported_at: u64,
 }
+
+/// What [`crate::store::Store::set_platform_admin`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminChange {
+    /// The flag changed and one audit row was written. Carries the user as stored.
+    Changed(User),
+    /// The user already was in the requested state; nothing was written.
+    Unchanged(User),
+    UnknownUser,
+    /// The change would leave the platform with no administrator.
+    LastAdmin,
+}
+
+/// One row of `admin_audit_log`. The actor and the target are `None` once the
+/// user they name has been deleted (the trail outlives the people in it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub actor_user_id: Option<String>,
+    pub target_user_id: Option<String>,
+    pub action: String,
+    pub detail: serde_json::Value,
+    /// Unix seconds.
+    pub created_at: u64,
+}
+
+/// `AuditEntry::action` of the first administrator, made at sign-in by
+/// `SWARM_WEB_BOOTSTRAP_ADMINS`.
+pub const AUDIT_ADMIN_BOOTSTRAP: &str = "admin.bootstrap";
+pub const AUDIT_ADMIN_PROMOTE: &str = "admin.promote";
+pub const AUDIT_ADMIN_DEMOTE: &str = "admin.demote";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeliveryClaim {

@@ -9,6 +9,8 @@ github_app_id    = 123456
 github_client_id = "Iv1.0000000000000000"
 github_app_slug  = "swarm-automation"
 trusted_authors  = ["your-github-login"]
+# Numeric GitHub ids are safer than logins. Empty the list once admins exist.
+bootstrap_admins = ["your-github-login"]
 
 # Keep 0 until the secrets are populated, then set 1 and apply again.
 api_desired_count = 0

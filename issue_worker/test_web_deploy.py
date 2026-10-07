@@ -111,6 +111,19 @@ class ComposeStackTests(unittest.TestCase):
         self.assertIn("SWARM_WEB_JOB_RUNNER: docker", api)
         self.assertIn("SWARM_WEB_BRIDGE: python", api)
 
+    def test_the_first_admin_bootstrap_has_one_name_everywhere(self):
+        # #441: one spelling in the code, compose, .env.example, Terraform and the docs.
+        name = "SWARM_WEB_BOOTSTRAP_ADMINS"
+        self.assertIn(name, names_the_code_reads())
+        self.assertRegex(service_block("api"), rf"\b{name}: \$\{{{name}:-\}}", "optional, empty by default")
+        self.assertIn(name, read(WEB / ".env.example"))
+        self.assertTrue(assigns(read(TERRAFORM / "ecs.tf"), name, 'join(",", var.bootstrap_admins)'))
+        self.assertRegex(read(TERRAFORM / "variables.tf"), r'variable "bootstrap_admins"[^}]*default\s*=\s*\[\]')
+        self.assertIn("bootstrap_admins", read(TERRAFORM / "terraform.tfvars.example"))
+        self.assertIn(name, read(REPO / "docs" / "web-architecture.md"))
+        # An operator-chosen list of accounts, not a credential: never a secret in the task.
+        self.assertNotIn(name, read(TERRAFORM / "secrets.tf"))
+
     def test_required_values_fail_loudly_instead_of_booting_empty(self):
         api = service_block("api")
         for name in sorted(REQUIRED_BY_API - {"SWARM_WEB_PUBLIC_URL"}) + ["SWARM_WEB_GITHUB_APP_ID", "SWARM_WEB_GITHUB_APP_PRIVATE_KEY"]:
