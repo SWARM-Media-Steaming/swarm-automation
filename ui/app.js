@@ -129,6 +129,8 @@
     keys: "API keys",
     github: "GitHub App",
     quota: "Quota & budget",
+    profile: "Profile",
+    admin: "Admin",
   };
   const symbols = { git: "G", gh: "GH", python: "Py", node: "N", npm: "npm", claude: "C", codex: "X", grok: "Gk" };
 
@@ -425,7 +427,7 @@
     }
     if (view === "guides") void refreshModelCalibration({ quiet: true });
     if (view === "ai") void refreshModelDataKeyStatus();
-    if (webMode && ["account", "keys", "github", "quota"].includes(view)) void refreshWebAccount();
+    if (webMode && ["profile", "account", "keys", "github", "quota", "admin"].includes(view)) void refreshWebAccount();
     if (view === "architecture") void refreshArchitecture({ quiet: true });
     if (view === "knowledge") {
       renderKnowledgeScope();
@@ -6078,6 +6080,9 @@
     renderWebKeys();
     renderWebGithub();
     renderWebQuota();
+    renderAvatarMenu();
+    renderWebProfile();
+    renderWebAdmin();
   }
 
   // An expired session shows the banner and keeps the page; every other failure
@@ -6090,7 +6095,11 @@
   async function refreshWebAccount() {
     if (!webAccount) return;
     await webAccount.loadSession();
-    if (webAccount.state.session.authenticated) await webAccount.loadTenantData();
+    if (webAccount.state.session.authenticated) {
+      await webAccount.loadTenantData();
+      await webAccount.loadProfile();
+      await webAccount.loadAdminUsers();
+    }
     renderWebAccount();
   }
 
@@ -6130,7 +6139,101 @@
     void refreshStatus({ quiet: true });
   }
 
+  // ----- Avatar menu (top right) ----------------------------------------------
+  // Items and their order come from `SwarmWebAccount.menuItems`; each opens a
+  // view of the view-switcher, or signs out.
+  function closeAvatarMenu({ focus = false } = {}) {
+    const button = byId("avatar-button");
+    byId("avatar-dropdown").classList.add("hidden");
+    button.setAttribute("aria-expanded", "false");
+    if (focus) button.focus();
+  }
+
+  function openAvatarMenu() {
+    byId("avatar-dropdown").classList.remove("hidden");
+    byId("avatar-button").setAttribute("aria-expanded", "true");
+    const first = byId("avatar-items").querySelector('[role="menuitem"]');
+    if (first) first.focus();
+  }
+
+  function renderAvatarMenu() {
+    const { profile } = webAccount.state;
+    document.body.dataset.profile = profile ? "yes" : "no";
+    document.body.dataset.admin = profile && profile.isAdmin ? "yes" : "no";
+    if (!profile) { closeAvatarMenu(); return; }
+    const image = byId("avatar-image");
+    image.classList.toggle("hidden", !profile.avatarUrl);
+    if (profile.avatarUrl) image.src = profile.avatarUrl; else image.removeAttribute("src");
+    image.onerror = () => image.classList.add("hidden");
+    byId("avatar-initials").textContent = profile.initials;
+    byId("avatar-button").setAttribute("aria-label", `Account menu for ${profile.login}`);
+    byId("avatar-name").textContent = profile.displayName;
+    byId("avatar-login").textContent = `@${profile.login}`;
+    byId("avatar-tenant").textContent = profile.tenant ? `Tenant: ${profile.tenant}` : "";
+    const list = byId("avatar-items");
+    list.replaceChildren();
+    window.SwarmWebAccount.menuItems(profile).forEach((item) => {
+      const entry = button(item.label, "avatar-item", () => {
+        closeAvatarMenu();
+        if (item.action === "signout") void signOutWeb(); else navigate(item.view);
+      });
+      entry.setAttribute("role", "menuitem");
+      entry.tabIndex = -1;
+      list.appendChild(entry);
+    });
+  }
+
+  function renderWebProfile() {
+    const { profile } = webAccount.state;
+    byId("profile-name").textContent = profile ? profile.displayName : "—";
+    byId("profile-login").textContent = profile ? `@${profile.login}` : "—";
+    byId("profile-tenant").textContent = profile && profile.tenant ? profile.tenant : "—";
+    const pill = byId("profile-role-pill");
+    pill.className = `status-pill ${profile && profile.role === "owner" ? "running" : "stopped"}`;
+    pill.textContent = profile ? window.SwarmWebAccount.roleLabel(profile.role) : "—";
+  }
+
+  function renderWebAdmin() {
+    const { adminUsers, errors } = webAccount.state;
+    const body = byId("admin-users");
+    body.replaceChildren();
+    adminUsers.forEach((user) => {
+      const row = document.createElement("tr");
+      const name = document.createElement("td");
+      name.appendChild(webNode("strong", "", user.login));
+      const role = document.createElement("td");
+      role.appendChild(webPill(user.isAdmin ? "Platform admin" : "User", user.isAdmin ? "running" : "stopped"));
+      row.append(name, role);
+      body.appendChild(row);
+    });
+    byId("admin-user-count").textContent = String(adminUsers.length);
+    setWebNotice("admin-users-error", errors.admin ? `Could not load users: ${errors.admin}` : "");
+  }
+
+  function bindAvatarMenuEvents() {
+    const menu = byId("avatar-menu");
+    const button = byId("avatar-button");
+    const items = () => Array.from(byId("avatar-items").querySelectorAll('[role="menuitem"]'));
+    const isOpen = () => button.getAttribute("aria-expanded") === "true";
+    button.addEventListener("click", () => (isOpen() ? closeAvatarMenu() : openAvatarMenu()));
+    button.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" && !isOpen()) { event.preventDefault(); openAvatarMenu(); }
+    });
+    menu.addEventListener("keydown", (event) => {
+      if (!isOpen()) return;
+      if (event.key === "Escape") { event.preventDefault(); closeAvatarMenu({ focus: true }); return; }
+      if (event.key === "Tab") { closeAvatarMenu(); return; }
+      const list = items();
+      const next = window.SwarmWebAccount.nextMenuIndex(list.indexOf(document.activeElement), event.key, list.length);
+      if (next >= 0) { event.preventDefault(); list[next].focus(); }
+    });
+    document.addEventListener("click", (event) => {
+      if (isOpen() && !menu.contains(event.target)) closeAvatarMenu();
+    });
+  }
+
   function bindWebAccountEvents() {
+    bindAvatarMenuEvents();
     ["tenant-select", "account-tenant-select"].forEach((id) => {
       byId(id).addEventListener("change", (event) => void chooseWebTenant(event.target.value));
     });
