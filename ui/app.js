@@ -124,6 +124,7 @@
     guides: "Guides",
     debug: "Info & Debug",
     help: "Help",
+    landing: "Welcome",
     signin: "Sign in",
     account: "Account",
     keys: "API keys",
@@ -5866,6 +5867,8 @@
     byId("session-banner").classList.toggle("hidden", !expired);
     byId("session-banner-link").href = session.loginUrl;
     byId("signin-link").href = session.loginUrl;
+    byId("landing-login").href = session.loginUrl;
+    byId("landing-login-top").href = session.loginUrl;
     const install = byId("signin-install-link");
     install.classList.toggle("hidden", !session.installUrl);
     if (session.installUrl) install.href = session.installUrl;
@@ -6125,7 +6128,7 @@
     const result = await webAccount.signOut();
     if (!result.ok) { showToast(result.message, "error"); return; }
     renderWebAccount();
-    navigate("signin");
+    navigate("landing");
   }
 
   async function chooseWebTenant(id) {
@@ -6333,14 +6336,51 @@
     }, 60000);
   }
 
+  // The landing page's guarded Q&A. `SwarmLanding.reply` is pure and makes no
+  // request; this only renders the exchange.
+  function bindLanding() {
+    const L = window.SwarmLanding;
+    if (!L) return;
+    const messages = byId("landing-messages");
+    const input = byId("landing-input");
+    const add = (role, text) => {
+      const bubble = document.createElement("div");
+      bubble.className = `chat-message ${role}`;
+      bubble.textContent = text;
+      messages.appendChild(bubble);
+      messages.scrollTop = messages.scrollHeight;
+    };
+    const ask = (question) => {
+      const text = String(question || "").trim();
+      if (!text) return;
+      add("user", text);
+      add("assistant", L.reply(text).text);
+      input.value = "";
+    };
+    add("assistant", "Hi! I can answer questions about how SWARM Automation works. What would you like to know?");
+    L.SUGGESTIONS.forEach((suggestion) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary-button compact";
+      button.textContent = suggestion;
+      button.addEventListener("click", () => ask(suggestion));
+      byId("landing-suggestions").appendChild(button);
+    });
+    byId("landing-form").addEventListener("submit", (event) => { event.preventDefault(); ask(input.value); });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); ask(input.value); }
+    });
+  }
+
   // Returns true when the signed-in desktop initialization should continue.
   async function bootstrapWeb() {
     document.body.dataset.transport = "web";
     await webAccount.loadSession();
     renderWebAccount();
     bindWebAccountEvents();
+    bindLanding();
     if (!webAccount.state.session.authenticated) {
-      navigate("signin");
+      navigate("landing");
       return false;
     }
     void refreshWebAccount();
