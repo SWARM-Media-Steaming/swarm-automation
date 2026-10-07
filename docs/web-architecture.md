@@ -203,19 +203,38 @@ numbers.
 
 ### Platform schema
 
-`web/migrations/0001_platform.sql` (embedded as `swarm_web::schema::MIGRATIONS`)
-is the Postgres schema for what the `Store` trait holds: `web_users`,
-`web_sessions`, `tenants` (one per GitHub App installation), `tenant_memberships`,
-`tenant_provider_keys` (sealed keys and their metadata, no plaintext column),
-`tenant_plan_quotas`, `tenant_budgets`, `tenant_usage_ledger` (a `NULL` cost is
-unpriced, never zero), `tenant_provider_reports`, `tenant_jobs` (a row holds a
-concurrent-job slot while `active`) and `webhook_deliveries`. Tenant-scoped tables
-lead their key with `tenant_id` and cascade from `tenants`. The file is idempotent;
-apply it with `psql -f` or any runner. Per-tenant execution history is *not* here
-(it is the `t_<tenant>` schema above) and neither are settings, which are
-`tenant_config` documents in object storage so a worker job reads them beside its
-checkpoints. The Postgres `Store` that queries these tables is a known gap;
-`memory::MemoryStore` remains the store until then.
+`web/migrations/*.sql` (embedded as `swarm_web::schema::MIGRATIONS`, applied in
+order and recorded in `platform_migrations`) is the Postgres schema for what the
+`Store` trait holds. `0001_platform` creates tenants (one per GitHub App
+installation), `tenant_provider_keys` (sealed keys and their metadata, no
+plaintext column), `tenant_plan_quotas`, `tenant_budgets`, `tenant_usage_ledger`
+(a `NULL` cost is unpriced, never zero), `tenant_provider_reports`, `tenant_jobs`
+(a row holds a concurrent-job slot while `active`) and `webhook_deliveries`.
+Tenant-scoped tables lead their key with `tenant_id` and cascade from `tenants`.
+
+`0002_identity` is the identity model (#438). GitHub is the only sign-in method
+today; there is no username, email or password login, and more OIDC providers
+join as extra `user_identities` rows:
+
+| Table | Holds | Keys |
+|-------|-------|------|
+| `users` (was `web_users`) | a person: `display_name`, `avatar_url`, nullable `email`, `is_platform_admin` (default false), `created_at`, `last_login_at` | `id` |
+| `user_identities` | how they sign in: `provider`, `subject` (the provider's stable id, the GitHub numeric id as text), `login`, `created_at` | `user_id` -> `users` ON DELETE CASCADE; UNIQUE (`provider`, `subject`) |
+| `sessions` (was `web_sessions`) | hashed cookie, CSRF token, expiry | `user_id` -> `users` ON DELETE CASCADE |
+| `tenant_memberships` | `role` CHECK (`owner`, `member`) | (`tenant_id`, `user_id`) unique; both FK, cascade |
+| `tenants.owner_user_id` | the owning user, nullable | -> `users` ON DELETE SET NULL |
+| `admin_audit_log` | `action`, JSON `detail`, `created_at` | `actor_user_id`, `target_user_id` -> `users` ON DELETE SET NULL (the trail outlives the people in it) |
+
+Every foreign key column is indexed. `users.github_id` and `users.login` moved
+into `user_identities` (backfilled as provider `github`). Every file is
+idempotent and the whole sequence may be applied twice (`psql -f` over each file
+in order): `0002` guards each step on the catalog, and drops the empty
+`web_users`/`web_sessions` that a re-run of `0001` recreates. The per-tenant
+worker schema (`t_<tenant>`, `SCHEMA_VERSION`) is untouched. Per-tenant
+execution history is *not* here (it is the `t_<tenant>` schema above) and neither
+are settings, which are `tenant_config` documents in object storage so a worker
+job reads them beside its checkpoints. The Postgres `Store` that queries these
+tables is a known gap; `memory::MemoryStore` remains the store until then.
 
 ### Desktop data import
 
