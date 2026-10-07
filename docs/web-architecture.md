@@ -293,6 +293,7 @@ in `web/` beside the desktop's.
 ```
 GET  /api/v1/health
 GET  /api/v1/session                              who is signed in, tenants, CSRF token
+GET  /api/v1/me                                   the signed-in user's profile (`web_me`)
 GET  /api/v1/auth/{provider}/login | /callback    identity-provider OAuth (state + PKCE); only `github` exists
 POST /api/v1/auth/logout
 GET  /api/v1/admin/users                          platform admin only (404 for anyone else)
@@ -918,6 +919,12 @@ repeated.
 - **Unavailable is not zero.** A figure the backend cannot know (remaining quota
   with no budget and no provider report, history without a bridge) is `null` or a
   `503`/`501` with the reason, never a made-up number.
+- **Profile.** `GET /me` (`web_me`, session-scoped by `Authed`, never reads a
+  tenant from client input) answers `id`, `login`, `display_name`, `avatar_url`,
+  `tenant` (the user's personal tenant id), `role` (their role there),
+  `is_platform_admin` and `identities` (`provider` + `login` only). Sign-out is
+  `POST /auth/logout` (`web_logout`); listing and revoking other sessions is not
+  offered yet.
 - **Public routes.** `GET /health`, `GET /session` (anonymous answer is
   `{"authenticated": false, "login_url": ..., "install_url": ...}`), `GET /version`
   and the OAuth redirect/callback. Everything else needs a session.
