@@ -714,6 +714,7 @@ saved and installation active.
 | `launch_bot_setup` | The GitHub App is installed from GitHub (sign-in creates the tenant); there is no local bot setup terminal. |
 | `install_ai_cli` | The provider CLIs are baked into the worker image; nothing is installed on the user's machine. |
 | `open_provider_login` | Hosted jobs use the tenant's own provider API keys (`provider-keys`), not an interactive CLI login. |
+| `github_sign_in` | The browser signs in through GitHub itself (sign-in creates the tenant). The desktop's device flow stores its token in the local `gh` CLI, which has no web equivalent. |
 
 **Events**
 
@@ -723,6 +724,7 @@ saved and installation active.
 | `job-log` | `GET /api/v1/events/jobs` | The per-issue projection of the same lines (`tenant`, `repository`, `issue`, `line`). |
 | `model-calibration-refreshed` | `GET /api/v1/events/model-calibration` | Published after `POST /calibration/refresh`. |
 | `system-permission-primed` | none (removed) | A macOS Automation permission prompt on the desktop; the web has no such permission. |
+| `github-device-code` | none (removed) | The one-time code shown during the desktop's GitHub device-flow sign-in; the web signs in through GitHub directly. |
 
 Every stream is session-scoped (the tenants the signed-in user belongs to; the
 membership and the session are re-checked every 30 s and a logout ends the

@@ -3296,10 +3296,34 @@
   }
 
   async function signIn(provider) {
+    if (provider === "gh") return signInWithGitHub();
     try {
       await invoke("open_provider_login", { provider });
       showToast("A Terminal window was opened for sign-in.", "success");
     } catch (error) { showToast(errorText(error), "error"); }
+  }
+
+  // GitHub sign-in runs in the app (device flow). The backend emits the code
+  // the user must enter; this shows it until the sign-in resolves.
+  let githubCodeToast = null;
+
+  function showGitHubCode(prompt) {
+    if (githubCodeToast) githubCodeToast.remove();
+    githubCodeToast = showToast(`Enter code ${prompt.userCode} on GitHub to finish signing in.`, "progress");
+    void openUrl(prompt.verificationUri);
+  }
+
+  async function signInWithGitHub() {
+    try {
+      const login = await invoke("github_sign_in");
+      showToast(`Signed in to GitHub as ${login}.`, "success");
+    } catch (error) {
+      showToast(errorText(error), "error");
+    } finally {
+      if (githubCodeToast) githubCodeToast.remove();
+      githubCodeToast = null;
+    }
+    void refreshTools({ quiet: true });
   }
 
   async function openUrl(url) {
@@ -6413,6 +6437,7 @@
         renderLogs();
       });
       await listen("system-permission-primed", (event) => showToast(event.payload));
+      await listen("github-device-code", (event) => showGitHubCode(event.payload));
       await listen("model-calibration-refreshed", (event) => onModelCalibrationRefreshed(event.payload));
       void refreshAppVersion();
       // Tool detection and repository inspection run independently. Keeping

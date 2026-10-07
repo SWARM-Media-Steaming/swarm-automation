@@ -1,4 +1,5 @@
 mod config;
+mod github_login;
 mod processes;
 mod secrets;
 mod tools;
@@ -4949,6 +4950,21 @@ fn open_provider_login(state: State<'_, AppState>, provider: String) -> Result<(
     open_terminal_command(&command)
 }
 
+/// Sign in to GitHub in-app via the device flow. Emits `github-device-code`
+/// with the code to enter on GitHub, then resolves with the signed-in login.
+#[tauri::command]
+async fn github_sign_in(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let config = current_config(&state)?;
+    let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        github_login::sign_in(&gh, |prompt| {
+            let _ = app.emit("github-device-code", prompt);
+        })
+    })
+    .await
+    .map_err(|error| format!("GitHub sign-in task failed: {error}"))?
+}
+
 #[tauri::command]
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     if !url.starts_with("https://") {
@@ -5485,6 +5501,7 @@ fn main() {
             promotion_overview,
             promotion_overview_background,
             open_provider_login,
+            github_sign_in,
             open_external_url,
             open_automation_folder,
             get_recent_logs,
