@@ -459,6 +459,39 @@ pub fn tenant_json(tenant: &Tenant, role: Role) -> serde_json::Value {
     })
 }
 
+/// The signed-in user's profile (`GET /me`): the session decides who, nothing
+/// from the client does. The tenant is the user's personal one (the first
+/// tenant when they somehow have none); identities carry provider and login
+/// only, never a subject, token or session hash.
+pub async fn me(
+    State(state): State<AppState>,
+    authed: Authed,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = &authed.user;
+    let tenants = state.store.tenants_for_user(&user.id).await?;
+    let primary = tenants
+        .iter()
+        .find(|(tenant, _)| tenant.account_type == PERSONAL_ACCOUNT_TYPE)
+        .or_else(|| tenants.first());
+    let identities: Vec<_> = state
+        .store
+        .identities_for_user(&user.id)
+        .await?
+        .into_iter()
+        .map(|(provider, login)| json!({ "provider": provider, "login": login }))
+        .collect();
+    Ok(Json(json!({
+        "id": user.id,
+        "login": user.login,
+        "display_name": user.display_name,
+        "avatar_url": user.avatar_url,
+        "tenant": primary.map(|(tenant, _)| tenant.id.clone()),
+        "role": primary.map(|(_, role)| *role),
+        "is_platform_admin": user.is_platform_admin,
+        "identities": identities,
+    })))
+}
+
 /// Who is signed in, their tenants, and the CSRF token for this session.
 /// Answers 200 either way so the page can decide between the app and sign-in.
 pub async fn session(

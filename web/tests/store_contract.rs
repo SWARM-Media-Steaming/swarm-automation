@@ -809,6 +809,27 @@ async fn a_failed_registration_leaves_nothing_behind(store: &dyn Store) {
     assert!(!message.contains(&login), "{message}");
 }
 
+async fn identities_list_provider_and_login_only(store: &dyn Store) {
+    let login = fresh_login();
+    let user = register(store, &profile(installation(), &login)).await.user;
+    let other = register(store, &profile(installation(), &fresh_login()))
+        .await
+        .user;
+    assert_eq!(
+        store.identities_for_user(&user.id).await.unwrap(),
+        vec![("github".to_string(), login)]
+    );
+    assert_ne!(
+        store.identities_for_user(&other.id).await.unwrap(),
+        store.identities_for_user(&user.id).await.unwrap()
+    );
+    assert!(store
+        .identities_for_user("u-missing")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 async fn contract(store: std::sync::Arc<dyn Store>) {
     first_sign_in_registers_user_identity_tenant_and_owner(store.as_ref()).await;
     repeat_sign_in_matches_on_provider_and_subject(store.as_ref()).await;
@@ -817,6 +838,7 @@ async fn contract(store: std::sync::Arc<dyn Store>) {
     concurrent_first_sign_ins_register_one_user_and_one_tenant(store.as_ref()).await;
     a_failed_registration_leaves_nothing_behind(store.as_ref()).await;
     identity_and_sessions(store.as_ref()).await;
+    identities_list_provider_and_login_only(store.as_ref()).await;
     tenants_and_membership(store.as_ref()).await;
     provider_keys_are_sealed_and_isolated(store.as_ref()).await;
     quotas_budgets_usage_and_reports(store.as_ref()).await;
