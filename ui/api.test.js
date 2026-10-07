@@ -234,6 +234,24 @@ test("the web account commands map onto the backend's /api/v1 routes", async () 
   assert.equal(http.requests.length, 6);
 });
 
+test("the platform admin commands map onto /api/v1/admin and carry the CSRF token on changes", async () => {
+  const http = mockHttp({
+    "GET /api/v1/admin/users": { body: { users: [] } },
+    "POST /api/v1/admin/users/u1%2Fx/promote": { body: { changed: true } },
+    "POST /api/v1/admin/users/u2/demote": { body: { changed: true } },
+  });
+  const web = api.createApi({ fetch: http.fetch, csrfToken: () => "csrf-adm" });
+  assert.deepEqual(await web.invoke("web_admin_list_users"), { users: [] });
+  await web.invoke("web_admin_promote_user", { userId: "u1/x" });
+  await web.invoke("web_admin_demote_user", { userId: "u2" });
+  assert.deepEqual(
+    http.requests.map((r) => r.init.headers["X-CSRF-Token"]),
+    [undefined, "csrf-adm", "csrf-adm"],
+  );
+  assert.ok(http.requests.slice(1).every((r) => !r.init.body || r.init.body === "{}"), "the id is a path segment, not a body field");
+  assert.ok(!/\{tenant\}/.test(JSON.stringify(api.COMMANDS.web_admin_list_users)), "admin routes are not tenant scoped");
+});
+
 test("web state-changing requests carry the CSRF token and reads do not", async () => {
   const http = mockHttp({
     "GET /api/v1/session": { body: {} },

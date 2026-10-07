@@ -27,6 +27,16 @@ stays the one shared worker.
   and Owner membership, or nothing. Do not split it into separate store calls, and
   keep tokens and profiles out of logs and errors. `retain_memberships` callers
   must keep the personal tenant.
+- **Platform admins are not tenant owners.** `users.is_platform_admin` is
+  changed only by `Store::set_platform_admin` (one step with its
+  `admin_audit_log` row; the last admin can never be demoted) and by
+  `Store::bootstrap_platform_admin` (the once-only first admin from
+  `SWARM_WEB_BOOTSTRAP_ADMINS`: a GitHub account, only while no admin exists).
+  A sign-in never sets the flag. `/admin` routes take the `Admin` extractor
+  (built on `Authed`, flag read per request, 404 for a non-admin), come from
+  `catalog::ADMIN_ROUTES` with a `ui/api.js` `web_admin_*` row and a docs row
+  (`api_catalog.rs` checks them), and are covered by `tests/admin.rs`. Never gate
+  tenant data on the admin flag.
 - Sessions and CSRF live in `auth.rs` extractors. State-changing routes must use
   `Authed`/`TenantAccess` (they enforce the token and `Origin`); the only
   cookie-less state-changing routes are the signed webhook and the bearer-token

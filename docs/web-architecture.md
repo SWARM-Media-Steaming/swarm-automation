@@ -295,6 +295,8 @@ GET  /api/v1/health
 GET  /api/v1/session                              who is signed in, tenants, CSRF token
 GET  /api/v1/auth/{provider}/login | /callback    identity-provider OAuth (state + PKCE); only `github` exists
 POST /api/v1/auth/logout
+GET  /api/v1/admin/users                          platform admin only (404 for anyone else)
+POST /api/v1/admin/users/{userId}/promote|demote  platform admin only, audited
 GET  /api/v1/tenants[/{tenant}[/members|/provider-keys|/quotas|/usage]]
 PUT  /api/v1/tenants/{tenant}/provider-keys/{provider}     write-only (owner)
 DEL  /api/v1/tenants/{tenant}/provider-keys/{provider}     (owner)
@@ -365,6 +367,61 @@ browser sends an `Origin`, it must be the configured origin. The token is
 delivered in a script-readable `swarm_csrf` cookie and in `GET /session`;
 `ui/api.js` echoes it. The check is in the `Authed` extractor, so a handler
 that needs a session cannot skip it.
+
+### Platform admins and the first admin (#441)
+
+A **platform admin** (`users.is_platform_admin`) runs the hosted service. It is
+not a tenant **owner**: an owner administers their own tenant (keys, budgets,
+settings) and is a per-tenant role synced from GitHub; an admin acts on the
+platform and holds no access to any tenant's data by being one. The flag is
+only ever changed through `Store::set_platform_admin` and
+`Store::bootstrap_platform_admin`; sign-in never touches it.
+
+`Admin` (`auth.rs`) is the only door to the `/admin` routes. It is built on
+`Authed`, so it has the same session, `Origin` and CSRF rules, and then reads the
+flag from the store on every request (a demotion applies to a live session at
+once). Anonymous is `401`, a missing or wrong CSRF token is `403 csrf_token`,
+and a signed-in user who is not an admin gets `404 not_found`, the answer of a
+route that does not exist, so the admin API is not discoverable.
+
+| Command (`ui/api.js`) | Endpoint | Access | Does |
+| --- | --- | --- | --- |
+| `web_admin_list_users` | `GET /api/v1/admin/users` | platform admin | every user: `id`, `login`, `display_name`, `avatar_url`, `last_login_at`, `is_platform_admin`, by login |
+| `web_admin_promote_user` | `POST /api/v1/admin/users/{userId}/promote` | platform admin | make the user an admin; `{"user": ..., "changed": bool}` |
+| `web_admin_demote_user` | `POST /api/v1/admin/users/{userId}/demote` | platform admin | remove the flag; `409` for the last admin |
+
+These routes are `catalog::ADMIN_ROUTES` (not tenant routes and not desktop
+commands, so they are not in the table above); `api_catalog.rs` checks them
+against `ui/api.js` and this page, and `tests/admin.rs` runs every one as an
+anonymous caller, a non-admin and an admin. Promoting an admin or demoting a
+non-admin is `200` with `changed: false` and writes nothing. An unknown user is
+`404`.
+
+**The last admin cannot be demoted** (`409 conflict`, by anyone, including that
+admin). The check and the update are one step under a Postgres advisory lock
+(`MemoryStore`: one mutex), so two admins demoting each other at the same moment
+leave one. Every real change writes an `admin_audit_log` row in the same
+transaction: `admin.bootstrap`, `admin.promote` or `admin.demote`, with the actor
+and the target user ids and `{"target_login": ...}`; a refusal or a no-op writes
+none. `Store::admin_audit_log` reads it (newest first); there is no HTTP route
+for it yet.
+
+**Bootstrap.** `SWARM_WEB_BOOTSTRAP_ADMINS` lists GitHub accounts, comma or
+whitespace separated: a numeric GitHub id (stable, the safer spelling) or a
+login (case-insensitive, `@` optional; a login that is renamed can later be
+claimed by someone else, so prefer ids). An all-digit entry is an id. When a
+listed account signs in and **no admin exists**, the callback calls
+`Store::bootstrap_platform_admin`, which makes it admin atomically and writes
+`admin.bootstrap` (actor and target both that user). It is once-only and
+idempotent: while any admin exists the list does nothing, so a second listed
+account is an ordinary user until an admin promotes them, repeated sign-ins add
+no row, and demoting a listed admin later (possible only while another admin exists)
+does not bring the bootstrap back. Only a `github` identity matches. An invalid entry stops the
+start (`Config::from_lookup`) instead of leaving the platform without its admin.
+The value is not a secret (it is a plain Terraform variable,
+`bootstrap_admins`, and a plain Compose variable), and unset means no bootstrap:
+nobody becomes admin and `/admin` answers `404` to everyone. Once the first
+admin has promoted the others, the variable can be emptied.
 
 ### Tenants, roles and isolation
 
@@ -462,8 +519,10 @@ it. Run now maps the same denial to HTTP 409.
 `SWARM_WEB_PUBLIC_URL`, `SWARM_WEB_GITHUB_CLIENT_ID`,
 `SWARM_WEB_GITHUB_CLIENT_SECRET`, `SWARM_WEB_GITHUB_WEBHOOK_SECRET` and
 `SWARM_WEB_LOCAL_KEY` are required; `SWARM_WEB_BIND` (default `127.0.0.1:8080`),
-`SWARM_WEB_UI_DIR`, `SWARM_WEB_GITHUB_APP_SLUG`, `SWARM_WEB_INTERNAL_TOKEN` and
-`SWARM_WEB_SESSION_TTL_SECS` are optional. Run it with
+`SWARM_WEB_UI_DIR`, `SWARM_WEB_GITHUB_APP_SLUG`, `SWARM_WEB_INTERNAL_TOKEN`,
+`SWARM_WEB_SESSION_TTL_SECS` and `SWARM_WEB_BOOTSTRAP_ADMINS` (GitHub logins or
+numeric ids who may become the first platform admin; see "Platform admins")
+are optional. Run it with
 `cargo run` in `web/` (tests: `cargo test --locked`).
 
 `SWARM_WEB_BRIDGE=python` turns the worker bridge on (`SWARM_WEB_PYTHON`, default
@@ -852,8 +911,9 @@ repeated.
   promotes, files an issue, imports or activates (`403 owner_required`).
 - **Errors.** `{"error": "<message>", "code": "<code>"}`: `400 bad_request`, `401
   unauthorized`, `403 owner_required | csrf_token | csrf_origin | tenant_inactive`,
-  `404 not_found`, `409` (a quota or concurrency denial from Run now, a webhook
-  `replay`), `501 not_available_yet`, `503 bridge_unconfigured | jobs_unconfigured`.
+  `404 not_found` (also what a non-admin gets from `/admin`), `409` (a quota or
+  concurrency denial from Run now, a webhook `replay`, demoting the last
+  platform admin), `501 not_available_yet`, `503 bridge_unconfigured | jobs_unconfigured`.
   A body is at most 64 KiB and is never echoed in an error.
 - **Unavailable is not zero.** A figure the backend cannot know (remaining quota
   with no budget and no provider report, history without a bridge) is `null` or a
@@ -1001,6 +1061,7 @@ job container to the repository's code, provider APIs and storage.
 | --- | --- | --- |
 | A user reads or changes another tenant's data | `TenantAccess` (404), tenant-first store methods, per-tenant schema and prefix, bound key sealing, per-tenant event ring; `tenant_isolation.rs` iterates every catalog route | a job holds the shared storage key (below) |
 | Session theft, CSRF | `HttpOnly` `SameSite=Lax` cookie, hashed at rest, rotation on sign-in, CSRF token plus `Origin` check, strict CSP with no inline code, nothing in `localStorage` | an XSS-free `ui/` is a property to keep testing (`ui/web-account.test.js`) |
+| A user gives themselves platform admin | `Admin` (signed in, CSRF, flag read per request, `404` otherwise); sign-in never sets the flag; the only other path is `SWARM_WEB_BOOTSTRAP_ADMINS`, which works while no admin exists and only for a listed GitHub account; every change is audited; the last admin cannot be demoted | the bootstrap list is operator-controlled input: a listed login that GitHub later reassigns is the first account to sign in once no admin exists, so list ids and empty the variable once admins exist |
 | Provider key disclosure | write-only API, envelope encryption, `Secret` redaction, zeroize, canary tests; plaintext leaves only through `Vault::job_environment`, one provider | the sealing key is a Secrets Manager value until the KMS wrapper lands |
 | Forged or replayed webhook | HMAC verified over the raw body before any work, idempotent by delivery id and payload hash | none beyond the App secret |
 | Hostile repository or issue content steering a job | one container per repository, read-only root, uid 1000, no capabilities, no inbound, per-job tmpfs, fresh clone, a repository-scoped, short-lived installation token, no app private key and no AWS identity in the container, metadata address blocked, trusted-author gate for follow-ups | outbound 443 is open: a job can exfiltrate what it can read (its repository, its own provider key, its storage key) |

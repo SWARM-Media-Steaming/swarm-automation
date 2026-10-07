@@ -137,7 +137,10 @@ docs and the routing calculator, and `events.rs` serves the `automation-log`,
 `job-log` and `model-calibration-refreshed` SSE streams with `Last-Event-ID`
 resume, heartbeat and bounded backpressure. `ui/api.js` fills `{tenant}` from
 `SwarmApi.setTenant` or the session's first tenant because the desktop's call
-sites pass none. Operations the hosted deployment cannot serve yet answer 501
+sites pass none. Platform admins (#441, `users.is_platform_admin`, not a tenant owner)
+use the `Admin` extractor on `catalog::ADMIN_ROUTES` (`web_admin_*` rows, `tests/admin.rs`);
+the first one comes from `SWARM_WEB_BOOTSTRAP_ADMINS` at sign-in, once, while no
+admin exists; the last admin cannot be demoted and every change is audited. Operations the hosted deployment cannot serve yet answer 501
 (`web_bridge.UNAVAILABLE`). See `docs/web-architecture.md` and
 `.claude/rules/web-backend.md`.
 

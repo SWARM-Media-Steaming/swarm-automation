@@ -34,6 +34,26 @@ struct Inner {
     data: HashMap<TenantId, TenantData>,
     delivery_hash: HashMap<String, String>,
     hash_delivery: HashMap<String, String>,
+    /// `admin_audit_log`, oldest first.
+    audit: Vec<AuditEntry>,
+}
+
+impl Inner {
+    fn admin_count(&self) -> usize {
+        self.users.values().filter(|u| u.is_platform_admin).count()
+    }
+
+    fn audit(&mut self, actor: &str, target: &str, action: &str, detail: serde_json::Value) {
+        let id = self.audit.len() as i64 + 1;
+        self.audit.push(AuditEntry {
+            id,
+            actor_user_id: Some(actor.to_string()),
+            target_user_id: Some(target.to_string()),
+            action: action.to_string(),
+            detail,
+            created_at: unix_now(),
+        });
+    }
 }
 
 #[derive(Default)]
@@ -120,6 +140,11 @@ impl Store for MemoryStore {
             display_name: profile.display_name.clone(),
             avatar_url: profile.avatar_url.clone(),
             last_login_at: Some(now),
+            // A sign-in never changes the flag; only the admin calls do.
+            is_platform_admin: inner
+                .users
+                .get(&user_id)
+                .is_some_and(|known| known.is_platform_admin),
         };
         inner.identities.insert(key, user_id.clone());
         inner.users.insert(user_id.clone(), user.clone());
@@ -156,6 +181,79 @@ impl Store for MemoryStore {
 
     async fn user(&self, user_id: &str) -> StoreResult<Option<User>> {
         Ok(self.lock()?.users.get(user_id).cloned())
+    }
+
+    async fn bootstrap_platform_admin(&self, user_id: &str) -> StoreResult<bool> {
+        let mut inner = self.lock()?;
+        if inner.admin_count() > 0 {
+            return Ok(false);
+        }
+        let Some(user) = inner.users.get_mut(user_id) else {
+            return Ok(false);
+        };
+        user.is_platform_admin = true;
+        let login = user.login.clone();
+        inner.audit(
+            user_id,
+            user_id,
+            AUDIT_ADMIN_BOOTSTRAP,
+            serde_json::json!({ "target_login": login }),
+        );
+        Ok(true)
+    }
+
+    async fn platform_users(&self) -> StoreResult<Vec<User>> {
+        let mut users: Vec<User> = self.lock()?.users.values().cloned().collect();
+        users.sort_by(|a, b| (a.login.to_lowercase(), &a.id).cmp(&(b.login.to_lowercase(), &b.id)));
+        Ok(users)
+    }
+
+    async fn set_platform_admin(
+        &self,
+        actor_id: &str,
+        target_id: &str,
+        admin: bool,
+    ) -> StoreResult<AdminChange> {
+        let mut inner = self.lock()?;
+        // The same foreign key the audit table has on the actor.
+        if !inner.users.contains_key(actor_id) {
+            return Err(StoreError("unknown actor".into()));
+        }
+        let Some(current) = inner.users.get(target_id).cloned() else {
+            return Ok(AdminChange::UnknownUser);
+        };
+        if current.is_platform_admin == admin {
+            return Ok(AdminChange::Unchanged(current));
+        }
+        if !admin && inner.admin_count() <= 1 {
+            return Ok(AdminChange::LastAdmin);
+        }
+        let user = inner.users.get_mut(target_id).expect("checked above");
+        user.is_platform_admin = admin;
+        let changed = user.clone();
+        let action = if admin {
+            AUDIT_ADMIN_PROMOTE
+        } else {
+            AUDIT_ADMIN_DEMOTE
+        };
+        inner.audit(
+            actor_id,
+            target_id,
+            action,
+            serde_json::json!({ "target_login": changed.login }),
+        );
+        Ok(AdminChange::Changed(changed))
+    }
+
+    async fn admin_audit_log(&self, limit: usize) -> StoreResult<Vec<AuditEntry>> {
+        Ok(self
+            .lock()?
+            .audit
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect())
     }
 
     async fn create_session(&self, session: Session) -> StoreResult<()> {

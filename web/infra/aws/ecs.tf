@@ -32,6 +32,7 @@ locals {
     SWARM_WEB_GITHUB_APP_ID       = tostring(var.github_app_id)
     SWARM_WEB_GITHUB_APP_SLUG     = var.github_app_slug
     SWARM_WEB_TRUSTED_AUTHORS     = join(",", var.trusted_authors)
+    SWARM_WEB_BOOTSTRAP_ADMINS    = join(",", var.bootstrap_admins)
     SWARM_WEB_BRIDGE              = "python"
     SWARM_WEB_JOB_RUNNER          = "fargate"
     SWARM_WEB_JOB_PROVIDER        = var.job_provider

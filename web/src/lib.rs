@@ -4,6 +4,7 @@
 //! `ui/` assets. See `docs/web-architecture.md` ("Web backend") and
 //! `.claude/rules/web-backend.md`.
 
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod bridge;

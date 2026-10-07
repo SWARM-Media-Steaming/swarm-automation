@@ -113,6 +113,8 @@ services:
       SWARM_WEB_LOCAL_KEY: ${SWARM_WEB_LOCAL_KEY:?set a base64 32-byte key in .env (see web/.env.example)}
       SWARM_WEB_INTERNAL_TOKEN: ${SWARM_WEB_INTERNAL_TOKEN:-}
       SWARM_WEB_TRUSTED_AUTHORS: ${SWARM_WEB_TRUSTED_AUTHORS:-}
+      # GitHub logins or numeric ids that may become the first platform admin.
+      SWARM_WEB_BOOTSTRAP_ADMINS: ${SWARM_WEB_BOOTSTRAP_ADMINS:-}
       # Worker bridge and jobs.
       SWARM_WEB_BRIDGE: python
       SWARM_WEB_JOB_RUNNER: docker

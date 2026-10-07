@@ -371,6 +371,7 @@ pub fn router(state: AppState) -> Router {
     let internal = "/api/v1/internal/tenants/{tenant}";
     let api = Router::new();
     let api = crate::api::mount(api);
+    let api = crate::admin::mount(api);
     let api = api
         .route("/api/v1/health", get(health))
         .route("/api/v1/session", get(auth::session))

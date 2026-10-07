@@ -146,6 +146,27 @@ impl FromRequestParts<AppState> for Authed {
     }
 }
 
+/// Proof that the signed-in user is a platform administrator
+/// (`users.is_platform_admin`). It is not a tenant [`Role::Owner`]: an owner
+/// administers their own tenant, an admin the platform.
+pub struct Admin {
+    pub authed: Authed,
+}
+
+impl FromRequestParts<AppState> for Admin {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        // Anonymous -> 401 and a bad CSRF token -> 403 come from `Authed`; past
+        // that, a non-admin must not learn the admin API exists.
+        let authed = Authed::from_request_parts(parts, state).await?;
+        if !authed.user.is_platform_admin {
+            return Err(ApiError::NotFound);
+        }
+        Ok(Admin { authed })
+    }
+}
+
 /// Proof that the signed-in user belongs to the tenant named by the `{tenant}`
 /// path parameter, with the role they hold.
 pub struct TenantAccess {
@@ -316,7 +337,15 @@ pub async fn callback(
     // One transaction: a first sign-in registers the user, their identity, their
     // personal tenant and its Owner membership, or none of them.
     let registration = state.store.register_identity(&profile).await?;
-    let user = registration.user;
+    let mut user = registration.user;
+    // The first-admin bootstrap: a listed account becomes the platform admin at
+    // sign-in, but only while there is none (the store decides atomically).
+    if state.config.is_bootstrap_admin(&profile)
+        && state.store.bootstrap_platform_admin(&user.id).await?
+    {
+        user.is_platform_admin = true;
+        tracing::warn!(user = %user.login, "first platform admin created from SWARM_WEB_BOOTSTRAP_ADMINS");
+    }
     let mut kept = vec![registration.tenant.id];
     for installation in &installations {
         let tenant = state
@@ -459,7 +488,7 @@ pub async fn session(
         .collect();
     Ok(Json(json!({
         "authenticated": true,
-        "user": { "login": user.login, "display_name": user.display_name, "avatar_url": user.avatar_url },
+        "user": { "login": user.login, "display_name": user.display_name, "avatar_url": user.avatar_url, "is_platform_admin": user.is_platform_admin },
         "csrf_token": session.csrf_token,
         "tenants": tenants,
         "install_url": install_url(&state),

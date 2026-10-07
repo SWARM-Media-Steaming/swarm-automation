@@ -47,6 +47,27 @@ pub trait Store: Send + Sync {
     async fn delete_session(&self, token_hash: &str) -> StoreResult<()>;
     async fn delete_expired_sessions(&self, now: u64) -> StoreResult<usize>;
 
+    // ---- platform administrators (platform-wide, not tenant data) -------
+    /// The first-admin bootstrap: make `user_id` a platform admin when, and
+    /// only when, no admin exists, in one atomic step that also writes the
+    /// `admin.bootstrap` audit row. `false` (and no change) when an admin
+    /// already exists (the user may be that admin), or the user is unknown.
+    async fn bootstrap_platform_admin(&self, user_id: &str) -> StoreResult<bool>;
+    /// Every user, by login. Only the `Admin` extractor's routes call it.
+    async fn platform_users(&self) -> StoreResult<Vec<User>>;
+    /// Promote or demote `target_id` on behalf of `actor_id`, writing an audit
+    /// row for a real change in the same step. Demoting the last admin is
+    /// refused (`LastAdmin`), also when two demotions race. Whether the actor
+    /// may do this is the caller's decision (`Admin`).
+    async fn set_platform_admin(
+        &self,
+        actor_id: &str,
+        target_id: &str,
+        admin: bool,
+    ) -> StoreResult<AdminChange>;
+    /// The newest audit rows first, at most `limit`.
+    async fn admin_audit_log(&self, limit: usize) -> StoreResult<Vec<AuditEntry>>;
+
     // ---- tenants and membership ---------------------------------------
     /// One tenant per GitHub App installation; creating is idempotent.
     async fn upsert_installation_tenant(

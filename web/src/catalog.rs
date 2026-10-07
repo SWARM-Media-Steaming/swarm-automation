@@ -446,6 +446,50 @@ pub const ROUTES: &[Route] = &[
     },
 ];
 
+/// What an [`AdminRoute`] does (`admin.rs` has one handler for each).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AdminAction {
+    ListUsers,
+    Promote,
+    Demote,
+}
+
+/// A platform-administration endpoint. Not a desktop command and not tenant
+/// data: it sits at `/api/v1{path}`, behind the `Admin` extractor (signed in,
+/// CSRF on every non-`GET`, and `users.is_platform_admin`; anyone else is
+/// answered 404). `command` is its `ui/api.js` `COMMANDS` row.
+pub struct AdminRoute {
+    pub command: &'static str,
+    pub method: &'static str,
+    pub path: &'static str,
+    pub action: AdminAction,
+}
+
+pub const ADMIN_ROUTES: &[AdminRoute] = &[
+    AdminRoute {
+        command: "web_admin_list_users",
+        method: "GET",
+        path: "/admin/users",
+        action: AdminAction::ListUsers,
+    },
+    AdminRoute {
+        command: "web_admin_promote_user",
+        method: "POST",
+        path: "/admin/users/{userId}/promote",
+        action: AdminAction::Promote,
+    },
+    AdminRoute {
+        command: "web_admin_demote_user",
+        method: "POST",
+        path: "/admin/users/{userId}/demote",
+        action: AdminAction::Demote,
+    },
+];
+
+pub fn admin_full_path(route: &AdminRoute) -> String {
+    format!("/api/v1{}", route.path)
+}
+
 /// Desktop commands with no web equivalent, and why.
 pub const REMOVED: &[Removed] = &[
     Removed { command: "choose_repository", reason: "A browser has no native folder picker. Repositories are the GitHub App installation's repositories, saved with the tenant's settings (GET /repos)." },

@@ -826,6 +826,187 @@ async fn contract(store: std::sync::Arc<dyn Store>) {
     webhook_deliveries(store.as_ref()).await;
 }
 
+/// Platform admins (issue #441). "No admin exists" is a property of the whole
+/// database, so this runs against an *empty* store: a fresh `MemoryStore`, and
+/// for Postgres a schema of its own (`isolated_postgres`).
+async fn platform_admins(store: std::sync::Arc<dyn Store>) {
+    let tag = random_hex(4);
+    let mut people = Vec::new();
+    let mut subjects = Vec::new();
+    for (n, name) in ["aaa", "Bbb", "ccc", "ddd", "eee"].iter().enumerate() {
+        let subject = installation();
+        subjects.push(subject);
+        people.push(
+            register(
+                store.as_ref(),
+                &profile(subject, &format!("{name}-{tag}-{n}")),
+            )
+            .await
+            .user,
+        );
+    }
+    let [a, b, c, d, e] = &people[..] else {
+        unreachable!()
+    };
+    assert!(
+        people.iter().all(|u| !u.is_platform_admin),
+        "nobody is an admin by default"
+    );
+    assert!(store.admin_audit_log(10).await.unwrap().is_empty());
+    assert!(!store.bootstrap_platform_admin("u-missing").await.unwrap());
+
+    // Racing bootstraps (two listed accounts signing in at once): one wins.
+    let mut tasks = Vec::new();
+    for person in [a, b, c, d, e] {
+        let store = store.clone();
+        let id = person.id.clone();
+        tasks.push(tokio::spawn(async move {
+            store.bootstrap_platform_admin(&id).await.unwrap()
+        }));
+    }
+    let mut winners = 0;
+    for task in tasks {
+        winners += usize::from(task.await.unwrap());
+    }
+    assert_eq!(winners, 1, "the bootstrap happens once");
+    let admins: Vec<User> = store
+        .platform_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|u| u.is_platform_admin)
+        .collect();
+    assert_eq!(admins.len(), 1);
+    let first = admins[0].clone();
+    assert!(
+        !store.bootstrap_platform_admin(&first.id).await.unwrap(),
+        "idempotent: the admin is not bootstrapped again"
+    );
+    let rows = store.admin_audit_log(10).await.unwrap();
+    assert_eq!(rows.len(), 1, "one audit row for one bootstrap");
+    assert_eq!(rows[0].action, AUDIT_ADMIN_BOOTSTRAP);
+    assert_eq!(rows[0].actor_user_id.as_deref(), Some(first.id.as_str()));
+    assert_eq!(rows[0].target_user_id.as_deref(), Some(first.id.as_str()));
+    assert_eq!(rows[0].detail["target_login"], first.login.as_str());
+
+    // A sign-in never changes the flag, whoever has it.
+    for (person, subject) in people.iter().zip(&subjects) {
+        let signed_in = register(store.as_ref(), &profile(*subject, &person.login)).await;
+        assert_eq!(signed_in.user.id, person.id);
+        assert_eq!(signed_in.user.is_platform_admin, person.id == first.id);
+    }
+    assert!(
+        store
+            .user(&first.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_platform_admin
+    );
+
+    // The list is every user, by login without regard to case.
+    let listed: Vec<String> = store
+        .platform_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|u| people.iter().any(|p| p.id == u.id))
+        .map(|u| u.login)
+        .collect();
+    let mut expected = listed.clone();
+    expected.sort_by_key(|login| login.to_lowercase());
+    assert_eq!(listed, expected);
+    assert_eq!(listed.len(), 5);
+
+    // Promote and demote: a real change writes one row, a repeat writes none.
+    let other = people.iter().find(|u| u.id != first.id).unwrap().clone();
+    match store
+        .set_platform_admin(&first.id, &other.id, true)
+        .await
+        .unwrap()
+    {
+        AdminChange::Changed(user) => assert!(user.is_platform_admin && user.id == other.id),
+        unexpected => panic!("{unexpected:?}"),
+    }
+    assert!(matches!(
+        store
+            .set_platform_admin(&first.id, &other.id, true)
+            .await
+            .unwrap(),
+        AdminChange::Unchanged(_)
+    ));
+    assert_eq!(store.admin_audit_log(10).await.unwrap().len(), 2);
+    assert!(matches!(
+        store
+            .set_platform_admin(&first.id, "u-missing", true)
+            .await
+            .unwrap(),
+        AdminChange::UnknownUser
+    ));
+    assert!(
+        store
+            .set_platform_admin("u-missing", &other.id, false)
+            .await
+            .is_err(),
+        "an unknown actor cannot write an audit row"
+    );
+    assert!(
+        store
+            .user(&other.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_platform_admin
+    );
+
+    // Racing demotions of the two admins leave exactly one, never zero.
+    let (x, y) = (first.id.clone(), other.id.clone());
+    let (s1, s2) = (store.clone(), store.clone());
+    let (x1, y1, x2, y2) = (x.clone(), y.clone(), x.clone(), y.clone());
+    let one = tokio::spawn(async move { s1.set_platform_admin(&x1, &y1, false).await.unwrap() });
+    let two = tokio::spawn(async move { s2.set_platform_admin(&y2, &x2, false).await.unwrap() });
+    let results = [one.await.unwrap(), two.await.unwrap()];
+    let changed = results
+        .iter()
+        .filter(|r| matches!(r, AdminChange::Changed(_)))
+        .count();
+    let last = results
+        .iter()
+        .filter(|r| matches!(r, AdminChange::LastAdmin))
+        .count();
+    assert_eq!((changed, last), (1, 1), "{results:?}");
+    let remaining: Vec<User> = store
+        .platform_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|u| u.is_platform_admin)
+        .collect();
+    assert_eq!(remaining.len(), 1);
+
+    // The last admin cannot be demoted, by anyone, and a refusal writes nothing.
+    let rows_before = store.admin_audit_log(100).await.unwrap().len();
+    let sole = remaining[0].id.clone();
+    assert_eq!(
+        store.set_platform_admin(&sole, &sole, false).await.unwrap(),
+        AdminChange::LastAdmin
+    );
+    assert!(store.user(&sole).await.unwrap().unwrap().is_platform_admin);
+    assert_eq!(store.admin_audit_log(100).await.unwrap().len(), rows_before);
+
+    // Audit rows, newest first, name actor, target and the action.
+    let rows = store.admin_audit_log(100).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        3,
+        "bootstrap, promote and the one demotion that won"
+    );
+    assert!(rows.windows(2).all(|pair| pair[0].id > pair[1].id));
+    assert_eq!(rows[0].action, AUDIT_ADMIN_DEMOTE);
+    assert_eq!(rows[rows.len() - 1].action, AUDIT_ADMIN_BOOTSTRAP);
+    assert_eq!(store.admin_audit_log(1).await.unwrap().len(), 1);
+}
+
 fn postgres_dsn() -> Option<String> {
     std::env::var("SWARM_TEST_POSTGRES_DSN")
         .ok()
@@ -845,6 +1026,46 @@ async fn postgres_store_meets_the_contract() {
     };
     let store = PostgresStore::connect(&dsn).await.expect("connect");
     contract(std::sync::Arc::new(store)).await;
+}
+
+#[tokio::test]
+async fn memory_store_meets_the_platform_admin_contract() {
+    platform_admins(std::sync::Arc::new(MemoryStore::new())).await;
+}
+
+/// A store over an empty schema of its own, so "no admin exists yet" holds
+/// however many other tests share the database. The schema is left behind like
+/// the random ids the other tests leave.
+async fn isolated_postgres(dsn: &str) -> PostgresStore {
+    let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
+        .await
+        .expect("plain connection to the test database");
+    tokio::spawn(connection);
+    let schema = format!("contract_{}", random_hex(6));
+    client
+        .batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .await
+        .expect("create schema");
+    let options = format!("-c search_path={schema}");
+    let isolated = if dsn.contains("://") {
+        let joiner = if dsn.contains('?') { '&' } else { '?' };
+        format!(
+            "{dsn}{joiner}options={}",
+            options.replace(' ', "%20").replace('=', "%3D")
+        )
+    } else {
+        format!("{dsn} options='{options}'")
+    };
+    PostgresStore::connect(&isolated).await.expect("connect")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_store_meets_the_platform_admin_contract() {
+    let Some(dsn) = postgres_dsn() else {
+        eprintln!("SWARM_TEST_POSTGRES_DSN is not set: skipping the Postgres admin contract");
+        return;
+    };
+    platform_admins(std::sync::Arc::new(isolated_postgres(&dsn).await)).await;
 }
 
 #[tokio::test]
