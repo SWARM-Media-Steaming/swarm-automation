@@ -576,3 +576,83 @@ test("the budget inputs bind through data attributes, not one-off listeners", ()
   assert.doesNotMatch(app, /byId\("budget-(minimum|claude|codex|grok)"\)\.addEventListener/);
   assert.match(app, /querySelectorAll\("\[data-budget\]"\)/);
 });
+
+// ----- Avatar menu ---------------------------------------------------------------
+
+const PROFILE = {
+  id: "u1", login: "octocat", display_name: "Octo Cat", avatar_url: "https://avatars.githubusercontent.com/u/1",
+  tenant: "octocat", role: "owner", is_platform_admin: false, identities: [{ provider: "github", login: "octocat" }],
+};
+
+test("profileView keeps the name, login, tenant and an https avatar, and rejects anything else", () => {
+  const view = account.profileView(PROFILE);
+  assert.equal(view.displayName, "Octo Cat");
+  assert.equal(view.login, "octocat");
+  assert.equal(view.tenant, "octocat");
+  assert.equal(view.initials, "OC");
+  assert.equal(view.avatarUrl, "https://avatars.githubusercontent.com/u/1");
+  assert.equal(account.profileView({ ...PROFILE, avatar_url: "javascript:alert(1)" }).avatarUrl, "");
+  assert.equal(account.profileView({ ...PROFILE, avatar_url: null }).avatarUrl, "");
+  assert.equal(account.profileView({ ...PROFILE, display_name: "" }).displayName, "octocat");
+  assert.equal(account.profileView({ ...PROFILE, display_name: "" }).initials, "OC");
+  for (const body of [null, {}, "x", { login: 5 }]) assert.equal(account.profileView(body), null);
+});
+
+test("the menu lists Profile, Settings, Account, Sign out, plus Admin for admins only, and no Billing", () => {
+  const user = account.profileView(PROFILE);
+  const admin = account.profileView({ ...PROFILE, is_platform_admin: true });
+  assert.deepEqual(account.menuItems(user).map((item) => item.label), ["Profile", "Settings", "Account", "Sign out"]);
+  assert.deepEqual(account.menuItems(admin).map((item) => item.label), ["Profile", "Settings", "Account", "Admin", "Sign out"]);
+  assert.deepEqual(account.menuItems(null).map((item) => item.id), ["profile", "settings", "account", "signout"]);
+  assert.ok(!account.MENU_ITEMS.some((item) => /billing/i.test(item.label)));
+});
+
+test("keyboard navigation wraps and ignores other keys", () => {
+  assert.equal(account.nextMenuIndex(-1, "ArrowDown", 4), 0);
+  assert.equal(account.nextMenuIndex(3, "ArrowDown", 4), 0);
+  assert.equal(account.nextMenuIndex(0, "ArrowUp", 4), 3);
+  assert.equal(account.nextMenuIndex(1, "Home", 4), 0);
+  assert.equal(account.nextMenuIndex(1, "End", 4), 3);
+  assert.equal(account.nextMenuIndex(1, "a", 4), -1);
+  assert.equal(account.nextMenuIndex(0, "ArrowDown", 0), -1);
+});
+
+test("the controller loads the profile over web_me, hides it on failure and clears it on sign-out", async () => {
+  const { controller, http } = controllerFor({
+    "GET /api/v1/me": { body: { ...PROFILE, is_platform_admin: true } },
+    "GET /api/v1/admin/users": { body: { users: [{ login: "octocat", display_name: "Octo Cat", is_platform_admin: true }, { login: "x" }] } },
+    "POST /api/v1/auth/logout": { status: 204 },
+  });
+  assert.equal((await controller.loadProfile()).isAdmin, true);
+  assert.deepEqual((await controller.loadAdminUsers()).map((user) => user.login), ["octocat", "x"]);
+  await controller.signOut();
+  assert.equal(controller.state.profile, null);
+  assert.deepEqual(controller.state.adminUsers, []);
+  assert.ok(http.requests.some((request) => request.url.endsWith("/api/v1/me")));
+  const failing = controllerFor({ "GET /api/v1/me": { status: 500, body: { error: "boom" } } });
+  assert.equal(await failing.controller.loadProfile(), null);
+  const plain = controllerFor({ "GET /api/v1/me": { body: PROFILE } });
+  await plain.controller.loadProfile();
+  assert.deepEqual(await plain.controller.loadAdminUsers(), [], "a non-admin never asks for the user list");
+  assert.ok(!plain.http.requests.some((request) => request.url.includes("/admin/")));
+});
+
+test("the avatar menu markup is web-only, accessible, token-styled and driven by the view-switcher", () => {
+  const css = fs.readFileSync(path.join(__dirname, "style.css"), "utf8");
+  assert.match(html, /<div class="avatar-menu" id="avatar-menu" data-web-only data-profile-only>/);
+  assert.match(html, /id="avatar-button"[^>]*aria-label="Account menu" aria-haspopup="menu" aria-expanded="false"/);
+  assert.match(html, /id="avatar-dropdown" class="avatar-dropdown hidden" role="menu"/);
+  for (const view of ["profile", "admin"]) {
+    assert.match(html, new RegExp(`data-view-target="${view}"`));
+    assert.match(html, new RegExp(`<section id="view-${view}" class="view" data-web-only>`));
+    assert.match(app, new RegExp(`\\n    ${view}: "`), `${view} is in pageTitles`);
+  }
+  const avatarRules = css.split("\n").filter((line) => /avatar/.test(line)).join("\n");
+  assert.doesNotMatch(avatarRules, /#[0-9a-fA-F]{3,8}\b|rgba?\(/);
+  assert.match(avatarRules, /prefers-reduced-motion/);
+  assert.match(css, /max-width: 1060px\) \{\n  \.avatar-dropdown/);
+  assert.match(css, /max-width: 820px\) \{\n  \.avatar-dropdown/);
+  assert.match(app, /key === "Escape"/);
+  assert.match(app, /menu\.contains\(event\.target\)/);
+  assert.doesNotMatch(app, /invoke\("web_/);
+});

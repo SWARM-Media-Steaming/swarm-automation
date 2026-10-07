@@ -483,3 +483,17 @@ test("the log and calibration streams deliver the desktop's payload shape", asyn
   http.sources[0].emit("automation-log", JSON.stringify({ source: "Issue worker", stream: "stdout", line: "Adversarial UAT for issue #12: round 1 of 3.", timestamp: 1 }));
   assert.equal(lines[0].line, "Adversarial UAT for issue #12: round 1 of 3.");
 });
+
+// ----- Avatar menu: the profile command on both transports -------------------
+
+test("web_me is a plain session GET on the web and a Tauri command on the desktop", async () => {
+  const profile = { login: "octo", display_name: "Octo Cat", is_platform_admin: false };
+  const http = mockHttp({ "GET /api/v1/me": { body: profile } });
+  const web = api.createApi({ fetch: http.fetch, csrfToken: () => "tok" });
+  assert.deepEqual(await web.invoke("web_me"), profile);
+  assert.equal(http.requests[0].init.headers["X-CSRF-Token"], undefined, "a read carries no CSRF token");
+  assert.ok(!/\{tenant\}/.test(JSON.stringify(api.COMMANDS.web_me)), "the profile is session-scoped, not tenant-scoped");
+  const desktop = api.createApi({ tauri: mockTauri({ web_me: () => profile }) });
+  assert.equal(desktop.transport, "tauri");
+  assert.deepEqual(await desktop.invoke("web_me"), profile, "the desktop adapter delegates unchanged");
+});

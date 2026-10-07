@@ -925,6 +925,13 @@ repeated.
   `is_platform_admin` and `identities` (`provider` + `login` only). Sign-out is
   `POST /auth/logout` (`web_logout`); listing and revoking other sessions is not
   offered yet.
+- **Avatar menu.** The signed-in web UI shows an avatar button top right
+  (`avatar_url`, initials fallback) whose menu lists Profile, Settings, Account,
+  Admin (platform admins only) and Sign out, with no Billing. It is `data-web-only`
+  markup rendered by `app.js` from `ui/web-account.js` (`profileView`, `menuItems`,
+  `nextMenuIndex`, `loadProfile`); items open the `profile`, `repository`,
+  `account` and `admin` views of the view-switcher. The Admin view lists
+  `web_admin_list_users` and is requested only when `/me` says admin.
 - **Public routes.** `GET /health`, `GET /session` (anonymous answer is
   `{"authenticated": false, "login_url": ..., "install_url": ...}`), `GET /version`
   and the OAuth redirect/callback. Everything else needs a session.
