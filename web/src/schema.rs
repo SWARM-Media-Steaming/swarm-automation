@@ -7,22 +7,48 @@
 //! queries it is a later step, so `memory::MemoryStore` remains the store.
 
 /// `(version, sql)` in the order they must be applied.
-pub const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_platform",
-    include_str!("../migrations/0001_platform.sql"),
-)];
+pub const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_platform",
+        include_str!("../migrations/0001_platform.sql"),
+    ),
+    (
+        "0002_identity",
+        include_str!("../migrations/0002_identity.sql"),
+    ),
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Splits on `;` outside `$$ ... $$` bodies (a DO block is one statement).
     fn statements(sql: &str) -> Vec<String> {
         let code: String = sql
             .lines()
             .filter(|line| !line.trim_start().starts_with("--"))
             .collect::<Vec<_>>()
             .join("\n");
-        code.split(';')
+        let mut out = Vec::new();
+        let mut current = String::new();
+        let mut in_body = false;
+        let mut rest = code.as_str();
+        while let Some(ch) = rest.chars().next() {
+            if rest.starts_with("$$") {
+                in_body = !in_body;
+                current.push_str("$$");
+                rest = &rest[2..];
+                continue;
+            }
+            if ch == ';' && !in_body {
+                out.push(std::mem::take(&mut current));
+            } else {
+                current.push(ch);
+            }
+            rest = &rest[ch.len_utf8()..];
+        }
+        out.push(current);
+        out.into_iter()
             .map(|statement| statement.trim().to_string())
             .filter(|statement| !statement.is_empty())
             .collect()
@@ -50,6 +76,11 @@ mod tests {
                 let upper = statement.to_uppercase();
                 let idempotent = upper.starts_with("CREATE TABLE IF NOT EXISTS")
                     || upper.starts_with("CREATE INDEX IF NOT EXISTS")
+                    || (upper.starts_with("ALTER TABLE")
+                        && upper.contains(" ADD COLUMN IF NOT EXISTS "))
+                    || (upper.starts_with("DO $$") && upper.contains("IF EXISTS (SELECT")
+                        || upper.starts_with("DO $$")
+                            && upper.contains("IF to_regclass".to_uppercase().as_str()))
                     || (upper.starts_with("INSERT INTO") && upper.contains("ON CONFLICT"));
                 assert!(idempotent, "{version}: not idempotent: {statement}");
             }
@@ -118,5 +149,58 @@ mod tests {
                 "provider keys must be stored sealed only: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn identity_migration_models_users_identities_ownership_and_audit() {
+        let sql = MIGRATIONS[1].1;
+        let all = statements(sql);
+        let table = |name: &str| {
+            all.iter()
+                .find(|s| s.starts_with(&format!("CREATE TABLE IF NOT EXISTS {name} ")))
+                .unwrap_or_else(|| panic!("{name} is missing"))
+                .clone()
+        };
+        let identities = table("user_identities");
+        assert!(identities.contains("REFERENCES users (id) ON DELETE CASCADE"));
+        assert!(identities.contains("UNIQUE (provider, subject)"));
+        let audit = table("admin_audit_log");
+        assert_eq!(
+            audit
+                .matches("REFERENCES users (id) ON DELETE SET NULL")
+                .count(),
+            2
+        );
+        for column in [
+            "display_name",
+            "avatar_url",
+            "email",
+            "is_platform_admin BOOLEAN NOT NULL DEFAULT false",
+            "last_login_at",
+        ] {
+            assert!(
+                sql.contains(&format!("ADD COLUMN IF NOT EXISTS {column}")),
+                "{column}"
+            );
+        }
+        assert!(sql.contains("owner_user_id TEXT REFERENCES users (id)"));
+        for index in [
+            "user_identities_user_idx",
+            "tenants_owner_idx",
+            "admin_audit_log_actor_idx",
+            "admin_audit_log_target_idx",
+        ] {
+            assert!(
+                sql.contains(&format!("CREATE INDEX IF NOT EXISTS {index} ")),
+                "{index}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_migration_leaves_the_worker_schema_alone() {
+        let sql = MIGRATIONS[1].1.to_lowercase();
+        assert!(!sql.contains("schema_migrations"));
+        assert!(!sql.contains("swarm_storage"));
     }
 }
