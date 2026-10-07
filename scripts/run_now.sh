@@ -1,101 +1,100 @@
 #!/usr/bin/env bash
-# Builds and runs the SWARM Automation desktop app from source for manual
-# testing — the same thing `npm run dev` does, wrapped so a fresh checkout
-# "just works" and so Ctrl+C actually leaves nothing running behind.
+# Builds and runs the hosted SWARM Automation web app (`web/`, the axum
+# backend that also serves `ui/`) locally for manual testing.
 #
-# Why a script and not just `npm run dev`:
-#   - First run on a clean checkout has no node_modules, so `npm run dev`
-#     fails with "tauri: command not found". This installs deps first when
-#     they're missing.
-#   - `tauri dev` hands off to `cargo`, which launches the real app binary
-#     (target/debug/swarm-automation). Closing the app window only *hides*
-#     it to the menu bar (see README) — it does not exit — so a plain
-#     Ctrl+C on `tauri dev` can leave that binary alive and, because the
-#     app registers tauri-plugin-single-instance, the *next* run then
-#     silently forwards to the orphan instead of starting the code you
-#     just changed. cleanup() below kills any leftover app process on exit.
-#   - Picks up the rustup toolchain the same way the media server's
-#     scripts/run_now.sh does, so a non-login shell still finds cargo.
+# The web app replaces the Tauri desktop client; this script no longer starts
+# the desktop. The backend serves the same `ui/` assets on one origin, so
+# opening the printed URL in a browser is the whole app.
 #
-# This app binds no network ports of its own; it only supervises child
-# processes you start from its UI. Those child workers are deliberately
-# left running when the app exits — quit them from the app's menu-bar
-# "Quit and stop workers" item, not from here.
+# First run creates web/.env.local (git-ignored) with generated dev secrets
+# (SWARM_WEB_LOCAL_KEY, the webhook secret). You only fill in the GitHub App
+# credentials there to make sign-in work:
 #
-# Env vars (all optional):
-#   RUST_LOG   log filter for the Rust backend (default "info")
+#   SWARM_WEB_GITHUB_CLIENT_ID       the GitHub App's client id
+#   SWARM_WEB_GITHUB_CLIENT_SECRET   the GitHub App's client secret
+#   SWARM_WEB_GITHUB_APP_SLUG        (optional) for the "install the app" link
+#
+# In the GitHub App settings, set the callback URL to:
+#   http://127.0.0.1:8080/api/v1/auth/github/callback   (or your PORT/HOST)
+#
+# Without credentials the server still starts (UI, /api/v1/health, static
+# assets) but "Sign in with GitHub" will fail. The store is in-memory, so
+# sign-ins, keys and usage are lost on every restart.
+#
+# Env vars (all optional, override web/.env.local):
+#   HOST       interface to bind (default 127.0.0.1)
+#   PORT       port to bind (default 8080)
+#   RUST_LOG   log filter (default "info")
+#   SWARM_WEB_*  any backend setting, see docs/web-architecture.md
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+ROOT="$PWD"
 
 if [ -d "$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin" ]; then
     export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 fi
-export RUST_LOG="${RUST_LOG:-info}"
 
-for tool in node npm cargo; do
-    command -v "$tool" >/dev/null 2>&1 || {
-        echo "Missing required tool: $tool. See README.md 'Run from source'." >&2
-        exit 1
-    }
-done
-
-# `tauri dev`'s child app binary. Resolved once so cleanup() and the
-# pre-flight check agree on exactly what to look for.
-APP_BIN="$PWD/target/debug/swarm-automation"
-
-kill_orphan_app() {
-    # pkill -f against the absolute path: narrow enough not to match this
-    # script or an unrelated "swarm-automation" checkout, broad enough to
-    # catch the binary whether cargo or launchd reparented it.
-    #
-    # SIGTERM then SIGKILL: this is a tray app that traps SIGTERM to hide
-    # to the menu bar instead of exiting (same reason closing its window
-    # doesn't quit it), so a plain `kill` leaves it running. Escalate.
-    pkill -f "$APP_BIN" 2>/dev/null || return 0
-    echo "   (stopping a leftover SWARM Automation app process)"
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        pgrep -f "$APP_BIN" >/dev/null 2>&1 || return 0
-        sleep 0.2
-    done
-    pkill -9 -f "$APP_BIN" 2>/dev/null || true
-    return 0
+command -v cargo >/dev/null 2>&1 || {
+    echo "Missing required tool: cargo (install Rust: https://rustup.rs)." >&2
+    exit 1
+}
+command -v openssl >/dev/null 2>&1 || {
+    echo "Missing required tool: openssl (used to generate dev secrets)." >&2
+    exit 1
 }
 
-_cleaned_up=""
-cleanup() {
-    # INT/TERM fire this and then EXIT fires it again; only sweep once.
-    [ -n "$_cleaned_up" ] && return 0
-    _cleaned_up=1
-    echo
-    echo "Stopping..."
-    # Kill the whole `tauri dev` -> cargo -> app process tree we started,
-    # then sweep any app binary that outlived it (window "hidden", not
-    # quit). `wait` reaps the direct child so the shell doesn't report it
-    # as terminated-by-signal noise.
-    [ -n "${dev_pid:-}" ] && kill "$dev_pid" 2>/dev/null || true
-    wait 2>/dev/null || true
-    sleep 0.3
-    kill_orphan_app
-}
-trap cleanup EXIT INT TERM
+ENV_FILE="$ROOT/web/.env.local"
 
-# Self-healing pre-flight: a previous run that didn't exit through cleanup()
-# (terminal closed, machine slept, `kill -9`) can leave the single-instance
-# app alive, which would hijack this run. Clear it before we start.
-echo "==> Checking for a leftover SWARM Automation app process..."
-kill_orphan_app
+if [ ! -f "$ENV_FILE" ]; then
+    echo "==> Creating $ENV_FILE with generated dev secrets..."
+    umask 077
+    cat >"$ENV_FILE" <<EOF
+# Local development settings for scripts/run_now.sh. Git-ignored; never commit.
+SWARM_WEB_LOCAL_KEY=$(openssl rand -base64 32)
+SWARM_WEB_GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 24)
+SWARM_WEB_INTERNAL_TOKEN=$(openssl rand -hex 24)
 
-if [ ! -d node_modules ]; then
-    echo "==> Installing npm dependencies (first run)..."
-    npm install
+# Fill these in from your GitHub App to enable sign-in:
+SWARM_WEB_GITHUB_CLIENT_ID=
+SWARM_WEB_GITHUB_CLIENT_SECRET=
+SWARM_WEB_GITHUB_APP_SLUG=
+EOF
 fi
 
-echo "==> Starting SWARM Automation (tauri dev, RUST_LOG=$RUST_LOG)..."
-echo "    Closing the window hides it to the menu bar; press Ctrl+C here to"
-echo "    fully stop the app. Child workers you start keep running — quit"
-echo "    them from the app's menu-bar menu."
+# Values already in the environment win over the file.
+caller_env="$(env | grep -E '^(SWARM_WEB_[A-Z_]+|HOST|PORT)=' || true)"
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+while IFS= read -r line; do
+    [ -n "$line" ] && export "$line"
+done <<<"$caller_env"
+
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-8080}"
+export SWARM_WEB_BIND="${SWARM_WEB_BIND:-$HOST:$PORT}"
+export SWARM_WEB_PUBLIC_URL="${SWARM_WEB_PUBLIC_URL:-http://$SWARM_WEB_BIND}"
+export SWARM_WEB_UI_DIR="${SWARM_WEB_UI_DIR:-$ROOT/ui}"
+export RUST_LOG="${RUST_LOG:-info}"
+
+if [ -z "${SWARM_WEB_GITHUB_CLIENT_ID:-}" ] || [ -z "${SWARM_WEB_GITHUB_CLIENT_SECRET:-}" ]; then
+    echo "!! GitHub App credentials are not set in $ENV_FILE." >&2
+    echo "   The server will start, but sign-in will not work until you set" >&2
+    echo "   SWARM_WEB_GITHUB_CLIENT_ID and SWARM_WEB_GITHUB_CLIENT_SECRET." >&2
+    export SWARM_WEB_GITHUB_CLIENT_ID="${SWARM_WEB_GITHUB_CLIENT_ID:-unconfigured}"
+    export SWARM_WEB_GITHUB_CLIENT_SECRET="${SWARM_WEB_GITHUB_CLIENT_SECRET:-unconfigured}"
+fi
+
+echo "==> Building and starting swarm-web..."
+echo "    URL:       $SWARM_WEB_PUBLIC_URL"
+echo "    Callback:  $SWARM_WEB_PUBLIC_URL/api/v1/auth/github/callback"
+echo "    UI dir:    $SWARM_WEB_UI_DIR"
+echo "    Ctrl+C to stop. State is in memory and is lost on exit."
 echo
-npm run dev &
-dev_pid=$!
-wait "$dev_pid"
+
+cd "$ROOT/web"
+# exec: cargo (and the server it launches) receive Ctrl+C directly, and
+# nothing is left running behind this script.
+exec cargo run --locked

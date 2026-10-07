@@ -354,9 +354,12 @@ npm install
 npm run dev
 ```
 
-Or run `./scripts/run_now.sh`, which installs npm dependencies on a fresh
-checkout if needed, starts the same `tauri dev` session, and on Ctrl+C also
-kills the app binary that `tauri dev` otherwise leaves hidden in the menu bar.
+To run the hosted web app (`web/`, which replaces the desktop client) locally,
+use `./scripts/run_now.sh`. It builds and starts `swarm-web`, which serves `ui/`
+on `http://127.0.0.1:8080` (override with `HOST`/`PORT`). The first run writes a
+git-ignored `web/.env.local` with generated dev secrets; add your GitHub App's
+client id and secret there to enable sign-in (callback URL
+`http://127.0.0.1:8080/api/v1/auth/github/callback`). The store is in memory.
 
 Closing the window hides it to the menu bar and leaves active workers running.
 Use **Quit and stop workers** in the menu-bar menu to terminate every supervised
