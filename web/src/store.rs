@@ -33,7 +33,14 @@ pub type StoreResult<T> = Result<T, StoreError>;
 #[async_trait]
 pub trait Store: Send + Sync {
     // ---- identity and sessions (not tenant data) -----------------------
-    async fn upsert_user(&self, github_id: u64, login: &str) -> StoreResult<User>;
+    /// Sign in (or register) an identity, in one transaction. A known
+    /// (provider, subject) refreshes login, display name, avatar and
+    /// `last_login_at` and keeps its tenant id even when the login was renamed.
+    /// An unknown one creates the user, the identity, a personal tenant whose id
+    /// is the slugified login (deduplicated on collision) and the Owner
+    /// membership, or creates none of them. Concurrent first sign-ins of one
+    /// identity yield one user and one tenant.
+    async fn register_identity(&self, profile: &IdentityProfile) -> StoreResult<Registration>;
     async fn user(&self, user_id: &str) -> StoreResult<Option<User>>;
     async fn create_session(&self, session: Session) -> StoreResult<()>;
     async fn session(&self, token_hash: &str) -> StoreResult<Option<Session>>;

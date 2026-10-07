@@ -755,7 +755,7 @@ class PlatformSchemaTests(unittest.TestCase):
                          "tenant_plan_quotas", "tenant_budgets", "tenant_usage_ledger", "tenant_provider_reports",
                          "tenant_jobs", "webhook_deliveries"} <= before)
         self.assertEqual(self.connection.execute("SELECT version FROM platform_migrations").fetchall(),
-                         [("0001_platform",), ("0002_identity",)])
+                         [("0001_platform",), ("0002_identity",), ("0003_tenant_documents",), ("0004_personal_tenants",)])
         self.assertFalse({"web_users", "web_sessions"} & before)
 
     def test_tenant_rows_cascade_and_are_constrained(self):
@@ -780,6 +780,29 @@ class PlatformSchemaTests(unittest.TestCase):
         for table in ("tenant_provider_keys", "tenant_usage_ledger", "tenant_jobs"):
             self.assertEqual(run(f"SELECT count(*) FROM {table}").fetchone()[0], 0, table)
 
+
+    def test_a_personal_tenant_needs_no_installation_and_is_unique_per_owner(self):
+        psycopg = _psycopg()
+        run = self.connection.execute
+        run("INSERT INTO users (id) VALUES ('u1'), ('u2')")
+        run("INSERT INTO tenants (tenant_id, installation_id, account_login, account_type, owner_user_id) "
+            "VALUES ('octo', NULL, 'octo', 'Personal', 'u1'), ('mona', NULL, 'mona', 'Personal', 'u2')")
+        for bad in (
+            # a second personal tenant for one owner
+            "INSERT INTO tenants (tenant_id, installation_id, account_login, account_type, owner_user_id) "
+            "VALUES ('octo-2', NULL, 'octo', 'Personal', 'u1')",
+            # an id outside the tenant grammar
+            "INSERT INTO tenants (tenant_id, installation_id, account_login, account_type, owner_user_id) "
+            "VALUES ('Octo Cat', NULL, 'octo', 'Personal', 'u2')",
+        ):
+            with self.subTest(statement=bad[-40:]), self.assertRaises(psycopg.errors.Error):
+                run(bad)
+        # Installation tenants are still one per installation, and may share an owner.
+        run("INSERT INTO tenants (tenant_id, installation_id, account_login, account_type, owner_user_id) "
+            "VALUES ('acme', 7, 'acme', 'Organization', 'u1')")
+        with self.assertRaises(psycopg.errors.Error):
+            run("INSERT INTO tenants (tenant_id, installation_id, account_login, account_type) "
+                "VALUES ('acme-2', 7, 'acme', 'Organization')")
 
     def test_identity_migration_upgrades_a_0001_database_and_backfills(self):
         run = self.connection.execute

@@ -17,7 +17,8 @@ use serde_json::Value;
 use swarm_web::auth::{csrf_cookie_name, session_cookie_name};
 use swarm_web::clock::ManualClock;
 use swarm_web::config::Config;
-use swarm_web::github::{GitHubClient, GitHubError, GitHubUser};
+use swarm_web::github::{GitHubClient, GitHubError, GitHubIdentity, GitHubUser};
+use swarm_web::identity::{IdentityProvider, IdentityProviders};
 use swarm_web::memory::MemoryStore;
 use swarm_web::model::{InstallationInfo, Role};
 use swarm_web::secret::Secret;
@@ -55,6 +56,8 @@ impl FakeGitHub {
                 GitHubUser {
                     id,
                     login: login.into(),
+                    name: Some(format!("{login} Display")),
+                    avatar_url: Some(format!("https://avatars.test/u/{id}")),
                 },
                 installations,
             ),
@@ -249,11 +252,25 @@ impl TestApp {
         Self::build_with("http://swarm.test", true, extra)
     }
 
+    /// A second sign-in method beside GitHub.
+    pub fn with_identity_provider(provider: Arc<dyn IdentityProvider>) -> Self {
+        Self::build_providers("http://swarm.test", true, &[], vec![provider])
+    }
+
     fn build(public_url: &str, internal_api: bool) -> Self {
         Self::build_with(public_url, internal_api, &[])
     }
 
     fn build_with(public_url: &str, internal_api: bool, extra: &[(&str, &str)]) -> Self {
+        Self::build_providers(public_url, internal_api, extra, Vec::new())
+    }
+
+    fn build_providers(
+        public_url: &str,
+        internal_api: bool,
+        extra: &[(&str, &str)],
+        providers: Vec<Arc<dyn IdentityProvider>>,
+    ) -> Self {
         ensure_callsites_live();
         let ui = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -291,10 +308,19 @@ impl TestApp {
         let github = Arc::new(FakeGitHub::default());
         let clock = Arc::new(ManualClock::new(START));
         let secure = config.cookie_secure();
-        let state = AppState::new(
+        let mut identity = IdentityProviders::new().with(Arc::new(GitHubIdentity::new(
+            github.clone(),
+            config.github.web_base.clone(),
+            config.github.client_id.clone(),
+        )));
+        for provider in providers {
+            identity = identity.with(provider);
+        }
+        let state = AppState::with_identity_providers(
             config,
             store.clone(),
             github.clone(),
+            identity,
             Arc::new(wrapper),
             clock.clone(),
         );
@@ -338,7 +364,13 @@ impl TestApp {
 
     /// Run the real sign-in round trip for the OAuth `code` the fake knows.
     pub async fn sign_in(&self, code: &str) -> Client<'_> {
-        let login = self.get("/api/v1/auth/github/login").await;
+        self.sign_in_with("github", code).await
+    }
+
+    /// The login redirect and the callback for `provider`; returns the
+    /// callback's reply whatever it was.
+    pub async fn callback_for(&self, provider: &str, code: &str) -> Reply {
+        let login = self.get(&format!("/api/v1/auth/{provider}/login")).await;
         assert_eq!(login.status, StatusCode::FOUND, "login redirects");
         let url = url::Url::parse(&login.location()).unwrap();
         let state = url
@@ -353,17 +385,20 @@ impl TestApp {
             "swarm_oauth"
         };
         let oauth = login.cookie(oauth_name).expect("oauth cookie");
-        let callback = self
-            .call(
-                Request::builder()
-                    .uri(format!(
-                        "/api/v1/auth/github/callback?code={code}&state={state}"
-                    ))
-                    .header(header::COOKIE, format!("{oauth_name}={oauth}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await;
+        self.call(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/auth/{provider}/callback?code={code}&state={state}"
+                ))
+                .header(header::COOKIE, format!("{oauth_name}={oauth}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    pub async fn sign_in_with(&self, provider: &str, code: &str) -> Client<'_> {
+        let callback = self.callback_for(provider, code).await;
         assert_eq!(
             callback.status,
             StatusCode::FOUND,
@@ -427,14 +462,15 @@ impl Client<'_> {
         self.send(Method::DELETE, path, None).await
     }
 
-    /// The first tenant this user sees, by GitHub account login.
+    /// The GitHub App installation tenant this user sees for an account login
+    /// (not their personal tenant, which carries the same login).
     pub async fn tenant_for(&self, account: &str) -> String {
         let reply = self.get("/api/v1/tenants").await;
         reply.json()["tenants"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|t| t["account_login"] == account)
+            .find(|t| t["account_login"] == account && t["account_type"] != "Personal")
             .unwrap_or_else(|| panic!("no tenant for {account}: {}", reply.text()))["id"]
             .as_str()
             .unwrap()
@@ -469,4 +505,25 @@ pub fn signed_webhook(event: &str, delivery: &str, body: &str) -> Request<Body> 
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()
+}
+
+impl Client<'_> {
+    /// The tenant created for this user at first sign-in.
+    pub async fn personal_tenant(&self) -> String {
+        let reply = self.get("/api/v1/tenants").await;
+        let personal: Vec<_> = reply.json()["tenants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["account_type"] == "Personal")
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            personal.len(),
+            1,
+            "exactly one personal tenant: {}",
+            reply.text()
+        );
+        personal[0].clone()
+    }
 }

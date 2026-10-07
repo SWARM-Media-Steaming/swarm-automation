@@ -235,7 +235,12 @@ execution history is *not* here (it is the `t_<tenant>` schema above) and neithe
 are settings, which are `tenant_config` documents in object storage so a worker
 job reads them beside its checkpoints. `0003_tenant_documents` adds
 `tenant_documents` (the `Store`'s tenant documents: tenant first in the key,
-cascading from `tenants`).
+cascading from `tenants`). `0004_personal_tenants` (#440) makes
+`tenants.installation_id` nullable (a personal tenant has no installation; the
+UNIQUE constraint ignores NULLs) and adds the partial unique index
+`tenants_personal_owner_idx` on `tenants (owner_user_id) WHERE installation_id IS
+NULL`, so one owner can never hold two personal tenants even under racing
+sign-ins.
 
 ### Postgres `Store`
 
@@ -288,7 +293,7 @@ in `web/` beside the desktop's.
 ```
 GET  /api/v1/health
 GET  /api/v1/session                              who is signed in, tenants, CSRF token
-GET  /api/v1/auth/github/login | /callback        GitHub App OAuth (state + PKCE)
+GET  /api/v1/auth/{provider}/login | /callback    identity-provider OAuth (state + PKCE); only `github` exists
 POST /api/v1/auth/logout
 GET  /api/v1/tenants[/{tenant}[/members|/provider-keys|/quotas|/usage]]
 PUT  /api/v1/tenants/{tenant}/provider-keys/{provider}     write-only (owner)
@@ -318,15 +323,41 @@ only, never the query string.
 
 ### Sign-in, sessions and CSRF
 
-Sign-in is the GitHub App's user-to-server OAuth flow with a random `state`
+Sign-in is an OIDC-style flow behind the `IdentityProvider` trait
+(`web/src/identity.rs`): the authorize URL, the code exchange and the person's
+profile (a stable `subject`, `login`, display name, avatar). GitHub (the App's
+user-to-server OAuth, `GitHubIdentity` in `github.rs`) is the only
+implementation; another provider is one more implementation in
+`IdentityProviders` and a `user_identities.provider` value, and the callback, the
+store and the personal tenant do not change. There is no username, email or
+password login and no registration route: an unknown `{provider}` in
+`/api/v1/auth/{provider}/...` is a 404. The flow uses a random `state`
 bound to the browser by an `HttpOnly` cookie and a PKCE S256 challenge. The
 user's GitHub token is used for the callback's three reads (`/user`,
 `/user/installations`, and the organization role) and dropped: it is never
-stored, logged or returned. The session is a 256-bit random id in an `HttpOnly`,
+stored, logged or returned, and an error names what failed, never the request.
+The session is a 256-bit random id in an `HttpOnly`,
 `SameSite=Lax` cookie (`Secure` and `__Host-` prefixed when `SWARM_WEB_PUBLIC_URL`
 is `https`); the store keeps only its SHA-256. A new id is minted on every
 sign-in, sessions expire (`SWARM_WEB_SESSION_TTL_SECS`, default 8 h) and logout
 deletes the row. Nothing credential-like goes in `localStorage`.
+
+**Registration (#440).** The callback hands the cleaned profile to
+`Store::register_identity`, one transaction. A (provider, subject) it has not
+seen creates the `users` row, the `user_identities` row, a personal tenant and
+the user's Owner membership (and sets `tenants.owner_user_id`), or none of them.
+The tenant id is the login slugified to the tenant grammar
+(`[a-z0-9][a-z0-9_-]{0,62}`: lowercase, other characters become `-`, edges
+trimmed, `user` if nothing is left) and deduplicated when taken by suffixing
+`-2`, `-3`, ... (then a random suffix after 50). Racing first sign-ins of one
+identity are serialised (a Postgres advisory lock on provider and subject; the
+partial unique index backs it), so exactly one user and one tenant result;
+people whose logins collide each get their own id because the insert is `ON
+CONFLICT DO NOTHING` and the loop moves on. A later sign-in matches on (provider,
+subject), refreshes `login`, display name, avatar and `last_login_at`, and
+**never changes the tenant id** when the GitHub login was renamed (the tenant's
+`account_login` follows for display). A user whose personal tenant is missing
+(a row from before `0004`) gets one at their next sign-in.
 
 CSRF: every state-changing request needs the session's token in `X-CSRF-Token`
 (constant-time compare against the copy stored with the session) and, if the
@@ -337,10 +368,13 @@ that needs a session cannot skip it.
 
 ### Tenants, roles and isolation
 
-A tenant is a GitHub App installation, created on first sight at sign-in or by
-the `installation` webhook. Tenant ids match the worker storage grammar
-(`t` + 16 hex), so the same string names the database tenant and the
-object-store prefix. A user belongs to the tenants GitHub says they can access;
+A tenant is either the user's **personal tenant** (`account_type` `Personal`, no
+installation, created at first sign-in, named after the login: see
+"Registration" above) or a GitHub App installation, created on first sight at
+sign-in or by the `installation` webhook (`t` + 16 hex). Both match the worker
+storage grammar, so the same string names the database tenant and the
+object-store prefix. A personal tenant has no installation to mint a repository
+token from, so a job for it is refused until an installation backs the work. A user belongs to the tenants GitHub says they can access;
 every sign-in re-syncs memberships (access GitHub no longer grants is dropped,
 role changes follow). Roles: **owner** is the installation's own user account or
 an organization admin (needs the App's *Organization members: read*
@@ -996,7 +1030,8 @@ job container to the repository's code, provider APIs and storage.
   on AWS. No Kubernetes and no Lambda: a job runs for hours, needs a real
   filesystem and `git`, and must be torn down afterwards.
 - **GitHub App for sign-in, installation tokens and webhooks.** One identity
-  provider, repository-scoped job tokens, no passwords.
+  provider behind an `IdentityProvider` trait, repository-scoped job tokens, no
+  passwords.
 - **Bring your own provider keys, sealed per tenant.** Spend is the tenant's own;
   the platform enforces budgets but never holds a shared provider key.
 - **Terraform, not CDK**, for the reasons above; and applied only by a human.

@@ -20,6 +20,13 @@ stays the one shared worker.
   them out of `tracing` fields, and never echo a rejected request body. Plaintext
   leaves only through `Vault::job_environment`, one provider's key per job. New
   secret-bearing code gets a canary test in `secrets.rs`.
+- **Sign-in is an `IdentityProvider`** (`identity.rs`; GitHub is the only one, no
+  password or email route). The callback registers through
+  `Store::register_identity`, one transaction that creates the user, identity,
+  personal tenant (id = slugified login, deduplicated, never changed by a rename)
+  and Owner membership, or nothing. Do not split it into separate store calls, and
+  keep tokens and profiles out of logs and errors. `retain_memberships` callers
+  must keep the personal tenant.
 - Sessions and CSRF live in `auth.rs` extractors. State-changing routes must use
   `Authed`/`TenantAccess` (they enforce the token and `Origin`); the only
   cookie-less state-changing routes are the signed webhook and the bearer-token

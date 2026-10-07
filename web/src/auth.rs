@@ -11,7 +11,7 @@
 //!   user belongs to the tenant in the path, and answers 404 (not 403) when they
 //!   do not so tenant ids cannot be probed.
 
-use axum::extract::{FromRequestParts, Query, RawPathParams, State};
+use axum::extract::{FromRequestParts, Path, Query, RawPathParams, State};
 use axum::http::header::{COOKIE, LOCATION, SET_COOKIE};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -23,7 +23,8 @@ use subtle::ConstantTimeEq;
 
 use crate::crypto::{random_token, sha256_hex};
 use crate::error::ApiError;
-use crate::github::{authorize_url, pkce_challenge};
+use crate::github::pkce_challenge;
+use crate::identity::{clean_profile, IdentityProvider};
 use crate::model::*;
 use crate::state::AppState;
 
@@ -214,18 +215,29 @@ impl FromRequestParts<AppState> for TenantAccess {
     }
 }
 
-fn redirect_uri(state: &AppState) -> String {
-    format!("{}{AUTH_PATH}/github/callback", state.config.origin())
+fn redirect_uri(state: &AppState, provider: &str) -> String {
+    format!("{}{AUTH_PATH}/{provider}/callback", state.config.origin())
 }
 
-pub async fn login(State(state): State<AppState>) -> Response {
+/// The provider named by the path, or 404 (an unconfigured provider is not
+/// distinguishable from a mistyped one).
+fn provider_for(
+    state: &AppState,
+    provider: &str,
+) -> Result<std::sync::Arc<dyn IdentityProvider>, ApiError> {
+    state.identity.get(provider).ok_or(ApiError::NotFound)
+}
+
+pub async fn login(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<Response, ApiError> {
+    let provider = provider_for(&state, &provider)?;
     let secure = state.config.cookie_secure();
     let oauth_state = random_token();
     let verifier = random_token();
-    let location = authorize_url(
-        &state.config.github.web_base,
-        &state.config.github.client_id,
-        &redirect_uri(&state),
+    let location = provider.authorize_url(
+        &redirect_uri(&state, provider.id()),
         &oauth_state,
         &pkce_challenge(&verifier),
     );
@@ -246,7 +258,7 @@ pub async fn login(State(state): State<AppState>) -> Response {
             secure,
         ),
     );
-    response
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -258,9 +270,11 @@ pub struct CallbackQuery {
 
 pub async fn callback(
     State(state): State<AppState>,
+    Path(provider): Path<String>,
     headers: HeaderMap,
     Query(query): Query<CallbackQuery>,
 ) -> Result<Response, ApiError> {
+    let provider = provider_for(&state, &provider)?;
     let secure = state.config.cookie_secure();
     if query.error.is_some() {
         return Err(ApiError::BadRequest(
@@ -284,23 +298,26 @@ pub async fn callback(
         ));
     }
 
-    let github = &state.github;
-    let token = github
-        .exchange_code(&code, &redirect_uri(&state), verifier)
+    let token = provider
+        .exchange_code(&code, &redirect_uri(&state, provider.id()), verifier)
         .await
         .map_err(|e| ApiError::BadGateway(e.to_string()))?;
-    let profile = github
-        .user(&token)
+    let profile = provider
+        .profile(&token)
         .await
         .map_err(|e| ApiError::BadGateway(e.to_string()))?;
-    let installations = github
+    let profile = clean_profile(profile).map_err(|e| ApiError::BadGateway(e.to_string()))?;
+    let installations = provider
         .installations(&token, &profile)
         .await
         .map_err(|e| ApiError::BadGateway(e.to_string()))?;
     drop(token);
 
-    let user = state.store.upsert_user(profile.id, &profile.login).await?;
-    let mut kept = Vec::new();
+    // One transaction: a first sign-in registers the user, their identity, their
+    // personal tenant and its Owner membership, or none of them.
+    let registration = state.store.register_identity(&profile).await?;
+    let user = registration.user;
+    let mut kept = vec![registration.tenant.id];
     for installation in &installations {
         let tenant = state
             .store
@@ -316,7 +333,8 @@ pub async fn callback(
             .await?;
         kept.push(tenant.id);
     }
-    // GitHub is the source of truth: access the user no longer has is dropped.
+    // The provider is the source of truth: access the user no longer has is
+    // dropped. The personal tenant is theirs and always stays.
     state.store.retain_memberships(&user.id, &kept).await?;
 
     // A new session id on every sign-in, so a pre-login cookie is never promoted.
@@ -332,7 +350,13 @@ pub async fn callback(
             expires_at: state.clock.now_secs() + ttl,
         })
         .await?;
-    tracing::info!(user = %user.login, tenants = kept.len(), "signed in");
+    tracing::info!(
+        user = %user.login,
+        provider = provider.id(),
+        first_sign_in = registration.first_sign_in,
+        tenants = kept.len(),
+        "signed in"
+    );
 
     let mut response = StatusCode::FOUND.into_response();
     let out = response.headers_mut();
@@ -435,7 +459,7 @@ pub async fn session(
         .collect();
     Ok(Json(json!({
         "authenticated": true,
-        "user": { "login": user.login },
+        "user": { "login": user.login, "display_name": user.display_name, "avatar_url": user.avatar_url },
         "csrf_token": session.csrf_token,
         "tenants": tenants,
         "install_url": install_url(&state),

@@ -8,7 +8,8 @@ use crate::clock::Clock;
 use crate::config::Config;
 use crate::crypto::KeyWrapper;
 use crate::events::EventHub;
-use crate::github::GitHubClient;
+use crate::github::{GitHubClient, GitHubIdentity};
+use crate::identity::IdentityProviders;
 use crate::orchestrator::Orchestrator;
 use crate::store::Store;
 use crate::usage::Accounting;
@@ -18,6 +19,8 @@ pub struct Inner {
     pub config: Config,
     pub store: Arc<dyn Store>,
     pub github: Arc<dyn GitHubClient>,
+    /// The sign-in methods: GitHub today (`identity.rs`).
+    pub identity: IdentityProviders,
     pub vault: Vault,
     pub accounting: Accounting,
     pub clock: Arc<dyn Clock>,
@@ -40,6 +43,24 @@ impl AppState {
         wrapper: Arc<dyn KeyWrapper>,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        let identity = IdentityProviders::new().with(Arc::new(GitHubIdentity::new(
+            github.clone(),
+            config.github.web_base.clone(),
+            config.github.client_id.clone(),
+        )));
+        Self::with_identity_providers(config, store, github, identity, wrapper, clock)
+    }
+
+    /// Like [`AppState::new`] with the sign-in methods named by the caller, for
+    /// a deployment (or a test) that adds a provider beside GitHub.
+    pub fn with_identity_providers(
+        config: Config,
+        store: Arc<dyn Store>,
+        github: Arc<dyn GitHubClient>,
+        identity: IdentityProviders,
+        wrapper: Arc<dyn KeyWrapper>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let vault = Vault::new(store.clone(), wrapper, clock.clone());
         let accounting = Accounting::new(store.clone(), clock.clone(), config.default_plan);
         let events = Arc::new(EventHub::new(config.sse_heartbeat_secs));
@@ -47,6 +68,7 @@ impl AppState {
             config,
             store,
             github,
+            identity,
             vault,
             accounting,
             clock,
