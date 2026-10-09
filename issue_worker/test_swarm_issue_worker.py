@@ -8078,15 +8078,55 @@ class GitHubAppAuthTestCase(unittest.TestCase):
                 with mock.patch.object(
                     auth_module.urllib.request,
                     "urlopen",
-                    side_effect=[io.BytesIO(json.dumps([]).encode())],
+                    side_effect=[
+                        io.BytesIO(json.dumps([]).encode()),
+                        io.BytesIO(json.dumps({"id": 987, "type": "User"}).encode()),
+                    ],
                 ):
                     missing = auth_module.GitHubAppAuth(
                         config, repository="Other-Org/widget"
                     ).repository_status("claude")
                 self.assertEqual(missing["state"], "not_installed_on_owner")
+                # Straight to the confirm screen for that account, no picker.
                 self.assertEqual(
                     missing["installUrl"],
+                    "https://github.com/apps/swarm-claude-bot/installations/new/permissions?target_id=987",
+                )
+
+                # The owner lookup failing only costs the shortcut.
+                with mock.patch.object(
+                    auth_module.urllib.request,
+                    "urlopen",
+                    side_effect=[io.BytesIO(json.dumps([]).encode()), OSError("offline")],
+                ):
+                    fallback = auth_module.GitHubAppAuth(
+                        config, repository="Other-Org/widget"
+                    ).repository_status("claude")
+                self.assertEqual(fallback["state"], "not_installed_on_owner")
+                self.assertEqual(
+                    fallback["installUrl"],
                     "https://github.com/apps/swarm-claude-bot/installations/new",
+                )
+
+                # Installed on a selected-repositories basis without this repo:
+                # link to that installation's access settings.
+                with mock.patch.object(
+                    auth_module.GitHubAppAuth, "installation_covers_repository", return_value=False
+                ):
+                    with mock.patch.object(
+                        auth_module.urllib.request,
+                        "urlopen",
+                        side_effect=[
+                            io.BytesIO(json.dumps({"id": 5, "type": "Organization"}).encode())
+                        ],
+                    ):
+                        no_access = auth_module.GitHubAppAuth(
+                            config, repository="My-Org/widget"
+                        ).repository_status("claude")
+                self.assertEqual(no_access["state"], "no_repo_access")
+                self.assertEqual(
+                    no_access["installUrl"],
+                    "https://github.com/organizations/My-Org/settings/installations/222",
                 )
 
             unconfigured = auth_module.GitHubAppAuth(

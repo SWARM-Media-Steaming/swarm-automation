@@ -65,12 +65,13 @@ def _request(method: str, url: str, bearer: str, payload: dict[str, Any] | None 
         method=method,
         headers={
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {bearer}",
             "Content-Type": "application/json",
             "X-GitHub-Api-Version": API_VERSION,
             "User-Agent": "swarm-issue-worker",
         },
     )
+    if bearer:
+        request.add_header("Authorization", f"Bearer {bearer}")
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
@@ -301,6 +302,33 @@ class GitHubAppAuth:
                 return identifier or None
         return None
 
+    def owner_account(self, provider: str, owner: str) -> tuple[int, str]:
+        """Numeric id and type (`User` / `Organization`) of `owner`, or `(0, "")`.
+
+        Best effort: it only improves the install links, so a failure never
+        changes readiness.
+        """
+        try:
+            # Public profile: an app JWT is rejected outside `/app/*`, so no auth.
+            account = _request("GET", f"https://api.github.com/users/{urllib.parse.quote(owner, safe='')}", "")
+            return int(account.get("id", 0) or 0), str(account.get("type", "") or "")
+        except (OSError, RuntimeError, ValueError, AttributeError):
+            return 0, ""
+
+    @staticmethod
+    def install_page(slug: str, target_id: int = 0) -> str:
+        """The app's install page; with `target_id` it opens the confirm screen
+        for that account directly instead of the "where to install" picker."""
+        base = f"https://github.com/apps/{slug}/installations/new"
+        return f"{base}/permissions?target_id={target_id}" if target_id > 0 else base
+
+    @staticmethod
+    def installation_settings_page(owner: str, owner_type: str, installation_id: int) -> str:
+        """Where an installation's repository access is edited."""
+        if owner_type == "Organization":
+            return f"https://github.com/organizations/{owner}/settings/installations/{installation_id}"
+        return f"https://github.com/settings/installations/{installation_id}"
+
     def _remember_installation(self, provider: str, owner: str, installation_id: int) -> None:
         """Cache a resolved installation in memory and, best-effort, back into
         the config file so the next run skips discovery."""
@@ -379,7 +407,7 @@ class GitHubAppAuth:
             "owner": owner,
             "repository": self.repository or "",
             "slug": slug,
-            "installUrl": f"https://github.com/apps/{slug}/installations/new",
+            "installUrl": self.install_page(slug),
             "installationId": 0,
         }
         if definition is None or (
@@ -409,19 +437,25 @@ class GitHubAppAuth:
             if not installation_id:
                 installation_id = self.find_installation_for_owner(key, owner)
             if not installation_id:
+                target_id, owner_type = self.owner_account(key, owner)
                 return {
                     **result,
+                    "installUrl": self.install_page(slug, target_id),
+                    "ownerType": owner_type,
                     "state": "not_installed_on_owner",
                     "message": f"{bot} is not installed on {owner}.",
                 }
             result["installationId"] = installation_id
             if not self.installation_covers_repository(key, installation_id):
+                _, owner_type = self.owner_account(key, owner)
                 return {
                     **result,
+                    "installUrl": self.installation_settings_page(owner, owner_type, installation_id),
+                    "ownerType": owner_type,
                     "state": "no_repo_access",
                     "message": (
                         f"{bot} is installed on {owner} but has not been granted "
-                        f"{self.repository}. Re-run the install and choose "
+                        f"{self.repository}. Add it under “Repository access”, or choose "
                         "“All repositories”."
                     ),
                 }

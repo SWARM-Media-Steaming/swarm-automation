@@ -88,6 +88,8 @@
     // repoId -> last BranchPushAccess from branch_push_access.
     branchPushAccess: {},
     botReadinessPoll: null,
+    botInstallQueue: [],
+    botInstallCurrent: null,
     // Dynamic Routing Calibration (Guides page). `status` is the last
     // get_model_calibration_status response; `lastResult` is the last manual
     // refresh_model_data response (cleared on navigation away is unnecessary,
@@ -478,7 +480,7 @@
       else input.value = value ?? "";
     });
     document.querySelectorAll("#days-field input").forEach((input) => {
-      input.checked = config.schedule_days.includes(input.value);
+      input.checked = (config.schedule_days || []).includes(input.value);
     });
     selectSchedule(config.schedule_mode, false);
     renderJevConnection();
@@ -3456,7 +3458,35 @@
   }
 
   // After a browser hand-off GitHub takes a few seconds to expose a new
-  // installation. Poll briefly so the checklist flips to ✓ on its own.
+  // installation. Poll (and re-check whenever the window regains focus) so the
+  // checklist flips to ✓ on its own, then move on to the next queued bot.
+  const BOT_POLL_TICKS = 36;
+
+  function installableBots(list) {
+    return (list || []).filter((row) => !row.ready && !row.needsSetupFlow && row.actionUrl);
+  }
+
+  async function advanceBotInstallQueue() {
+    const queue = state.botInstallQueue;
+    if (!queue || !queue.length) return;
+    const list = botReadinessFor() || [];
+    const pending = queue.filter((provider) => list.some((row) => row.provider === provider && !row.ready));
+    state.botInstallQueue = pending;
+    if (!pending.length) return;
+    const next = list.find((row) => row.provider === pending[0] && row.actionUrl);
+    if (!next || state.botInstallCurrent === next.provider) return;
+    state.botInstallCurrent = next.provider;
+    await openUrl(next.actionUrl);
+    showToast(`Install ${next.providerLabel} on GitHub (${pending.length} left), then return here.`, "success");
+  }
+
+  function stopBotPoll() {
+    if (state.botReadinessPoll) window.clearInterval(state.botReadinessPoll);
+    state.botReadinessPoll = null;
+    state.botInstallQueue = [];
+    state.botInstallCurrent = null;
+  }
+
   function pollBotReadiness() {
     if (state.botReadinessPoll) window.clearInterval(state.botReadinessPoll);
     let ticks = 0;
@@ -3464,11 +3494,20 @@
       ticks += 1;
       await refreshBotReadiness({ quiet: true });
       const list = botReadinessFor();
-      if (ticks >= 12 || (list && list.length && list.every((row) => row.ready))) {
-        window.clearInterval(state.botReadinessPoll);
-        state.botReadinessPoll = null;
-      }
+      await advanceBotInstallQueue();
+      if (ticks >= BOT_POLL_TICKS || (list && list.length && list.every((row) => row.ready))) stopBotPoll();
     }, 5000);
+  }
+
+  async function installMissingBots() {
+    await withBusy("install-missing-bots", async () => {
+      await saveBeforeAction();
+      await refreshBotReadiness({ quiet: false });
+      state.botInstallQueue = installableBots(botReadinessFor()).map((row) => row.provider);
+      state.botInstallCurrent = null;
+      await advanceBotInstallQueue();
+      pollBotReadiness();
+    }, { progress: "Opening GitHub…" });
   }
 
   async function botAction(row) {
@@ -3478,7 +3517,12 @@
     }
     if (row.actionUrl) {
       await openUrl(row.actionUrl);
-      showToast("Finish the install on GitHub — choose “All repositories” — then return here.", "success");
+      showToast(
+        row.state === "no_repo_access"
+          ? "Add this repository under “Repository access” (or choose “All repositories”), then return here."
+          : "Click Install on GitHub — choose “All repositories” — then return here.",
+        "success",
+      );
       pollBotReadiness();
     }
   }
@@ -3499,6 +3543,8 @@
       pill.textContent = summary.text;
       pill.className = `status-pill ${summary.ok ? "running" : list && list.length ? "stopped" : ""}`;
     }
+    const installAll = byId("install-missing-bots");
+    if (installAll) installAll.classList.toggle("hidden", installableBots(list).length < 2);
     const container = byId("bot-checklist");
     if (!container) return;
     container.replaceChildren();
@@ -5319,6 +5365,10 @@
     });
     byId("setup-bots").addEventListener("click", setupBots);
     byId("recheck-bots").addEventListener("click", recheckBots);
+    byId("install-missing-bots").addEventListener("click", installMissingBots);
+    window.addEventListener("focus", () => {
+      if (state.botReadinessPoll) void refreshBotReadiness({ quiet: true });
+    });
     byId("verify-bots").addEventListener("click", verifyBots);
     byId("grant-bot-push-access").addEventListener("click", grantBotPushAccess);
     window.addEventListener("focus", () => {
