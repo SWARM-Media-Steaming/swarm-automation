@@ -1815,10 +1815,10 @@ with tempfile.TemporaryDirectory() as directory:
         for (offered, priced) in [(false, true), (true, false), (true, true)] {
             let mut models = vec![model("gpt-6-sol")];
             if offered {
-                models.push(model("gpt-6-1-sol"));
+                models.push(model("gpt-6.1-sol"));
             }
             let mut successor =
-                serde_json::json!({"provider": "openai", "agent": "codex", "model": "gpt-6-1-sol"});
+                serde_json::json!({"provider": "openai", "agent": "codex", "model": "gpt-6.1-sol"});
             if priced {
                 successor["input_cost"] = serde_json::json!(2);
                 successor["output_cost"] = serde_json::json!(10);
@@ -1861,7 +1861,7 @@ with tempfile.TemporaryDirectory() as directory:
             provider.router_model = "gpt-6-sol".into();
             reconcile_config_models(&mut config, &tools);
             let expected = if offered && priced {
-                "gpt-6-1-sol"
+                "gpt-6.1-sol"
             } else {
                 "gpt-6-sol"
             };
@@ -2045,7 +2045,7 @@ print(json.dumps(cases))
         std::fs::write(policy_dir.join("active_catalog.json"), serde_json::json!({
             "calibration": {"models": [
                 {"provider": "openai", "agent": "codex", "model": "gpt-6-sol", "input_cost": 2, "output_cost": 10},
-                {"provider": "openai", "agent": "codex", "model": "gpt-6-1-sol", "input_cost": 2, "output_cost": 10}
+                {"provider": "openai", "agent": "codex", "model": "gpt-6.1-sol", "input_cost": 2, "output_cost": 10}
             ]}
         }).to_string()).unwrap();
         let mut config = AppConfig {
@@ -2079,7 +2079,7 @@ print(json.dumps(cases))
         let policy_dir = dir.path().join("model_calibration");
         std::fs::create_dir_all(&policy_dir).unwrap();
         let policy =
-            serde_json::json!({"priced_models": ["gpt-6-sol", "gpt-6-1-sol", "gpt-5.6-sol"]});
+            serde_json::json!({"priced_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-5.6-sol"]});
         std::fs::write(
             policy_dir.join("active_catalog.json"),
             serde_json::json!({"calibration": {"model_policy": policy}}).to_string(),
@@ -2100,15 +2100,15 @@ print(json.dumps(cases))
         tool.models = vec![
             model("gpt-5.6-sol"),
             model("gpt-6-sol"),
-            model("gpt-6-1-sol"),
+            model("gpt-6.1-sol"),
         ];
         tool.models_detected = true;
         apply_model_policy(std::slice::from_mut(&mut tool), &policy, None);
         reconcile_config_models(&mut config, &[tool]);
-        assert_eq!(config.provider("codex").unwrap().model, "gpt-6-1-sol");
+        assert_eq!(config.provider("codex").unwrap().model, "gpt-6.1-sol");
         assert_eq!(
             config.provider("codex").unwrap().router_model,
-            "gpt-6-1-sol"
+            "gpt-6.1-sol"
         );
     }
 }

@@ -281,7 +281,7 @@ models:
     active: false
     recommended: false
     deprecated: true
-    superseded_by: gpt-6-1-sol
+    superseded_by: gpt-6.1-sol
     supported_efforts: [low, medium, high, xhigh]
     strengths: [normal_software_engineering, repository_implementation]
     weaknesses: []

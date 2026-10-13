@@ -1858,7 +1858,7 @@ mod tests {
         let seeded = fresh.model_blacklist.clone().unwrap();
         assert!(seeded
             .iter()
-            .any(|row| row.model == "gpt-6-sol" && row.superseded_by == "gpt-6-1-sol"));
+            .any(|row| row.model == "gpt-6-sol" && row.superseded_by == "gpt-6.1-sol"));
         assert!(seeded.iter().any(|row| row.model == "claude-haiku-4-5"));
 
         fresh.model_blacklist = Some(vec![ModelBlacklistEntry {

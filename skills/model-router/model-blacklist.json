@@ -38,7 +38,7 @@
     },
     {
       "model": "gpt-6-sol",
-      "superseded_by": "gpt-6-1-sol",
+      "superseded_by": "gpt-6.1-sol",
       "reason": "GPT-6.1 Sol supersedes GPT-6 Sol."
     },
     {

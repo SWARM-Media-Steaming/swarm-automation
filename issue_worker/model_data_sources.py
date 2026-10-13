@@ -11,6 +11,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 import socket
 import ssl
 import time
@@ -21,6 +22,7 @@ ARTIFICIAL_ANALYSIS_URL = "https://artificialanalysis.ai/api/v2/data/llms/models
 MAX_SOURCE_BYTES = 12_000_000
 ARTIFICIAL_ANALYSIS_KEY_ENV = "ARTIFICIAL_ANALYSIS_API_KEY"
 ALLOWED_KINDS = ("models_dev", "artificial_analysis", "json")
+_OPENAI_GPT_VERSION_SLUG = re.compile(r"^(gpt-\d+)-(\d+)(?=-|$)")
 
 
 class SourceError(ValueError):
@@ -97,6 +99,13 @@ def fetch_json(url: str, *, api_key: str | None = None) -> tuple[object, str]:
         ) from None
 
 
+def _artificial_analysis_model_slug(provider: object, slug: object) -> object:
+    """Map Artificial Analysis OpenAI GPT IDs to the provider's CLI spelling."""
+    if provider != "openai" or not isinstance(slug, str):
+        return slug
+    return _OPENAI_GPT_VERSION_SLUG.sub(r"\1.\2", slug, count=1)
+
+
 def fetch_source(kind: str, url: str = "") -> tuple[list[dict], dict]:
     if kind not in ALLOWED_KINDS:
         raise SourceError("Unknown model data source.")
@@ -146,7 +155,7 @@ def fetch_source(kind: str, url: str = "") -> tuple[list[dict], dict]:
                 rows.append(
                     {
                         "provider": creator.get("slug"),
-                        "model": model.get("slug"),
+                        "model": _artificial_analysis_model_slug(creator.get("slug"), model.get("slug")),
                         "source_id": model.get("id"),
                         "input_cost": price.get("price_1m_input_tokens"),
                         "output_cost": price.get("price_1m_output_tokens"),

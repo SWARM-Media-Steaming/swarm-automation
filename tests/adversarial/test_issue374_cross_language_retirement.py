@@ -30,7 +30,7 @@ class CrossLanguageRetirementUAT(unittest.TestCase):
             (ROOT / "skills/model-router/model-blacklist.json").read_text(encoding="utf-8")
         )
         rows = {row["model"]: row for row in blacklist["models"]}
-        self.assertEqual(rows["gpt-6-sol"]["superseded_by"], "gpt-6-1-sol")
+        self.assertEqual(rows["gpt-6-sol"]["superseded_by"], "gpt-6.1-sol")
         self.assertEqual(
             rows["gpt-6-sol"]["reason"], "GPT-6.1 Sol supersedes GPT-6 Sol."
         )
@@ -40,7 +40,7 @@ class CrossLanguageRetirementUAT(unittest.TestCase):
         peer = models[marker:marker + 500]
         self.assertIn("active: false", peer)
         self.assertIn("deprecated: true", peer)
-        self.assertIn("superseded_by: gpt-6-1-sol", peer)
+        self.assertIn("superseded_by: gpt-6.1-sol", peer)
 
 
 if __name__ == "__main__":

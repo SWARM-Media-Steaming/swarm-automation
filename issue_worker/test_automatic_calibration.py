@@ -32,7 +32,7 @@ class AutomaticCalibrationTests(unittest.TestCase):
         rows = rows if rows is not None else [
             {'provider': 'openai', 'model': 'gpt-6-sol', 'input_cost': 2, 'output_cost': 10,
              'evaluations': {'artificial_analysis_intelligence_index': 50}},
-            {'provider': 'openai', 'model': 'gpt-6-1-sol', 'input_cost': 2, 'output_cost': 10,
+            {'provider': 'openai', 'model': 'gpt-6.1-sol', 'input_cost': 2, 'output_cost': 10,
              'evaluations': {'artificial_analysis_intelligence_index': 51.8}},
         ]
         raw = {'codex': names, 'claude': [], 'grok': []}
@@ -46,25 +46,25 @@ class AutomaticCalibrationTests(unittest.TestCase):
         self.assertTrue(first['activated'], first)
         self.assertFalse(available.is_blacklisted('gpt-6-sol'))
         self.assertIn('gpt-6-sol', dynamic_router.catalog_model_names(('codex',)))
-        self.assertNotIn('gpt-6-1-sol', dynamic_router.catalog_model_names(('codex',)))
+        self.assertNotIn('gpt-6.1-sol', dynamic_router.catalog_model_names(('codex',)))
         self.assertEqual(len([line for line in first['log_lines'] if 'not offered' in line]), 1)
         repeat = self.refresh(['gpt-6-sol'], force=True)
         self.assertEqual(repeat['log_lines'], [])
         self.assertEqual(repeat['status'], 'no_change')
         # CLI change bypasses the success interval and requires no user action.
-        result = self.refresh(['gpt-6-sol', 'gpt-6-1-sol'])
+        result = self.refresh(['gpt-6-sol', 'gpt-6.1-sol'])
         self.assertTrue(result['activated'], result)
         self.assertEqual(sum('now available' in line for line in result['log_lines']), 1)
         self.assertEqual(sum('gpt-6-sol retired' in line for line in result['log_lines']), 1)
         self.assertTrue(available.is_blacklisted('gpt-6-sol'))
-        self.assertEqual(available.replace_blacklisted('gpt-6-sol'), 'gpt-6-1-sol')
+        self.assertEqual(available.replace_blacklisted('gpt-6-sol'), 'gpt-6.1-sol')
         names = dynamic_router.catalog_model_names(('codex',))
-        self.assertIn('gpt-6-1-sol', names)
+        self.assertIn('gpt-6.1-sol', names)
         self.assertNotIn('gpt-6-sol', names)
         picked = dynamic_router.scored_floor('codex', 4)
         self.assertIsNotNone(picked)
         self.assertNotEqual(picked[0], 'gpt-6-sol')
-        estimate = model_pricing.estimate_invocation_cost(model='gpt-6-1-sol', provider='codex',
+        estimate = model_pricing.estimate_invocation_cost(model='gpt-6.1-sol', provider='codex',
             input_tokens=1_000_000, output_tokens=1_000_000, cached_input_tokens=500_000,
             cached_tokens_included_in_input=True)
         self.assertEqual(estimate.cost, 12)
@@ -72,8 +72,8 @@ class AutomaticCalibrationTests(unittest.TestCase):
         retired = next(row for row in self.service.load_active()['models'] if row['model'] == 'gpt-6-sol')
         self.assertFalse(retired['active'])
         self.assertTrue(retired['deprecated'])
-        self.assertEqual(retired['superseded_by'], 'gpt-6-1-sol')
-        repeat = self.refresh(['gpt-6-sol', 'gpt-6-1-sol'], force=True)
+        self.assertEqual(retired['superseded_by'], 'gpt-6.1-sol')
+        repeat = self.refresh(['gpt-6-sol', 'gpt-6.1-sol'], force=True)
         self.assertEqual(repeat['status'], 'no_change')
         self.assertEqual(repeat['log_lines'], [])
 
@@ -92,7 +92,7 @@ class AutomaticCalibrationTests(unittest.TestCase):
     def test_regression_activates_and_analysis_is_automatic(self):
         self.refresh(['gpt-6-sol'])
         with mock.patch.object(calibration, 'run_simulation', return_value={'regression_ok': False, 'regressions': ['fixture']}):
-            result = self.refresh(['gpt-6-sol', 'gpt-6-1-sol'])
+            result = self.refresh(['gpt-6-sol', 'gpt-6.1-sol'])
         self.assertTrue(result['activated'])
         self.assertTrue(result['diff']['regression'])
         self.assertIn('regression', result['notification']['message'])
@@ -150,24 +150,24 @@ class AutomaticCalibrationTests(unittest.TestCase):
         result = self.refresh([], force=True)
         active = self.service.load_active()['models']
         self.assertFalse(any(row['status'] in calibration.ROUTABLE_STATUSES for row in active))
-        self.assertFalse(any(row['model'] == 'gpt-6-1-sol' and row['status'] in calibration.ROUTABLE_STATUSES for row in active))
-        self.assertEqual([line for line in result['log_lines'] if 'gpt-6-1-sol is reported' in line], [
-            'Model data: openai/gpt-6-1-sol is reported by Artificial Analysis but not offered by the codex CLI; not a routing candidate.',
+        self.assertFalse(any(row['model'] == 'gpt-6.1-sol' and row['status'] in calibration.ROUTABLE_STATUSES for row in active))
+        self.assertEqual([line for line in result['log_lines'] if 'gpt-6.1-sol is reported' in line], [
+            'Model data: openai/gpt-6.1-sol is reported by Artificial Analysis but not offered by the codex CLI; not a routing candidate.',
         ])
 
     def test_scheduler_live_reload_replaces_stale_discovery_and_selections(self):
         import install_swarm_issue_cron as scheduler
-        args = ['--available-models', '{"codex":["gpt-6-1-sol"]}',
-                '--codex-model', 'gpt-6-1-sol', '--codex-router-model', 'gpt-6-1-sol',
+        args = ['--available-models', '{"codex":["gpt-6.1-sol"]}',
+                '--codex-model', 'gpt-6.1-sol', '--codex-router-model', 'gpt-6.1-sol',
                 '--codex-effort', 'high', '--codex-router-effort', 'medium']
         self.assertEqual(scheduler.saved_routing_overrides(args), args)
 
     def test_started_session_reroutes_when_its_model_is_retired(self):
         from types import SimpleNamespace
         import swarm_issue_worker
-        self.refresh(['gpt-6-sol', 'gpt-6-1-sol'])
+        self.refresh(['gpt-6-sol', 'gpt-6.1-sol'])
         pinned = SimpleNamespace(key='codex', model='gpt-6-sol', effort='high', resume=True)
-        fresh = SimpleNamespace(key='codex', model='gpt-6-1-sol', effort='high', resume=False)
+        fresh = SimpleNamespace(key='codex', model='gpt-6.1-sol', effort='high', resume=False)
         switch, reason = swarm_issue_worker.Worker.reroute_verdict(None, pinned, fresh, True)
         self.assertTrue(switch)
         self.assertIn('retired', reason)
@@ -231,20 +231,20 @@ class AutomaticCalibrationTests(unittest.TestCase):
                 self.assertEqual(active['retirements'][old], successor)
 
     def test_withdrawn_successor_is_not_resurrected_from_stale_cli_evidence(self):
-        self.refresh(['gpt-6-sol', 'gpt-6-1-sol'])
+        self.refresh(['gpt-6-sol', 'gpt-6.1-sol'])
         # Simulate a worker that was configured before the next publication.
         stale = available._discovered_rows()
         result = self.refresh(['gpt-6-sol'], force=True)
         with mock.patch.object(available, '_models', stale), mock.patch.object(available, '_configured_version', 'older'):
             self.assertIn('gpt-6-sol', dynamic_router.catalog_model_names(('codex',)))
-            self.assertNotIn('gpt-6-1-sol', dynamic_router.catalog_model_names(('codex',)))
+            self.assertNotIn('gpt-6.1-sol', dynamic_router.catalog_model_names(('codex',)))
             self.assertFalse(available.is_blacklisted('gpt-6-sol'))
-        self.assertEqual(sum('gpt-6-1-sol is reported' in line for line in result['log_lines']), 1)
+        self.assertEqual(sum('gpt-6.1-sol is reported' in line for line in result['log_lines']), 1)
         self.assertEqual(self.refresh(['gpt-6-sol'], force=True)['log_lines'], [])
 
     def test_empty_new_publication_replaces_all_stale_worker_discovery(self):
-        self.refresh(['gpt-6-sol', 'gpt-6-1-sol'])
-        available.configure({'codex': ['gpt-6-sol', 'gpt-6-1-sol']})
+        self.refresh(['gpt-6-sol', 'gpt-6.1-sol'])
+        available.configure({'codex': ['gpt-6-sol', 'gpt-6.1-sol']})
         rows = [{'provider': 'openai', 'model': 'gpt-6-sol', 'input_cost': 2, 'output_cost': 10}]
         with mock.patch.object(calibration._sources, 'fetch_source', return_value=(rows, {'status': 'ok'})):
             result = self.service.refresh(source='artificial_analysis', available_models={}, force=True)
@@ -308,16 +308,16 @@ class AutomaticCalibrationTests(unittest.TestCase):
         self.refresh(['gpt-6-sol'])
         before = self.service.catalog_override_path.read_bytes()
         with mock.patch.object(self.service, '_write_catalog_override', side_effect=OSError('fixture publication failure')):
-            failed = self.refresh(['gpt-6-sol', 'gpt-6-1-sol'], force=True)
+            failed = self.refresh(['gpt-6-sol', 'gpt-6.1-sol'], force=True)
         self.assertEqual(failed['status'], 'failed')
         self.assertEqual(before, self.service.catalog_override_path.read_bytes())
-        retried = self.refresh(['gpt-6-sol', 'gpt-6-1-sol'], force=True)
+        retried = self.refresh(['gpt-6-sol', 'gpt-6.1-sol'], force=True)
         self.assertEqual(sum('now available' in line for line in retried['log_lines']), 1)
         self.assertEqual(sum('gpt-6-sol retired' in line for line in retried['log_lines']), 1)
 
     def test_analysis_failure_does_not_fail_an_activation(self):
         with mock.patch.object(self.service, 'analyze', side_effect=RuntimeError('fixture')):
-            result = self.refresh(['gpt-6-sol', 'gpt-6-1-sol'])
+            result = self.refresh(['gpt-6-sol', 'gpt-6.1-sol'])
         self.assertTrue(result['activated'])
         self.assertEqual(result['status'], 'changed')
 
@@ -351,7 +351,7 @@ class AutomaticCalibrationTests(unittest.TestCase):
     def test_all_initiators_default_to_auto_and_approval_state_is_removed(self):
         parser = calibration.build_calibration_parser()
         self.assertEqual(parser.parse_args(['--state-dir', self.tmp.name, 'refresh']).activation_policy, 'auto')
-        self.service.save_state({'approved_models': ['openai/gpt-6-1-sol'], 'last_approved_by': 'USER'})
+        self.service.save_state({'approved_models': ['openai/gpt-6.1-sol'], 'last_approved_by': 'USER'})
         self.assertNotIn('approved_models', self.service.load_state())
         self.assertNotIn('last_approved_by', self.service.load_state())
         self.assertFalse(hasattr(self.service, 'approve_discovered_model'))
@@ -368,14 +368,14 @@ class AutomaticCalibrationTests(unittest.TestCase):
         from types import SimpleNamespace
         import swarm_issue_worker
         import token_usage
-        self.refresh(['gpt-6-sol', 'gpt-6-1-sol'])
+        self.refresh(['gpt-6-sol', 'gpt-6.1-sol'])
         worker = mock.Mock()
         worker.history = SimpleNamespace(execution_id='fixture')
         worker.choice = None
         worker.issue = None
         worker.current_token_usage_events.return_value = []
         swarm_issue_worker.Worker._record_usage_event(worker, agent_type='IMPLEMENTER', prompt_type='IMPLEMENTATION',
-            provider_key='codex', provider_name='Codex', model='gpt-6-1-sol', effort='high', attempt_number=1,
+            provider_key='codex', provider_name='Codex', model='gpt-6.1-sol', effort='high', attempt_number=1,
             usage=token_usage.NormalizedUsage(input_tokens=1_000_000, output_tokens=1_000_000),
             started_at='2026-09-30T00:00:00+00:00', success=True, error_type='')
         event = worker._append_token_usage_event.call_args.args[0]
