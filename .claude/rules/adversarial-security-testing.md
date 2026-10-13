@@ -47,7 +47,10 @@ the `minor` label from a trusted author; the worker owns VERSION.
   cap-hit is also `FAILED`, distinguished by `security_outcome = "cap_hit"`.
   A best-effort cap-hit is still `FAILED`; the execution, issue, and PR are
   labelled **Best-effort merge with unresolved adversarial results**. Strict
-  exhaustion does not merge and does not become `AI Needs Input`.
+  exhaustion does not merge and does not become `AI Needs Input`. Three
+  identical rejections of the tester report deliver that same best-effort
+  merge even when the epoch policy is strict. The comment names the rejection.
+  A missing commit or a dirty worktree still uses the Automation Failed hold.
 
 ### Scope, issues and the label
 

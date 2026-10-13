@@ -24,6 +24,11 @@ label from a trusted author; the worker owns VERSION.
   That delivery merges into the integration branch and promotes to the base
   branch only when both automatic promotion and automatic issue-PR merging are
   on. It must not become `AI Needs Input` solely because findings remain.
+  The same delivery is used when a tester report is rejected three times
+  (missing verdict, invalid report, or edits the tester may not make), even
+  if this setting is off: another epoch cannot produce the missing verdict.
+  The completion comment and pull request name that reason. A missing commit
+  or a dirty worktree still uses the Automation Failed hold.
 - Each tester invocation has fresh context containing the issue/spec, current
   diff, trusted issue amendments and repository conventions, never the implementer's transcript or
   reasoning. Quota resume may continue the same unfinished phase. Provider

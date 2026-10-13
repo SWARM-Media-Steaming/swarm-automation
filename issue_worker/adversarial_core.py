@@ -21,6 +21,12 @@ ends without a clean verdict is the repository's merge policy:
 * **best_effort** (`adversarial_best_effort_merge`): stop after the first epoch
   and deliver the latest committed implementation, marked as a best-effort
   merge with unresolved adversarial results.
+* **rejected tester result**: three identical rejections of a tester report
+  (a missing verdict line, an invalid report, or edits the tester was not
+  allowed to make) also deliver that latest commit as the same best-effort
+  merge, even when the epoch policy is strict. The verdict was never accepted.
+  A missing commit, a dirty worktree, and every other repeated failure still
+  hold for a corrected build.
 
 `AdversarialStage` is the per-agent description (state key, owned test root,
 suite origin, prompts, report schema). `AdversarialStageMixin` is the loop, and
@@ -54,6 +60,10 @@ MERGE_POLICIES = (MERGE_POLICY_STRICT, MERGE_POLICY_BEST_EFFORT)
 BEST_EFFORT_LABEL = "Best-effort merge with unresolved adversarial results"
 DELIVERY_VERIFIED_CLEAN = "verified_clean"
 DELIVERY_BEST_EFFORT = "best_effort"
+#: A tester report rejected this many times is delivered as best effort. The
+#: count matches the automation-failure hold so the same bound cannot both
+#: hold the issue and ship it.
+TESTER_RESULT_REJECTED = "tester_result_rejected"
 BEST_EFFORT_PR_MARKER = "<!-- swarm-issue-worker:adversarial-best-effort -->"
 #: Strict mode renews epochs in-process, but after this many epochs in one
 #: worker run it checkpoints and hands control back to the scheduler, which
@@ -589,6 +599,9 @@ class AdversarialStage:
         outcome = loop.get("outcome")
         epochs = epoch_of(int(loop.get("round") or 0))
         across = f" across {epochs} epochs" if epochs > 1 else ""
+        if outcome == "cap_hit" and loop.get("best_effort_reason") == TESTER_RESULT_REJECTED:
+            attempts = int((loop.get("retry_rejection") or {}).get("attempts") or 0)
+            return f"tester result rejected {attempts} times — {BEST_EFFORT_LABEL.lower()}"
         return {"clean_first_pass": "clean first pass",
                 "resolved_after_n": f"resolved after {loop['round']} rounds{across}",
                 "cap_hit": f"still failing after {MAX_ROUNDS} rounds — {BEST_EFFORT_LABEL.lower()}"}[outcome]
@@ -1644,17 +1657,35 @@ class AdversarialStageMixin:
         if not url:
             title = f"Address deferred {stage.label.lower()} findings from #{self.issue.number}"
             title = title[:120]
-            notes = sanitize_text(stage.cap_hit_output(loop))
+            explanation = str(loop.get("best_effort_explanation") or "")
+            if explanation:
+                notes = sanitize_text(
+                    f"**{BEST_EFFORT_LABEL}.**\n\n## Summary\n{explanation}\n\n" + stage.summary_line(loop)
+                )
+                policy_line = (
+                    f"- Merge policy: {BEST_EFFORT_LABEL.lower()} — the tester result was rejected "
+                    "and the verdict was never accepted\n"
+                )
+                handoff = (
+                    "The original issue was delivered as best effort because the tester result was "
+                    "rejected and the verdict was never accepted. "
+                )
+            else:
+                notes = sanitize_text(stage.cap_hit_output(loop))
+                policy_line = (
+                    f"- Round cap: `{MAX_ROUNDS}` fix/re-test rounds\n"
+                    f"- Merge policy: {BEST_EFFORT_LABEL.lower()} (the repository allows a best-effort "
+                    "adversarial merge after 3 rounds)\n"
+                )
+                handoff = "The original issue was delivered as best effort after the bounded review budget. "
             body = (
                 f"{marker}\n"
                 f"Follow-up work deferred from {stage.label.lower()} on issue #{self.issue.number}.\n\n"
                 f"- Original issue: {self.issue.url}\n"
                 f"- Delivered commit: `{loop.get('completion', '')}`\n"
-                f"- Round cap: `{MAX_ROUNDS}` fix/re-test rounds\n"
-                f"- Merge policy: {BEST_EFFORT_LABEL.lower()} (the repository allows a best-effort "
-                "adversarial merge after 3 rounds)\n\n"
+                f"{policy_line}\n"
                 "## Adversarial notes\n"
-                "The original issue was delivered as best effort after the bounded review budget. "
+                f"{handoff}"
                 "Work the notes below in a later issue; do not reopen the original delivery just "
                 "to obtain a response.\n\n"
                 f"{notes}\n"
@@ -1835,6 +1866,11 @@ class AdversarialStageMixin:
                     )
                     self.save_stage(stage, loop)
                     self.record_stage_failure(stage, loop, str(error))
+                    if self.begin_rejected_tester_best_effort(stage, loop):
+                        # The stage is done. Another tester call cannot produce
+                        # the missing verdict, so the pipeline delivers the
+                        # commit that already exists.
+                        continue
                     raise WorkerError(
                         f"Invalid adversarial test result: {error}. Rejected edits were restored; "
                         f"diagnostic patch: {patch_path}"
@@ -2121,6 +2157,55 @@ class AdversarialStageMixin:
                   and state[stage.key].get("consumed_percent") is not None]
         return sum(values) if values else None
 
+    def begin_rejected_tester_best_effort(self, stage: AdversarialStage, loop: dict[str, Any]) -> bool:
+        """Deliver after the tester result is rejected past the hold bound.
+
+        Returns true only when a committed implementation is still checked out
+        and the worktree is clean. The caller then finishes the stage as a
+        best-effort cap hit. A missing commit or leftover edits return false
+        so the existing automation hold still applies.
+        """
+        from swarm_issue_worker import AUTOMATION_FAILURE_LIMIT, log
+        attempts = int((loop.get("retry_rejection") or {}).get("attempts") or 0)
+        if attempts < AUTOMATION_FAILURE_LIMIT:
+            return False
+        if self.worktree_status():
+            return False
+        completion = str(loop.get("completion") or "")
+        if not completion or not self.git_ok("cat-file", "-e", f"{completion}^{{commit}}"):
+            return False
+        head = self.git("rev-parse", "HEAD")
+        if head != completion and not self.git_ok("merge-base", "--is-ancestor", completion, "HEAD"):
+            return False
+        reason = str(
+            (loop.get("retry_rejection") or {}).get("reason")
+            or loop.get("review_error")
+            or "the tester result was rejected"
+        )
+        explanation = (
+            f"The adversarial tester result was rejected {attempts} times ({reason}). "
+            "Rejected edits were restored, and the verdict was never accepted. "
+            "The latest committed implementation is delivered as best effort."
+        )
+        loop.update(
+            phase="done",
+            outcome="cap_hit",
+            status="FAILED",
+            active=False,
+            response=None,
+            force_best_effort=True,
+            best_effort_reason=TESTER_RESULT_REJECTED,
+            best_effort_explanation=explanation,
+            completion=head,
+            merge_policy=MERGE_POLICY_BEST_EFFORT,
+        )
+        self.save_stage(stage, loop)
+        state = self.read_state()
+        if state.pop("automation_failure", None) is not None:
+            self.write_state(state)
+        log(f"{stage.label} for issue #{self.issue.number}: {BEST_EFFORT_LABEL} — {explanation}")
+        return True
+
     def record_stage_failure(self, stage: AdversarialStage, loop: dict[str, Any], reason: str) -> None:
         """A review that could not execute must never read as a clean pass."""
         from ai_execution_history import sanitize_text
@@ -2210,12 +2295,17 @@ class AdversarialStageMixin:
             raise WorkerError("Adversarial delivery has uncommitted changes")
         policy = self.adversarial_merge_policy()
         capped_stages = [(stage, loop) for stage, loop in finished if loop.get("outcome") == "cap_hit"]
-        if capped_stages and policy == MERGE_POLICY_STRICT:
+        forced = [pair for pair in capped_stages if pair[1].get("force_best_effort")]
+        if capped_stages and policy == MERGE_POLICY_STRICT and not forced:
             # A checkpoint can carry a cap hit from a worker version (or a
             # policy) that delivered best effort. Strict mode never merges
             # known blocking failures, so the stage resumes in a new epoch.
+            # A tester result rejected past the hold bound is not that case:
+            # another epoch cannot produce the missing verdict.
             self.reopen_capped_stages(stages, capped_stages)
             return self.run_adversarial_pipeline()
+        if forced:
+            policy = MERGE_POLICY_BEST_EFFORT
         last = finished[-1][1]
         self.choice = ProviderChoice(**last["delivery_choice"])
         self.update_state_for_choice(self.choice)
@@ -2227,16 +2317,28 @@ class AdversarialStageMixin:
         if capped:
             stage, loop = capped
             unresolved = self.adversarial_unresolved(finished)
-            self.update_state(adversarial_best_effort={"policy": policy, "unresolved": unresolved})
+            explanation = str(loop.get("best_effort_explanation") or "")
+            self.update_state(adversarial_best_effort={
+                "policy": policy, "unresolved": unresolved,
+                "reason": str(loop.get("best_effort_reason") or ""),
+                "explanation": explanation,
+            })
             self.history.update(
                 iso_timestamp(), adversarial_merge_policy=policy, adversarial_delivery=DELIVERY_BEST_EFFORT,
                 adversarial_unresolved={"before_merge": unresolved},
             )
-            log(f"{stage.label} for issue #{self.issue.number}: {BEST_EFFORT_LABEL} — delivering "
-                f"{str(last['completion'])[:12]} with {len(unresolved['suites'])} failing suite(s) and "
-                f"{len(unresolved['findings'])} open finding(s) after {MAX_ROUNDS} fix/re-test rounds.")
+            if explanation:
+                log(f"{stage.label} for issue #{self.issue.number}: {BEST_EFFORT_LABEL} — delivering "
+                    f"{str(last['completion'])[:12]}. {explanation}")
+            else:
+                log(f"{stage.label} for issue #{self.issue.number}: {BEST_EFFORT_LABEL} — delivering "
+                    f"{str(last['completion'])[:12]} with {len(unresolved['suites'])} failing suite(s) and "
+                    f"{len(unresolved['findings'])} open finding(s) after {MAX_ROUNDS} fix/re-test rounds.")
             followup_url = self.file_cap_followup(stage, loop)
-            output = stage.cap_hit_output(loop)
+            output = (
+                f"**{BEST_EFFORT_LABEL}.**\n\n## Summary\n{explanation}\n\n" + stage.summary_line(loop)
+                if explanation else stage.cap_hit_output(loop)
+            )
             if followup_url:
                 output += f"\n\nFollow-up issue: {followup_url}\n"
             # A cap hit is still recorded as FAILED in the adversarial review,

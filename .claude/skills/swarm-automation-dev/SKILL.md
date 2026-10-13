@@ -767,12 +767,18 @@ Once an issue is selected and has durable state, repeated deterministic
 automation failures are part of the public issue lifecycle, including failures
 in repository or adversarial-definition preflight before the Started comment.
 Three identical failures must preserve the branch/state, post one
-`automation-failed` marker and stop further AI work.
+`automation-failed` marker and stop further AI work. The one exception is an
+adversarial tester report rejected three times when a commit already exists
+and the worktree is clean: that delivers the commit through the best-effort
+merge path, including when the epoch policy is strict, and the comment names
+the rejection. Do not use that path for a missing commit, a dirty worktree,
+or any other repeated failure.
 The hold is build-scoped: a changed packaged worker source revision or app
 version resumes the saved checkpoint, posts `automation-resumed`, and removes
 the `Automation Failed` label after preflight passes. Never implement this by
-clearing `in-progress-issue.json`, cleaning the branch, or publishing untested
-work merely to reach a terminal state. The scheduler exit for this hold is 14.
+clearing `in-progress-issue.json` or cleaning the branch. Publishing the
+latest commit is reserved for the rejected-tester best-effort path above.
+The scheduler exit for this hold is 14.
 Exit 13 stays the strict adversarial epoch yield.
 
 The desktop exports `RUST_LOG` for its own native diagnostics, but Rust-based

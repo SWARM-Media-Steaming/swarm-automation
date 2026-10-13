@@ -1388,6 +1388,68 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertNotIn("retry_rejection", self.worker.read_state()["adversarial"])
         self.assertEqual(self.worker.read_state()["adversarial"]["outcome"], "clean_first_pass")
 
+    def test_three_rejected_tester_results_deliver_best_effort_while_strict(self):
+        self.prepare(fixed=True)
+        self.assertFalse(self.worker.config.adversarial_best_effort_merge)
+        self.assertFalse(self.worker.config.auto_approve)
+        implementation = self.git("rev-parse", "HEAD")
+
+        def malformed(prompt, activity=""):
+            self.role(prompt)
+            self.worker.ai_output_file.write_text("The tests should pass.")
+            return 0
+
+        with self.patches(malformed), mock.patch.object(self.worker, "approve_pull_request") as approve, \
+                mock.patch.object(self.worker, "merge_pull_request") as merge:
+            merge.return_value = implementation
+            with self.assertRaisesRegex(WorkerError, "exactly one SWARM_ADVERSARIAL_RESULT"):
+                self.worker.run_adversarial_delivery()
+            with self.assertRaisesRegex(WorkerError, "exactly one SWARM_ADVERSARIAL_RESULT"):
+                self.worker.run_adversarial_delivery()
+            self.assertEqual(self.pr_bodies, [])
+            self.assertEqual(self.worker.run_adversarial_delivery(), 10)
+        approve.assert_called_once()
+        merge.assert_called_once()
+        self.assertEqual([call[0] for call in self.calls].count("test"), 3)
+        self.assertFalse((self.repo / "tests/adversarial/test_issue.py").exists())
+        delivered = merge.call_args.args[1]
+        self.assertNotIn(
+            "tests/adversarial/test_issue.py",
+            self.git("ls-tree", "-r", "--name-only", delivered),
+        )
+        self.assertEqual(len(self.comments_posted), 1)
+        self.assertIn("Best-effort merge with unresolved adversarial results", self.comments_posted[0])
+        self.assertIn("rejected 3 times", self.comments_posted[0])
+        self.assertIn("SWARM_ADVERSARIAL_RESULT", self.comments_posted[0])
+        self.assertIn("verdict was never accepted", self.comments_posted[0])
+        self.assertNotIn("this repository allows a best-effort", self.comments_posted[0])
+        self.assertNotIn("AI needs your input", self.comments_posted[0])
+        self.assertNotIn("Automation needs attention", self.comments_posted[0])
+        self.assertIn("Best-effort merge with unresolved adversarial results", self.pr_bodies[0])
+        self.assertIn("rejected 3 times", self.pr_bodies[0])
+        self.assertTrue(any(args[:2] == ["issue", "create"] for args in self.api))
+        row = self.worker.history.repository.for_repository(self.worker.config.github_repository)[0]
+        self.assertEqual(row["adversarial_outcome"], "cap_hit")
+        self.assertEqual(row["adversarial_delivery"], "best_effort")
+        self.assertEqual(row["adversarial_merge_policy"], "best_effort")
+        self.assertEqual(row["final_status"], "completed")
+        self.assertEqual(row["promotion_status"], "not_configured")
+
+    def test_a_failed_adversarial_session_still_holds_instead_of_merging(self):
+        self.prepare(fixed=True)
+
+        def failed_session(prompt, activity=""):
+            return 1
+
+        with self.patches(failed_session), mock.patch.object(self.worker, "merge_pull_request") as merge:
+            for _ in range(3):
+                with self.assertRaisesRegex(WorkerError, "coding session failed"):
+                    self.worker.run_adversarial_delivery()
+        merge.assert_not_called()
+        self.assertEqual(self.pr_bodies, [])
+        self.assertEqual(self.comments_posted, [])
+        self.assertNotEqual(self.worker.read_state()["adversarial"].get("outcome"), "cap_hit")
+
 
 class ResultPayloadTests(unittest.TestCase):
     """A pure function, tested directly against formatting a tester actually

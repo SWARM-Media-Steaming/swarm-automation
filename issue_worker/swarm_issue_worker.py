@@ -4213,7 +4213,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             f"{len(after_merge['suites'])} failing suite(s) and {len(after_merge['findings'])} open "
             "finding(s) remain unresolved.")
         return {"policy": policy, "delivery": DELIVERY_BEST_EFFORT, "before_merge": unresolved,
-                "after_merge": after_merge}
+                "after_merge": after_merge, "explanation": str(record.get("explanation") or "")}
 
     @staticmethod
     def render_adversarial_policy(report: dict[str, Any] | None) -> str:
@@ -4242,10 +4242,17 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         }.get(str(after.get("promotion")), "not merged")
         merged = (f"merged into `{after.get('integration_branch')}` as `{after.get('merged_sha')}`"
                   if after.get("merged") else "pull request left open")
+        explanation = str(report.get("explanation") or "").strip()
+        if explanation:
+            policy_line = f"- **Adversarial merge policy:** **{BEST_EFFORT_LABEL}** — {explanation}\n"
+        else:
+            policy_line = (
+                f"- **Adversarial merge policy:** **{BEST_EFFORT_LABEL}** — this repository allows a best-effort "
+                "adversarial merge after 3 rounds.\n"
+            )
         return (
-            f"- **Adversarial merge policy:** **{BEST_EFFORT_LABEL}** — this repository allows a best-effort "
-            "adversarial merge after 3 rounds.\n"
-            f"- **Delivery:** {merged}; {promotion}.\n"
+            policy_line
+            + f"- **Delivery:** {merged}; {promotion}.\n"
             f"- **Unresolved before merge:** {describe(report.get('before_merge') or {})}.\n"
             f"- **Unresolved after merge:** {describe(after)} — the merged commit is the one the final round "
             "tested, so these remain open and are tracked in the follow-up issue.\n"
@@ -6548,11 +6555,21 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         """The prominent PR banner for a best-effort adversarial delivery."""
         record = self.read_state().get("adversarial_best_effort") if self.in_progress_file.exists() else None
         unresolved = (record or {}).get("unresolved") or {"suites": [], "findings": []}
+        explanation = str((record or {}).get("explanation") or "").strip()
+        if explanation:
+            banner = (
+                f"> [!WARNING]\n> **{BEST_EFFORT_LABEL}.** {explanation} "
+                "This pull request merges the latest committed implementation."
+            )
+        else:
+            banner = (
+                f"> [!WARNING]\n> **{BEST_EFFORT_LABEL}.** This repository allows a best-effort adversarial "
+                "merge after 3 rounds; this pull request merges the latest committed implementation even though "
+                "the adversarial results below were still unresolved."
+            )
         lines = [
             BEST_EFFORT_PR_MARKER,
-            f"> [!WARNING]\n> **{BEST_EFFORT_LABEL}.** This repository allows a best-effort adversarial "
-            "merge after 3 rounds; this pull request merges the latest committed implementation even though "
-            "the adversarial results below were still unresolved.",
+            banner,
             "",
             "Unresolved before merge:",
         ]
