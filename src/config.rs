@@ -44,6 +44,48 @@ pub fn repo_slug(github_repository: &str) -> String {
         .collect()
 }
 
+/// One operator-managed retirement. An empty `superseded_by` is an outright
+/// ban and applies immediately. A named successor stays dormant until that
+/// model is offered by its provider CLI and priced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelBlacklistEntry {
+    pub model: String,
+    #[serde(default)]
+    pub superseded_by: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+fn model_slug_ok(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    value.len() <= 100
+        && (first.is_ascii_alphanumeric() || matches!(first, '.' | '_' | ':' | '-'))
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+}
+
+/// The checked-in seed. A config that has never stored `model_blacklist`
+/// copies this list once; after that the saved list is the one both languages
+/// enforce. The file stays so a fresh install and the cross-language tests
+/// still see the same predecessors.
+pub fn bundled_model_blacklist() -> Vec<ModelBlacklistEntry> {
+    serde_json::from_str::<serde_json::Value>(include_str!(
+        "../skills/model-router/model-blacklist.json"
+    ))
+    .ok()
+    .and_then(|value| {
+        value
+            .get("models")
+            .cloned()
+            .and_then(|rows| serde_json::from_value(rows).ok())
+    })
+    .unwrap_or_default()
+}
+
 /// Starting worker and router settings for one provider, derived by the worker
 /// from the live model catalog (`routing_calculator.py defaults`). Nothing here
 /// names a model: the app fills only settings that are still empty, so a
@@ -591,6 +633,12 @@ pub struct AppConfig {
     #[serde(default = "default_owner_scope_id")]
     pub knowledge_owner_scope_id: String,
 
+    /// Operator-managed model retirements. `None` in a config written before
+    /// this field existed means "copy the bundled seed". `Some`, including an
+    /// empty list, is the list routing, option lists and the worker use.
+    #[serde(default)]
+    pub model_blacklist: Option<Vec<ModelBlacklistEntry>>,
+
     /// Jev decision engine (issue #299). Off by default: Swarm behavior is
     /// unchanged and Jev adds no call, cost, or latency.
     #[serde(default)]
@@ -719,6 +767,7 @@ impl Default for AppConfig {
             generate_issue_clustering: false,
             knowledge_context_token_limit: default_knowledge_context_token_limit(),
             knowledge_owner_scope_id: default_owner_scope_id(),
+            model_blacklist: None,
             jev_enabled: false,
             jev_bin: String::new(),
             jev_model: default_jev_model(),
@@ -953,6 +1002,7 @@ impl AppConfig {
         self.normalize_providers();
         self.normalize_routing();
         self.normalize_model_calibration();
+        self.normalize_model_blacklist();
         self.normalize_knowledge();
         self.normalize_repositories();
         let repository_ids: HashSet<_> = self
@@ -1037,6 +1087,43 @@ impl AppConfig {
             self.routing_optimization = default_routing_optimization();
         }
         self.normalize_jev();
+    }
+
+    /// Copy the bundled retirements the first time, then keep whatever the
+    /// operator saved. Invalid rows are dropped so a hand-edited file cannot
+    /// stall routing; the AI Configuration form rejects them before save.
+    fn normalize_model_blacklist(&mut self) {
+        let mut seen = HashSet::new();
+        let mut cleaned = Vec::new();
+        for mut row in self
+            .model_blacklist
+            .take()
+            .unwrap_or_else(bundled_model_blacklist)
+        {
+            row.model = row.model.trim().to_ascii_lowercase();
+            row.superseded_by = row.superseded_by.trim().to_ascii_lowercase();
+            row.reason = row.reason.trim().chars().take(300).collect();
+            if !model_slug_ok(&row.model)
+                || row.model == row.superseded_by
+                || (!row.superseded_by.is_empty() && !model_slug_ok(&row.superseded_by))
+            {
+                continue;
+            }
+            if !seen.insert(row.model.clone()) {
+                cleaned.retain(|existing: &ModelBlacklistEntry| existing.model != row.model);
+            }
+            cleaned.push(row);
+        }
+        self.model_blacklist = Some(cleaned);
+    }
+
+    /// JSON document the worker's `--model-blacklist` flag accepts.
+    /// `None` means the config has not been normalized and the worker should
+    /// keep reading the bundled file.
+    pub fn model_blacklist_document(&self) -> Option<String> {
+        self.model_blacklist
+            .as_ref()
+            .map(|rows| serde_json::json!({ "models": rows }).to_string())
     }
 
     /// A malformed source name or interval (e.g. from an older config file
@@ -1761,5 +1848,45 @@ mod tests {
         config.preferred_provider = "not-a-provider".into();
         config.normalize();
         assert_eq!(config.preferred_provider, "claude");
+    }
+
+    #[test]
+    fn a_missing_blacklist_copies_the_bundled_seed_and_a_saved_list_stays() {
+        let mut fresh = AppConfig::default();
+        assert!(fresh.model_blacklist.is_none());
+        fresh.normalize();
+        let seeded = fresh.model_blacklist.clone().unwrap();
+        assert!(seeded
+            .iter()
+            .any(|row| row.model == "gpt-6-sol" && row.superseded_by == "gpt-6-1-sol"));
+        assert!(seeded.iter().any(|row| row.model == "claude-haiku-4-5"));
+
+        fresh.model_blacklist = Some(vec![ModelBlacklistEntry {
+            model: "  Custom-Old ".into(),
+            superseded_by: "Custom-New".into(),
+            reason: " Operator. ".into(),
+        }]);
+        fresh.normalize();
+        assert_eq!(
+            fresh.model_blacklist.as_deref(),
+            Some(
+                &[ModelBlacklistEntry {
+                    model: "custom-old".into(),
+                    superseded_by: "custom-new".into(),
+                    reason: "Operator.".into(),
+                }][..]
+            )
+        );
+        let document = fresh.model_blacklist_document().unwrap();
+        assert!(document.contains("custom-old"));
+        assert!(!document.contains("gpt-6-sol"));
+
+        fresh.model_blacklist = Some(vec![ModelBlacklistEntry {
+            model: "not a model".into(),
+            superseded_by: "custom-old".into(),
+            reason: String::new(),
+        }]);
+        fresh.normalize();
+        assert!(fresh.model_blacklist.as_ref().unwrap().is_empty());
     }
 }

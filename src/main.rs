@@ -857,6 +857,9 @@ fn provider_scheduler_arguments(config: &AppConfig, providers: &[ResolvedProvide
         available_models_json(config, providers),
     ]);
     arguments.extend(["--routing-optimization".into(), "cost".into()]);
+    if let Some(document) = config.model_blacklist_document() {
+        arguments.extend(["--model-blacklist".into(), document]);
+    }
     // The router names the worker model itself, so it needs the same
     // credit-model filter the desktop applies to every other model list.
     arguments.push(
@@ -3450,6 +3453,9 @@ fn routing_calculator_args(
     if config.allow_usage_credit_models {
         arguments.push("--allow-usage-credit-models".into());
     }
+    if let Some(document) = config.model_blacklist_document() {
+        arguments.extend(["--model-blacklist".into(), document]);
+    }
     if let Some(input) = input {
         arguments.push("--input".into());
         arguments.push(input.to_string());
@@ -4953,7 +4959,10 @@ fn open_provider_login(state: State<'_, AppState>, provider: String) -> Result<(
 /// Sign in to GitHub in-app via the device flow. Emits `github-device-code`
 /// with the code to enter on GitHub, then resolves with the signed-in login.
 #[tauri::command]
-async fn github_sign_in(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+async fn github_sign_in(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let config = current_config(&state)?;
     let gh = tools::configured_or_detected(&config.gh_bin, "gh")?;
     tauri::async_runtime::spawn_blocking(move || {

@@ -95,9 +95,8 @@ fn request_device_code() -> Result<DeviceCodeResponse, String> {
         DEVICE_CODE_URL,
         &[("client_id", GITHUB_OAUTH_CLIENT_ID), ("scope", SCOPES)],
     )?;
-    serde_json::from_str::<DeviceCodeResponse>(&body).map_err(|_| {
-        format!("GitHub did not start a sign-in: {}", describe_error(&body))
-    })
+    serde_json::from_str::<DeviceCodeResponse>(&body)
+        .map_err(|_| format!("GitHub did not start a sign-in: {}", describe_error(&body)))
 }
 
 fn poll_token(device_code: &str) -> Result<TokenPoll, String> {
@@ -114,7 +113,10 @@ fn poll_token(device_code: &str) -> Result<TokenPoll, String> {
 
 fn parse_token_response(body: &str) -> TokenPoll {
     let Ok(response) = serde_json::from_str::<TokenResponse>(body) else {
-        return TokenPoll::Failed(format!("Unexpected GitHub response: {}", describe_error(body)));
+        return TokenPoll::Failed(format!(
+            "Unexpected GitHub response: {}",
+            describe_error(body)
+        ));
     };
     if let Some(token) = response.access_token.filter(|token| !token.is_empty()) {
         return TokenPoll::Token(token);
@@ -189,7 +191,9 @@ fn post_form(url: &str, fields: &[(&str, &str)]) -> Result<String, String> {
     let mut command = Command::new("curl");
     command.args(["-sS", "-X", "POST", "-H", "Accept: application/json"]);
     for (name, value) in fields {
-        command.arg("--data-urlencode").arg(format!("{name}={value}"));
+        command
+            .arg("--data-urlencode")
+            .arg(format!("{name}={value}"));
     }
     command.arg(url);
     let output = command

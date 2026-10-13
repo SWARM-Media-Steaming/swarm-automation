@@ -2,15 +2,17 @@
 
 Two retirement sources, one rule:
 
-* ``skills/model-router/model-blacklist.json`` lists known successor
-  relationships (read by ``available_models`` and ``src/tools.rs``).
+* ``skills/model-router/model-blacklist.json`` is the seed. A saved operator
+  list (``--model-blacklist``, AI Configuration) replaces it. Both
+  ``available_models`` and ``src/tools.rs`` read that same list.
 * ``derived_supersessions`` retires an older release of the same provider and
   family when a newer one is offered by its CLI, priced, no dearer than
   ``UPGRADE_PRICE_TOLERANCE`` and not measurably weaker than
   ``UPGRADE_SCORE_MARGIN`` at any effort both were measured at.
 
-Either kind is in force only while its successor is offered and priced
-(``available_models.retirement_in_force``). ``policy_snapshot`` publishes the
+A named successor is in force only while that model is offered and priced
+(``available_models.retirement_in_force``). An operator entry with no successor
+applies immediately. ``policy_snapshot`` publishes the
 evidence with every calibration so the worker and the desktop app apply the
 same rule without re-deriving it. Retired rows are marked inactive and
 deprecated with ``superseded_by``; they are never deleted.

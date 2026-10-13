@@ -1,12 +1,20 @@
 # Model retirement rules
 
-`skills/model-router/model-blacklist.json` records explicit predecessor/successor
-relationships. An entry is dormant until its successor is both offered by that
+`skills/model-router/model-blacklist.json` is the seed of explicit
+predecessor/successor relationships. AI Configuration stores the operator list
+on `AppConfig.model_blacklist`. A config that has never stored the field copies
+the seed on load; after that the saved list, including an empty one, is the
+list both languages enforce. The desktop passes it as `--model-blacklist`. An
+empty flag still reads the seed file, or `SWARM_MODEL_BLACKLIST_JSON` for a
+hosted job that has not been given the flag.
+
+An entry is dormant until its successor is both offered by that
 provider CLI and priced by the static catalog or active feed calibration.
+An entry with no successor is an outright ban and applies immediately.
 This rule applies to every entry, including GPT-6 Sol → GPT-6.1 Sol. While
 it is dormant, the predecessor stays routable and saved selections stay intact.
 
-Python (`available_models.py`) and Rust (`src/tools.rs`) read the same JSON.
+Python (`available_models.py`) and Rust (`src/tools.rs`) read that same list.
 Rust consumes the price and derived-retirement snapshot published atomically
 with the active calibration; both readers check current CLI availability.
 Keep price and availability evidence keyed by provider. A model name returned

@@ -34,11 +34,6 @@ fn requires_usage_credits(value: &str) -> bool {
         .any(|part| USAGE_CREDIT_MODELS.contains(&part))
 }
 
-/// Models the operator has ruled out: older releases with a better successor.
-/// The same file `issue_worker/available_models.py` reads at run time, embedded
-/// here so the app's option lists and the worker's routing cannot disagree.
-const MODEL_BLACKLIST_JSON: &str = include_str!("../skills/model-router/model-blacklist.json");
-
 /// `claude-opus-4-7-20251001` and `claude-opus-4-7` name the same model.
 fn canonical_model(value: &str) -> String {
     let mut name = value.trim().to_ascii_lowercase();
@@ -52,25 +47,38 @@ fn canonical_model(value: &str) -> String {
     name
 }
 
+/// Names in the bundled seed. A saved operator list can add or remove these.
 #[cfg(test)]
-fn blacklist() -> &'static Vec<String> {
-    static LISTED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    LISTED.get_or_init(|| {
-        serde_json::from_str::<serde_json::Value>(MODEL_BLACKLIST_JSON)
-            .ok()
-            .and_then(|value| value["models"].as_array().cloned())
-            .into_iter()
-            .flatten()
-            .filter_map(|row| row["model"].as_str().map(canonical_model))
-            .collect()
-    })
+fn bundled_blacklist_names() -> Vec<String> {
+    crate::config::bundled_model_blacklist()
+        .into_iter()
+        .map(|row| canonical_model(&row.model))
+        .collect()
 }
 
-/// Whether a model is listed in the JSON. Eligibility uses `active_retirements`.
+/// Whether a model is in the bundled seed. Eligibility uses `active_retirements`.
 #[cfg(test)]
 pub fn is_blacklisted(value: &str) -> bool {
     let wanted = canonical_model(value);
-    blacklist().contains(&wanted)
+    bundled_blacklist_names().contains(&wanted)
+}
+
+fn retirement_rows(listed: Option<&[crate::config::ModelBlacklistEntry]>) -> Vec<(String, String)> {
+    let bundled = if listed.is_none() {
+        crate::config::bundled_model_blacklist()
+    } else {
+        Vec::new()
+    };
+    let rows = listed.unwrap_or(&bundled);
+    rows.iter()
+        .filter(|row| !row.model.trim().is_empty())
+        .map(|row| {
+            (
+                canonical_model(&row.model),
+                row.superseded_by.trim().to_string(),
+            )
+        })
+        .collect()
 }
 
 fn static_prices() -> &'static Vec<serde_json::Value> {
@@ -214,34 +222,26 @@ fn offered_names_by_agent(
 /// Apply conditional retirements to a raw CLI response before a calibration exists.
 #[cfg(test)]
 fn without_blacklisted(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
-    let retired = active_retirements(&models, "", &serde_json::Value::Null);
+    let retired = active_retirements(&models, "", &serde_json::Value::Null, None);
     models
         .into_iter()
         .filter(|model| !retired.contains_key(&canonical_model(&model.value)))
         .collect()
 }
 
-/// Both readers use the shared JSON plus calibration-derived retirements.
-/// A successor must be offered and priced. The current CLI response replaces
-/// its recorded list; bundled catalog rows are never availability evidence.
+/// Both readers use the operator list (or the bundled seed when none is saved)
+/// plus calibration-derived retirements. A successor must be offered and
+/// priced. The current CLI response replaces its recorded list; bundled
+/// catalog rows are never availability evidence.
 fn active_retirements(
     models: &[ModelInfo],
     agent: &str,
     policy: &serde_json::Value,
+    listed: Option<&[crate::config::ModelBlacklistEntry]>,
 ) -> std::collections::BTreeMap<String, String> {
     let mut entries = std::collections::BTreeMap::new();
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(MODEL_BLACKLIST_JSON) {
-        if let Some(rows) = value["models"].as_array() {
-            for row in rows {
-                if let (Some(old), Some(new)) =
-                    (row["model"].as_str(), row["superseded_by"].as_str())
-                {
-                    if !old.trim().is_empty() {
-                        entries.insert(canonical_model(old), new.trim().to_string());
-                    }
-                }
-            }
-        }
+    for (old, new) in retirement_rows(listed) {
+        entries.insert(old, new);
     }
     let offered = offered_names_by_agent(models, agent, policy);
     let prices = priced_names_by_agent(policy, agent);
@@ -289,11 +289,15 @@ fn active_retirements(
     entries
 }
 
-pub fn apply_model_policy(tools: &mut [ToolInfo], policy: &serde_json::Value) {
+pub fn apply_model_policy(
+    tools: &mut [ToolInfo],
+    policy: &serde_json::Value,
+    listed: Option<&[crate::config::ModelBlacklistEntry]>,
+) {
     for tool in tools.iter_mut().filter(|tool| {
         crate::config::KNOWN_PROVIDERS.contains(&tool.id.as_str()) && tool.models_detected
     }) {
-        let retired = active_retirements(&tool.models, &tool.id, policy);
+        let retired = active_retirements(&tool.models, &tool.id, policy, listed);
         let prices = priced_names_by_agent(policy, &tool.id);
         let kept: Vec<_> = tool
             .models
@@ -1070,6 +1074,7 @@ fn supported_effort(model: &ModelInfo, current: &str) -> String {
 pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Vec<String> {
     let mut repairs = Vec::new();
     let policy = calibration_policy(config);
+    let listed = config.model_blacklist.clone();
     for tool in tools
         .iter()
         .filter(|tool| tool.models_detected && !tool.models.is_empty())
@@ -1081,7 +1086,7 @@ pub fn reconcile_config_models(config: &mut AppConfig, tools: &[ToolInfo]) -> Ve
         else {
             continue;
         };
-        let retired = active_retirements(&tool.models, &tool.id, &policy);
+        let retired = active_retirements(&tool.models, &tool.id, &policy, listed.as_deref());
         let worker_name = retired
             .get(&canonical_model(&provider.model))
             .unwrap_or(&provider.model);
@@ -1260,7 +1265,11 @@ pub fn detect(config: &AppConfig, github_host: &str) -> Vec<ToolInfo> {
             _ => {}
         }
     }
-    apply_model_policy(&mut tools, &calibration_policy(config));
+    apply_model_policy(
+        &mut tools,
+        &calibration_policy(config),
+        config.model_blacklist.as_deref(),
+    );
     tools
 }
 
@@ -1692,6 +1701,24 @@ mod tests {
     }
 
     #[test]
+    fn an_operator_list_replaces_the_bundled_seed() {
+        use crate::config::ModelBlacklistEntry;
+        let listed = vec![ModelBlacklistEntry {
+            model: "claude-sonnet-5-5".into(),
+            superseded_by: String::new(),
+            reason: "Operator ban.".into(),
+        }];
+        let models = vec![model("claude-sonnet-5-5"), model("claude-sonnet-5")];
+        let retired =
+            active_retirements(&models, "claude", &serde_json::Value::Null, Some(&listed));
+        assert!(retired.contains_key("claude-sonnet-5-5"));
+        assert!(!retired.contains_key("claude-sonnet-5"));
+
+        let cleared = active_retirements(&models, "claude", &serde_json::Value::Null, Some(&[]));
+        assert!(cleared.is_empty());
+    }
+
+    #[test]
     fn blacklisted_models_leave_the_option_list_and_saved_selections_move_to_the_successor() {
         let offered = without_blacklisted(vec![
             model("claude-sonnet-5-5"),
@@ -1816,14 +1843,14 @@ with tempfile.TemporaryDirectory() as directory:
                 String::from_utf8_lossy(&output.stderr)
             );
             let python: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            let retired = active_retirements(&models, "codex", &python["policy"]);
+            let retired = active_retirements(&models, "codex", &python["policy"], None);
             assert_eq!(serde_json::to_value(&retired).unwrap(), python["retired"]);
             assert_eq!(retired.contains_key("gpt-6-sol"), offered && priced);
             let mut tool = basic_tool("codex", "Codex", "codex", true, "");
             tool.models = models;
             tool.models_detected = true;
             let mut tools = vec![tool];
-            apply_model_policy(&mut tools, &python["policy"]);
+            apply_model_policy(&mut tools, &python["policy"], None);
             let mut config = AppConfig::default();
             let provider = config
                 .providers
@@ -1904,8 +1931,12 @@ print(json.dumps({'cases': cases, 'static': sorted({a.canonical(n) for row in pr
                 .iter()
                 .map(|name| model(name.as_str().unwrap()))
                 .collect();
-            let retired =
-                active_retirements(&models, case["agent"].as_str().unwrap(), &case["policy"]);
+            let retired = active_retirements(
+                &models,
+                case["agent"].as_str().unwrap(),
+                &case["policy"],
+                None,
+            );
             assert_eq!(
                 serde_json::to_value(&retired).unwrap(),
                 case["retired"],
@@ -1926,6 +1957,7 @@ print(json.dumps({'cases': cases, 'static': sorted({a.canonical(n) for row in pr
         apply_model_policy(
             std::slice::from_mut(&mut tool),
             &serde_json::json!({"priced_models": []}),
+            None,
         );
         assert!(tool.models.is_empty());
     }
@@ -1983,7 +2015,7 @@ print(json.dumps(cases))
                     .iter()
                     .map(|name| model(name.as_str().unwrap()))
                     .collect();
-                let retired = active_retirements(&models, agent, &case["policy"]);
+                let retired = active_retirements(&models, agent, &case["policy"], None);
                 assert_eq!(
                     serde_json::to_value(&retired).unwrap(),
                     case["retired"],
@@ -1992,7 +2024,7 @@ print(json.dumps(cases))
             }
             // A live withdrawal replaces the recorded list for that provider.
             let retired =
-                active_retirements(&[model("claude-sonnet-5")], "claude", &case["policy"]);
+                active_retirements(&[model("claude-sonnet-5")], "claude", &case["policy"], None);
             assert!(!retired.contains_key("claude-sonnet-5"));
         }
         // Before calibration the static catalog also binds prices to a CLI.
@@ -2000,6 +2032,7 @@ print(json.dumps(cases))
             &[model("claude-sonnet-5-5")],
             "codex",
             &serde_json::Value::Null,
+            None,
         );
         assert!(!retired.contains_key("claude-sonnet-5"));
     }
@@ -2032,6 +2065,7 @@ print(json.dumps(cases))
         apply_model_policy(
             std::slice::from_mut(&mut tool),
             &calibration_policy(&config),
+            None,
         );
         assert!(tool.models.iter().any(|m| m.value == "gpt-6-sol"));
         reconcile_config_models(&mut config, &[tool]);
@@ -2069,7 +2103,7 @@ print(json.dumps(cases))
             model("gpt-6-1-sol"),
         ];
         tool.models_detected = true;
-        apply_model_policy(std::slice::from_mut(&mut tool), &policy);
+        apply_model_policy(std::slice::from_mut(&mut tool), &policy, None);
         reconcile_config_models(&mut config, &[tool]);
         assert_eq!(config.provider("codex").unwrap().model, "gpt-6-1-sol");
         assert_eq!(

@@ -24,10 +24,11 @@ are actually available, which one should run it.
   the app already invokes providers with (`issue_worker/dynamic_router.py`'s
   `_MODEL_CATALOG`); feed and CLI discovery can add models without a row here. Metadata is inferred
   from the closest same-family peer and refined by feed measurements.
-- `model-blacklist.json` — explicit retirements that take effect when their successor is CLI offered and
-  priced. Same-family retirements can also be derived from measurements. Read by
-  `issue_worker/available_models.py` and embedded in `src/tools.rs`; see
-  "Model blacklist" below.
+- `model-blacklist.json` — the seed for explicit retirements. AI Configuration
+  saves the operator list, and that saved list replaces the seed. A successor
+  must be CLI offered and priced; no successor is an immediate ban.
+  Same-family retirements can also be derived from measurements. Read by
+  `issue_worker/available_models.py` and `src/tools.rs`; see "Model blacklist" below.
 - `routing-rules.yaml` — complexity bands (`TRIVIAL` through `EXTREME`), task
   type groupings and their benchmark emphasis, the scoring weights, and the
   overqualification / unnecessary-reasoning penalty terms. All of it is a
@@ -241,8 +242,10 @@ enough metadata exists" requirement. If nothing is eligible after filtering,
 
 ## Model blacklist
 
-A retirement in `model-blacklist.json` is dormant until its successor is offered
-by the provider CLI and priced. `model_lifecycle.py` additionally derives
+The operator list in AI Configuration is the retirement list. It is seeded from
+`model-blacklist.json` until the operator saves their own, including a shorter
+or empty one. A named successor is dormant until that model is offered by the
+provider CLI and priced. An empty successor is an immediate ban. `model_lifecycle.py` additionally derives
 same-provider, same-family retirements under the shared price tolerance and
 score margin. Retired rows stay as inactive, deprecated peers with
 `superseded_by`; dormant predecessors remain usable. Fresh selections are

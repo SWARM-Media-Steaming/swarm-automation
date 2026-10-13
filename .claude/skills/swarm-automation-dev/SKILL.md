@@ -240,9 +240,10 @@ same missing-versus-zero distinction.
 
 ## Dynamic model routing
 
-Models the operator has ruled out are listed once in
-`skills/model-router/model-blacklist.json` and enforced in both languages (see
-`.claude/rules/model-blacklist.md`). Only apply a retirement once its successor is priced and CLI offered; keep
+Models the operator has ruled out are the saved `model_blacklist` on app
+config, edited from AI Configuration. A config without that field is seeded
+from `skills/model-router/model-blacklist.json`. Both languages enforce the
+saved list (see `.claude/rules/model-blacklist.md`). Only apply a retirement once its successor is priced and CLI offered; an entry with no successor applies immediately. Keep
 the predecessor catalog rows as inactive peers and restore dormant offers.
 The upgrade to a newer release (`latest_release`) also runs for every fresh
 adversarial tester/fixer session, and each stage's router prompt carries the

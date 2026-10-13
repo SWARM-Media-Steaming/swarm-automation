@@ -190,6 +190,10 @@
       html: "<p>Every applicable execution stores three distinct scores: the original Swarm baseline, the Jev score, and the combined score after Jev signals. The baseline is never overwritten. When Jev is off, unavailable, or used as fallback, the table labels that state instead of showing a zero Jev score.</p><p>Jev success is measured first by task completion, then by lower estimated cost per successfully completed task. Failures and retries are never treated as savings.</p>",
       links: [],
     },
+    "model-blacklist": {
+      title: "Model blacklist",
+      html: "<p>A row here retires a model from routing, upgrades, option lists and saved selections. The list is saved with the rest of AI Configuration and is what the worker uses on the next cycle.</p><p>With a <strong>successor</strong>, the row stays dormant until that model is offered by the provider CLI and priced. Until then the original model remains routable. With <strong>no successor</strong>, the ban applies at once.</p><p>Removing a row restores the model. A fresh install starts from the built-in retirements; after you save, this list is the one that counts.</p>",
+    },
     "provider-include-exclude": {
       title: "Enabled AI tools",
       html: "<p>Each card represents an AI provider. Turn its switch on to allow it to receive new work, and set that provider’s own minimum quota reserve. Changing one card does not change the others. A reserve of 0% accepts any positive remaining quota, but never an exhausted account.</p><p><strong>Dynamic Model Routing</strong> grades the original issue, picks which enabled provider handles it, and chooses that provider’s worker model and reasoning effort from the models it offers. The card’s router model performs the grading; to tell the providers apart it uses each one’s remaining usage and a built-in summary of what it tends to be good at. Turn routing off to choose the provider order and the worker model and effort yourself.</p><p><strong>No preference</strong> means you do not care who handles a new issue first. The enabled provider with the most usage left is selected, so one account is not used up before the others. If remaining usage is tied, the order is Claude, then Codex, then Grok.</p><p>Choosing a provider instead makes that provider the tie-breaker when remaining usage is equal. At least one provider must remain enabled. Turning one off does not erase work it already completed.</p>",
@@ -483,6 +487,7 @@
       input.checked = (config.schedule_days || []).includes(input.value);
     });
     selectSchedule(config.schedule_mode, false);
+    renderModelBlacklist(config);
     renderJevConnection();
     bindRepositoryForm();
     byId("profile-kicker").textContent = (currentRepo()?.github_repository || "REPOSITORY").toUpperCase();
@@ -1327,6 +1332,87 @@
       cell.append(name, status);
       box.appendChild(cell);
     });
+  }
+
+  function blacklistEntries(config) {
+    return Array.isArray(config?.model_blacklist) ? config.model_blacklist : [];
+  }
+
+  function validateBlacklistEntry(model, successor, reason) {
+    const slug = /^[a-z0-9._:-]{1,100}$/;
+    const name = String(model ?? "").trim().toLowerCase();
+    const next = String(successor ?? "").trim().toLowerCase();
+    const why = String(reason ?? "").trim();
+    if (!slug.test(name)) return { ok: false, message: "Name the model with letters, digits, dots, dashes, colons or underscores." };
+    if (next && !slug.test(next)) return { ok: false, message: "The successor uses letters, digits, dots, dashes, colons or underscores." };
+    if (next === name) return { ok: false, message: "A model cannot be its own successor." };
+    if (why.length > 300) return { ok: false, message: "Keep the reason under 300 characters." };
+    return { ok: true, model: name, successor: next, reason: why, message: "" };
+  }
+
+  function renderModelBlacklist(config) {
+    const body = byId("model-blacklist-rows");
+    const count = byId("model-blacklist-count");
+    if (!body) return;
+    const rows = blacklistEntries(config);
+    body.replaceChildren();
+    if (!rows.length) {
+      const empty = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 4;
+      cell.textContent = "No models are blacklisted.";
+      empty.append(cell);
+      body.append(empty);
+    }
+    rows.forEach((entry) => {
+      const row = document.createElement("tr");
+      const model = document.createElement("td");
+      model.textContent = entry.model || "";
+      const successor = document.createElement("td");
+      successor.textContent = entry.superseded_by || "—";
+      const reason = document.createElement("td");
+      reason.textContent = entry.reason || "";
+      const action = document.createElement("td");
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "text-button compact";
+      remove.textContent = "Remove";
+      remove.setAttribute("aria-label", `Remove ${entry.model} from the blacklist`);
+      remove.addEventListener("click", () => removeBlacklistEntry(entry.model));
+      action.append(remove);
+      row.append(model, successor, reason, action);
+      body.append(row);
+    });
+    if (count) count.textContent = String(rows.length);
+  }
+
+  function removeBlacklistEntry(model) {
+    if (!state.config) return;
+    state.config.model_blacklist = blacklistEntries(state.config).filter((entry) => entry.model !== model);
+    renderModelBlacklist(state.config);
+    setDirty();
+  }
+
+  function addBlacklistEntry(event) {
+    event.preventDefault();
+    const status = byId("model-blacklist-status");
+    if (!state.config) return;
+    const checked = validateBlacklistEntry(
+      byId("model-blacklist-model").value,
+      byId("model-blacklist-successor").value,
+      byId("model-blacklist-reason").value,
+    );
+    if (!checked.ok) {
+      if (status) status.textContent = checked.message;
+      return;
+    }
+    const next = blacklistEntries(state.config).filter((entry) => entry.model !== checked.model);
+    next.push({ model: checked.model, superseded_by: checked.successor, reason: checked.reason });
+    state.config.model_blacklist = next;
+    ["model", "successor", "reason"].forEach((field) => { byId(`model-blacklist-${field}`).value = ""; });
+    if (status) status.textContent = `${checked.model} is on the blacklist. Save configuration to keep it.`;
+    renderModelBlacklist(state.config);
+    setDirty();
   }
 
   function collectConfig() {
@@ -4937,6 +5023,7 @@
       }
     });
     byId("active-repo-select").addEventListener("change", () => renderKnowledgeScope());
+    byId("model-blacklist-form")?.addEventListener("submit", (event) => addBlacklistEntry(event));
     byId("model-data-key-save")?.addEventListener("click", () => void saveModelDataKey());
     byId("model-data-key-clear")?.addEventListener("click", () => void clearModelDataKey());
     byId("model-data-key")?.addEventListener("keydown", (event) => {

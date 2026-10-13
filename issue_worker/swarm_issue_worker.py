@@ -609,6 +609,10 @@ class Config:
             if args.execution_history_db
             else state_dir / "swarm-automation.sqlite3"
         )
+        # The operator list replaces the bundled file for this process. An
+        # empty flag leaves the file (or SWARM_MODEL_BLACKLIST_JSON) in place.
+        # Install it before provider models are repaired against it.
+        available_models.configure_blacklist(getattr(args, "model_blacklist", ""))
         # The provider CLIs' own model lists, passed by the desktop app. Held
         # process-wide so both routers and the decision engine see them.
         available_models.configure(
@@ -7920,6 +7924,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--routing-tiers",
         default=env_value("SWARM_ROUTING_TIERS", ""),
         help="Ignored. Routing tiers are computed from the live catalog and are no longer configurable.",
+    )
+    parser.add_argument(
+        "--model-blacklist",
+        default="",
+        help=(
+            "JSON object {models: [{model, superseded_by, reason}]} of operator-managed "
+            "retirements. Replaces the bundled model-blacklist.json, including when models "
+            "is empty. Empty uses that file, or SWARM_MODEL_BLACKLIST_JSON when set."
+        ),
     )
     parser.add_argument(
         "--available-models",

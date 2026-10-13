@@ -229,6 +229,24 @@ fn provider_scheduler_arguments_carry_dynamic_routing_settings() {
 }
 
 #[test]
+fn provider_scheduler_arguments_pass_the_saved_model_blacklist() {
+    let mut config = AppConfig::default();
+    let providers = vec![resolved_provider("claude", "/usr/bin/false")];
+    let before = provider_scheduler_arguments(&config, &providers);
+    assert!(!before.iter().any(|arg| arg == "--model-blacklist"));
+
+    config.model_blacklist = Some(vec![crate::config::ModelBlacklistEntry {
+        model: "custom-old".into(),
+        superseded_by: String::new(),
+        reason: "Banned.".into(),
+    }]);
+    let args = provider_scheduler_arguments(&config, &providers);
+    let document = pair(&args, "--model-blacklist").expect("blacklist flag");
+    assert!(document.contains("custom-old"));
+    assert!(!document.contains("gpt-6-sol"));
+}
+
+#[test]
 fn provider_scheduler_arguments_carry_each_provider_quota_floor() {
     let config = AppConfig::default();
     let providers = vec![

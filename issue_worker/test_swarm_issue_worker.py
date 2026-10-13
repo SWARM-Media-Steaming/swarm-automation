@@ -6983,10 +6983,12 @@ class RunnerTestCase(unittest.TestCase):
             "--github-repository", "acme/widgets",
             "--no-dynamic-model-routing",
             "--routing-optimization", "cost",
+            "--model-blacklist", '{"models":[]}',
         ]
         self.assertEqual(
             runner_module.saved_routing_overrides(worker_args),
-            ["--no-dynamic-model-routing", "--routing-optimization", "cost"],
+            ["--no-dynamic-model-routing", "--routing-optimization", "cost",
+             "--model-blacklist", '{"models":[]}'],
         )
         parsed = build_parser().parse_args(
             [

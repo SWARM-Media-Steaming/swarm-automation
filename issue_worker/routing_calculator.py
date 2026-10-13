@@ -308,6 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--providers", default="", help="Comma-separated enabled AI tool keys.")
         command.add_argument("--tiers", default="", help="Ignored. Reference tiers are computed from the live catalog.")
         command.add_argument("--available-models", default="", help="JSON of models each provider CLI reports.")
+        command.add_argument("--model-blacklist", default="", help="Operator retirement list. Empty uses the bundled file.")
         command.add_argument("--allow-usage-credit-models", action="store_true")
         if name == "simulate":
             command.add_argument("--input", required=True, help="JSON object of calculator inputs.")
@@ -316,6 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    available_models.configure_blacklist(getattr(args, "model_blacklist", ""))
     available_models.configure(
         args.available_models, allow_usage_credit_models=bool(args.allow_usage_credit_models)
     )

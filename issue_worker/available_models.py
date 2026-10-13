@@ -56,6 +56,9 @@ _lock = threading.Lock()
 _models: dict[str, tuple[DiscoveredModel, ...]] = {}
 _allow_usage_credit_models = False
 _configured_version = None
+# ``None`` means "read the bundled file or SWARM_MODEL_BLACKLIST_JSON".
+# A dict, including an empty one, is the operator list and replaces both.
+_operator_listed: dict[str, str] | None = None
 
 
 def configure(raw: Any, *, allow_usage_credit_models: bool = False) -> int:
@@ -122,21 +125,9 @@ def _model_from(agent: str, row: Any) -> DiscoveredModel | None:
     )
 
 
-@functools.lru_cache(maxsize=1)
-def listed_retirements() -> dict[str, str]:
-    """``{canonical model: successor}`` exactly as the shared JSON lists them.
-
-    Every entry is conditional (see ``blacklist``). The successor is ``""``
-    when none is named. An unreadable or malformed file yields no entries:
-    routing must degrade, never stall, on a bad list.
-    """
-    try:
-        # A hosted job carries the admin-managed list (database) in the
-        # environment; the desktop and a bare worker read the bundled file.
-        hosted = os.environ.get(BLACKLIST_ENV, "").strip()
-        document = hosted or BLACKLIST_PATH.read_text(encoding="utf-8")
-        rows = json.loads(document).get("models") or []
-    except (OSError, ValueError, AttributeError):
+def _rows_from_document(parsed: Any) -> dict[str, str]:
+    rows = parsed.get("models") if isinstance(parsed, Mapping) else parsed
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
         return {}
     listed: dict[str, str] = {}
     for row in rows:
@@ -144,6 +135,59 @@ def listed_retirements() -> dict[str, str]:
         if name:
             listed[name] = str(row.get("superseded_by") or "").strip()
     return listed
+
+
+def configure_blacklist(raw: Any) -> None:
+    """Install the operator list from ``--model-blacklist``.
+
+    ``None`` or ``""`` clears the override so the bundled file (or
+    ``SWARM_MODEL_BLACKLIST_JSON``) applies. A JSON document replaces that
+    file, and ``{"models": []}`` means the operator removed every entry.
+    A malformed document degrades to no entries.
+    """
+    global _operator_listed
+    if raw is None or raw == "":
+        override: dict[str, str] | None = None
+    else:
+        parsed: Any = raw
+        if isinstance(raw, (str, bytes)):
+            text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+            if not text.strip():
+                override = None
+            else:
+                try:
+                    parsed = json.loads(text)
+                except ValueError:
+                    parsed = {}
+                override = _rows_from_document(parsed) if parsed != {} else {}
+        else:
+            override = _rows_from_document(parsed)
+    with _lock:
+        _operator_listed = override
+    listed_retirements.cache_clear()
+
+
+@functools.lru_cache(maxsize=1)
+def listed_retirements() -> dict[str, str]:
+    """``{canonical model: successor}`` from the operator list, else the file.
+
+    Every entry is conditional (see ``blacklist``). The successor is ``""``
+    when none is named. An unreadable or malformed file yields no entries:
+    routing must degrade, never stall, on a bad list. A saved operator list
+    replaces the file entirely, including when it is empty.
+    """
+    with _lock:
+        override = None if _operator_listed is None else dict(_operator_listed)
+    if override is not None:
+        return override
+    try:
+        # A hosted job carries the admin-managed list (database) in the
+        # environment; the desktop and a bare worker read the bundled file.
+        hosted = os.environ.get(BLACKLIST_ENV, "").strip()
+        document = hosted or BLACKLIST_PATH.read_text(encoding="utf-8")
+        return _rows_from_document(json.loads(document))
+    except (OSError, ValueError, AttributeError):
+        return {}
 
 
 @functools.lru_cache(maxsize=1)
@@ -293,6 +337,7 @@ def replace_blacklisted(slug: str) -> str:
 def reset() -> None:
     """Forget discovery (tests, and a worker started without the app)."""
     configure({})
+    configure_blacklist(None)
 
 
 def _discovered_rows() -> dict[str, tuple[DiscoveredModel, ...]]:

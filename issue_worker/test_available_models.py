@@ -302,3 +302,28 @@ class HostedBlacklistTests(AvailableModelsTestCase):
         with mock.patch.dict("os.environ", {available_models.BLACKLIST_ENV: "{not json"}):
             available_models.listed_retirements.cache_clear()
             self.assertEqual(available_models.listed_retirements(), {})
+
+    def test_operator_list_replaces_the_bundled_file_including_when_empty(self):
+        document = json.dumps({"models": [
+            {"model": "Custom-Old", "superseded_by": "custom-new", "reason": "Operator."},
+        ]})
+        available_models.configure_blacklist(document)
+        self.assertEqual(available_models.listed_retirements(), {"custom-old": "custom-new"})
+        self.assertNotIn("claude-haiku-4-5", available_models.listed_retirements())
+        available_models.configure_blacklist('{"models": []}')
+        self.assertEqual(available_models.listed_retirements(), {})
+        available_models.configure_blacklist("")
+        self.assertEqual(
+            available_models.listed_retirements().get("claude-haiku-4-5"), "claude-haiku-5-5"
+        )
+
+    def test_from_args_installs_the_operator_list_before_models_are_repaired(self):
+        args = swarm_issue_worker.build_parser().parse_args([
+            "--model-blacklist",
+            json.dumps({"models": [{"model": "custom-old", "superseded_by": "custom-new"}]}),
+            "--claude-model", "custom-old",
+        ])
+        config = swarm_issue_worker.Config.from_args(args)
+        self.assertEqual(available_models.listed_retirements(), {"custom-old": "custom-new"})
+        claude = next(provider for provider in config.providers if provider.key == "claude")
+        self.assertEqual(claude.model, "custom-old")
