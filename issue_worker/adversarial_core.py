@@ -1743,6 +1743,12 @@ class AdversarialStageMixin:
         # log tail, which may have rotated past the originals.
         resumed = bool(loop.get("active")) and loop["phase"] != "done"
         while loop["phase"] != "done":
+            if (
+                loop["phase"] != "fix"
+                and not loop.get("active")
+                and self.begin_rejected_tester_best_effort(stage, loop)
+            ):
+                continue
             if resumed:
                 resumed = False
                 if getattr(self, "choice", None) is not None:

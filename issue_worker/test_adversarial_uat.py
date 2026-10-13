@@ -1435,6 +1435,28 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(row["final_status"], "completed")
         self.assertEqual(row["promotion_status"], "not_configured")
 
+    def test_saved_rejection_bound_delivers_without_another_tester(self):
+        self.prepare(fixed=True)
+        loop = self.worker.read_state()["adversarial"]
+        loop["retry_rejection"] = {
+            "reason": "Tester must return exactly one SWARM_ADVERSARIAL_RESULT JSON line",
+            "attempts": 3, "paths": [], "patch": "",
+        }
+        self.worker.save_adversarial(loop)
+        with self.patches(), mock.patch.object(self.worker, "approve_pull_request"), \
+                mock.patch.object(self.worker, "merge_pull_request") as merge:
+            merge.return_value = self.git("rev-parse", "HEAD")
+            self.assertEqual(self.worker.run_adversarial_delivery(), 10)
+        self.assertEqual(self.calls, [])
+        self.assertIn("rejected 3 times", self.comments_posted[0])
+        self.assertIn("SWARM_ADVERSARIAL_RESULT", self.comments_posted[0])
+        self.assertEqual(
+            self.worker.history.repository.for_repository(
+                self.worker.config.github_repository
+            )[0]["adversarial_delivery"],
+            "best_effort",
+        )
+
     def test_a_failed_adversarial_session_still_holds_instead_of_merging(self):
         self.prepare(fixed=True)
 
