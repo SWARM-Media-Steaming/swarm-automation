@@ -7233,6 +7233,8 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         if self.adversarial_state_present():
             self.refresh_adversarial_requirements()
             return self.run_adversarial_pipeline()
+        if self.protected_remediation_pending():
+            return self.start_protected_remediation()
         prompt = self.build_prompt(recovery_mode, candidate, recovery_dirty)
         self.history.update(
             iso_timestamp(), effective_prompt=prompt, final_status="prompt_generated"

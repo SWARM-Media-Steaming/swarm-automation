@@ -75,7 +75,12 @@ label from a trusted author; the worker owns VERSION.
   retryable and must not abort the original issue's round. A finding may name
   out-of-scope `suite_ids`; these stay registered in `.swarm/tests.json` but
   are excluded from this issue's blocking verdict after the separate issue is
-  filed. A stable finding marker prevents duplicate auto-filing. Log both newly
+  filed. A finding that cites a suite under `tests/adversarial/` is labelled
+  `adversarial-protected` as well, and its follow-up issue skips implementation:
+  the worker seeds the stage's dispute with the issue text, so the first tester
+  is a fresh adjudicator (the only role that may revise a protected test). No
+  implementer run is needed, so no-code outcomes never block that adjudication.
+  A stable finding marker prevents duplicate auto-filing. Log both newly
   filed and deduplicated findings; keep each filed issue's title and URL in
   execution history so the app can surface the non-blocking follow-up to the
   user.

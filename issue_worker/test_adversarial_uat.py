@@ -698,6 +698,52 @@ class AdversarialUatTests(unittest.TestCase):
             "title": "Separate parser bug", "url": "https://example.invalid/issues/182",
         }])
 
+    def test_protected_suite_ids_cover_files_and_commands_under_the_protected_root(self):
+        definition = {"suites": [
+            {"id": "adversarial-a", "requirements": {"files": ["tests/adversarial/test_a.py"]}},
+            {"id": "adversarial-b", "command": "python3 -m unittest tests/adversarial/test_b.py"},
+            {"id": "project-c", "requirements": {"files": ["tests/test_c.py"]}, "command": "pytest tests/test_c.py"},
+        ]}
+        self.assertEqual(adversarial_core.protected_suite_ids(definition), {"adversarial-a", "adversarial-b"})
+
+    def test_finding_citing_a_protected_suite_is_labelled_for_adjudication(self):
+        self.prepare(fixed=True)
+        finding = {"title": "Teardown race", "body": "Cleanup omits the LAN worker stop.", "suite_ids": ["adversarial-a"]}
+        definition = {"suites": [{"id": "adversarial-a", "requirements": {"files": ["tests/adversarial/test_a.py"]}}]}
+        def external(prompt, activity=""):
+            self.role(prompt)
+            self.worker.ai_output_file.write_text(uat.RESULT_MARKER + json.dumps({"out_of_scope": []}))
+            return 0
+        with self.patches(external), mock.patch.object(self.worker, "finalize_issue"), contextlib.redirect_stdout(io.StringIO()):
+            self.worker.run_adversarial_delivery()
+            with mock.patch.object(adversarial_core, "read_definition", return_value=definition):
+                self.worker.file_adversarial_findings(self.worker.read_state()["adversarial"], [finding])
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        self.assertEqual(len(creates), 1)
+        self.assertIn(adversarial_core.PROTECTED_FINDING_LABEL[0], creates[0])
+        self.assertIn("--assignee", creates[0])
+
+    def test_protected_remediation_seeds_the_dispute_and_skips_the_implementer(self):
+        self.prepare(fixed=True)
+        self.worker.issue.labels = [adversarial_core.PROTECTED_FINDING_LABEL[0]]
+        self.assertTrue(self.worker.protected_remediation_pending())
+        with mock.patch.object(self.worker, "initialize_stage") as initialize, \
+                mock.patch.object(self.worker, "run_adversarial_pipeline", return_value=0) as pipeline, \
+                mock.patch.object(self.worker, "build_prompt") as build_prompt, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.worker.start_protected_remediation(), 0)
+        build_prompt.assert_not_called()
+        pipeline.assert_called_once_with()
+        stage = self.worker.adversarial_stages()[0]
+        self.assertIn(f"{stage.key}_initial_dispute", self.worker.read_state())
+        self.assertIn("protected expectation", self.worker.read_state()[f"{stage.key}_initial_dispute"])
+        self.assertEqual(initialize.call_args.args[0], stage)
+
+    def test_unlabelled_issue_is_not_routed_to_protected_adjudication(self):
+        self.prepare(fixed=True)
+        self.worker.issue.labels = ["bug"]
+        self.assertFalse(self.worker.protected_remediation_pending())
+
     def test_reworded_rediscovery_of_a_prior_finding_is_not_refiled(self):
         # Issue #222: each tester round runs with fresh context and never sees
         # a prior round's exact finding wording, so a later round rediscovering

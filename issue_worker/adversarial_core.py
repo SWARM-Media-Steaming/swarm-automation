@@ -95,6 +95,23 @@ CAP_HIT_PR_LEGACY_NOTICE = (CAP_HIT_PR_MARKER + "\nAdversarial UAT is still fail
                             "Automation is held; review the failing tests and adjudicate on the linked issue.\n\n")
 CAP_FOLLOWUP_LABEL = ("adversarial-follow-up", "FBCA04", "Adversarial findings deferred for later work")
 ADVERSARIAL_HANDOFF_MARKER = "swarm-issue-worker:adversarial-disabled-handoff"
+# A finding whose cited suite lives under a protected root needs that test
+# revised, which only a fresh adjudicating tester may do (see
+# start_protected_remediation). Its follow-up carries this label.
+PROTECTED_FINDING_LABEL = ("adversarial-protected", "B60205", "Adversarial finding that needs a protected test adjudicated")
+PROTECTED_DISPUTE_MAX_CHARS = 6000
+
+
+def protected_suite_ids(definition: dict[str, Any]) -> set[str]:
+    """IDs of registered suites whose files or command sit under TEST_ROOT."""
+    protected: set[str] = set()
+    for suite in definition.get("suites", []):
+        files = (suite.get("requirements") or {}).get("files") or []
+        command = str(suite.get("command") or "")
+        if any(str(path).startswith(TEST_ROOT) for path in files) or TEST_ROOT in command:
+            protected.add(str(suite.get("id", "")))
+    protected.discard("")
+    return protected
 # A later round's fresh-context tester rediscovering an earlier round's
 # out-of-scope bug almost never reproduces the same title/body wording, so an
 # exact-digest marker match cannot dedup it. Title token overlap is a coarse
@@ -1592,10 +1609,13 @@ class AdversarialStageMixin:
                         log(f"Out-of-scope {stage.log_name} finding suppressed as a duplicate of the open "
                             f"issue \"{sanitize_text(open_duplicate['title'])}\": {open_duplicate['url']}")
                         continue
+                    finding_labels = stage.finding_labels
+                    if self.cites_protected_suite(finding):
+                        finding_labels = finding_labels + (PROTECTED_FINDING_LABEL,)
                     output = self.file_labelled_issue(
                         finding["title"][:120],
                         f"{marker}\n{stage.finding_issue_body(self, finding)}",
-                        stage.finding_labels, self.choice.key)
+                        finding_labels, self.choice.key)
                     url = github_issue_url_from_output(output)
                     if url:
                         log(f"Filed out-of-scope {stage.log_name} finding for #{self.issue.number}: {url}")
@@ -1617,6 +1637,42 @@ class AdversarialStageMixin:
                 # later round or a retried tester run gets another chance to
                 # file this same finding, deduplicated by the same marker.
                 log(f"Could not file out-of-scope {stage.log_name} finding for #{self.issue.number}: {error}")
+
+    def cites_protected_suite(self, finding: dict[str, Any]) -> bool:
+        """Whether an out-of-scope finding cites a protected suite.
+
+        Its fix needs a protected test revised, which no fixer may do, so the
+        follow-up is routed to a fresh-tester adjudication instead of ordinary
+        implementation.
+        """
+        protected = protected_suite_ids(read_definition(self.config.repo_dir))
+        return bool(protected & {str(sid) for sid in finding.get("suite_ids", [])})
+
+    def protected_remediation_pending(self) -> bool:
+        """Whether this issue is a protected-test follow-up awaiting adjudication."""
+        labels = {label.lower() for label in self.issue.labels}
+        return PROTECTED_FINDING_LABEL[0] in labels and bool(self.adversarial_stages())
+
+    def start_protected_remediation(self) -> int:
+        """Adjudicate a protected-test follow-up without an implementer run.
+
+        The implementer cannot change protected tests, and a run with no commit
+        never enters the adversarial loop. So the issue text is seeded as the
+        first stage's dispute: its first tester is a fresh adjudicator, which
+        may revise the protected expectation only with a recorded resolution.
+        """
+        from ai_execution_history import sanitize_text
+        stage = self.adversarial_stages()[0]
+        completion = self.git("rev-parse", "HEAD")
+        dispute = sanitize_text(
+            f"Protected-test follow-up for issue #{self.issue.number}. The implementer cannot change "
+            "protected adversarial tests, so adjudicate the finding below as a dispute: decide whether the "
+            "protected expectation needs a change, and record a dispute_resolution grounded in the issue.\n\n"
+            + self.issue.body
+        )[:PROTECTED_DISPUTE_MAX_CHARS]
+        self.update_state(**{f"{stage.key}_initial_dispute": dispute})
+        self.initialize_stage(stage, completion, "Routed directly to protected-test adjudication; no implementer run.")
+        return self.run_adversarial_pipeline()
 
     def file_cap_followup(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
         """File unresolved cap-hit notes without blocking the original issue.
