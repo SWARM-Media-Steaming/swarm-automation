@@ -73,7 +73,8 @@ from token_usage import (
     render_ai_usage_markdown,
 )
 from adversarial_core import (
-    BEST_EFFORT_LABEL, BEST_EFFORT_PR_MARKER, DELIVERY_BEST_EFFORT, AdversarialStage,
+    BEST_EFFORT_LABEL, BEST_EFFORT_PR_MARKER, DELIVERY_BEST_EFFORT, PROTECTED_FINDING_LABEL,
+    AdversarialStage, effort_rank, raise_effort,
 )
 from adversarial_security import AdversarialSecurityMixin, SECURITY_STAGE
 from adversarial_uat import (
@@ -345,6 +346,11 @@ SUMMARY_INSTRUCTION = (
     "implementation output."
 )
 ENVIRONMENT_ONLY_MARKER = "SWARM_ENVIRONMENT_ONLY"
+# The implementer may not edit tests/adversarial/. When the issue cannot be done
+# without doing so, it makes no change and reports this marker so the worker
+# routes the issue to protected-test adjudication instead of failing it.
+PROTECTED_TEST_BLOCKED_MARKER = "SWARM_PROTECTED_TEST_BLOCKED"
+PARKED_ISSUES_DIR = "parked-issues"
 
 # CI monitoring (``--monitor-actions``). Issues the worker files for a failing
 # pipeline carry CI_FAILURE_LABEL and a hidden marker in the body; both are how
@@ -3913,6 +3919,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         issues = self.assigned_issues()
         completed = self.completed_numbers()
         paused = {int(path.stem) for path in self.paused_files()}
+        paused |= self.parked_numbers(issues)
         in_progress_number: int | None = None
         saved_state: dict[str, Any] | None = None
         if self.in_progress_file.exists():
@@ -4517,6 +4524,13 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         if question_issue:
             lines.append(QUESTION_INSTRUCTION)
         lines.append(NEEDS_INPUT_INSTRUCTION)
+        if not question_issue and self.adversarial_stages():
+            lines.append(
+                "If this issue cannot be completed without editing a protected test under "
+                "`tests/adversarial/` (which you may not edit), make no change, explain which "
+                f"protected test blocks it in the summary, and put {PROTECTED_TEST_BLOCKED_MARKER} "
+                "on its own final line."
+            )
         if self.uses_version_file():
             lines.append(
                 f"Do not edit the `{VERSION_FILE}` file: the worker manages the product version, and any "
@@ -4636,6 +4650,91 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             return False, output
         cleaned = re.sub(pattern, "", output, flags=re.MULTILINE).rstrip() + "\n"
         return True, cleaned
+
+    def ai_reported_protected_test_block(self, output: str) -> tuple[bool, str]:
+        """Whether a no-change run says protected adversarial tests block the issue.
+
+        The marker is the explicit signal. A model that explains the block in
+        prose without it is still recognised when the summary names both the
+        protected tests and `tests/adversarial/`; the caller only acts on it
+        when the run left no commit and a clean tree, so it cannot hide work.
+        """
+        pattern = rf"(?:^[ \t]*|(?<=\s)){re.escape(PROTECTED_TEST_BLOCKED_MARKER)}[ \t]*$\n?"
+        if re.search(pattern, output, re.MULTILINE):
+            return True, re.sub(pattern, "", output, flags=re.MULTILINE).rstrip() + "\n"
+        lowered = output.lower()
+        if "protected" in lowered and "tests/adversarial" in lowered:
+            return True, output
+        return False, output
+
+    def route_protected_test_block(self) -> int | None:
+        """Send an issue blocked on protected tests to fresh-tester adjudication.
+
+        Returns the pipeline status, or None when the issue cannot be routed
+        (no adversarial stage, or the repository is not clean), so the caller
+        keeps its existing failure handling.
+        """
+        if not self.adversarial_stages() or self.worktree_status():
+            return None
+        name, color, description = PROTECTED_FINDING_LABEL
+        self.ensure_label(name, color, description, self.choice.key)
+        self.github.gh(
+            [
+                "issue", "edit", str(self.issue.number), "--repo",
+                self.config.github_repository, "--add-label", name,
+            ],
+            self.choice.key,
+        )
+        if name not in {item.lower() for item in self.issue.labels}:
+            self.issue.labels.append(name)
+        self.history.note(
+            "Implementer reported the issue is blocked by protected adversarial tests; "
+            "routed to protected-test adjudication",
+            iso_timestamp(),
+        )
+        log(
+            f"Issue #{self.issue.number} is blocked by protected adversarial tests; "
+            "routing it to protected-test adjudication."
+        )
+        return self.start_protected_remediation()
+
+    def escalate_after_no_change(self) -> None:
+        """Make the next attempt stronger after a run that changed nothing.
+
+        Repeating the same model and effort three times reaches the hold with
+        no new information. Raise the effort one rung, then move to the
+        provider's strongest tier, always inside the repository routing cap.
+        A run with Dynamic Model Routing off keeps its pinned selection.
+        """
+        if self.config.dry_run or not self.config.dynamic_model_routing:
+            return
+        try:
+            from dynamic_router import COMPLEXITY_SCALE_TOP, tier_for_complexity
+
+            attempts = int(self.read_state().get("no_change_escalations") or 0) + 1
+            spec = self.config.require_spec(self.choice.key)
+            model, effort = self.choice.model, raise_effort(self.choice.effort, 1)
+            if attempts >= 2:
+                top = tier_for_complexity(tuple(self.config.tiers_for(spec.key)), COMPLEXITY_SCALE_TOP)
+                model, effort = top.model, max(effort, top.effort, key=effort_rank)
+            if self.config.routing_caps:
+                model, effort, _ = routing_cap.clamp_choice(
+                    self.choice.key, model, effort, self.config.routing_caps,
+                    allow_usage_credit_models=self.config.allow_usage_credit_models)
+            if (model, effort) == (self.choice.model, self.choice.effort):
+                return
+            escalated = ProviderChoice(
+                self.choice.name, model, effort,
+                self.new_session_id(spec) if model != self.choice.model else self.choice.session_id,
+            )
+            self.update_state_for_choice(escalated)
+            self.update_state(no_change_escalations=attempts)
+            log(
+                f"Issue #{self.issue.number}: {self.choice.name} changed nothing; the next attempt "
+                f"uses {escalated.model} at {escalated.effort} effort."
+            )
+        except Exception as error:  # noqa: BLE001 - escalation is best effort and must not mask the failure
+            log(f"Could not escalate after a no-change run: {sanitize_text(error)}")
 
     @staticmethod
     def ai_reported_needs_input(output: str) -> tuple[bool, str]:
@@ -7346,6 +7445,13 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             self.finalize_environment_only(output)
             return ISSUE_COMPLETED_EXIT_CODE
         else:
+            blocked, blocked_output = self.ai_reported_protected_test_block(output)
+            if blocked and not question_issue:
+                self.ai_output_file.write_text(blocked_output, encoding="utf-8")
+                routed = self.route_protected_test_block()
+                if routed is not None:
+                    return routed
+            self.escalate_after_no_change()
             raise WorkerError(
                 f"{self.choice.name} finished without producing changes or a new commit. "
                 "Recovery state was preserved."
@@ -7684,6 +7790,99 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         )
         return True
 
+    @property
+    def parked_dir(self) -> Path:
+        return self.state / PARKED_ISSUES_DIR
+
+    def automation_failure_upgraded(self, failure: dict[str, Any]) -> bool:
+        """Whether this worker build differs from the one that recorded `failure`."""
+        failed_revision = str(failure.get("worker_revision") or "")
+        return bool(failure) and (
+            str(failure.get("application_version") or "") != self.config.application_version
+            or (bool(failed_revision) and failed_revision != self.automation_worker_revision())
+        )
+
+    def park_held_issue(self) -> bool:
+        """Shelve a held issue so it stops blocking the repository's queue.
+
+        The saved state moves to ``parked-issues/``; the issue branch, its
+        commits and the GitHub label/comment stay. Uncommitted edits are
+        stashed, never deleted. Returns false (leaving the classic hold in
+        place) when the checkout cannot be made safe.
+        """
+        if self.config.dry_run or not self.in_progress_file.exists():
+            return False
+        try:
+            state = self.read_state()
+            number = int(state["issue_number"])
+            if self.worktree_status():
+                self.git(
+                    "stash", "push", "--include-untracked", "-m",
+                    f"swarm: parked issue #{number} after repeated automation failure",
+                    check=False,
+                )
+                if self.worktree_status():
+                    return False
+            integration = self.config.integration_branch
+            if self.git("branch", "--show-current") != integration and not (
+                self.git_ok("switch", integration) or self.git_ok("switch", self.config.base_branch)
+            ):
+                return False
+            self.parked_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(self.parked_dir / f"{number}.json", state)
+            self.clear_in_progress(number)
+        except Exception as error:  # noqa: BLE001 - parking falls back to the classic hold
+            log(f"Could not park the held issue: {sanitize_text(error)}")
+            return False
+        log(
+            f"Parked issue #{number} after repeated automation failure; its branch and checkpoint "
+            "are preserved and the rest of the queue continues."
+        )
+        return True
+
+    def parked_numbers(self, issues: list[dict[str, Any]]) -> set[int]:
+        """Parked issues still to skip; release those that may run again.
+
+        A parked issue returns to the slot when a different worker build is
+        installed or when someone removes its `Automation Failed` label. One
+        that was closed or unassigned is archived. Never raises into selection.
+        """
+        parked: set[int] = set()
+        if not self.parked_dir.is_dir():
+            return parked
+        remote_by_number = {int(item["number"]): item for item in issues}
+        for path in sorted(self.parked_dir.glob("*.json")):
+            try:
+                number = int(path.stem)
+                state = json.loads(path.read_text(encoding="utf-8"))
+                remote = remote_by_number.get(number)
+                if remote is None:
+                    archive = self.state / "abandoned"
+                    archive.mkdir(parents=True, exist_ok=True)
+                    path.replace(archive / f"issue-{number}-parked-{dt.datetime.now():%Y%m%dT%H%M%S}.json")
+                    log(f"Parked issue #{number} is closed or unassigned; archived its saved attempt.")
+                    continue
+                failure = state.get("automation_failure") or {}
+                label_removed = AUTOMATION_FAILED_LABEL.lower() not in {
+                    label.lower() for label in issue_labels(remote)
+                }
+                upgraded = self.automation_failure_upgraded(failure)
+                if (upgraded or label_removed) and not self.in_progress_file.exists() and not self.config.dry_run:
+                    state["status"] = "active"
+                    state["automation_failure_resumed"] = failure
+                    state.pop("automation_failure", None)
+                    atomic_write_json(self.in_progress_file, state)
+                    path.unlink()
+                    log(
+                        f"Released parked issue #{number} "
+                        f"({'a newer worker is installed' if upgraded else 'its Automation Failed label was removed'})."
+                    )
+                    continue
+                parked.add(number)
+            except Exception as error:  # noqa: BLE001 - a bad parked file must not stop selection
+                log(f"Ignoring unreadable parked-issue file {path.name}: {sanitize_text(error)}")
+        return parked
+
     def post_automation_failure_resumed(self) -> None:
         """Clear the terminal hold visibly once upgraded code takes over."""
         if not self.in_progress_file.exists():
@@ -7744,8 +7943,9 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             f"the same automation failure occurred {failure['count']} times. Further AI and "
             "adversarial-test retries are paused.\n\n"
             "## Action required\n\n"
-            "Install a corrected SWARM Automation build, then leave this issue assigned and open. "
-            "Changed worker code will resume from the saved checkpoint automatically.\n\n"
+            "Other issues in this repository continue meanwhile. Install a corrected SWARM Automation "
+            "build, then leave this issue assigned and open; changed worker code resumes from the "
+            "saved checkpoint automatically. Removing the `Automation Failed` label also resumes it.\n\n"
             "## Failure\n\n"
             f"```text\n{message[:4000]}\n```\n\n"
             f"- First occurrence: {failure['first_at']}\n"
@@ -7829,7 +8029,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             self.deliver_pending()
             self.reconcile_issue_pull_requests()
             self.reconcile_orphan_issue_branches()
-            if self.automation_failure_is_held():
+            if self.automation_failure_is_held() and not self.park_held_issue():
                 return AUTOMATION_FAILED_EXIT_CODE
             if not self.config.dry_run:
                 self.refresh_complexity_profile()
@@ -7848,6 +8048,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
                 self.history.warning(str(error), iso_timestamp())
                 self.finish_execution_history("failed")
                 if self.record_automation_failure(error):
+                    self.park_held_issue()
                     return AUTOMATION_FAILED_EXIT_CODE
                 raise
 

@@ -120,6 +120,18 @@ label from a trusted author; the worker owns VERSION.
   matching resume transition, and removes the hold label only after repository
   preparation and preflight pass. Exit code 14 carries this hold. Exit code 13
   remains the strict-mode epoch yield and must not be reused for it.
+  A hold never blocks the repository's queue: the worker parks the issue
+  (`park_held_issue`, state in `parked-issues/`, branch and label kept, edits
+  stashed) and keeps selecting other issues. A parked issue returns to the slot
+  on a changed worker build or when a person removes its `Automation Failed`
+  label (`parked_numbers`); one that is closed or unassigned is archived.
+- An implementer that must change a protected test under `tests/adversarial/`
+  makes no change and reports `SWARM_PROTECTED_TEST_BLOCKED` (or says so in its
+  summary). With an adversarial stage on and a clean tree the worker labels the
+  issue `adversarial-protected` and routes it to fresh-tester adjudication
+  (`route_protected_test_block`) instead of counting a failure. Any other
+  no-change run raises the next attempt's effort, then moves to the strongest
+  tier, inside the routing cap (`escalate_after_no_change`).
 - Provider diagnostics must never be parsed as the provider's structured
   result. In particular, remove the desktop's `RUST_LOG` from Grok's child
   environment, capture JSON stdout separately from stderr, and preserve a

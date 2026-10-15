@@ -6904,6 +6904,103 @@ class WorkerTestCase(unittest.TestCase):
             resumed["automation_failure_resumed"]["application_version"], "1.0.0"
         )
 
+    def _held_state(self, number: int) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, application_version="1.0.0")
+        self.worker.issue = IssueContext(
+            number, "Held issue", "Body", [], f"https://example.invalid/{number}"
+        )
+        self.worker.choice = ProviderChoice("Codex", "test-model", "low", f"session-{number}")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.update_state(
+            status="automation_failed",
+            automation_failure={
+                "application_version": "1.0.0",
+                "worker_revision": self.worker.automation_worker_revision(),
+                "fingerprint": "failure",
+                "count": 3,
+            },
+        )
+
+    def test_held_issue_is_parked_so_the_queue_continues(self) -> None:
+        self._held_state(249)
+        self.assertTrue(self.worker.automation_failure_is_held())
+        self.assertTrue(self.worker.park_held_issue())
+        self.assertFalse(self.worker.in_progress_file.exists())
+        self.assertTrue((self.worker.parked_dir / "249.json").exists())
+
+        labelled = {"number": 249, "labels": [{"name": "Automation Failed"}]}
+        self.assertEqual(self.worker.parked_numbers([labelled]), {249})
+        self.assertFalse(self.worker.in_progress_file.exists())
+
+    def test_parked_issue_returns_after_upgrade_or_label_removal(self) -> None:
+        for reason in ("upgrade", "label"):
+            with self.subTest(reason=reason):
+                self._held_state(249)
+                self.assertTrue(self.worker.park_held_issue())
+                labels = [{"name": "Automation Failed"}] if reason == "upgrade" else []
+                if reason == "upgrade":
+                    self.worker.config = dataclasses.replace(
+                        self.worker.config, application_version="1.0.1"
+                    )
+                self.assertEqual(
+                    self.worker.parked_numbers([{"number": 249, "labels": labels}]), set()
+                )
+                state = self.worker.read_state()
+                self.assertEqual(state["status"], "active")
+                self.assertNotIn("automation_failure", state)
+                self.assertEqual(state["automation_failure_resumed"]["count"], 3)
+                self.assertFalse((self.worker.parked_dir / "249.json").exists())
+                self.worker.in_progress_file.unlink()
+
+    def test_parked_issue_that_was_closed_is_archived(self) -> None:
+        self._held_state(249)
+        self.assertTrue(self.worker.park_held_issue())
+        self.assertEqual(self.worker.parked_numbers([]), set())
+        self.assertFalse((self.worker.parked_dir / "249.json").exists())
+        self.assertEqual(len(list((self.worker.state / "abandoned").glob("issue-249-parked-*.json"))), 1)
+
+    def test_protected_test_block_is_detected_from_marker_or_summary(self) -> None:
+        marked = "## Summary\nBlocked.\nSWARM_PROTECTED_TEST_BLOCKED\n"
+        blocked, cleaned = self.worker.ai_reported_protected_test_block(marked)
+        self.assertTrue(blocked)
+        self.assertNotIn("SWARM_PROTECTED_TEST_BLOCKED", cleaned)
+        prose = "The fix belongs in the protected harnesses under tests/adversarial/, which I may not edit."
+        self.assertTrue(self.worker.ai_reported_protected_test_block(prose)[0])
+        self.assertFalse(self.worker.ai_reported_protected_test_block("Nothing to change; already fixed.")[0])
+
+    def test_protected_test_block_routes_to_adjudication(self) -> None:
+        self.worker.issue = IssueContext(249, "Teardown", "Body", [], "https://example.invalid/249")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "low", "session-249")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        calls: list[list[str]] = []
+        with (
+            mock.patch.object(self.worker, "adversarial_stages", return_value=[object()]),
+            mock.patch.object(self.worker, "ensure_label"),
+            mock.patch.object(self.worker.github, "gh", side_effect=lambda args, *_a, **_k: calls.append(args) or ""),
+            mock.patch.object(self.worker, "start_protected_remediation", return_value=0) as start,
+        ):
+            self.assertEqual(self.worker.route_protected_test_block(), 0)
+        start.assert_called_once()
+        self.assertIn("adversarial-protected", self.worker.issue.labels)
+        self.assertTrue(any("--add-label" in args for args in calls))
+        with mock.patch.object(self.worker, "adversarial_stages", return_value=[]):
+            self.assertIsNone(self.worker.route_protected_test_block())
+
+    def test_no_change_run_escalates_effort_then_strongest_tier(self) -> None:
+        self.worker.config = dataclasses.replace(
+            self.worker.config, dynamic_model_routing=True, routing_caps={}
+        )
+        self.worker.issue = IssueContext(249, "Teardown", "Body", [], "https://example.invalid/249")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "low", "session-249")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        self.worker.escalate_after_no_change()
+        state = self.worker.read_state()
+        self.assertEqual(state["effort"], "medium")
+        self.assertEqual(state["no_change_escalations"], 1)
+        self.worker.config = dataclasses.replace(self.worker.config, dynamic_model_routing=False)
+        self.worker.escalate_after_no_change()
+        self.assertEqual(self.worker.read_state()["no_change_escalations"], 1)
+
     def test_changed_worker_revision_resumes_hold_without_marketing_version_bump(self) -> None:
         self.worker.config = dataclasses.replace(
             self.worker.config, application_version="1.0.0"

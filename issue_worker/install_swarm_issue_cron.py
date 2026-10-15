@@ -678,8 +678,9 @@ class Runner:
             )
         elif status == AUTOMATION_FAILED_EXIT_CODE:
             self.log(
-                f"{label}: automation is held after repeated identical failures; "
-                "the issue checkpoint is preserved and will resume after a worker update."
+                f"{label}: an issue was parked after repeated identical failures; "
+                "its checkpoint is preserved, other issues continue, and it resumes after a "
+                "worker update or when its Automation Failed label is removed."
             )
         elif status:
             self.log(f"{label}: worker exited with status {status}; will retry.")
