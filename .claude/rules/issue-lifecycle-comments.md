@@ -117,6 +117,125 @@ Work paused because **<Provider>** no longer has sufficient usage available.
 <!-- swarm-issue-worker:needs-input:issue:<n>;provider:<key>[;through-comment:<id>] -->
 # 🤖 AI needs your input
 
+Work on this issue is paused until you reply. Everything below is in plain
+language; technical detail is folded away at the end.
+
+## Action required
+<one short sentence: the one question or action, and the exact short reply
+that resumes work>
+
+## Summary
+<at most three plain sentences: what was attempted, what is in the way, why
+the person is needed>
+
+## Recommendations
+<preferred course in one or two sentences, with a warning not to post secrets
+when applicable>
+
+## Step-by-step guide
+<short numbered steps a non-engineer can follow, or "- None.">
+
+## How to resume
+<one new comment from a trusted author; sensitive-information reminder>
+
+<details><summary>Technical details</summary> ... </details>
+```
+The readers are non-engineers: the main sections carry no file paths, function
+names, commands or jargon, and only an action a person can actually take is
+requested (never "assign a tester" or anything the automation does itself).
+The AI's `## Technical details` section is folded by `split_technical_details`.
+
+**Question answered** — `finalize_question_answer`, for issues labelled
+   `Question`. Post a grounded no-code answer and never apply `Ready For
+   Testing`.
+7. **Automation failed** — `post_automation_failure`, after the same
+   deterministic failure reaches its bounded retry limit once an issue has
+   durable state. This includes repository or UAT preflight failures before a
+   Started comment can be posted.
+   Preserve the implementation branch and checkpoint, apply `Automation
+   Failed`, and post one actionable comment. A changed packaged worker build
+   or newer app version resumes automatically, removes the label after
+   preflight, and posts an idempotent resume transition.
+
+### Each comment is idempotent via an HTML marker
+
+Every one of these comments opens with an HTML comment marker unique to
+that specific event (issue number, provider, branch/session/commit as
+appropriate) — e.g. `<!-- swarm-issue-worker:started:issue:278;provider:
+claude;branch:ai/claude/issue-278 -->` or `<!-- swarm-issue-worker:commit:
+<sha>;through-comment:<id> -->`. Before posting, the worker checks the
+issue's existing comments for that exact marker and skips posting if it is
+already there. A new comment-posting path added to this file must follow
+the same pattern: mint a marker specific enough that re-running the same
+event (a retried scheduler tick, a supervisor restart) can never double-post,
+but distinct enough that a genuinely new event (a new work-round, a new
+resume) always gets its own comment.
+
+### Baseline templates — match this shape for any new or edited comment
+
+**Started** (`post_started_comment`):
+```
+<!-- swarm-issue-worker:started:issue:<n>;provider:<key>;branch:<branch> -->
+🤖 **<Provider> Bot** started working on this issue.
+
+- **Model:** `<model>`
+- **Branch:** `<branch>`
+- **<Provider> usage remaining:** <usage>
+```
+("started working on" becomes "started follow-up work on" when
+`work_type == "followup"`.)
+
+**Reworked / Completed** (`render_pending_comment`):
+```
+<!-- swarm-issue-worker:commit:<sha>[;through-comment:<id>] -->
+<Reworked|Completed> by **<Provider>**.
+
+- **Model:** `<model>`
+- **Effort:** `<effort>`
+- **Branch:** `<branch>` → <pull_request_url>
+- **Commit:** `<sha>` — <commit message>
+<usage report line(s), with the label portion of each key:value line bolded>
+- **Adversarial UAT:** <clean first pass|resolved after N rounds>, <N> test files added.
+- **Adversarial Cybersecurity:** <PASS|FIXED|FINDINGS_CREATED|FAILED> — <N> in-scope finding(s), <N> fixed, <N> follow-up issue(s) filed; Critical <N> / High <N> / Medium <N> / Low <N>; <N> security test file(s) added.
+<details><summary>AI completion summary</summary>
+
+<the AI's own final output>
+</details>
+```
+("Reworked" for a followup work-round, "Completed" otherwise — see
+`render_pending_comment`'s `verb` selection.)
+
+**Stopped for usage** (`post_quota_comment`):
+```
+<!-- swarm-issue-worker:quota-paused:issue:<n>;session:<session_id> -->
+Work paused because **<Provider>** no longer has sufficient usage available.
+
+- **Model:** `<model>`
+- **Session:** `<session_id>`
+- The current work and AI session were saved.
+- The worker will wait for <Provider> specifically, include new trusted
+  comments, and resume this same session automatically.
+```
+
+**Resumed** (`post_resumed_comment`):
+```
+<!-- swarm-issue-worker:resumed:issue:<n>;provider:<key>;session:<session_id>;at:<resume_token> -->
+🤖 **<Provider> Bot** is resuming work on this issue.
+
+- **Model:** `<model>`
+- **Branch:** `<branch>`
+- **Session:** `<session_id>`
+- **<Provider> usage remaining:** <usage>
+- **Re-routed:** <from> → <to> (<reason>) — when applicable
+- **Picking up new comments:** <count> new trusted comments — when applicable
+...
+```
+
+**AI needs input** (`finalize_needs_input`):
+```
+<!-- swarm-issue-worker:needs-input:issue:<n>;provider:<key>[;through-comment:<id>] -->
+# 🤖 AI needs your input
+
 ## Action required
 <one exact action or question and the reply that resumes work>
 

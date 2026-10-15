@@ -6163,6 +6163,34 @@ class WorkerTestCase(unittest.TestCase):
         routed.assert_called_once_with()
         needs_input.assert_not_called()
 
+    def test_needs_input_comment_folds_technical_details_away(self) -> None:
+        self.worker.issue = IssueContext(
+            247, "Decision", "Body", [], "https://example.invalid/247"
+        )
+        self.worker.choice = ProviderChoice("Claude", "test-model", "low", "session-247")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        output = (
+            "## Action required\nReply `approved` to continue.\n\n## Summary\nI need a go-ahead.\n\n"
+            "## Recommendations\nApprove it.\n\n## Step-by-step guide\n- None.\n\n"
+            "## Technical details\nscanner in tests/adversarial/test_x.py reads path.read_text\n"
+        )
+        bodies: list[str] = []
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker, "ensure_label"),
+            mock.patch.object(self.worker, "cleanup_no_code_branch"),
+            mock.patch.object(
+                self.worker.github, "gh",
+                side_effect=lambda args, _p=None, body=None, **_k: bodies.append(body or "") or "",
+            ),
+        ):
+            self.worker.finalize_needs_input(output)
+        body = next(b for b in bodies if "AI needs your input" in b)
+        visible, _, folded = body.partition("<details>")
+        self.assertIn("Reply `approved`", visible)
+        self.assertNotIn("test_x.py", visible)
+        self.assertIn("test_x.py", folded)
+
     def test_repeat_input_request_after_a_trusted_reply_retries_once_then_asks(self) -> None:
         self.worker.issue = IssueContext(
             246, "Needs a decision", "Body", [], "https://example.invalid/246",

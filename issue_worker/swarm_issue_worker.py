@@ -316,14 +316,21 @@ AUTOPILOT_INSTRUCTION = (
 )
 NEEDS_INPUT_INSTRUCTION = (
     f"If and only if you are completely blocked on required user input, make no repository changes "
-    f"and put {NEEDS_INPUT_MARKER} on its own final line. Before that marker, use exactly these "
-    "Markdown headings: '## Action required', '## Summary', '## Recommendations', and "
-    "'## Step-by-step guide'. Under Action required, ask one clear question or name the exact user "
-    "action needed and state the exact reply that will resume work. Under Summary, explain why AI "
-    "cannot continue without it. Under Recommendations, give your preferred course and explicitly "
-    "warn the user not to put passwords, tokens, private keys, or other sensitive information in "
-    "the issue whenever credentials are involved. Under Step-by-step guide, provide concrete "
-    "numbered instructions when setup or an external action is required; otherwise write '- None.'"
+    f"and put {NEEDS_INPUT_MARKER} on its own final line. The reader is a non-technical person who "
+    "does not read code: write for them in plain, friendly language, with no file paths, function "
+    "or class names, commands, or jargon in the main sections. Before that marker, use exactly "
+    "these Markdown headings: '## Action required', '## Summary', '## Recommendations', "
+    "'## Step-by-step guide', and optionally '## Technical details'. Under Action required, write "
+    "one short sentence asking one clear question or naming the one action needed, and give the "
+    "exact short reply that will resume work (for example `approved`). Under Summary, write at most "
+    "three short sentences saying what you were trying to do, what is in the way, and why you need "
+    "them. Under Recommendations, give your preferred course in one or two sentences, and "
+    "explicitly warn the user not to put passwords, tokens, private keys, or other sensitive "
+    "information in the issue whenever credentials are involved. Under Step-by-step guide, provide "
+    "short numbered instructions a non-engineer can follow when setup or an external action is "
+    "required; otherwise write '- None.'. Put every technical detail (files, tests, error text, "
+    "reasoning) only under Technical details, or omit it. Never ask the user to do something only "
+    "an engineer or the automation itself can do."
 )
 QUESTION_INSTRUCTION = (
     f"This issue is labelled {QUESTION_LABEL}. Answer the question; do not edit files, create "
@@ -7115,6 +7122,15 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         self.clear_in_progress(self.issue.number)
         log(f"Finished issue #{self.issue.number} with {self.choice.name}: environment-only summary posted.")
 
+    @staticmethod
+    def split_technical_details(output: str) -> tuple[str, str]:
+        """Separate the optional `## Technical details` section from the readable text."""
+        match = re.search(r"(?ims)^##\s+Technical details\s*$\n(.*?)(?=^##\s+|\Z)", output or "")
+        if not match:
+            return (output or "").strip(), ""
+        readable = (output[: match.start()] + output[match.end():]).strip()
+        return readable, match.group(1).strip()
+
     def finalize_needs_input(self, ai_output: str, *, delivery: tuple[str, str, str] | None = None) -> None:
         """Pause an impossible-to-continue issue until a trusted user replies."""
         assert self.issue and self.choice
@@ -7125,16 +7141,21 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         if self.issue.trigger_comment_id:
             marker_fields += f";through-comment:{self.issue.trigger_comment_id}"
         marker = f"<!-- {marker_fields} -->"
+        readable, technical = self.split_technical_details(ai_output)
+        details = (
+            f"<details><summary>Technical details</summary>\n\n{technical}\n\n</details>\n\n"
+            if technical else ""
+        )
         body = (
             f"{marker}\n# 🤖 AI needs your input\n\n"
-            "Work is paused because the AI cannot continue safely without the requested user "
-            "answer or external action. This status is reserved for genuine blockers, not normal "
-            "implementation choices.\n\n"
-            f"{ai_output or '(No captured AI explanation was available.)'}\n"
+            "Work on this issue is paused until you reply. Everything below is in plain language; "
+            "technical detail is folded away at the end.\n\n"
+            f"{readable or '(No captured AI explanation was available.)'}\n\n"
             "## How to resume\n\n"
-            "Complete the action above or answer the question in **one new comment**. Only replies "
-            "from a configured trusted follow-up author resume automation. Do not put passwords, "
-            "tokens, private keys, or other sensitive information in this issue.\n"
+            "Reply in **one new comment** with the answer above. Only replies from a trusted "
+            "follow-up author resume work. Do not put passwords, tokens, or private keys in this "
+            "issue.\n\n"
+            f"{details}"
         )
         existing = any(marker in str(comment.get("body") or "") for comment in self.comments(self.issue.number))
         if not existing:
