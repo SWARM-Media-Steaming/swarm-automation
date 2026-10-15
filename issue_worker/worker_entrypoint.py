@@ -29,8 +29,7 @@ def run(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except (worker.WorkerError, OSError, ValueError, json.JSONDecodeError) as error:
-        worker.log(f"ERROR: {error}")
-        return 1
+        return worker.report_worker_error(error)
 
 
 if __name__ == "__main__":

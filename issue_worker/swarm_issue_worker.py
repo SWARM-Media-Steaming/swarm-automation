@@ -155,6 +155,17 @@ ADVERSARIAL_EPOCH_YIELD_EXIT_CODE = 13
 # The same deterministic infrastructure failure has reached its limit. The
 # checkpoint stays; a newer worker build or app version resumes it.
 AUTOMATION_FAILED_EXIT_CODE = 14
+# A self-recovering condition (a GitHub hiccup, a rejected tester answer the
+# worker retries at higher effort) ended this run. Nothing needs attention, so
+# it is logged on stdout rather than as an ERROR, and the next pass retries.
+RETRY_LATER_EXIT_CODE = 15
+RETRY_LATER_PATTERNS = (
+    r"Invalid adversarial test result",
+    r"GitHub did not confirm the linked branch",
+    r"HTTP (?:429|5\d\d)\b",
+    r"unexpected end of JSON input",
+    r"finished without producing changes or a new commit",
+)
 AUTOMATION_FAILURE_LIMIT = 3
 CODEX_QUOTA_TIMEOUTS_SECONDS = (30, 60)
 CODEX_QUOTA_CACHE_MAX_AGE_SECONDS = 15 * 60
@@ -374,6 +385,26 @@ CI_ISSUE_MARKER_RE = re.compile(r"swarm-issue-worker:ci-failure:branch:([^;\s]+)
 
 class WorkerError(RuntimeError):
     pass
+
+
+def is_retry_later(error: BaseException) -> bool:
+    """Whether `error` is a known self-recovering condition, not a real fault."""
+    return isinstance(error, WorkerError) and any(
+        re.search(pattern, str(error)) for pattern in RETRY_LATER_PATTERNS
+    )
+
+
+def report_worker_error(error: BaseException) -> int:
+    """Log a fatal worker error and return its exit status.
+
+    Only an actual fault is written as `ERROR:` (stderr, shown in red). A
+    retryable condition is narrated on stdout with its own exit status.
+    """
+    if is_retry_later(error):
+        log(f"Will retry on the next pass: {sanitize_text(str(error))}")
+        return RETRY_LATER_EXIT_CODE
+    log(f"ERROR: {error}")
+    return 1
 
 
 def timestamp() -> str:
@@ -8570,5 +8601,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         raise SystemExit(130)
     except (WorkerError, OSError, ValueError, json.JSONDecodeError) as error:
-        log(f"ERROR: {error}")
-        raise SystemExit(1)
+        raise SystemExit(report_worker_error(error))

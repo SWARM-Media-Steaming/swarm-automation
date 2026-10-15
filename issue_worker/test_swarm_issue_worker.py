@@ -6191,6 +6191,24 @@ class WorkerTestCase(unittest.TestCase):
         self.assertNotIn("test_x.py", visible)
         self.assertIn("test_x.py", folded)
 
+    def test_expected_retry_conditions_do_not_log_an_error(self) -> None:
+        import swarm_issue_worker as module
+
+        for message in (
+            "Invalid adversarial test result: Tester must return exactly one SWARM_ADVERSARIAL_RESULT JSON line.",
+            "GitHub did not confirm the linked branch for issue #249",
+            "Command failed (gh pr list): HTTP 504: 504 Gateway Timeout",
+        ):
+            with self.subTest(message=message), \
+                    mock.patch("sys.stderr", new=io.StringIO()) as err, \
+                    mock.patch("sys.stdout", new=io.StringIO()) as out:
+                self.assertEqual(module.report_worker_error(WorkerError(message)), module.RETRY_LATER_EXIT_CODE)
+            self.assertEqual(err.getvalue(), "")
+            self.assertIn("Will retry on the next pass", out.getvalue())
+        with mock.patch("sys.stderr", new=io.StringIO()) as err, mock.patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(module.report_worker_error(WorkerError("gh is required but was not found")), 1)
+        self.assertIn("ERROR: gh is required", err.getvalue())
+
     def test_repeat_input_request_after_a_trusted_reply_retries_once_then_asks(self) -> None:
         self.worker.issue = IssueContext(
             246, "Needs a decision", "Body", [], "https://example.invalid/246",

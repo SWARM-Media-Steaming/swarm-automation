@@ -64,6 +64,12 @@ test("suppresses routine output and expected worker statuses", () => {
   assert.equal(actionableLogEntry(line("Starting a cycle over 3 repositories.")), null);
   assert.equal(actionableLogEntry(line("Codex remaining quota: 80%.")), null);
   assert.equal(actionableLogEntry(line("Issue worker exited with status 10.")), null);
+  assert.equal(
+    actionableLogEntry(line("Will retry on the next pass: Invalid adversarial test result: Tester must return one line. failed")),
+    null,
+  );
+  assert.equal(actionableLogEntry(line("Issue worker exited with status 15.")), null);
+  assert.equal(actionableLogEntry(line("Issue worker exited with status 1.")).level, "error");
   assert.equal(actionableLogEntry(line("Tests passed", "Test scheduler")), null);
 });
 

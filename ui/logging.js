@@ -30,10 +30,12 @@
     const filedFinding = /out-of-scope adversarial UAT finding/i.test(message);
     // Success lines quote the issue title, which may itself say "failed"/"could not".
     const completion = /^(?:Committed completed issue|Finished issue) #\d+/i.test(message);
+    // A self-recovering condition the worker retries on its own; not an error.
+    const retryLater = /^Will retry on the next pass:|a temporary condition ended this pass/i.test(message);
     const isError = /^(?:ERROR|FATAL):|traceback|panic(?:ked)?\b|permission denied|authentication failed|unrecognized arguments/i.test(message)
-      || (!capacityPause && !filedFinding && !completion && /\bcould not\b|\bfailed\b/i.test(message))
+      || (!capacityPause && !filedFinding && !completion && !retryLater && /\bcould not\b|\bfailed\b/i.test(message))
       || /deferring synchronization and AI \(left untouched for manual review\)/i.test(message)
-      || (nonzeroExit && ![0, 10, 11, 12].includes(Number(nonzeroExit[1])));
+      || (nonzeroExit && ![0, 10, 11, 12, 13, 15].includes(Number(nonzeroExit[1])));
     if (isError) {
       return {
         ...log,

@@ -33,6 +33,8 @@ ADVERSARIAL_EPOCH_YIELD_EXIT_CODE = 13
 # Repeated identical infrastructure failure. The checkpoint is held until a
 # newer worker build or application version arrives. Not progress.
 AUTOMATION_FAILED_EXIT_CODE = 14
+# A self-recovering condition ended the run; the next pass retries. Quiet.
+RETRY_LATER_EXIT_CODE = 15
 PROGRESS_EXIT_CODES = (
     ISSUE_COMPLETED_EXIT_CODE,
     QUOTA_PAUSED_EXIT_CODE,
@@ -682,6 +684,8 @@ class Runner:
                 "its checkpoint is preserved, other issues continue, and it resumes after a "
                 "worker update or when its Automation Failed label is removed."
             )
+        elif status == RETRY_LATER_EXIT_CODE:
+            self.log(f"{label}: a temporary condition ended this pass; will retry on the next cycle.")
         elif status:
             self.log(f"{label}: worker exited with status {status}; will retry.")
         else:
@@ -703,6 +707,7 @@ class Runner:
         # a wholly successful fleet cycle.
         expected = (
             AUTOMATION_FAILED_EXIT_CODE,
+            RETRY_LATER_EXIT_CODE,
             *PROGRESS_EXIT_CODES,
             PROVIDER_UNAVAILABLE_EXIT_CODE,
         )
