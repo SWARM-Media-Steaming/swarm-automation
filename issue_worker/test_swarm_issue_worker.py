@@ -6129,6 +6129,40 @@ class WorkerTestCase(unittest.TestCase):
             self.git("branch", "--format=%(refname:short)").splitlines(),
         )
 
+    def test_needs_input_blocked_on_protected_tests_is_adjudicated_not_posted(self) -> None:
+        """Asking a person to "assign a fresh tester" can never be answered, so the
+        worker routes the issue to adjudication instead of waiting (issue #245)."""
+        self.worker.issue = IssueContext(
+            245, "Protected harness teardown", "Body", [], "https://example.invalid/245"
+        )
+
+        def fake_run_ai(_prompt: str, activity: str = "") -> int:
+            self.worker.ai_output_file.write_text(
+                "## Action required\nAssign a fresh tester to the protected harnesses.\n\n"
+                "## Summary\nThe fix requires editing tests/adversarial/, which I may not do.\n\n"
+                "## Recommendations\nAssign a fresh adversarial tester.\n\n"
+                "## Step-by-step guide\n- None.\n\nSWARM_NEEDS_INPUT\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with (
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
+            mock.patch.object(self.worker, "adversarial_stages", return_value=[object()]),
+            mock.patch.object(self.worker, "route_protected_test_block", return_value=0) as routed,
+            mock.patch.object(self.worker, "finalize_needs_input") as needs_input,
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = self.worker.run_selected_issue()
+
+        self.assertEqual(status, 0)
+        routed.assert_called_once_with()
+        needs_input.assert_not_called()
+
     def test_clean_needs_input_drops_its_empty_issue_branch(self) -> None:
         """An input request is only published once the worker has proved no
         commit and no uncommitted change survived, so its branch is empty and a

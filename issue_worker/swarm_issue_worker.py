@@ -7438,6 +7438,14 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
                     f"{self.choice.name} requested user input but also left repository changes; "
                     "refusing to publish an ambiguous partial result"
                 )
+            # A blocker on protected tests is not something a person can supply
+            # (the answer the AI asks for is "assign a fresh tester", which the
+            # worker does itself), so adjudicate instead of waiting for input.
+            blocked, _ = self.ai_reported_protected_test_block(output)
+            if blocked and not question_issue:
+                routed = self.route_protected_test_block()
+                if routed is not None:
+                    return routed
             self.ai_output_file.write_text(output, encoding="utf-8")
             self.finalize_needs_input(output)
             return ISSUE_COMPLETED_EXIT_CODE

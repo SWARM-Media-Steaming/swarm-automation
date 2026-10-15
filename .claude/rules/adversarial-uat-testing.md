@@ -129,7 +129,9 @@ label from a trusted author; the worker owns VERSION.
   makes no change and reports `SWARM_PROTECTED_TEST_BLOCKED` (or says so in its
   summary). With an adversarial stage on and a clean tree the worker labels the
   issue `adversarial-protected` and routes it to fresh-tester adjudication
-  (`route_protected_test_block`) instead of counting a failure. Any other
+  (`route_protected_test_block`) instead of counting a failure. The same routing
+  replaces an `AI Needs Input` request that is only about protected tests, since
+  no person can supply "a fresh tester". Any other
   no-change run raises the next attempt's effort, then moves to the strongest
   tier, inside the routing cap (`escalate_after_no_change`).
 - Provider diagnostics must never be parsed as the provider's structured
