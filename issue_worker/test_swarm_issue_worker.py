@@ -6163,6 +6163,39 @@ class WorkerTestCase(unittest.TestCase):
         routed.assert_called_once_with()
         needs_input.assert_not_called()
 
+    def test_repeat_input_request_after_a_trusted_reply_retries_once_then_asks(self) -> None:
+        self.worker.issue = IssueContext(
+            246, "Needs a decision", "Body", [], "https://example.invalid/246",
+            work_type="followup",
+            followup_comments=[{"id": 1, "user": "owner", "body": "Authorized, go ahead."}],
+        )
+
+        def fake_run_ai(_prompt: str, activity: str = "") -> int:
+            self.worker.ai_output_file.write_text(
+                "## Action required\nReply `go`.\n\n## Summary\nNeed a decision.\n\n"
+                "## Recommendations\n- None.\n\n## Step-by-step guide\n- None.\n\nSWARM_NEEDS_INPUT\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with (
+            mock.patch.object(self.worker, "provider_usage", return_value=ProviderUsage(0, 100.0)),
+            mock.patch.object(self.worker, "post_started_comment"),
+            mock.patch.object(self.worker, "run_ai", side_effect=fake_run_ai),
+            mock.patch.object(self.worker, "escalate_after_no_change") as escalate,
+            mock.patch.object(self.worker, "finalize_needs_input") as needs_input,
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker.github, "gh", side_effect=self.gh_responder()),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(WorkerError):
+                self.worker.run_selected_issue()
+            needs_input.assert_not_called()
+            escalate.assert_called_once()
+            self.assertTrue(self.worker.read_state()["answered_input_retry"])
+            self.assertEqual(self.worker.run_selected_issue(), ISSUE_COMPLETED_EXIT_CODE)
+        needs_input.assert_called_once()
+
     def test_clean_needs_input_drops_its_empty_issue_branch(self) -> None:
         """An input request is only published once the worker has proved no
         commit and no uncommitted change survived, so its branch is empty and a

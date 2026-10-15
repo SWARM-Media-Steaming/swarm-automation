@@ -4524,6 +4524,13 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         if question_issue:
             lines.append(QUESTION_INSTRUCTION)
         lines.append(NEEDS_INPUT_INSTRUCTION)
+        if self.issue.work_type == "followup" and self.issue.followup_comments and not question_issue:
+            lines.append(
+                "A trusted user has already replied on this issue (their comments are above). Treat "
+                "that reply as the answer or authorization you asked for and continue the work. Do not "
+                f"ask for the same thing again or return {NEEDS_INPUT_MARKER} unless you need genuinely "
+                "new information the reply does not provide."
+            )
         if not question_issue and self.adversarial_stages():
             lines.append(
                 "If this issue cannot be completed without editing a protected test under "
@@ -7446,6 +7453,21 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
                 routed = self.route_protected_test_block()
                 if routed is not None:
                     return routed
+            if (
+                self.issue.work_type == "followup"
+                and self.issue.followup_comments
+                and not question_issue
+                and not self.read_state().get("answered_input_retry")
+            ):
+                # The user already replied, so asking again is likely a
+                # misreading. Retry once with a stronger attempt before
+                # making them answer a second time.
+                self.update_state(answered_input_retry=True)
+                self.escalate_after_no_change()
+                raise WorkerError(
+                    f"{self.choice.name} asked for input again after a trusted reply; "
+                    "retrying once with a stronger attempt."
+                )
             self.ai_output_file.write_text(output, encoding="utf-8")
             self.finalize_needs_input(output)
             return ISSUE_COMPLETED_EXIT_CODE
