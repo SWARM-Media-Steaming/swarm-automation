@@ -6892,6 +6892,8 @@ class WorkerTestCase(unittest.TestCase):
         comments = [body for args, body in calls if args[:2] == ["issue", "comment"]]
         self.assertEqual(len(comments), 1)
         self.assertIn("Automation needs attention", comments[0])
+        self.assertIn("<details><summary>Failure details", comments[0])
+        self.assertLess(comments[0].index("Action required"), comments[0].index("Failure details"))
         self.assertTrue(self.worker.automation_failure_is_held())
 
         self.worker.config = dataclasses.replace(
@@ -6976,10 +6978,12 @@ class WorkerTestCase(unittest.TestCase):
         with (
             mock.patch.object(self.worker, "adversarial_stages", return_value=[object()]),
             mock.patch.object(self.worker, "ensure_label"),
+            mock.patch.object(self.worker, "comments", return_value=[]),
             mock.patch.object(self.worker.github, "gh", side_effect=lambda args, *_a, **_k: calls.append(args) or ""),
             mock.patch.object(self.worker, "start_protected_remediation", return_value=0) as start,
         ):
             self.assertEqual(self.worker.route_protected_test_block(), 0)
+            self.assertEqual(sum(args[:2] == ["issue", "comment"] for args in calls), 1)
         start.assert_called_once()
         self.assertIn("adversarial-protected", self.worker.issue.labels)
         self.assertTrue(any("--add-label" in args for args in calls))

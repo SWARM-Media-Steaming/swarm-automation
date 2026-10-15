@@ -154,14 +154,26 @@ No repository changes were made.
 <!-- swarm-issue-worker:automation-failed:issue:<n>;fingerprint:<digest> -->
 # ⚠️ Automation needs attention
 
-The implementation checkpoint, issue branch, and worker state were preserved.
+The same automation failure occurred <n> times, so retries on this issue are
+paused. Its branch and checkpoint are preserved, and other issues continue.
 
 ## Action required
-Install a corrected SWARM Automation release; the newer version resumes the
-saved checkpoint automatically.
+Install a corrected SWARM Automation build, or remove the `Automation Failed`
+label to resume. Leave the issue assigned and open.
 
-## Failure
+<details><summary>Failure details</summary>
 <sanitized error and first/last occurrence metadata>
+</details>
+```
+
+**Routed to protected-test review** (`route_protected_test_block`):
+```
+<!-- swarm-issue-worker:protected-test-routed:issue:<n>;provider:<key> -->
+# 🤖 Routed to protected-test review
+
+**<Provider>** could not complete this issue because it needs a protected test
+under `tests/adversarial/` changed. The issue is labelled `adversarial-protected`
+and sent to a fresh independent tester. No action is needed.
 ```
 
 ### What must never happen

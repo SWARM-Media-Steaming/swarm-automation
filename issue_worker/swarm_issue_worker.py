@@ -4687,6 +4687,23 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         )
         if name not in {item.lower() for item in self.issue.labels}:
             self.issue.labels.append(name)
+        marker = (
+            f"<!-- swarm-issue-worker:protected-test-routed:issue:{self.issue.number};"
+            f"provider:{self.choice.key} -->"
+        )
+        if not any(marker in str(c.get("body") or "") for c in self.comments(self.issue.number)):
+            self.github.gh(
+                [
+                    "issue", "comment", str(self.issue.number), "--repo",
+                    self.config.github_repository, "--body-file", "-",
+                ],
+                self.choice.key,
+                f"{marker}\n# 🤖 Routed to protected-test review\n\n"
+                f"**{self.choice.name}** could not complete this issue because it needs a protected test "
+                "under `tests/adversarial/` changed, which an implementer may not do. The issue is "
+                f"labelled `{name}` and sent to a fresh independent tester to decide whether the test "
+                "should change. No action is needed.\n",
+            )
         self.history.note(
             "Implementer reported the issue is blocked by protected adversarial tests; "
             "routed to protected-test adjudication",
@@ -7939,19 +7956,18 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         )
         body = (
             f"{marker}\n# ⚠️ Automation needs attention\n\n"
-            "The implementation checkpoint, issue branch, and worker state were preserved, but "
-            f"the same automation failure occurred {failure['count']} times. Further AI and "
-            "adversarial-test retries are paused.\n\n"
+            f"The same automation failure occurred {failure['count']} times, so retries on this "
+            "issue are paused. Its branch and checkpoint are preserved, and other issues continue.\n\n"
             "## Action required\n\n"
-            "Other issues in this repository continue meanwhile. Install a corrected SWARM Automation "
-            "build, then leave this issue assigned and open; changed worker code resumes from the "
-            "saved checkpoint automatically. Removing the `Automation Failed` label also resumes it.\n\n"
-            "## Failure\n\n"
+            "Install a corrected SWARM Automation build, or remove the `Automation Failed` label "
+            "to resume. Leave the issue assigned and open.\n\n"
+            "<details><summary>Failure details</summary>\n\n"
             f"```text\n{message[:4000]}\n```\n\n"
             f"- First occurrence: {failure['first_at']}\n"
             f"- Last occurrence: {failure['last_at']}\n"
             f"- Application version: `{failure['application_version']}`\n"
             f"- Worker revision: `{failure['worker_revision']}`\n"
+            "</details>\n"
         )
         existing = any(
             marker in str(comment.get("body") or "")
