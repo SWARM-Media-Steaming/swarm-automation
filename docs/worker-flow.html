@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Worker Flow</title><meta name="claude:viewport-fit-sides" content="cover"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"><style>
+/* Layout: a reference document. Sticky section index on wide screens, one reading column,
+   diagrams in their own scrollable frames so a large flowchart never widens the page. */
+:root {
+  --bg: #f5f8f9; --surface: #ffffff; --surface-2: #eaf0f2; --fg: #14232c; --muted: #52646e;
+  --line: #d3dde2; --accent: #0a6c7e; --accent-ink: #ffffff; --code-bg: #e6eef1; --warn: #8a5a00;
+  --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e171c; --surface: #152229; --surface-2: #1c2d36; --fg: #e2ebf0; --muted: #96a8b2;
+    --line: #2a3d47; --accent: #5cc3d6; --accent-ink: #062831; --code-bg: #1d2e37; --warn: #e0b04a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e171c; --surface: #152229; --surface-2: #1c2d36; --fg: #e2ebf0; --muted: #96a8b2;
+  --line: #2a3d47; --accent: #5cc3d6; --accent-ink: #062831; --code-bg: #1d2e37; --warn: #e0b04a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  padding-block: 0 4rem; padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px)); margin: 0; }
+a { color: var(--accent); }
+code { font-family: var(--font-mono); font-size: .86em; background: var(--code-bg); padding: .1em .35em; border-radius: 4px;
+  overflow-wrap: anywhere; }
+.wrap { max-width: 78rem; margin: 0 auto; }
+.masthead { padding-block: 2.5rem 1.5rem; border-bottom: 1px solid var(--line); margin-bottom: 1.5rem; }
+.masthead h1 { font-size: clamp(1.9rem, 4vw, 2.7rem); line-height: 1.1; margin: 0 0 .6rem; letter-spacing: -.02em;
+  text-wrap: balance; font-weight: 700; }
+.masthead p { margin: 0; max-width: 46rem; color: var(--muted); font-size: 1.05rem; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2rem; }
+@media (min-width: 62rem) { .layout { grid-template-columns: 15rem minmax(0, 1fr); } }
+nav.index { display: none; }
+@media (min-width: 62rem) {
+  nav.index { display: block; position: sticky; top: 1rem; align-self: start; max-height: calc(100vh - 2rem); overflow: auto; }
+}
+nav.index h2 { font-size: .72rem; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 0 0 .6rem; font-weight: 600; }
+nav.index ol { list-style: none; margin: 0; padding: 0; display: grid; gap: .1rem; }
+nav.index a { display: block; padding: .35rem .6rem; border-radius: 6px; text-decoration: none; color: var(--fg); font-size: .92rem; line-height: 1.35; }
+nav.index a:hover, nav.index a:focus-visible { background: var(--surface-2); outline: none; }
+nav.index a.current { background: var(--surface-2); color: var(--accent); font-weight: 600; }
+main { min-width: 0; }
+section.part { margin-bottom: 3.2rem; scroll-margin-top: 1rem; }
+section.part > h2 { font-size: 1.55rem; line-height: 1.2; margin: 0 0 1rem; letter-spacing: -.01em; text-wrap: balance; font-weight: 650; }
+h3 { font-size: 1.1rem; margin: 1.8rem 0 .6rem; font-weight: 650; }
+p { margin: 0 0 1rem; max-width: 46rem; }
+ul, ol { margin: 0 0 1.1rem; padding-left: 1.3rem; max-width: 46rem; display: grid; gap: .45rem; }
+.callout { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  padding: .8rem 1rem; border-radius: 6px; margin: 0 0 1.4rem; max-width: 46rem; }
+.callout p { margin: 0; }
+.tablewrap { overflow-x: auto; margin: 0 0 1.4rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; min-width: 34rem; }
+th, td { text-align: left; padding: .55rem .8rem; vertical-align: top; border-bottom: 1px solid var(--line); }
+th { font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); background: var(--surface-2); font-weight: 600; }
+tr:last-child td { border-bottom: 0; }
+td:first-child code { white-space: nowrap; }
+figure.diagram { margin: 0 0 1.6rem; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+figure.diagram .bar { display: flex; justify-content: space-between; align-items: center; gap: .6rem; padding: .45rem .8rem;
+  background: var(--surface-2); border-bottom: 1px solid var(--line); font-size: .78rem; color: var(--muted); }
+figure.diagram .bar b { color: var(--fg); font-weight: 600; letter-spacing: .02em; }
+figure.diagram button { font: inherit; font-size: .78rem; color: var(--fg); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 6px; padding: .2rem .6rem; cursor: pointer; }
+figure.diagram button:hover { border-color: var(--accent); }
+figure.diagram button:focus-visible, nav.index a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+figure.diagram .scroll { overflow: auto; padding: 1rem; max-height: 80vh; }
+figure.diagram .zoomer { width: calc(100% * var(--zoom, 1)); }
+figure.diagram pre.mermaid { margin: 0; display: block; width: 100%; font-family: var(--font-body); background: transparent; }
+figure.diagram pre.mermaid svg { display: block; width: 100%; max-width: none !important; height: auto; }
+figure.diagram .zoom { display: flex; align-items: center; gap: .35rem; }
+figure.diagram .zoom .level { min-width: 3.2em; text-align: center; font-variant-numeric: tabular-nums; }
+.contents { margin: 0 0 1.4rem; }
+.contents h2 { font-size: .72rem; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 0 0 .5rem; font-weight: 600; }
+@media (min-width: 62rem) { .contents { display: none; } }
+pre.code { background: var(--code-bg); padding: .8rem 1rem; border-radius: 8px; overflow-x: auto; font-family: var(--font-mono); font-size: .86rem; }
+@media (prefers-reduced-motion: no-preference) { nav.index a { transition: background .12s; } }
+</style></head><body><div class="wrap"><header class="masthead"><h1>Issue worker flow</h1><p>How <code>issue_worker/</code> picks up an issue, works it, lets the adversarial reviewers attack the result, and delivers it. This is the reference for the whole flow; the diagrams are <a href="https://mermaid.js.org/">Mermaid</a>. They render on GitHub, and <code>docs/worker-flow.html</code> is the same content as a standalone visual page.</p></header><div class="layout"><nav class="index" aria-label="Sections"><h2>Sections</h2><ol><li><a href="#1-the-big-picture">1. The big picture</a></li><li><a href="#2-one-worker-run-and-how-an-issue-is-selected">2. One worker run, and how an issue is selected</a></li><li><a href="#3-starting-work-and-the-implementation-pass">3. Starting work and the implementation pass</a></li><li><a href="#4-the-adversarial-pipeline">4. The adversarial pipeline</a></li><li><a href="#5-inside-one-adversarial-stage-rounds-and-epochs">5. Inside one adversarial stage: rounds and epochs</a></li><li><a href="#6-what-happens-to-a-finding">6. What happens to a finding</a></li><li><a href="#7-delivery">7. Delivery</a></li><li><a href="#8-pauses-holds-and-recovery">8. Pauses, holds and recovery</a></li><li><a href="#9-limits-and-counts">9. Limits and counts</a></li><li><a href="#10-comments-and-labels-on-the-issue">10. Comments and labels on the issue</a></li><li><a href="#11-where-state-lives">11. Where state lives</a></li><li><a href="#12-code-map">12. Code map</a></li></ol></nav><main><div class="callout"><p><strong>Keep this file in step with the code.</strong> Any change to the flow, a limit, an exit code, a label, a comment or a state file must update the matching diagram and table in the same change. The rule is <code>.claude/rules/worker-flow-diagram.md</code>; <code>test_worker_flow_docs.py</code> fails when a limit or a named function here drifts from the code, or when <code>docs/worker-flow.html</code> is not rebuilt (<code>python3 scripts/build_worker_flow_html.py</code>).</p></div><div class="contents"><h2>Sections</h2><ol><li><a href="#1-the-big-picture">The big picture</a></li><li><a href="#2-one-worker-run-and-how-an-issue-is-selected">One worker run, and how an issue is selected</a></li><li><a href="#3-starting-work-and-the-implementation-pass">Starting work and the implementation pass</a></li><li><a href="#4-the-adversarial-pipeline">The adversarial pipeline</a></li><li><a href="#5-inside-one-adversarial-stage-rounds-and-epochs">Inside one adversarial stage: rounds and epochs</a></li><li><a href="#6-what-happens-to-a-finding">What happens to a finding</a></li><li><a href="#7-delivery">Delivery</a></li><li><a href="#8-pauses-holds-and-recovery">Pauses, holds and recovery</a></li><li><a href="#9-limits-and-counts">Limits and counts</a></li><li><a href="#10-comments-and-labels-on-the-issue">Comments and labels on the issue</a></li><li><a href="#11-where-state-lives">Where state lives</a></li><li><a href="#12-code-map">Code map</a></li></ol></div><section class="part" id="1-the-big-picture"><h2>1. The big picture</h2>
+<p>A scheduler starts one worker run per repository on an interval. A run does at most one unit of work (one issue, or one resumed checkpoint), then exits with a code that tells the scheduler what happened.</p>
+<figure class="diagram"><div class="bar"><b>1. The big picture</b><div class="zoom"><button type="button" data-z="out" aria-label="Zoom out">−</button><span class="level" aria-live="polite">100%</span><button type="button" data-z="in" aria-label="Zoom in">+</button><button type="button" data-z="fit">Fit</button></div></div><div class="scroll"><div class="zoomer"><pre class="mermaid">flowchart TD
+    S[&quot;Scheduler&lt;br/&gt;install_swarm_issue_cron.py&lt;br/&gt;every interval, repos in parallel&quot;] --&gt; R[&quot;One worker run&lt;br/&gt;Worker.run&quot;]
+    R --&gt; W{&quot;What did this run do?&quot;}
+    W --&gt;|&quot;nothing to do&quot;| X0[&quot;exit 0&quot;]
+    W --&gt;|&quot;issue delivered or answered&quot;| X10[&quot;exit 10&quot;]
+    W --&gt;|&quot;provider out of usage, session saved&quot;| X11[&quot;exit 11&quot;]
+    W --&gt;|&quot;no provider has enough usage&quot;| X12[&quot;exit 12&quot;]
+    W --&gt;|&quot;strict adversarial epochs renewed 3 times&quot;| X13[&quot;exit 13&quot;]
+    W --&gt;|&quot;same failure repeated, issue held&quot;| X14[&quot;exit 14&quot;]
+    W --&gt;|&quot;self-recovering condition&quot;| X15[&quot;exit 15&quot;]
+    X10 --&gt; AGAIN[&quot;Run again immediately&lt;br/&gt;progress codes are 10, 11 and 13&quot;]
+    X11 --&gt; AGAIN
+    X13 --&gt; AGAIN
+    X0 --&gt; WAIT[&quot;Wait for the next interval&quot;]
+    X12 --&gt; WAIT
+    X14 --&gt; WAIT
+    X15 --&gt; WAIT
+    AGAIN --&gt; R
+    WAIT --&gt; R</pre></div></div></figure>
+<div class="tablewrap"><table><thead><tr><th>Exit code</th><th>Meaning</th><th>Scheduler treats it as</th></tr></thead><tbody><tr><td>0</td><td>Nothing to do right now</td><td>idle</td></tr><tr><td>10</td><td><code>ISSUE_COMPLETED_EXIT_CODE</code>: delivered, answered, or asked for input</td><td>progress</td></tr><tr><td>11</td><td><code>QUOTA_PAUSED_EXIT_CODE</code>: provider usage ran out; session saved</td><td>progress</td></tr><tr><td>12</td><td><code>PROVIDER_UNAVAILABLE_EXIT_CODE</code>: no enabled provider has its minimum remaining usage</td><td>idle</td></tr><tr><td>13</td><td><code>ADVERSARIAL_EPOCH_YIELD_EXIT_CODE</code>: a strict stage renewed 3 epochs in this process; the checkpoint resumes next pass</td><td>progress</td></tr><tr><td>14</td><td><code>AUTOMATION_FAILED_EXIT_CODE</code>: the issue is held after a repeated or deliberate failure</td><td>idle</td></tr><tr><td>15</td><td><code>RETRY_LATER_EXIT_CODE</code>: a self-recovering condition (GitHub hiccup, rejected tester answer); logged quietly</td><td>idle</td></tr></tbody></table></div>
+</section>
+<section class="part" id="2-one-worker-run-and-how-an-issue-is-selected"><h2>2. One worker run, and how an issue is selected</h2>
+<figure class="diagram"><div class="bar"><b>2. One worker run, and how an issue is selected</b><div class="zoom"><button type="button" data-z="out" aria-label="Zoom out">−</button><span class="level" aria-live="polite">100%</span><button type="button" data-z="in" aria-label="Zoom in">+</button><button type="button" data-z="fit">Fit</button></div></div><div class="scroll"><div class="zoomer"><pre class="mermaid">flowchart TD
+    A[&quot;Worker.run&lt;br/&gt;takes the per-repo worker lock&quot;] --&gt; B[&quot;deliver_pending&lt;br/&gt;finish an interrupted comment or label&quot;]
+    B --&gt; C[&quot;reconcile_issue_pull_requests&lt;br/&gt;approve and squash-merge open issue PRs&lt;br/&gt;when auto-approve is on&quot;]
+    C --&gt; D[&quot;reconcile_orphan_issue_branches&lt;br/&gt;remove branches stranded by no-code results&quot;]
+    D --&gt; E{&quot;Is the saved issue held&lt;br/&gt;after repeated failure?&quot;}
+    E --&gt;|&quot;yes, build unchanged&quot;| E1[&quot;park_held_issue&lt;br/&gt;shelve it, keep branch and checkpoint&quot;]
+    E1 --&gt; E2[&quot;exit 14, or carry on with the queue&quot;]
+    E --&gt;|&quot;no, or a newer build is installed&quot;| F[&quot;refresh_complexity_profile&lt;br/&gt;repository analysis, never blocks&quot;]
+    F --&gt; G{&quot;Quota-paused attempt&lt;br/&gt;waiting to resume?&quot;}
+    G --&gt;|&quot;yes&quot;| G1[&quot;prepare_paused_resume&lt;br/&gt;resume the same session,&lt;br/&gt;or hand off to another provider&quot;]
+    G --&gt;|&quot;no&quot;| H{&quot;Is CI monitoring on and the&lt;br/&gt;integration branch failing?&quot;}
+    H --&gt;|&quot;yes&quot;| H1[&quot;monitor_repository_actions&lt;br/&gt;file a CI failure issue and work it now&quot;]
+    H --&gt;|&quot;no&quot;| I[&quot;select_issue&quot;]
+    G1 --&gt; J[&quot;run_selected_issue&quot;]
+    H1 --&gt; J
+    I --&gt; J</pre></div></div></figure>
+<h3 id="select_issue"><code>select_issue</code></h3>
+<figure class="diagram"><div class="bar"><b>select_issue</b><div class="zoom"><button type="button" data-z="out" aria-label="Zoom out">−</button><span class="level" aria-live="polite">100%</span><button type="button" data-z="in" aria-label="Zoom in">+</button><button type="button" data-z="fit">Fit</button></div></div><div class="scroll"><div class="zoomer"><pre class="mermaid">flowchart TD
+    A[&quot;Open issues assigned to the configured assignee&quot;] --&gt; B[&quot;Drop completed, paused and parked issues&quot;]
+    B --&gt; C{&quot;Saved in-progress issue&lt;br/&gt;still open and assigned?&quot;}
+    C --&gt;|&quot;yes&quot;| C1[&quot;Resume it first&lt;br/&gt;always wins&quot;]
+    C --&gt;|&quot;no&quot;| D[&quot;Build the ready list&quot;]
+    D --&gt; D1[&quot;Not completed before:&lt;br/&gt;first pass&quot;]
+    D --&gt; D2[&quot;Completed before, with a new trusted&lt;br/&gt;comment after the completion marker:&lt;br/&gt;follow-up rework&quot;]
+    D1 --&gt; E[&quot;gate_on_dependencies&lt;br/&gt;drop first-pass issues whose&lt;br/&gt;Depends on #N are not merged&quot;]
+    D2 --&gt; E
+    E --&gt; F[&quot;Pick by priority:&lt;br/&gt;Urgent, High, Medium, Low&lt;br/&gt;Project Priority field first, then labels&quot;]
+    F --&gt; G[&quot;Ties: lowest issue number&quot;]</pre></div></div></figure>
+<p>Follow-up comments only count from <strong>trusted authors</strong> (<code>--trusted-followup-author</code>). Comments from bots, including the worker's own, are not instructions.</p>
+</section>
+<section class="part" id="3-starting-work-and-the-implementation-pass"><h2>3. Starting work and the implementation pass</h2>
+<figure class="diagram"><div class="bar"><b>3. Starting work and the implementation pass</b><div class="zoom"><button type="button" data-z="out" aria-label="Zoom out">−</button><span class="level" aria-live="polite">100%</span><button type="button" data-z="in" aria-label="Zoom in">+</button><button type="button" data-z="fit">Fit</button></div></div><div class="scroll"><div class="zoomer"><pre class="mermaid">flowchart TD
+    A[&quot;run_selected_issue&quot;] --&gt; B{&quot;Resuming a saved attempt?&quot;}
+    B --&gt;|&quot;yes&quot;| B1[&quot;Check the pinned provider&#x27;s usage&lt;br/&gt;hand off to another provider,&lt;br/&gt;or pause for quota and exit 11&quot;]
+    B --&gt;|&quot;no&quot;| B2[&quot;choose_provider&lt;br/&gt;preferred provider with enough usage&lt;br/&gt;exit 12 if none&quot;]
+    B1 --&gt; C[&quot;ensure_bot_auth&quot;]
+    B2 --&gt; C
+    C --&gt; D[&quot;prepare_issue_complexity&lt;br/&gt;repository-aware complexity analysis&lt;br/&gt;Jev or the AI fallback&quot;]
+    D --&gt; E[&quot;maybe_apply_dynamic_routing&lt;br/&gt;score models by capability then cost,&lt;br/&gt;then clamp to the repository routing cap&quot;]
+    E --&gt; F[&quot;prepare_repository&lt;br/&gt;branch ai/provider/issue-N&lt;br/&gt;recover an earlier commit if one exists&quot;]
+    F --&gt; G[&quot;preflight_adversarial_definition&quot;]
+    G --&gt; H[&quot;Post the Started comment&quot;]
+    H --&gt; I{&quot;Adversarial checkpoint&lt;br/&gt;already exists?&quot;}
+    I --&gt;|&quot;yes&quot;| P[&quot;run_adversarial_pipeline&lt;br/&gt;section 4&quot;]
+    I --&gt;|&quot;no&quot;| J[&quot;build_prompt and run_ai&lt;br/&gt;the implementation pass&quot;]
+    J --&gt; K{&quot;AI result&quot;}
+    K --&gt;|&quot;usage ran out&quot;| K1[&quot;Save session, post quota comment,&lt;br/&gt;exit 11&quot;]
+    K --&gt;|&quot;session failed&quot;| K2[&quot;WorkerError: state preserved,&lt;br/&gt;counted toward the failure limit&quot;]
+    K --&gt;|&quot;asks for input&quot;| K3{&quot;Only about protected tests?&quot;}
+    K3 --&gt;|&quot;yes&quot;| K4[&quot;route_protected_test_block&lt;br/&gt;label adversarial-protected,&lt;br/&gt;a fresh tester adjudicates&quot;]
+    K3 --&gt;|&quot;no&quot;| K5[&quot;finalize_needs_input&lt;br/&gt;AI Needs Input comment and label&lt;br/&gt;wait for a trusted reply, exit 10&quot;]
+    K --&gt;|&quot;answers a Question issue&quot;| K6[&quot;finalize_question_answer&lt;br/&gt;code-free answer, exit 10&quot;]
+    K --&gt;|&quot;no change: environment only&quot;| K7[&quot;finalize_environment_only&lt;br/&gt;comment, exit 10&quot;]
+    K --&gt;|&quot;no change at all&quot;| K8[&quot;escalate_after_no_change&lt;br/&gt;stronger attempt next time,&lt;br/&gt;exit 15&quot;]
+    K --&gt;|&quot;made a commit&quot;| L[&quot;Version policy:&lt;br/&gt;discard any AI edit to VERSION,&lt;br/&gt;worker writes the minor bump if labelled&quot;]
+    L --&gt; M[&quot;Validate: still on the issue branch,&lt;br/&gt;history only grows, commit messages,&lt;br/&gt;issue reference present, tree clean&quot;]
+    M --&gt; N{&quot;Any adversarial stage enabled?&quot;}
+    N --&gt;|&quot;yes&quot;| P
+    N --&gt;|&quot;no&quot;| Q[&quot;finalize_issue&lt;br/&gt;section 7&quot;]</pre></div></div></figure>
+<p>Notes</p>
+<ul><li><code>Question</code> issues never change the repository and never enter the adversarial loop. Pre-flight grading and routing still run.</li><li>Only the worker writes <code>VERSION</code> (see <code>.claude/rules/versioning.md</code>).</li><li>Routing never overrides a manual model selection, and a started session is never re-routed to a different model unless its model was retired.</li></ul>
+</section>
+<section class="part" id="4-the-adversarial-pipeline"><h2>4. The adversarial pipeline</h2>
+<p>The stages are independent switches. Each runs its own loop to completion before the next starts, then delivery happens once.</p>
+<figure class="diagram"><div class="bar"><b>4. The adversarial pipeline</b><div class="zoom"><button type="button" data-z="out" aria-label="Zoom out">−</button><span class="level" aria-live="polite">100%</span><button type="button" data-z="in" aria-label="Zoom in">+</button><button type="button" data-z="fit">Fit</button></div></div><div class="scroll"><div class="zoomer"><pre class="mermaid">flowchart LR
+    I[&quot;Implementation&lt;br/&gt;commit on the issue branch&quot;] --&gt; U{&quot;adversarial_uat_enabled?&quot;}
+    U --&gt;|&quot;yes&quot;| U1[&quot;Adversarial UAT&lt;br/&gt;verdict = suite exit codes&quot;]
+    U --&gt;|&quot;no&quot;| C
+    U1 --&gt; C{&quot;adversarial_security_enabled?&quot;}
+    C --&gt;|&quot;yes&quot;| C1[&quot;Adversarial cybersecurity&lt;br/&gt;verdict = suite exit codes&lt;br/&gt;plus in-scope findings from a fresh reviewer&quot;]
+    C --&gt;|&quot;no&quot;| D
+    C1 --&gt; D[&quot;Delivery&lt;br/&gt;section 7&quot;]</pre></div></div></figure>
+<p>Rules that hold for both stages (they share <code>adversarial_core.py</code>):</p>
+<ul><li><strong>Fresh context.</strong> Every tester or reviewer starts a new session. It sees the issue, trusted amendments, the current diff, repository conventions and the failed approaches so far. It never sees the implementer's transcript or reasoning. It is also told which out-of-scope findings are already tracked.</li><li><strong>Ownership.</strong> The fixer changes product code only. It cannot change, disable or retire anything under <code>tests/adversarial/</code>; the worker restores such edits and turns them into a dispute. UAT owns <code>tests/adversarial/</code>; cybersecurity owns <code>tests/adversarial/security/</code>. Neither may edit the other's suites.</li><li><strong>Tester floor.</strong> A tester never runs below the scored STANDARD-task model at medium effort, and never weaker than the first assessment's tester.</li><li><strong>Provider choice.</strong> Capacity is checked for every phase. Another provider is preferred for testing, and the dynamic router is reused when enabled.</li></ul>
+</section>
+<section class="part" id="5-inside-one-adversarial-stage-rounds-and-epochs"><h2>5. Inside one adversarial stage: rounds and epochs</h2>
+<p>Round 0 is the independent assessment. One counted round is one fixer pass plus one fresh re-test. Three counted rounds are one epoch.</p>
+<figure class="diagram"><div class="bar"><b>5. Inside one adversarial stage: rounds and epochs</b><div class="zoom"><button type="button" data-z="out" aria-label="Zoom out">−</button><span class="level" aria-live="polite">100%</span><button type="button" data-z="in" aria-label="Zoom in">+</button><button type="button" data-z="fit">Fit</button></div></div><div class="scroll"><div class="zoomer"><pre class="mermaid">flowchart TD
+    A[&quot;Round 0&lt;br/&gt;independent assessment by a fresh tester&quot;] --&gt; B{&quot;Blocking failures&lt;br/&gt;or findings?&quot;}
+    B --&gt;|&quot;none&quot;| OK[&quot;Clean first pass&lt;br/&gt;stage done&quot;]
+    B --&gt;|&quot;yes&quot;| F[&quot;Round n: fixer pass&quot;]
+    F --&gt; F1{&quot;Fixer already returned no change 3 times&lt;br/&gt;for this exact failure on this exact&lt;br/&gt;provider, model and effort?&quot;}
+    F1 --&gt;|&quot;yes&quot;| F2[&quot;Skip the fixer call&lt;br/&gt;the round still re-tests&quot;]
+    F1 --&gt;|&quot;no&quot;| F3[&quot;Fixer edits product code&lt;br/&gt;worker restores any test edits&quot;]
+    F2 --&gt; T
+    F3 --&gt; T[&quot;Round n: fresh tester re-test&lt;br/&gt;revises tests only to answer a dispute,&lt;br/&gt;runs suites, returns the structured result&quot;]
+    T --&gt; V{&quot;Result valid?&lt;br/&gt;edits allowed, JSON well formed&quot;}
+    V --&gt;|&quot;rejected&quot;| V1[&quot;Restore the edits, tell the next tester why&lt;br/&gt;step the tester up&quot;]
+    V1 --&gt; V2{&quot;Rejected 3 times?&quot;}
+    V2 --&gt;|&quot;yes&quot;| BE[&quot;Deliver the latest commit as best effort&lt;br/&gt;even in strict mode&quot;]
+    V2 --&gt;|&quot;no&quot;| T
+    V --&gt;|&quot;accepted&quot;| G[&quot;File or suppress out-of-scope findings&lt;br/&gt;section 6&quot;]
+    G --&gt; H[&quot;Run the blocking suites&quot;]
+    H --&gt; I{&quot;Clean?&quot;}
+    I --&gt;|&quot;yes&quot;| OK2[&quot;Resolved after n rounds&lt;br/&gt;stage done&quot;]
+    I --&gt;|&quot;no&quot;| J{&quot;Was that round 3 of the epoch?&quot;}
+    J --&gt;|&quot;no&quot;| F
+    J --&gt;|&quot;yes&quot;| K{&quot;Merge policy&quot;}
+    K --&gt;|&quot;best effort&quot;| BE
+    K --&gt;|&quot;strict&quot;| L[&quot;close_adversarial_epoch&lt;br/&gt;record progress and plan escalation&quot;]
+    L --&gt; M{&quot;Stop conditions&quot;}
+    M --&gt;|&quot;4 epochs in a row without progress,&lt;br/&gt;12 epochs, or 8 hours&quot;| HOLD[&quot;hold_stalled_stage&lt;br/&gt;Automation Failed hold, issue parked&quot;]
+    M --&gt;|&quot;none hit&quot;| N[&quot;Next epoch: re-route, raise effort,&lt;br/&gt;change provider if no progress,&lt;br/&gt;strongest model after 2 stalled epochs,&lt;br/&gt;never above the routing cap&quot;]
+    N --&gt; O{&quot;3 epochs in this process?&quot;}
+    O --&gt;|&quot;yes&quot;| Y[&quot;Checkpoint and exit 13&lt;br/&gt;scheduler resumes it&quot;]
+    O --&gt;|&quot;no&quot;| F</pre></div></div></figure>
+<p>How the pieces fit</p>
+<ul><li><strong>Progress.</strong> An epoch made progress only if fewer suites fail and fewer blocking findings remain than at its start. Failure and patch fingerprints detect a repeated failure or a repeated patch; either forces a different strategy next epoch.</li><li><strong>Strict vs best effort.</strong> <code>adversarial_best_effort_merge</code> is off by default and never inferred. Strict never merges known failures and never becomes <code>AI Needs Input</code> just because findings remain. Best effort stops after the first epoch and delivers the latest commit labelled <strong>Best-effort merge with unresolved adversarial results</strong>, with the unresolved notes filed as a follow-up issue.</li><li><strong>Stop conditions are the only way out of strict mode</strong> besides a clean verdict. A held issue is parked and the queue continues; a newer worker build or a removed <code>Automation Failed</code> label releases it with a fresh budget.</li><li><strong>Quota.</strong> Any phase can pause for usage (exit 11). The session, phase, round and epoch are checkpointed and resume exactly there.</li></ul>
+</section>
+<section class="part" id="6-what-happens-to-a-finding"><h2>6. What happens to a finding</h2>
+<p>The tester or reviewer returns findings in two buckets.</p>
+<figure class="diagram"><div class="bar"><b>6. What happens to a finding</b><div class="zoom"><button type="button" data-z="out" aria-label="Zoom out">−</button><span class="level" aria-live="polite">100%</span><button type="button" data-z="in" aria-label="Zoom in">+</button><button type="button" data-z="fit">Fit</button></div></div><div class="scroll"><div class="zoomer"><pre class="mermaid">flowchart TD
+    R[&quot;Tester or reviewer result&quot;] --&gt; A{&quot;Which bucket?&quot;}
+    A --&gt;|&quot;In scope: caused by or needed for this issue&quot;| B{&quot;Stage&quot;}
+    B --&gt;|&quot;UAT: a failing acceptance suite&quot;| B1[&quot;Fixer repairs the product code&lt;br/&gt;in this issue&#x27;s next round&quot;]
+    B --&gt;|&quot;Cybersecurity: high or medium confidence&quot;| B2[&quot;Fixer repairs it in this issue&lt;br/&gt;a new reviewer must stop reporting it&quot;]
+    B --&gt;|&quot;Cybersecurity: low confidence&quot;| B3[&quot;Advisory only&lt;br/&gt;never blocks, never fixed, never filed&quot;]
+    A --&gt;|&quot;Out of scope: legitimate but unrelated&quot;| C[&quot;file_stage_findings&quot;]
+    C --&gt; D{&quot;Same marker already filed&lt;br/&gt;for this issue?&quot;}
+    D --&gt;|&quot;yes&quot;| SKIP[&quot;Skip, log it&quot;]
+    D --&gt;|&quot;no&quot;| E{&quot;Reworded title of one&lt;br/&gt;already filed for this issue?&quot;}
+    E --&gt;|&quot;yes&quot;| SKIP
+    E --&gt;|&quot;no&quot;| F{&quot;Open issue with the stage label&lt;br/&gt;holds the same suites, or a title&lt;br/&gt;within one word?&quot;}
+    F --&gt;|&quot;yes&quot;| SUP[&quot;Suppress as a duplicate&quot;]
+    F --&gt;|&quot;no&quot;| G[&quot;Shortlist open issues sharing&lt;br/&gt;at least 3 content words&quot;]
+    G --&gt; H{&quot;Any candidates?&quot;}
+    H --&gt;|&quot;no&quot;| CAP
+    H --&gt;|&quot;yes&quot;| I[&quot;judge_duplicate&lt;br/&gt;a cheap model decides duplicate or new&lt;br/&gt;advisory, fails open&quot;]
+    I --&gt; J{&quot;Duplicate with confidence&lt;br/&gt;0.70 or more?&lt;br/&gt;0.90 for High and Critical&quot;}
+    J --&gt;|&quot;yes&quot;| SUP
+    J --&gt;|&quot;no, failed, or malformed&quot;| CAP{&quot;Already 5 follow-ups filed&lt;br/&gt;by this stage for this issue?&quot;}
+    CAP --&gt;|&quot;no&quot;| NEW[&quot;File a new labelled, assigned issue&lt;br/&gt;adversarial-uat or adversarial-security&quot;]
+    CAP --&gt;|&quot;yes&quot;| OVF[&quot;Record it in one unassigned overflow issue&lt;br/&gt;for this source issue and stage&lt;br/&gt;one notice on the source issue&quot;]
+    SUP --&gt; K{&quot;Did the new report add facts&lt;br/&gt;the tracked issue lacks?&quot;}
+    K --&gt;|&quot;yes&quot;| L[&quot;note_rediscovery&lt;br/&gt;add them to a marked block in the tracked&lt;br/&gt;issue description, plus one comment&quot;]
+    K --&gt;|&quot;no&quot;| M[&quot;Nothing added&quot;]</pre></div></div></figure>
+<p>Details</p>
+<ul><li>A finding may cite out-of-scope <code>suite_ids</code>. After its follow-up issue is filed (or found as a duplicate) those suites stay registered in <code>.swarm/tests.json</code> but no longer block this issue's verdict.</li><li>A finding that cites a suite under <code>tests/adversarial/</code> is labelled <code>adversarial-protected</code>. Its follow-up skips implementation: a fresh tester adjudicates, because only an adjudicator may revise a protected test.</li><li>GitHub failures while searching, commenting or filing are logged and retried; they never abort the round. A model failure files the finding, because a duplicate costs noise while a suppressed vulnerability costs far more.</li><li>Filed issues and their URLs are kept in execution history so the app can show the non-blocking follow-ups.</li></ul>
+</section>
+<section class="part" id="7-delivery"><h2>7. Delivery</h2>
+<p>Nothing is delivered until every enabled stage is <code>done</code> and the worktree is clean. A completion comment must never describe a commit that was not pushed.</p>
+<figure class="diagram"><div class="bar"><b>7. Delivery</b><div class="zoom"><button type="button" data-z="out" aria-label="Zoom out">−</button><span class="level" aria-live="polite">100%</span><button type="button" data-z="in" aria-label="Zoom in">+</button><button type="button" data-z="fit">Fit</button></div></div><div class="scroll"><div class="zoomer"><pre class="mermaid">flowchart TD
+    A[&quot;All stages done&quot;] --&gt; B{&quot;Outcome&quot;}
+    B --&gt;|&quot;clean first pass or resolved&quot;| C[&quot;finalize_issue&quot;]
+    B --&gt;|&quot;best-effort cap hit&quot;| C2[&quot;finalize_issue with the best-effort override&lt;br/&gt;files a follow-up for unresolved notes&quot;]
+    C --&gt; D[&quot;synchronize_issue_delivery&lt;br/&gt;merge the latest integration branch&lt;br/&gt;into the issue branch locally&quot;]
+    C2 --&gt; D
+    D --&gt; E{&quot;Conflicts?&quot;}
+    E --&gt;|&quot;yes&quot;| E1[&quot;AI resolves them,&lt;br/&gt;then every enabled stage reruns&lt;br/&gt;no earlier PASS is reused&quot;]
+    E1 --&gt; D
+    E --&gt;|&quot;no&quot;| F[&quot;push_ref&lt;br/&gt;push the issue branch&quot;]
+    F --&gt; G[&quot;deliver_pull_request&lt;br/&gt;open or reuse the PR to the integration branch&quot;]
+    G --&gt; H{&quot;auto-approve on, or best effort?&quot;}
+    H --&gt;|&quot;yes&quot;| I[&quot;Approve and squash-merge into the integration branch&lt;br/&gt;delete the remote branch&quot;]
+    I --&gt; J{&quot;auto-promote and auto-approve both on?&quot;}
+    J --&gt;|&quot;yes&quot;| J1[&quot;Promote the integration branch to the base branch&quot;]
+    J --&gt;|&quot;no&quot;| K
+    J1 --&gt; K
+    H --&gt;|&quot;no&quot;| K[&quot;Leave the PR for a person&quot;]
+    K --&gt; L[&quot;Post the Completed or Reworked comment&lt;br/&gt;add Ready For Testing&quot;]
+    L --&gt; M[&quot;Architecture docs review&lt;br/&gt;only if enabled, only after delivery,&lt;br/&gt;never raises, never edits the repo&quot;]
+    M --&gt; N[&quot;record_completed&lt;br/&gt;finish execution history&lt;br/&gt;clear the in-progress checkpoint&quot;]</pre></div></div></figure>
+<p>The order is mandatory: <strong>push, then PR, then comment and label.</strong> A failure in any delivery step raises and leaves the issue exactly as it was before the round. A reused branch name is never proof that a commit was delivered; an "already merged" shortcut must prove the specific commit is an ancestor of the merged one.</p>
+</section>
+<section class="part" id="8-pauses-holds-and-recovery"><h2>8. Pauses, holds and recovery</h2>
+<figure class="diagram"><div class="bar"><b>8. Pauses, holds and recovery</b><div class="zoom"><button type="button" data-z="out" aria-label="Zoom out">−</button><span class="level" aria-live="polite">100%</span><button type="button" data-z="in" aria-label="Zoom in">+</button><button type="button" data-z="fit">Fit</button></div></div><div class="scroll"><div class="zoomer"><pre class="mermaid">flowchart TD
+    A[&quot;Something stops forward progress&quot;] --&gt; B{&quot;What?&quot;}
+    B --&gt;|&quot;Provider usage below its minimum&quot;| Q[&quot;Quota pause&lt;br/&gt;save session, phase, round and epoch&lt;br/&gt;post the quota comment, exit 11&quot;]
+    Q --&gt; Q1[&quot;Later: resume the same session&lt;br/&gt;or hand off to another provider&lt;br/&gt;post the Resumed comment&quot;]
+    B --&gt;|&quot;Needs credentials, authority or an outside action&quot;| N[&quot;AI Needs Input&lt;br/&gt;comment and label, wait&quot;]
+    N --&gt; N1[&quot;A trusted author replies:&lt;br/&gt;the issue is picked up as a follow-up&quot;]
+    B --&gt;|&quot;Same deterministic failure 3 times&quot;| H[&quot;Automation Failed hold&quot;]
+    B --&gt;|&quot;Strict adversarial loop stopped converging&quot;| H
+    H --&gt; H1[&quot;Label Automation Failed, one comment,&lt;br/&gt;branch and checkpoint kept,&lt;br/&gt;park_held_issue, queue continues&quot;]
+    H1 --&gt; H2[&quot;Released by a newer worker build or app version,&lt;br/&gt;or by removing the label&lt;br/&gt;fresh budget, Resumed transition posted&quot;]
+    B --&gt;|&quot;Self-recovering condition&quot;| RL[&quot;exit 15&lt;br/&gt;quiet, retried next pass&quot;]
+    B --&gt;|&quot;Tester answer rejected 3 times&quot;| BE[&quot;Best-effort delivery&lt;br/&gt;even in strict mode&quot;]
+    B --&gt;|&quot;Missing commit or dirty worktree&quot;| H</pre></div></div></figure>
+<div class="tablewrap"><table><thead><tr><th>Situation</th><th>Result</th><th>Comment on the issue</th></tr></thead><tbody><tr><td>Usage runs out mid-run</td><td>exit 11, session saved, resumes later</td><td>quota paused, then resumed</td></tr><tr><td>AI needs a person</td><td><code>AI Needs Input</code> label, waits for a trusted reply</td><td>AI needs your input</td></tr><tr><td>Question issue</td><td>code-free answer, no <code>Ready For Testing</code></td><td>AI answer</td></tr><tr><td>Same failure 3 times</td><td>held and parked</td><td>Automation needs attention</td></tr><tr><td>Strict loop stalls or exhausts its budget</td><td>held and parked</td><td>Automation needs attention, plain language</td></tr><tr><td>Protected test blocks the fixer</td><td><code>adversarial-protected</code>, fresh adjudicator</td><td>routed to protected-test review</td></tr><tr><td>Tester result rejected 3 times</td><td>best-effort delivery</td><td>completion comment naming the rejection</td></tr></tbody></table></div>
+</section>
+<section class="part" id="9-limits-and-counts"><h2>9. Limits and counts</h2>
+<p>Values are checked against the code by <code>test_worker_flow_docs.py</code>; change both together.</p>
+<div class="tablewrap"><table><thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead><tbody><tr><td><code>MAX_ROUNDS</code></td><td>3</td><td>counted fix and re-test rounds in one epoch (round 0 is not counted)</td></tr><tr><td><code>STRICT_EPOCHS_PER_RUN</code></td><td>3</td><td>strict epochs per worker process before exit 13</td></tr><tr><td><code>STALLED_EPOCHS_BEFORE_STRONGEST</code></td><td>2</td><td>stalled epochs before the strongest model is used</td></tr><tr><td><code>STALLED_EPOCHS_BEFORE_HOLD</code></td><td>4</td><td>stalled epochs in a row before the issue is held</td></tr><tr><td><code>MAX_EPOCHS_PER_BUDGET</code></td><td>12</td><td>epochs since the budget began before the issue is held</td></tr><tr><td><code>MAX_HOURS_PER_BUDGET</code></td><td>8</td><td>hours since the budget began before the issue is held</td></tr><tr><td><code>FUTILE_EMPTY_FIXES</code></td><td>3</td><td>empty fixes for the same failure and choice before the fixer is skipped</td></tr><tr><td><code>AUTOMATION_FAILURE_LIMIT</code></td><td>3</td><td>identical failures before a hold (also the tester-rejection bound)</td></tr><tr><td><code>MAX_FILED_PER_STAGE</code></td><td>5</td><td>follow-up issues one stage files per source issue</td></tr><tr><td><code>MAX_CANDIDATES</code></td><td>8</td><td>open issues sent to the duplicate judge</td></tr><tr><td><code>DUPLICATE_MIN_CONFIDENCE</code></td><td>0.7</td><td>confidence needed to suppress a duplicate</td></tr><tr><td><code>DUPLICATE_MIN_CONFIDENCE_SEVERE</code></td><td>0.9</td><td>confidence needed for High and Critical findings</td></tr><tr><td><code>MAX_CONTEXT_ENTRIES</code></td><td>5</td><td>rediscovery notes kept in a tracked issue's description</td></tr><tr><td><code>MAX_OVERFLOW_ENTRIES</code></td><td>30</td><td>held-back findings kept in an overflow issue</td></tr></tbody></table></div>
+<p>Counting rules</p>
+<ul><li>Round 0 plus up to 3 counted rounds is the first epoch; each later epoch adds 3 counted rounds. Round numbers are cumulative; the epoch is <code>(round - 1) // 3 + 1</code>.</li><li>The first epoch's boundary logs read <code>N of 3</code>; later epochs append <code>in epoch N</code>.</li><li>Worst case for one stage in strict mode before a hold: 4 stalled epochs, so 12 counted rounds, fewer when progress is made, never more than 12 epochs or 8 hours.</li><li>Test counts in history are test files changed and suites failing. Capacity consumed is an approximate percentage-point drop in remaining quota, never tokens or dollars.</li></ul>
+</section>
+<section class="part" id="10-comments-and-labels-on-the-issue"><h2>10. Comments and labels on the issue</h2>
+<p>One comment per transition, each opening with a unique HTML marker so a retry never double-posts. Every provider uses the same shape.</p>
+<div class="tablewrap"><table><thead><tr><th>Transition</th><th>Function</th><th>Label effect</th></tr></thead><tbody><tr><td>Started</td><td><code>post_started_comment</code></td><td>none</td></tr><tr><td>Completed or Reworked</td><td><code>post_pending_comment</code></td><td>adds <code>Ready For Testing</code></td></tr><tr><td>Stopped for usage</td><td><code>post_quota_comment</code></td><td>none</td></tr><tr><td>Resumed</td><td><code>post_resumed_comment</code></td><td>none</td></tr><tr><td>AI needs input</td><td><code>finalize_needs_input</code></td><td>adds <code>AI Needs Input</code>, removes <code>Ready For Testing</code></td></tr><tr><td>Question answered</td><td><code>finalize_question_answer</code></td><td>never adds <code>Ready For Testing</code></td></tr><tr><td>Automation failed</td><td><code>post_automation_failure</code></td><td>adds <code>Automation Failed</code></td></tr><tr><td>Routed to protected-test review</td><td><code>route_protected_test_block</code></td><td>adds <code>adversarial-protected</code></td></tr></tbody></table></div>
+<p>The adversarial stages are part of <strong>one</strong> work-round: one Started comment and one terminal comment, with a line per enabled stage. There are no per-round GitHub comments. Follow-up issues the stages file carry <code>adversarial-uat</code> or <code>adversarial-security</code>, and <code>adversarial-protected</code> when they cite a protected suite.</p>
+</section>
+<section class="part" id="11-where-state-lives"><h2>11. Where state lives</h2>
+<p>Under the repository's worker state directory (<code>~/.local/state/swarm-issue-worker/&lt;repo&gt;/</code> on the desktop):</p>
+<div class="tablewrap"><table><thead><tr><th>File or folder</th><th>Holds</th></tr></thead><tbody><tr><td><code>in-progress-issue.json</code></td><td>the active attempt: provider, session, routing decision, each adversarial stage's phase, round, epoch, approaches, filed and held-back findings, usage events</td></tr><tr><td><code>worker.lock</code></td><td>the per-repository lock</td></tr><tr><td><code>completed-issues</code></td><td>issue numbers already delivered</td></tr><tr><td><code>quota-paused-issues/</code></td><td>attempts waiting for usage</td></tr><tr><td><code>parked-issues/</code></td><td>held attempts, released by a new build or a removed label</td></tr><tr><td><code>abandoned/</code></td><td>archived attempts for closed or unassigned issues</td></tr><tr><td><code>last-ai-output.log</code>, <code>last-ai-diagnostic.log</code></td><td>the latest AI session's output and diagnostics</td></tr><tr><td><code>../swarm-automation.sqlite3</code></td><td>execution history: rounds, epochs, usage, filed findings</td></tr></tbody></table></div>
+<p>The checkpoint is what makes every pause, hold and yield resumable. It is deleted or archived when the issue finishes.</p>
+</section>
+<section class="part" id="12-code-map"><h2>12. Code map</h2>
+<div class="tablewrap"><table><thead><tr><th>Area</th><th>Where</th></tr></thead><tbody><tr><td>Scheduler</td><td><code>install_swarm_issue_cron.py</code></td></tr><tr><td>Run order and issue selection</td><td><code>Worker.run()</code>, <code>select_issue()</code> in <code>swarm_issue_worker.py</code></td></tr><tr><td>Implementation pass</td><td><code>run_selected_issue()</code></td></tr><tr><td>Adversarial loop</td><td><code>run_adversarial_stage()</code>, <code>close_adversarial_epoch()</code>, <code>hold_stalled_stage()</code> in <code>adversarial_core.py</code></td></tr><tr><td>Stage definitions</td><td><code>adversarial_uat.py</code>, <code>adversarial_security.py</code></td></tr><tr><td>Fixer skip</td><td><code>fixer_is_futile()</code></td></tr><tr><td>Finding filing</td><td><code>file_stage_findings()</code>, <code>judge_duplicate()</code>, <code>note_rediscovery()</code>, <code>record_overflow_findings()</code></td></tr><tr><td>Duplicate rules</td><td><code>finding_dedup.py</code></td></tr><tr><td>Delivery</td><td><code>finalize_issue()</code>, <code>deliver_pull_request()</code>, <code>synchronize_issue_delivery()</code></td></tr><tr><td>Holds</td><td><code>record_automation_failure()</code>, <code>park_held_issue()</code></td></tr></tbody></table></div>
+</section></main></div></div><script>
+(function () {
+  var levels = [1, 1.5, 2, 3];
+  Array.prototype.forEach.call(document.querySelectorAll('figure.diagram'), function (figure) {
+    var index = 0;
+    var label = figure.querySelector('.level');
+    function apply() {
+      figure.style.setProperty('--zoom', String(levels[index]));
+      label.textContent = Math.round(levels[index] * 100) + '%';
+    }
+    figure.addEventListener('click', function (event) {
+      var button = event.target.closest ? event.target.closest('button[data-z]') : null;
+      if (!button) { return; }
+      var action = button.getAttribute('data-z');
+      if (action === 'in') { index = Math.min(levels.length - 1, index + 1); }
+      else if (action === 'out') { index = Math.max(0, index - 1); }
+      else { index = 0; }
+      apply();
+    });
+  });
+  var links = document.querySelectorAll('nav.index a');
+  var parts = document.querySelectorAll('section.part');
+  if ('IntersectionObserver' in window && parts.length) {
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        Array.prototype.forEach.call(links, function (link) {
+          link.classList.toggle('current', link.getAttribute('href') === '#' + entry.target.id);
+        });
+      });
+    }, { rootMargin: '-10% 0px -80% 0px' });
+    Array.prototype.forEach.call(parts, function (part) { observer.observe(part); });
+  }
+})();
+</script><script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.0/mermaid.min.js"></script><script>
+(function () {
+  if (!window.mermaid) { return; }
+  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  window.mermaid.initialize({ startOnLoad: true, securityLevel: 'strict', theme: dark ? 'dark' : 'default',
+    flowchart: { htmlLabels: true, curve: 'basis', useMaxWidth: false } });
+})();
+</script></body></html>

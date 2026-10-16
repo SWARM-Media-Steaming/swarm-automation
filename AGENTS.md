@@ -19,3 +19,8 @@ adversarial tester; never weaken them to make a patch pass.
 The hosted web app (backend, deployment files and its tests) now lives in its own
 repository, Chomp (https://github.com/DotNetRockStar/chomp). This repository is the
 desktop application and the shared `issue_worker/`; do not add web code here.
+
+The end-to-end flow (issue pickup, adversarial rounds and epochs, findings,
+delivery, holds) is documented in `docs/worker-flow.md` with a generated visual
+page. Any change to that flow updates the diagram in the same change; follow
+`.claude/rules/worker-flow-diagram.md`.

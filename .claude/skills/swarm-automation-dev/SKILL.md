@@ -10,6 +10,15 @@ description: Use when working on this repository (SWARM Automation, the Tauri de
 meant to run against **any** local Git checkout, not just SWARM's. A fix made here
 is the whole change; there is no other copy to sync.
 
+## Keep the worker flow diagram current
+
+`docs/worker-flow.md` (with its generated `docs/worker-flow.html` and
+`docs/index.html`, served by GitHub Pages) is the reference for how the worker
+selects, works, attacks and delivers an issue. Any change to that flow, a limit,
+an exit code, a label or a lifecycle comment updates the diagram in the same
+change: edit the Markdown, run `python3 scripts/build_worker_flow_html.py`, and run
+`test_worker_flow_docs` (`.claude/rules/worker-flow-diagram.md`).
+
 ## This is a standalone Cargo package, not a workspace member
 
 `Cargo.toml` has concrete `version`/`edition`/`license` and concrete
