@@ -46,6 +46,7 @@ import subprocess
 import tempfile
 from typing import Any
 
+import finding_dedup
 import routing_cap
 
 #: Counted fix/re-test rounds in one epoch. The initial assessment (round 0)
@@ -1303,6 +1304,7 @@ class AdversarialStageMixin:
             "Do not commit, push, open PRs, post comments, or file issues; the worker handles delivery. "
             "Run checks in the foreground. Do not edit VERSION.\n" + rejection_guidance +
             self.adversarial_history_context(stage, loop) +
+            (self.already_filed_context(stage, loop) if loop["phase"] != "fix" else "") +
             "\nResulting patch:\n" + diff + "\n"
         )
 
@@ -1596,12 +1598,16 @@ class AdversarialStageMixin:
                 for issue in issues]
 
     def note_rediscovery(self, stage: AdversarialStage, tracked: dict[str, Any],
-                         finding: dict[str, Any]) -> None:
+                         finding: dict[str, Any], new_information: str = "") -> None:
         """Add a suppressed duplicate's new context to the issue already tracking it.
 
-        Best effort and idempotent: one comment per (source issue, tracked
-        issue), only when the report carries content the tracked issue lacks.
-        A GitHub failure here never escapes into the adversarial round.
+        The context goes into a bounded block at the end of the tracked issue's
+        description (the worker always reads the description when it works the
+        issue) and into one comment as the audit trail. `new_information` is
+        what the duplicate judge found missing; without it the older word-count
+        test decides. Best effort and idempotent: one comment and one body entry
+        per (source issue, tracked issue). A GitHub failure never escapes into
+        the adversarial round.
         """
         from ai_execution_history import sanitize_text
         from swarm_issue_worker import WorkerError, log
@@ -1615,22 +1621,36 @@ class AdversarialStageMixin:
         try:
             output = self.github.gh([
                 "issue", "view", number, "--repo", self.config.github_repository,
-                "--json", "comments",
+                "--json", "body,comments",
             ], self.choice.key)
             try:
                 thread = json.loads(output)
             except json.JSONDecodeError:
                 return
-            comments = thread.get("comments", []) if isinstance(thread, dict) else []
+            if not isinstance(thread, dict):
+                return
+            comments = thread.get("comments", [])
             bodies = [str(c.get("body") or "") for c in comments if isinstance(c, dict)]
             if any(marker in body for body in bodies):
                 return
-            text = sanitize_text(f"{finding.get('title', '')}\n{finding.get('body', '')}")
-            if not rediscovery_adds_context(text, "\n".join([str(tracked.get("body", "")), *bodies])):
-                return
+            current_body = str(thread.get("body") or tracked.get("body", ""))
+            if new_information.strip():
+                text = sanitize_text(new_information.strip())
+            else:
+                text = sanitize_text(f"{finding.get('title', '')}\n{finding.get('body', '')}")
+                if not rediscovery_adds_context(text, "\n".join([current_body, *bodies])):
+                    return
+            # Body first: it is idempotent per source issue, so a failed comment
+            # can be retried without duplicating anything.
+            merged = finding_dedup.merge_additional_context(current_body, self.issue.number, text)
+            if merged != current_body:
+                self.github.gh([
+                    "issue", "edit", number, "--repo", self.config.github_repository, "--body-file", "-",
+                ], self.choice.key, merged)
             suites = ", ".join(f"`{sid}`" for sid in finding.get("suite_ids", []) if sid)
             comment = (f"{marker}\nRediscovered while testing #{self.issue.number}; "
-                       "it adds the following not already recorded here.\n\n"
+                       "it adds the following not already recorded here, and the same details were added "
+                       "to this issue's description.\n\n"
                        + (f"- **Suites:** {suites}\n\n" if suites else "")
                        + text[:REDISCOVERY_EXCERPT_CHARS])
             self.github.gh([
@@ -1639,6 +1659,94 @@ class AdversarialStageMixin:
             log(f"Added new {stage.log_name} context from #{self.issue.number} to tracked finding #{number}")
         except WorkerError as error:
             log(f"Could not add {stage.log_name} context to tracked finding #{number}: {error}")
+
+    def judge_duplicate(self, stage: AdversarialStage, finding: dict[str, Any],
+                        candidates: list[dict[str, Any]]) -> "finding_dedup.Verdict | None":
+        """Ask a cheap model whether `finding` duplicates one of `candidates`.
+
+        Advisory and fail-open: any failure, timeout or malformed answer returns
+        None, which files the finding. The call goes through the same usage
+        recording as the router's.
+        """
+        from ai_execution_history import sanitize_text
+        from dynamic_router import run_provider_oneshot
+        from swarm_issue_worker import iso_timestamp, log
+        from token_usage import AgentType, PromptType
+
+        host = None
+        usage_sink: list[Any] = []
+        started = iso_timestamp()
+        succeeded = False
+        try:
+            host = self.config.require_spec(self.choice.key)
+            text = sanitize_text(
+                f"Title: {finding.get('title', '')}\nSeverity: {finding.get('severity', 'unknown')}\n"
+                f"{stage.finding_issue_body(self, finding)}")
+            raw = run_provider_oneshot(
+                provider=host.key, bin_path=host.bin or "", model=host.router_model,
+                effort=host.router_effort, prompt=finding_dedup.build_prompt(text, candidates),
+                cwd=self.config.repo_dir, schema=finding_dedup.DUPLICATE_SCHEMA, timeout=120,
+                usage_sink=usage_sink)
+            allowed = [finding_dedup.issue_number(c.get("url", "")) for c in candidates]
+            verdict = finding_dedup.parse_verdict(raw, [n for n in allowed if n is not None])
+            succeeded = verdict is not None
+            return verdict
+        except Exception as error:  # noqa: BLE001 - advisory: any failure means "file it"
+            log(f"Duplicate check for a {stage.log_name} finding could not run ({sanitize_text(str(error))[:200]}); "
+                "filing it as new.")
+            return None
+        finally:
+            if host is not None:
+                self._record_usage_event(
+                    agent_type=AgentType.OTHER.value, prompt_type=PromptType.REVIEW.value,
+                    provider_key=host.key, provider_name=host.name, model=host.router_model,
+                    effort=host.router_effort, attempt_number=1,
+                    usage=usage_sink[0] if usage_sink else None, started_at=started,
+                    success=succeeded, error_type="" if succeeded else "duplicate_judge_failed")
+
+    def already_filed_context(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
+        """What is already tracked, so a fresh reviewer does not rediscover it."""
+        from ai_execution_history import sanitize_text
+        entries = [dict(item) for item in loop.get("filed_finding_details", [])]
+        try:
+            entries += self.existing_finding_titles(stage)
+        except Exception:  # noqa: BLE001 - the list is a convenience, never a blocker
+            pass
+        for entry in entries:
+            entry["title"] = sanitize_text(str(entry.get("title") or ""))
+        return finding_dedup.already_filed_section(entries)
+
+    def defer_unfiled_finding(self, stage: AdversarialStage, loop: dict[str, Any],
+                              finding: dict[str, Any], title: str) -> None:
+        """Keep a finding that is over the per-issue filing limit, loudly but quietly.
+
+        It is logged and kept in the checkpoint; one idempotent comment on the
+        source issue says the limit was reached.
+        """
+        from ai_execution_history import sanitize_text
+        from swarm_issue_worker import WorkerError, log
+        unfiled = loop.setdefault("unfiled_findings", [])
+        if not any(item.get("title") == title for item in unfiled):
+            unfiled.append({"title": title, "severity": str(finding.get("severity") or "")})
+            del unfiled[:-50]
+        safe_title = sanitize_text(title)
+        log(f"Out-of-scope {stage.log_name} finding for #{self.issue.number} not filed: the limit of "
+            f"{finding_dedup.MAX_FILED_PER_STAGE} follow-up issues for this stage was reached ({safe_title}).")
+        self.save_stage(stage, loop)
+        marker = f"<!-- swarm-issue-worker:{stage.finding_marker_kind}-limit:issue:{self.issue.number} -->"
+        try:
+            if any(marker in str(c.get("body") or "") for c in self.comments(self.issue.number)):
+                return
+            self.github.gh([
+                "issue", "comment", str(self.issue.number), "--repo", self.config.github_repository,
+                "--body-file", "-",
+            ], self.choice.key,
+                f"{marker}\nThe automated {stage.log_name} review found more separate problems outside this "
+                f"issue's scope than the limit of {finding_dedup.MAX_FILED_PER_STAGE} follow-up issues. The "
+                f"remaining ones are recorded in the worker log and review record instead of being filed. "
+                f"First one held back: {safe_title}")
+        except WorkerError as error:
+            log(f"Could not post the follow-up limit notice for #{self.issue.number}: {error}")
 
     def file_stage_findings(self, stage: AdversarialStage, loop: dict[str, Any],
                             findings: list[dict[str, Any]]) -> None:
@@ -1748,6 +1856,34 @@ class AdversarialStageMixin:
                         log(f"Out-of-scope {stage.log_name} finding suppressed as a duplicate of the open "
                             f"issue \"{sanitize_text(open_duplicate['title'])}\": {open_duplicate['url']}")
                         self.note_rediscovery(stage, open_duplicate, finding)
+                        continue
+                    # Wording-independent check: a model decides whether this is
+                    # the same defect as a plausible candidate. Advisory and
+                    # fail-open; a weak or failed verdict files the finding.
+                    known = {item.get("url") for item in open_findings}
+                    candidates = open_findings + [
+                        {"title": item.get("title", ""), "url": item.get("url", ""), "body": ""}
+                        for item in details if item.get("url") and item.get("url") not in known]
+                    short = finding_dedup.shortlist(
+                        sanitize_text(f"{title}\n{stage.finding_issue_body(self, finding)}"), candidates)
+                    verdict = self.judge_duplicate(stage, finding, short) if short else None
+                    if finding_dedup.suppresses(verdict, str(finding.get("severity") or "")):
+                        target = next(c for c in short
+                                      if finding_dedup.issue_number(c.get("url", "")) == verdict.duplicate_of)
+                        log(f"Out-of-scope {stage.log_name} finding suppressed as a duplicate of "
+                            f"\"{sanitize_text(target['title'])}\" ({target['url']}), confidence "
+                            f"{verdict.confidence:.2f}: {sanitize_text(verdict.reason)}")
+                        suppressed = loop.setdefault("suppressed_findings", [])
+                        suppressed.append({"title": stored_title, "duplicate_of": target["url"],
+                                           "confidence": verdict.confidence, "reason": verdict.reason,
+                                           "adds_information": verdict.adds_information})
+                        del suppressed[:-50]
+                        self.save_stage(stage, loop)
+                        if verdict.adds_information:
+                            self.note_rediscovery(stage, target, finding, verdict.new_information)
+                        continue
+                    if len([item for item in details if item.get("url")]) >= finding_dedup.MAX_FILED_PER_STAGE:
+                        self.defer_unfiled_finding(stage, loop, finding, title)
                         continue
                     finding_labels = stage.finding_labels
                     if self.cites_protected_suite(finding):

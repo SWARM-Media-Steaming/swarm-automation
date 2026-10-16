@@ -911,6 +911,156 @@ class AdversarialUatTests(unittest.TestCase):
         comments, _ = self._rediscovery_run(f"{marker}\n{known}", known)
         self.assertEqual(comments, [])
 
+    # --- model-judged duplicate detection ---------------------------------
+    TRACKED = {"title": "Pairing code goes over plaintext http", "url": "https://example.invalid/issues/9",
+               "body": "pairing code cleartext http certificate pinned peer_connectivity"}
+    REWORDED = {"title": "Unpinned address pairing exposes the secret on the wire",
+                "body": "The pairing code travels in cleartext over http and the certificate becomes the pin; "
+                        "handlers_network.py is also affected."}
+
+    def _judged_run(self, findings, verdict, *, open_issues=None, current_body="Original description."):
+        """Run filing with a fake duplicate judge. `verdict` is a dict, raw text or an Exception."""
+        if not getattr(self, "_judge_prepared", False):
+            self.prepare()
+            self._judge_prepared = True
+        self.api = []
+        loop = self.worker.read_state()["adversarial"]
+        loop["filed_findings"], loop["filed_finding_details"], loop["suppressed_findings"] = [], [], []
+        posted, edits, judge_calls = [], [], []
+        tracked = [dict(self.TRACKED)] if open_issues is None else open_issues
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"] and "--label" in args:
+                return json.dumps(tracked)
+            if args[:2] == ["issue", "view"]:
+                return json.dumps({"body": current_body, "comments": []})
+            if args[:2] == ["issue", "edit"]:
+                edits.append((args[2], body))
+                return ""
+            if args[:2] == ["issue", "comment"]:
+                posted.append((args[2], body))
+                return ""
+            return self.gh(args, provider, body)
+
+        def oneshot(**kwargs):
+            judge_calls.append(kwargs)
+            if isinstance(verdict, Exception):
+                raise verdict
+            return verdict if isinstance(verdict, str) else json.dumps(verdict)
+
+        output = io.StringIO()
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                mock.patch("dynamic_router.run_provider_oneshot", side_effect=oneshot), \
+                mock.patch.object(self.worker, "comments", return_value=[{"body": b} for _, b in posted]), \
+                contextlib.redirect_stdout(output):
+            self.worker.file_adversarial_findings(loop, findings)
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        return {"creates": creates, "posted": posted, "edits": edits, "calls": judge_calls,
+                "log": output.getvalue(), "loop": self.worker.read_state()["adversarial"]}
+
+    def _verdict(self, **kw):
+        return {"duplicate_of": 9, "confidence": 0.9, "adds_information": True,
+                "new_information": "Also affects handlers_network.py", "reason": "same defect", **kw}
+
+    def test_model_duplicate_is_not_filed_and_its_new_facts_reach_the_issue_description(self):
+        result = self._judged_run([dict(self.REWORDED)], self._verdict())
+        self.assertEqual(result["creates"], [])
+        self.assertEqual(len(result["calls"]), 1)
+        self.assertEqual(result["calls"][0]["schema"], adversarial_core.finding_dedup.DUPLICATE_SCHEMA)
+        number, body = result["edits"][0]
+        self.assertEqual(number, "9")
+        self.assertTrue(body.startswith("Original description."))
+        self.assertIn("Also affects handlers_network.py", body)
+        self.assertEqual([n for n, _ in result["posted"]], ["9"])
+        self.assertIn("rediscovered:issue:180;target:9", result["posted"][0][1])
+        self.assertIn("description", result["posted"][0][1])
+        suppressed = result["loop"]["suppressed_findings"]
+        self.assertEqual((len(suppressed), suppressed[0]["duplicate_of"]), (1, self.TRACKED["url"]))
+        self.assertIn("suppressed as a duplicate", result["log"])
+
+    def test_model_duplicate_without_new_facts_changes_nothing_on_the_tracked_issue(self):
+        result = self._verdict(adds_information=False, new_information="")
+        result = self._judged_run([dict(self.REWORDED)], result)
+        self.assertEqual(result["creates"], [])
+        self.assertEqual((result["edits"], result["posted"]), ([], []))
+
+    def test_low_confidence_or_unlisted_duplicate_is_filed_as_new(self):
+        for verdict in (self._verdict(confidence=0.5), self._verdict(duplicate_of=77), self._verdict(duplicate_of=0)):
+            result = self._judged_run([dict(self.REWORDED)], verdict)
+            self.assertEqual(len(result["creates"]), 1, verdict)
+            self.assertEqual((result["edits"], result["posted"]), ([], []))
+
+    def test_severe_finding_needs_a_stricter_verdict_to_be_suppressed(self):
+        severe = {**self.REWORDED, "severity": "High"}
+        self.assertEqual(len(self._judged_run([dict(severe)], self._verdict(confidence=0.8))["creates"]), 1)
+        self.assertEqual(self._judged_run([dict(severe)], self._verdict(confidence=0.95))["creates"], [])
+
+    def test_a_failing_or_garbled_judge_files_the_finding(self):
+        for verdict in (RuntimeError("provider exploded"), "not json at all"):
+            result = self._judged_run([dict(self.REWORDED)], verdict)
+            self.assertEqual(len(result["creates"]), 1)
+            self.assertEqual(result["loop"].get("suppressed_findings", []), [])
+        failed = self._judged_run([dict(self.REWORDED)], RuntimeError("provider exploded"))
+        self.assertIn("filing it as new", failed["log"])
+
+    def test_judge_is_not_called_without_a_plausible_candidate(self):
+        unrelated = [{"title": "Sidebar icon misaligned", "url": "https://example.invalid/issues/5", "body": "css"}]
+        result = self._judged_run([dict(self.REWORDED)], self._verdict(), open_issues=unrelated)
+        self.assertEqual((result["calls"], len(result["creates"])), ([], 1))
+
+    def test_follow_up_issues_are_capped_per_stage_with_one_notice(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        posted = []
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "comment"]:
+                posted.append(body)
+                return ""
+            return self.gh(args, provider, body)
+
+        findings = [{"title": f"Distinct problem {name}", "body": f"Unrelated body about {name} subsystem."}
+                    for name in ("alpha", "bravo", "charlie", "delta", "echo")]
+        with mock.patch.object(adversarial_core.finding_dedup, "MAX_FILED_PER_STAGE", 2), \
+                mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                mock.patch.object(self.worker, "comments", side_effect=lambda n: [{"body": b} for b in posted]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.worker.file_adversarial_findings(loop, findings)
+        self.assertEqual(len([a for a in self.api if a[:2] == ["issue", "create"]]), 2)
+        state = self.worker.read_state()["adversarial"]
+        self.assertEqual(len(state["filed_finding_details"]), 2)
+        self.assertEqual([f["title"] for f in state["unfiled_findings"]],
+                         ["Distinct problem charlie", "Distinct problem delta", "Distinct problem echo"])
+        self.assertEqual(len(posted), 1)
+        self.assertIn("limit of 2 follow-up issues", posted[0])
+        self.assertIn("Distinct problem charlie", posted[0])
+
+    def test_fresh_reviewer_is_told_what_is_already_tracked(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        loop["filed_finding_details"] = [{"marker": "m", "title": "Already filed by this run",
+                                          "url": "https://example.invalid/issues/3"}]
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"] and "--label" in args:
+                return json.dumps([self.TRACKED])
+            return self.gh(args, provider, body)
+
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh):
+            text = self.worker.already_filed_context(uat.UAT_STAGE, loop)
+            tester = self.worker.adversarial_common_prompt(uat.UAT_STAGE, {**loop, "phase": "test"})
+            fixer = self.worker.adversarial_common_prompt(uat.UAT_STAGE, {**loop, "phase": "fix"})
+        self.assertIn("Already filed by this run", text)
+        self.assertIn("Pairing code goes over plaintext http", text)
+        self.assertIn("ALREADY TRACKED", tester)
+        self.assertNotIn("ALREADY TRACKED", fixer)
+
+    def test_tracked_list_failure_never_blocks_the_prompt(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        with mock.patch.object(self.worker.github, "gh", side_effect=WorkerError("rate limited")):
+            self.assertEqual(self.worker.already_filed_context(uat.UAT_STAGE, loop), "")
+
     def test_findings_citing_different_suites_are_both_filed_despite_open_findings(self):
         self.prepare()
         loop = self.worker.read_state()["adversarial"]

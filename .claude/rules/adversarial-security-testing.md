@@ -63,14 +63,26 @@ the `minor` label from a trusted author; the worker owns VERSION.
   remediation, severity, confidence and the issue it was found during. The
   dedicated `adversarial-security` label is created when missing and must stay
   independently searchable from `adversarial-uat`.
-- Dedup three times: the stable per-issue finding marker, a suite marker
-  (`finding_suite_marker`, derived from the cited `suite_ids`, so the same
-  retained failing suite is one issue whichever issue's run found it), and a
-  reworded-title check against still-open issues carrying the stage's
-  `dedup_label` (UAT and security both set one). A suppressed duplicate adds a
-  single idempotent comment to the tracked issue only when it carries content
-  that issue lacks (`note_rediscovery`). GitHub failures while deduplicating,
-  commenting or filing are retryable and must never abort the round.
+- Dedup in layers, cheapest and most certain first: the stable per-issue
+  finding marker, a suite marker (`finding_suite_marker`, derived from the
+  cited `suite_ids`, so the same retained failing suite is one issue whichever
+  issue's run found it), and a reworded-title check against still-open issues
+  carrying the stage's `dedup_label` (UAT and security both set one). What those
+  miss is decided by a model (`finding_dedup.py`, `judge_duplicate`): code picks
+  a short list of plausible open issues, a cheap model on the router's host says
+  whether the new report is the same defect and whether it adds facts. The
+  verdict is advisory and fail-open: a failed, malformed, unlisted or
+  low-confidence answer files the finding (`DUPLICATE_MIN_CONFIDENCE` 0.70; high
+  and critical findings need 0.90). Never let a model failure suppress a
+  finding, and keep report text in the prompt as data. A suppressed duplicate
+  that adds facts puts them in a bounded block at the end of the tracked issue's
+  description and in one idempotent comment (`note_rediscovery`), so the worker
+  sees them when it works that issue. Fresh reviewers are told what is already
+  tracked (`already_filed_context`), and a stage files at most
+  `MAX_FILED_PER_STAGE` follow-ups per issue; the rest are kept in the
+  checkpoint with one notice (`defer_unfiled_finding`). GitHub failures while
+  deduplicating, commenting or filing are retryable and must never abort the
+  round.
 
 ### Tests and ownership
 
