@@ -1,0 +1,12 @@
+/Users/Jerrod/Library/Application Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/deps/serde-692ac49cfdb871af.d: /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/Jerrod/Library/Application\ Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/build/serde-2516bfb940104d9c/out/private.rs
+
+/Users/Jerrod/Library/Application Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/deps/libserde-692ac49cfdb871af.rmeta: /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/Jerrod/Library/Application\ Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/build/serde-2516bfb940104d9c/out/private.rs
+
+/Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/Users/Jerrod/Library/Application\ Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/build/serde-2516bfb940104d9c/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/Jerrod/Library/Application Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/build/serde-2516bfb940104d9c/out

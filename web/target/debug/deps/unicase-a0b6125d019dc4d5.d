@@ -1,0 +1,10 @@
+/Users/Jerrod/Library/Application Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/deps/unicase-a0b6125d019dc4d5.d: /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/lib.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/ascii.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/unicode/mod.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/unicode/map.rs
+
+/Users/Jerrod/Library/Application Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/deps/libunicase-a0b6125d019dc4d5.rlib: /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/lib.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/ascii.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/unicode/mod.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/unicode/map.rs
+
+/Users/Jerrod/Library/Application Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/deps/libunicase-a0b6125d019dc4d5.rmeta: /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/lib.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/ascii.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/unicode/mod.rs /Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/unicode/map.rs
+
+/Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/lib.rs:
+/Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/ascii.rs:
+/Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/unicode/mod.rs:
+/Users/Jerrod/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicase-2.10.0/src/unicode/map.rs:
