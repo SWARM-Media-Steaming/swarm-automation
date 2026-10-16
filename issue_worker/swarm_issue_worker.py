@@ -383,6 +383,14 @@ CI_LOG_EXCERPT_CHARS = 3000
 CI_ISSUE_MARKER_RE = re.compile(r"swarm-issue-worker:ci-failure:branch:([^;\s]+);sha:([0-9a-f]{40})")
 
 
+# Labels only an adversarial agent's auto-filed finding carries (each stage's
+# finding_labels include its own; see adversarial_uat.py and
+# adversarial_security.py). Such an issue is closed on completion, not marked
+# Ready For Testing. The protected label is left out: a person's own issue is
+# also routed to adjudication with it.
+ADVERSARIAL_FINDING_LABELS = ("adversarial-uat", "adversarial-security")
+
+
 class WorkerError(RuntimeError):
     pass
 
@@ -4324,7 +4332,40 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         atomic_write_json(self.pending_file, pending)
         return pending
 
+    def created_by_adversarial_agent(self) -> bool:
+        """Whether the issue being worked was auto-filed by an adversarial agent."""
+        assert self.issue
+        labels = {label.lower() for label in self.issue.labels}
+        return any(label in labels for label in ADVERSARIAL_FINDING_LABELS)
+
+    def close_completed_issue(self, pending: dict[str, Any]) -> dict[str, Any]:
+        """Close an adversarial-filed issue whose work is complete.
+
+        Nothing remains for a person to test on these issues, so they are not
+        marked Ready For Testing; the completion comment already records the
+        delivered commit.
+        """
+        if pending.get("issue_closed"):
+            return pending
+        provider = str(pending.get("ai_tool") or pending.get("ai") or "").lower()
+        issue_number = int(pending["issue_number"])
+        log(f"Closing GitHub issue #{issue_number}: it was filed by an adversarial agent and its work is complete.")
+        try:
+            self.github.gh(
+                ["issue", "close", str(issue_number), "--repo", self.config.github_repository],
+                provider,
+            )
+        except WorkerError as error:
+            # Already closed (for example by a merged pull request) is the goal state.
+            if "already closed" not in str(error).lower():
+                raise
+        pending["issue_closed"] = True
+        atomic_write_json(self.pending_file, pending)
+        return pending
+
     def add_pending_label(self, pending: dict[str, Any]) -> dict[str, Any]:
+        if pending.get("close_on_completion"):
+            return self.close_completed_issue(pending)
         if pending.get("ready_for_testing_label_added"):
             return pending
         provider = str(pending.get("ai_tool") or pending.get("ai") or "").lower()
@@ -7067,6 +7108,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             "commit_message": self.git("log", "-1", "--format=%s", commit_sha),
             "github_comment_posted": False,
             "ready_for_testing_label_added": False,
+            "close_on_completion": self.created_by_adversarial_agent(),
             "pull_request_url": pr_url,
             "branch_name": branch,
             "adversarial_summary": self.adversarial_summary_line(),

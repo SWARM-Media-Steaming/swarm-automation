@@ -1168,6 +1168,30 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(github.call_args_list[1].args[0][0:2], ["label", "create"])
         self.assertEqual(github.call_args_list[2].args[0][0:2], ["issue", "edit"])
 
+    def test_adversarial_filed_issue_is_closed_instead_of_marked_ready(self) -> None:
+        pending = {"issue_number": 465, "ai_tool": "claude", "close_on_completion": True}
+        with mock.patch.object(self.worker.github, "gh", return_value="") as github:
+            result = self.worker.add_pending_label(pending)
+
+        self.assertTrue(result["issue_closed"])
+        self.assertNotIn("ready_for_testing_label_added", result)
+        self.assertEqual(github.call_count, 1)
+        self.assertEqual(github.call_args.args[0][:2], ["issue", "close"])
+        self.assertNotIn("--add-label", github.call_args.args[0])
+
+    def test_closing_an_already_closed_adversarial_issue_is_accepted(self) -> None:
+        pending = {"issue_number": 465, "ai_tool": "claude", "close_on_completion": True}
+        already = WorkerError("failed to close issue: Issue #465 is already closed")
+        with mock.patch.object(self.worker.github, "gh", side_effect=already):
+            result = self.worker.add_pending_label(pending)
+        self.assertTrue(result["issue_closed"])
+
+    def test_adversarial_filed_issue_detection_uses_finding_labels(self) -> None:
+        self.worker.issue = IssueContext(465, "Finding", "Body", ["Bug", "Adversarial-UAT"], "https://example.invalid/465")
+        self.assertTrue(self.worker.created_by_adversarial_agent())
+        self.worker.issue = IssueContext(466, "Own issue", "Body", ["adversarial-protected"], "https://example.invalid/466")
+        self.assertFalse(self.worker.created_by_adversarial_agent())
+
     def test_environment_only_marker_is_accepted_alone_on_a_line_or_as_the_final_token(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, allow_environment_only_summary=True)
         report = self.worker.ai_reported_environment_only
