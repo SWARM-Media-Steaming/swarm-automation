@@ -1718,35 +1718,101 @@ class AdversarialStageMixin:
 
     def defer_unfiled_finding(self, stage: AdversarialStage, loop: dict[str, Any],
                               finding: dict[str, Any], title: str) -> None:
-        """Keep a finding that is over the per-issue filing limit, loudly but quietly.
+        """Keep a finding that is over the per-issue filing limit.
 
-        It is logged and kept in the checkpoint; one idempotent comment on the
-        source issue says the limit was reached.
+        It is kept in the checkpoint with its details and recorded in one
+        unassigned overflow issue (`record_overflow_findings`), so a real
+        problem is never lost and the tracker is not flooded. A GitHub failure
+        leaves it queued for the next attempt.
         """
         from ai_execution_history import sanitize_text
         from swarm_issue_worker import WorkerError, log
         unfiled = loop.setdefault("unfiled_findings", [])
-        if not any(item.get("title") == title for item in unfiled):
-            unfiled.append({"title": title, "severity": str(finding.get("severity") or "")})
+        key = finding_dedup.overflow_key(title)
+        if not any(item.get("key") == key for item in unfiled):
+            unfiled.append({
+                "key": key, "title": title, "severity": str(finding.get("severity") or ""),
+                "text": sanitize_text(stage.finding_issue_body(self, finding))[:finding_dedup.OVERFLOW_ENTRY_CHARS],
+                "recorded": False,
+            })
             del unfiled[:-50]
-        safe_title = sanitize_text(title)
-        log(f"Out-of-scope {stage.log_name} finding for #{self.issue.number} not filed: the limit of "
-            f"{finding_dedup.MAX_FILED_PER_STAGE} follow-up issues for this stage was reached ({safe_title}).")
+        log(f"Out-of-scope {stage.log_name} finding for #{self.issue.number} is over the limit of "
+            f"{finding_dedup.MAX_FILED_PER_STAGE} follow-up issues; recording it in the overflow issue "
+            f"({sanitize_text(title)}).")
         self.save_stage(stage, loop)
-        marker = f"<!-- swarm-issue-worker:{stage.finding_marker_kind}-limit:issue:{self.issue.number} -->"
         try:
-            if any(marker in str(c.get("body") or "") for c in self.comments(self.issue.number)):
+            self.record_overflow_findings(stage, loop)
+        except WorkerError as error:
+            log(f"Could not record held-back {stage.log_name} findings for #{self.issue.number}: {error}")
+
+    def record_overflow_findings(self, stage: AdversarialStage, loop: dict[str, Any]) -> None:
+        """Write every unrecorded held-back finding into the stage's overflow issue.
+
+        One unassigned issue per source issue and stage, found again by its
+        marker after a restart. Entries are idempotent per finding, and a
+        failure raises before anything is marked recorded.
+        """
+        from swarm_issue_worker import WorkerError, github_issue_url_from_output, log
+        pending = [item for item in loop.get("unfiled_findings", []) if not item.get("recorded")]
+        if not pending:
+            return
+        marker = f"<!-- swarm-issue-worker:{stage.finding_marker_kind}-overflow:issue:{self.issue.number} -->"
+        url = str(loop.get("overflow_issue_url") or "")
+        if not url:
+            output = self.github.gh([
+                "issue", "list", "--repo", self.config.github_repository, "--state", "all",
+                "--search", f'"{marker}" in:body', "--json", "body,url", "--limit", "20",
+            ], self.choice.key)
+            try:
+                found = json.loads(output)
+            except json.JSONDecodeError:
+                found = []
+            existing = next((i for i in found if isinstance(i, dict) and marker in str(i.get("body") or "")), None)
+            if existing:
+                url = github_issue_url_from_output(str(existing.get("url", "")))
+            else:
+                created = self.file_labelled_issue(
+                    f"Further out-of-scope {stage.log_name} findings from #{self.issue.number}",
+                    finding_dedup.overflow_issue_body(marker, self.issue.number, stage.log_name),
+                    stage.finding_labels, self.choice.key, assignee="")
+                url = github_issue_url_from_output(created)
+                if url:
+                    log(f"Filed the overflow issue for {stage.log_name} findings of #{self.issue.number}: {url}")
+            if not url:
                 return
+            loop["overflow_issue_url"] = url
+            self.save_stage(stage, loop)
+        number = finding_dedup.issue_number(url)
+        if number is None:
+            return
+        try:
+            view = json.loads(self.github.gh([
+                "issue", "view", str(number), "--repo", self.config.github_repository, "--json", "body",
+            ], self.choice.key) or "{}")
+        except json.JSONDecodeError as error:
+            raise WorkerError("GitHub returned malformed JSON while reading the overflow issue") from error
+        body = str(view.get("body") or "") if isinstance(view, dict) else ""
+        merged = body
+        for item in pending:
+            merged = finding_dedup.merge_overflow_entry(
+                merged, item["key"], item["title"], item.get("severity", ""), item.get("text", ""))
+        if merged != body:
+            self.github.gh([
+                "issue", "edit", str(number), "--repo", self.config.github_repository, "--body-file", "-",
+            ], self.choice.key, merged)
+        for item in pending:
+            item["recorded"] = True
+        self.save_stage(stage, loop)
+        limit_marker = f"<!-- swarm-issue-worker:{stage.finding_marker_kind}-limit:issue:{self.issue.number} -->"
+        if not any(limit_marker in str(c.get("body") or "") for c in self.comments(self.issue.number)):
             self.github.gh([
                 "issue", "comment", str(self.issue.number), "--repo", self.config.github_repository,
                 "--body-file", "-",
             ], self.choice.key,
-                f"{marker}\nThe automated {stage.log_name} review found more separate problems outside this "
-                f"issue's scope than the limit of {finding_dedup.MAX_FILED_PER_STAGE} follow-up issues. The "
-                f"remaining ones are recorded in the worker log and review record instead of being filed. "
-                f"First one held back: {safe_title}")
-        except WorkerError as error:
-            log(f"Could not post the follow-up limit notice for #{self.issue.number}: {error}")
+                f"{limit_marker}\nThe automated {stage.log_name} review found more separate problems outside "
+                f"this issue's scope than the limit of {finding_dedup.MAX_FILED_PER_STAGE} follow-up issues. "
+                f"The remaining ones, with their details, are collected in {url} instead of being filed "
+                "one by one.")
 
     def file_stage_findings(self, stage: AdversarialStage, loop: dict[str, Any],
                             findings: list[dict[str, Any]]) -> None:

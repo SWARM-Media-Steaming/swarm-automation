@@ -1008,32 +1008,90 @@ class AdversarialUatTests(unittest.TestCase):
         result = self._judged_run([dict(self.REWORDED)], self._verdict(), open_issues=unrelated)
         self.assertEqual((result["calls"], len(result["creates"])), ([], 1))
 
-    def test_follow_up_issues_are_capped_per_stage_with_one_notice(self):
-        self.prepare()
-        loop = self.worker.read_state()["adversarial"]
-        posted = []
-
+    def _overflow_gh(self, state):
+        """A GitHub fake that remembers the overflow issue's body and what was posted."""
         def gh(args, provider=None, body=None):
-            if args[:2] == ["issue", "comment"]:
-                posted.append(body)
+            if args[:2] == ["issue", "list"] and "--search" in args:
+                return json.dumps([{"url": state["url"], "body": state["body"]}] if state.get("url") else [])
+            if args[:2] == ["issue", "view"]:
+                return json.dumps({"body": state["body"]})
+            if args[:2] == ["issue", "edit"]:
+                if state.get("fail_edit"):
+                    from swarm_issue_worker import WorkerError as Err
+                    raise Err("edit failed")
+                state["body"] = body
+                state["edits"] += 1
                 return ""
+            if args[:2] == ["issue", "comment"]:
+                state["comments"].append(body)
+                return ""
+            if args[:2] == ["issue", "create"]:
+                if "--assignee" not in args and "Further out-of-scope" in " ".join(args):
+                    self.api.append(args)
+                    state["body"], state["url"], state["unassigned"] = body, "https://example.invalid/issues/190", True
+                    return state["url"]
             return self.gh(args, provider, body)
+        return gh
 
-        findings = [{"title": f"Distinct problem {name}", "body": f"Unrelated body about {name} subsystem."}
-                    for name in ("alpha", "bravo", "charlie", "delta", "echo")]
+    def _file_over_cap(self, loop, state, names):
+        findings = [{"title": f"Distinct problem {name}", "body": f"Unrelated body about the {name} subsystem."}
+                    for name in names]
         with mock.patch.object(adversarial_core.finding_dedup, "MAX_FILED_PER_STAGE", 2), \
-                mock.patch.object(self.worker.github, "gh", side_effect=gh), \
-                mock.patch.object(self.worker, "comments", side_effect=lambda n: [{"body": b} for b in posted]), \
+                mock.patch.object(self.worker.github, "gh", side_effect=self._overflow_gh(state)), \
+                mock.patch.object(self.worker, "comments", side_effect=lambda n: [{"body": b} for b in state["comments"]]), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.worker.file_adversarial_findings(loop, findings)
-        self.assertEqual(len([a for a in self.api if a[:2] == ["issue", "create"]]), 2)
-        state = self.worker.read_state()["adversarial"]
-        self.assertEqual(len(state["filed_finding_details"]), 2)
-        self.assertEqual([f["title"] for f in state["unfiled_findings"]],
-                         ["Distinct problem charlie", "Distinct problem delta", "Distinct problem echo"])
-        self.assertEqual(len(posted), 1)
-        self.assertIn("limit of 2 follow-up issues", posted[0])
-        self.assertIn("Distinct problem charlie", posted[0])
+
+    def test_findings_over_the_cap_are_recorded_in_one_unassigned_overflow_issue(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        state = {"body": "", "url": "", "edits": 0, "comments": []}
+        self._file_over_cap(loop, state, ("alpha", "bravo", "charlie", "delta", "echo"))
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        # Two ordinary follow-ups plus exactly one overflow issue.
+        self.assertEqual(len(creates), 3)
+        self.assertTrue(state["unassigned"])
+        for name in ("charlie", "delta", "echo"):
+            self.assertIn(f"Distinct problem {name}", state["body"])
+            self.assertIn(f"the {name} subsystem", state["body"])
+        self.assertNotIn("Distinct problem alpha", state["body"])
+        self.assertIn("deliberately unassigned", state["body"])
+        saved = self.worker.read_state()["adversarial"]
+        self.assertEqual(len(saved["filed_finding_details"]), 2)
+        self.assertTrue(all(item["recorded"] for item in saved["unfiled_findings"]))
+        self.assertEqual(saved["overflow_issue_url"], "https://example.invalid/issues/190")
+        self.assertEqual(len(state["comments"]), 1)
+        self.assertIn("https://example.invalid/issues/190", state["comments"][0])
+
+    def test_later_overflow_findings_extend_the_same_issue_without_a_second_notice(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        state = {"body": "", "url": "", "edits": 0, "comments": []}
+        self._file_over_cap(loop, state, ("alpha", "bravo", "charlie"))
+        self.api = []
+        # A restart: the checkpoint forgot the URL, so the issue is found by its marker.
+        loop = self.worker.read_state()["adversarial"]
+        loop.pop("overflow_issue_url", None)
+        self._file_over_cap(loop, state, ("alpha", "bravo", "charlie", "delta"))
+        self.assertEqual([a for a in self.api if a[:2] == ["issue", "create"]], [])
+        self.assertIn("Distinct problem charlie", state["body"])
+        self.assertIn("Distinct problem delta", state["body"])
+        self.assertEqual(state["body"].count("overflow:entry:"), 2)
+        self.assertEqual(len(state["comments"]), 1)
+
+    def test_a_failed_overflow_write_keeps_the_finding_queued_for_retry(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        state = {"body": "", "url": "", "edits": 0, "comments": [], "fail_edit": True}
+        self._file_over_cap(loop, state, ("alpha", "bravo", "charlie"))
+        saved = self.worker.read_state()["adversarial"]
+        self.assertEqual([item["recorded"] for item in saved["unfiled_findings"]], [False])
+        self.assertEqual(state["comments"], [])
+        state["fail_edit"] = False
+        self._file_over_cap(self.worker.read_state()["adversarial"], state, ("alpha", "bravo", "charlie"))
+        self.assertIn("Distinct problem charlie", state["body"])
+        saved = self.worker.read_state()["adversarial"]
+        self.assertEqual([item["recorded"] for item in saved["unfiled_findings"]], [True])
 
     def test_fresh_reviewer_is_told_what_is_already_tracked(self):
         self.prepare()

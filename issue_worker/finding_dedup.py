@@ -13,6 +13,7 @@ while a wrongly suppressed vulnerability costs far more.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -38,10 +39,16 @@ MAX_FILED_PER_STAGE = 5
 MAX_CONTEXT_ENTRIES = 5
 CONTEXT_ENTRY_CHARS = 800
 NEW_INFORMATION_CHARS = 1200
+#: The overflow issue that collects findings held back by the per-stage limit.
+MAX_OVERFLOW_ENTRIES = 30
+OVERFLOW_ENTRY_CHARS = 1800
 
 CONTEXT_START = "<!-- swarm-issue-worker:additional-context:start -->"
 CONTEXT_END = "<!-- swarm-issue-worker:additional-context:end -->"
 _ENTRY_RE = re.compile(r"<!-- swarm-issue-worker:additional-context:entry:(\d+) -->")
+OVERFLOW_START = "<!-- swarm-issue-worker:overflow:start -->"
+OVERFLOW_END = "<!-- swarm-issue-worker:overflow:end -->"
+_OVERFLOW_ENTRY_RE = re.compile(r"<!-- swarm-issue-worker:overflow:entry:([0-9a-f]+) -->")
 
 DUPLICATE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -218,3 +225,38 @@ def already_filed_section(entries: Sequence[dict[str, Any]], limit: int = 25) ->
         "wording. Report it only if you can add a concrete new fact, and then say which entry it "
         "extends:\n" + "\n".join(lines) + "\n"
     )
+
+
+def overflow_key(title: str) -> str:
+    """Stable id for a held-back finding, so recording it twice is one entry."""
+    return hashlib.sha256(" ".join(str(title or "").lower().split()).encode()).hexdigest()[:12]
+
+
+def overflow_issue_body(marker: str, source_issue: int, stage_name: str) -> str:
+    """Opening text of the issue that collects findings over the filing limit."""
+    return (
+        f"{marker}\n"
+        f"The automated {stage_name} review of #{source_issue} found more separate problems outside "
+        f"that issue's scope than the limit of {MAX_FILED_PER_STAGE} follow-up issues. Rather than losing "
+        "them or flooding the tracker, each is recorded below with its details.\n\n"
+        "This issue is deliberately unassigned so automation does not try to fix a bundle. Review each "
+        "entry, split the real ones into their own issues, then close this one.\n\n"
+        f"{OVERFLOW_START}\n{OVERFLOW_END}"
+    )
+
+
+def merge_overflow_entry(body: str, key: str, title: str, severity: str, text: str) -> str:
+    """``body`` with one held-back finding added or replaced (idempotent per key)."""
+    start, end = body.find(OVERFLOW_START), body.find(OVERFLOW_END)
+    if start == -1 or end < start:
+        body = body.rstrip() + f"\n\n{OVERFLOW_START}\n{OVERFLOW_END}"
+        start, end = body.find(OVERFLOW_START), body.find(OVERFLOW_END)
+    head, block, tail = body[:start], body[start + len(OVERFLOW_START):end], body[end:]
+    parts = _OVERFLOW_ENTRY_RE.split(block)
+    entries = [(parts[i], parts[i + 1].strip()) for i in range(1, len(parts) - 1, 2) if parts[i] != key]
+    heading = " ".join(str(title or "").split())[:140]
+    level = f" ({severity})" if severity else ""
+    entries.append((key, f"### {heading}{level}\n\n{str(text or '').strip()[:OVERFLOW_ENTRY_CHARS]}"))
+    entries = entries[-MAX_OVERFLOW_ENTRIES:]
+    rendered = "\n\n".join(f"<!-- swarm-issue-worker:overflow:entry:{k} -->\n{t}" for k, t in entries)
+    return f"{head}{OVERFLOW_START}\n\n{rendered}\n\n{tail}"

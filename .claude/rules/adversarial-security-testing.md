@@ -79,8 +79,11 @@ the `minor` label from a trusted author; the worker owns VERSION.
   description and in one idempotent comment (`note_rediscovery`), so the worker
   sees them when it works that issue. Fresh reviewers are told what is already
   tracked (`already_filed_context`), and a stage files at most
-  `MAX_FILED_PER_STAGE` follow-ups per issue; the rest are kept in the
-  checkpoint with one notice (`defer_unfiled_finding`). GitHub failures while
+  `MAX_FILED_PER_STAGE` follow-ups per issue; the rest are queued in the
+  checkpoint with their details and recorded in one unassigned, labelled
+  overflow issue per source issue and stage (`defer_unfiled_finding`,
+  `record_overflow_findings`), so nothing real is lost and automation never
+  works a bundle. A failed write stays queued for the next attempt. GitHub failures while
   deduplicating, commenting or filing are retryable and must never abort the
   round.
 

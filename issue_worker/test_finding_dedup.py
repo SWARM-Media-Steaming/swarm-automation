@@ -102,6 +102,36 @@ class AdditionalContextTests(unittest.TestCase):
         self.assertEqual(fd.merge_additional_context("Body", 3, "   "), "Body")
 
 
+class OverflowTests(unittest.TestCase):
+    def body(self):
+        return fd.overflow_issue_body("<!-- m -->", 279, "adversarial cybersecurity")
+
+    def test_entries_are_added_idempotently_and_keep_the_header(self):
+        key = fd.overflow_key("Distinct problem")
+        once = fd.merge_overflow_entry(self.body(), key, "Distinct problem", "High", "Details here.")
+        again = fd.merge_overflow_entry(once, key, "Distinct problem", "High", "Details here.")
+        self.assertEqual(once, again)
+        self.assertTrue(once.startswith("<!-- m -->"))
+        self.assertIn("### Distinct problem (High)", once)
+        self.assertIn("Details here.", once)
+        self.assertEqual(once.count("overflow:entry:"), 1)
+
+    def test_key_ignores_case_and_spacing(self):
+        self.assertEqual(fd.overflow_key("A  Problem"), fd.overflow_key("a problem"))
+        self.assertNotEqual(fd.overflow_key("a problem"), fd.overflow_key("another problem"))
+
+    def test_entries_are_bounded_and_a_missing_block_is_recreated(self):
+        body = self.body()
+        for number in range(fd.MAX_OVERFLOW_ENTRIES + 5):
+            body = fd.merge_overflow_entry(body, fd.overflow_key(f"p{number}"), f"p{number}", "", "x" * 5000)
+        self.assertEqual(body.count("overflow:entry:"), fd.MAX_OVERFLOW_ENTRIES)
+        self.assertNotIn("### p0 ", body)
+        self.assertLess(len(body), 100000)
+        rebuilt = fd.merge_overflow_entry("A person rewrote this.", "abc", "t", "", "d")
+        self.assertIn("A person rewrote this.", rebuilt)
+        self.assertIn("### t", rebuilt)
+
+
 class AlreadyFiledTests(unittest.TestCase):
     def test_lists_titles_once_and_is_empty_without_entries(self):
         text = fd.already_filed_section([issue(9, "Cleartext pairing"), issue(9, "Cleartext pairing"),
