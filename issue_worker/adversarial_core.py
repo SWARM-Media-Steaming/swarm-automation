@@ -74,6 +74,20 @@ STRICT_EPOCHS_PER_RUN = 3
 #: Consecutive epochs without progress before the fixer moves to the strongest
 #: model its provider offers, at that provider's maximum effort.
 STALLED_EPOCHS_BEFORE_STRONGEST = 2
+#: Strict mode renews epochs, but never forever. Any one of these ends the
+#: loop by holding the issue (the Automation Failed path: branch and checkpoint
+#: kept, the queue moves on), because another epoch cannot change the outcome:
+#: epochs in a row without progress, epochs since the budget began, or hours
+#: since it began. The budget restarts when a held issue is released, so a
+#: corrected worker build or a person removing the label gets a fresh allowance.
+STALLED_EPOCHS_BEFORE_HOLD = 4
+MAX_EPOCHS_PER_BUDGET = 12
+MAX_HOURS_PER_BUDGET = 8
+#: A fixer that has returned no change this many times for the same failure,
+#: on the same provider/model/effort, is not called again until something
+#: changes (the failure, or the model or effort that escalation picks).
+FUTILE_EMPTY_FIXES = 3
+FIX_SKIPPED_RESPONSE = "SWARM_FIX_SKIPPED: this fixer already returned no change for this exact failure."
 #: Reasoning effort, weakest first. Escalation climbs this ladder and is
 #: clamped to the highest effort the chosen provider's own tiers use.
 EFFORT_LADDER = ("low", "medium", "high", "xhigh", "max")
@@ -284,6 +298,41 @@ def round_in_epoch(round_number: int) -> int:
 def epoch_exhausted(round_number: int) -> bool:
     """Whether a re-test at this round is the last one of its epoch."""
     return round_number > 0 and round_number % MAX_ROUNDS == 0
+
+
+def fixer_is_futile(loop: dict[str, Any], choice: tuple[str, str, str]) -> bool:
+    """Whether this provider/model/effort already failed to change anything.
+
+    `choice` is (provider name, model, effort). The evidence is the recorded
+    fix approaches: empty ones made against the failure that is still current.
+    A different failure, model or effort starts the count again.
+    """
+    fingerprint = (loop.get("failure_history") or [""])[-1]
+    if not fingerprint:
+        return False
+    empty = [a for a in loop.get("approaches", [])
+             if a.get("empty") and a.get("failure_fingerprint") == fingerprint
+             and (a.get("provider"), a.get("model"), a.get("effort")) == tuple(choice)]
+    return len(empty) >= FUTILE_EMPTY_FIXES
+
+
+def stall_hold_reason(loop: dict[str, Any], epochs_used: int, now: dt.datetime) -> str:
+    """Why strict mode must stop renewing epochs, or "" to carry on."""
+    stalled = int(loop.get("stalled_epochs") or 0)
+    if stalled >= STALLED_EPOCHS_BEFORE_HOLD:
+        return f"{stalled} epochs in a row ended without progress"
+    if epochs_used >= MAX_EPOCHS_PER_BUDGET:
+        return f"{epochs_used} epochs have run without a clean verdict"
+    try:
+        started = dt.datetime.fromisoformat(str(loop.get("budget_started") or ""))
+    except ValueError:
+        return ""
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=now.tzinfo)
+    hours = (now - started).total_seconds() / 3600
+    if hours >= MAX_HOURS_PER_BUDGET:
+        return f"the review has run for {hours:.1f} hours without a clean verdict"
+    return ""
 
 
 def effort_rank(effort: str) -> int:
@@ -1886,6 +1935,17 @@ class AdversarialStageMixin:
         # not consume the cybersecurity stage's renewals in the same process.
         self.adversarial_epochs_this_run = 0
         loop = self.read_state()[stage.key]
+        if loop["phase"] != "done" and not loop.get("budget_started"):
+            # First entry, or first entry after a hold was released: the
+            # epoch and time allowance counts from here.
+            loop.update(budget_started=iso_timestamp(), budget_epoch_base=epoch_of(int(loop.get("round") or 0)))
+            self.save_stage(stage, loop)
+        if loop["phase"] != "done":
+            # A checkpoint can already be past the bound (it was written by a
+            # build without it): hold before spending another call.
+            reason = stall_hold_reason(loop, 0, dt.datetime.now().astimezone())
+            if reason:
+                self.hold_stalled_stage(stage, loop, reason)
         # A same-session resume (quota pause, restart) skips the setup below, so
         # replay the boundary logs once; the Overview rebuilds its row from the
         # log tail, which may have rotated past the originals.
@@ -1923,6 +1983,17 @@ class AdversarialStageMixin:
                     # or a broken setup silently bypasses failure recording.
                     self.record_stage_failure(stage, loop, str(error))
                     raise
+            hold_reason = ""
+            if (loop.get("response") is None and loop["phase"] == "fix"
+                    and getattr(self, "choice", None) is not None
+                    and fixer_is_futile(loop, (self.choice.name, self.choice.model, self.choice.effort))):
+                # Calling it again would only spend usage to get the same empty
+                # answer. The round still runs its re-test and counts.
+                log(f"{stage.label} for issue #{self.issue.number}: skipped the fixer "
+                    f"({self.choice.name} {self.choice.model}, effort {self.choice.effort}); it returned no change "
+                    f"{FUTILE_EMPTY_FIXES} times for this exact failure.")
+                loop["response"] = FIX_SKIPPED_RESPONSE
+                self.save_stage(stage, loop)
             if loop.get("response") is None:
                 # Every tester phase starts with a new CLI session. Only an
                 # interrupted *same phase* resumes its existing session.
@@ -2083,6 +2154,10 @@ class AdversarialStageMixin:
                     self.close_adversarial_epoch(stage, loop, results, blocking, policy)
                     if policy == MERGE_POLICY_BEST_EFFORT:
                         loop["outcome"] = "cap_hit"
+                    else:
+                        base = int(loop.get("budget_epoch_base") or 1)
+                        hold_reason = stall_hold_reason(
+                            loop, epoch_of(loop["round"]) - base + 1, dt.datetime.now().astimezone())
             completion = self.commit_completed_work(loop["stage_base"])
             self.validate_new_commit_messages(loop["stage_base"], completion)
             loop["completion"] = completion
@@ -2110,6 +2185,10 @@ class AdversarialStageMixin:
                         f"{(loop.get('escalation') or {}).get('reason', 'epoch_exhausted')}).")
             loop.update(active=False, response=None)
             self.save_stage(stage, loop)
+            if hold_reason:
+                # Saved first, so the held checkpoint resumes at the next fix
+                # round instead of replaying the re-test that just closed.
+                self.hold_stalled_stage(stage, loop, hold_reason)
             if renewed:
                 self.adversarial_epochs_this_run = getattr(self, "adversarial_epochs_this_run", 0) + 1
                 if self.adversarial_epochs_this_run >= STRICT_EPOCHS_PER_RUN:
@@ -2198,6 +2277,9 @@ class AdversarialStageMixin:
             "provider": self.choice.name, "model": self.choice.model, "effort": self.choice.effort,
             "files": files[:25], "patch_fingerprint": fingerprint, "repeated_patch": repeated,
             "empty": not fingerprint,
+            # The failure this fix answered, so futility is judged per failure.
+            "failure_fingerprint": (loop.get("failure_history") or [""])[-1],
+            "skipped": loop.get("response") == FIX_SKIPPED_RESPONSE,
         })
         del approaches[:-30]
         if repeated:
@@ -2294,6 +2376,24 @@ class AdversarialStageMixin:
             f"({len(failing)} failing suite(s), {len(blocking)} open finding(s), "
             f"{'progress' if progress else 'no progress'}); strict policy does not merge known failures.")
         return summary
+
+    def hold_stalled_stage(self, stage: AdversarialStage, loop: dict[str, Any], reason: str) -> None:
+        """Stop renewing epochs: hold the issue through the Automation Failed path.
+
+        The branch and checkpoint stay, the queue moves on, and one actionable
+        comment is posted (`record_automation_failure`, `park_held_issue`). The
+        allowance restarts so a released issue gets a fresh, bounded budget.
+        """
+        from swarm_issue_worker import WorkerError, log
+        loop.update(stalled_epochs=0, budget_started=None, budget_epoch_base=None)
+        self.save_stage(stage, loop)
+        message = (f"{stage.label} for issue #{self.issue.number} stopped renewing strict-mode epochs: {reason}. "
+                   f"Failing suites: {', '.join(str(r.get('id', '')) for r in loop.get('results', []) if r.get('exit_code')) or 'none'}. "
+                   "Another epoch cannot change the result, so the issue is held for a person or a corrected build.")
+        log(message)
+        error = WorkerError(message)
+        error.immediate_hold = True
+        raise error
 
     def yield_adversarial_epoch(self, stage: AdversarialStage, loop: dict[str, Any]) -> int:
         """Checkpoint a renewed strict epoch and hand control to the scheduler."""

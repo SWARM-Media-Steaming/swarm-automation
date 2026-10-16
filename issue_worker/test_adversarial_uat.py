@@ -258,6 +258,61 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(epochs[0]["merge_policy"], "strict")
         self.assertTrue(epochs[0]["next_escalation"].get("reason"))
 
+    def test_strict_loop_holds_the_issue_once_epochs_stall(self):
+        self.prepare(auto=True)
+
+        def never_fix(prompt, activity=""):
+            status = self.role(prompt)
+            (self.repo / "tracked.txt").write_text("broken\n")
+            return status
+
+        with mock.patch("adversarial_core.STRICT_EPOCHS_PER_RUN", 99), \
+                mock.patch("adversarial_core.STALLED_EPOCHS_BEFORE_HOLD", 3), \
+                self.patches(never_fix), \
+                mock.patch.object(self.worker, "merge_pull_request") as merge:
+            with self.assertRaises(WorkerError) as raised:
+                self.worker.run_adversarial_delivery()
+        merge.assert_not_called()
+        self.assertTrue(raised.exception.immediate_hold)
+        self.assertIn("without progress", str(raised.exception))
+        self.assertIn("adversarial-180", str(raised.exception))
+        loop = self.worker.read_state()["adversarial"]
+        # The stalled epoch was saved before the hold, so a release resumes at
+        # the next fix round and does not replay the closed re-test.
+        self.assertEqual((loop["phase"], loop["round"], loop["epoch"]), ("fix", 10, 4))
+        self.assertFalse(loop["active"])
+        self.assertEqual(loop["outcome"], "")
+        # A released issue gets a fresh, bounded allowance.
+        self.assertEqual(loop["stalled_epochs"], 0)
+        self.assertIsNone(loop["budget_started"])
+        self.assertTrue(self.worker.in_progress_file.exists())
+
+    def test_futile_fixer_is_skipped_but_the_round_still_retests(self):
+        self.prepare()
+
+        def never_fix(prompt, activity=""):
+            status = self.role(prompt)
+            (self.repo / "tracked.txt").write_text("broken\n")
+            return status
+
+        with mock.patch("adversarial_core.STRICT_EPOCHS_PER_RUN", 99), \
+                mock.patch("adversarial_core.STALLED_EPOCHS_BEFORE_HOLD", 99), \
+                mock.patch("adversarial_core.MAX_EPOCHS_PER_BUDGET", 3), \
+                mock.patch.object(self.worker, "escalate_stage_choice", lambda stage, loop, choice, *a, **kw: choice), \
+                self.patches(never_fix):
+            with self.assertRaises(WorkerError) as raised:
+                self.worker.run_adversarial_delivery()
+        self.assertIn("epochs have run", str(raised.exception))
+        fixes = [c for c in self.calls if c[0] == "fix"]
+        tests = [c for c in self.calls if c[0] == "test"]
+        # Three epochs of three rounds. Escalation rotates the provider, so two
+        # distinct choices each get their tries; the third epoch returns to the
+        # first choice, which already returned nothing for this exact failure.
+        self.assertEqual(len(fixes), 2 * adversarial_core.FUTILE_EMPTY_FIXES)
+        self.assertEqual(len(tests), 1 + 3 * adversarial_core.MAX_ROUNDS)
+        approaches = self.worker.read_state()["adversarial"]["approaches"]
+        self.assertEqual(sum(1 for a in approaches if a.get("skipped")), 3 * adversarial_core.MAX_ROUNDS - len(fixes))
+
     def test_best_effort_merges_issue_pr_when_routine_approval_is_off(self):
         self.prepare(auto=False)
         self.worker.config = dataclasses.replace(

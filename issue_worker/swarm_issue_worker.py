@@ -8036,10 +8036,16 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             f"<!-- swarm-issue-worker:automation-failed:issue:{self.issue.number};"
             f"fingerprint:{fingerprint} -->"
         )
+        cause = (
+            "The automated review kept retrying without getting closer to a result, so it was stopped "
+            "to avoid spending more usage for nothing."
+            if failure.get("deliberate")
+            else f"The same automation failure occurred {failure['count']} times, so retries on this "
+            "issue are paused."
+        )
         body = (
             f"{marker}\n# ⚠️ Automation needs attention\n\n"
-            f"The same automation failure occurred {failure['count']} times, so retries on this "
-            "issue are paused. Its branch and checkpoint are preserved, and other issues continue.\n\n"
+            f"{cause} Its branch and checkpoint are preserved, and other issues continue.\n\n"
             "## Action required\n\n"
             "Install a corrected SWARM Automation build, or remove the `Automation Failed` label "
             "to resume. Leave the issue assigned and open.\n\n"
@@ -8089,8 +8095,15 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         previous = state.get("automation_failure") or {}
         same = previous.get("fingerprint") == fingerprint
         count = int(previous.get("count") or 0) + 1 if same else 1
+        # A bounded-loop stop (adversarial stall or budget) is already the
+        # conclusion of many attempts, so it holds at once instead of waiting
+        # for three identical repeats.
+        deliberate = bool(getattr(error, "immediate_hold", False))
+        if deliberate:
+            count = max(count, AUTOMATION_FAILURE_LIMIT)
         failure = {
             "fingerprint": fingerprint,
+            "deliberate": deliberate,
             "count": count,
             "first_at": previous.get("first_at", now) if same else now,
             "last_at": now,

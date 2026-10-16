@@ -3,6 +3,7 @@
 These stay outside tests/adversarial/: that tree is the independent tester's
 suite and is not edited to match a policy change.
 """
+import datetime as dt
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +71,56 @@ class EpochPolicyTests(unittest.TestCase):
         self.assertEqual(status([13, 1]), 1)
         self.assertEqual(status([13, 12]), 13)
         self.assertEqual(status([10, 13]), 10)
+
+
+class BoundedLoopTests(unittest.TestCase):
+    """Strict mode renews epochs, but a loop that cannot converge must end."""
+
+    NOW = dt.datetime(2026, 10, 16, 12, 0, tzinfo=dt.timezone.utc)
+
+    def test_stalled_epochs_hold_the_issue(self):
+        loop = {"stalled_epochs": core.STALLED_EPOCHS_BEFORE_HOLD - 1}
+        self.assertEqual(core.stall_hold_reason(loop, 1, self.NOW), "")
+        loop["stalled_epochs"] = core.STALLED_EPOCHS_BEFORE_HOLD
+        self.assertIn("without progress", core.stall_hold_reason(loop, 1, self.NOW))
+
+    def test_epoch_and_time_budgets_catch_slow_flailing(self):
+        # Progress keeps resetting `stalled_epochs`; the budgets are the backstop.
+        loop = {"stalled_epochs": 0, "budget_started": self.NOW.isoformat()}
+        self.assertEqual(core.stall_hold_reason(loop, core.MAX_EPOCHS_PER_BUDGET - 1, self.NOW), "")
+        self.assertIn("epochs have run", core.stall_hold_reason(loop, core.MAX_EPOCHS_PER_BUDGET, self.NOW))
+        late = self.NOW + dt.timedelta(hours=core.MAX_HOURS_PER_BUDGET, minutes=1)
+        self.assertIn("hours", core.stall_hold_reason(loop, 1, late))
+        early = self.NOW + dt.timedelta(hours=core.MAX_HOURS_PER_BUDGET - 1)
+        self.assertEqual(core.stall_hold_reason(loop, 1, early), "")
+
+    def test_budget_clock_tolerates_missing_or_naive_timestamps(self):
+        self.assertEqual(core.stall_hold_reason({}, 1, self.NOW), "")
+        self.assertEqual(core.stall_hold_reason({"budget_started": "garbage"}, 1, self.NOW), "")
+        naive = (self.NOW - dt.timedelta(hours=core.MAX_HOURS_PER_BUDGET + 1)).replace(tzinfo=None).isoformat()
+        self.assertIn("hours", core.stall_hold_reason({"budget_started": naive}, 1, self.NOW))
+
+    def test_fixer_is_futile_only_for_the_same_failure_and_choice(self):
+        who = ("Codex", "gpt-6.1-sol", "medium")
+
+        def empty(fingerprint, choice=who):
+            return {"empty": True, "failure_fingerprint": fingerprint, "provider": choice[0],
+                    "model": choice[1], "effort": choice[2]}
+
+        loop = {"failure_history": ["f1"], "approaches": [empty("f1")] * (core.FUTILE_EMPTY_FIXES - 1)}
+        self.assertFalse(core.fixer_is_futile(loop, who))
+        loop["approaches"].append(empty("f1"))
+        self.assertTrue(core.fixer_is_futile(loop, who))
+        # Escalation to another model or effort earns a fresh try.
+        self.assertFalse(core.fixer_is_futile(loop, ("Codex", "gpt-6.1-sol", "xhigh")))
+        self.assertFalse(core.fixer_is_futile(loop, ("Claude", "claude-sonnet-5-5", "medium")))
+        # So does a different failure, and a non-empty fix never counts.
+        loop["failure_history"].append("f2")
+        self.assertFalse(core.fixer_is_futile(loop, who))
+        loop["failure_history"] = ["f1"]
+        loop["approaches"] = [{**empty("f1"), "empty": False}] * 5
+        self.assertFalse(core.fixer_is_futile(loop, who))
+        self.assertFalse(core.fixer_is_futile({"approaches": [empty("")] * 5, "failure_history": [""]}, who))
 
 
 class EpochHistoryTests(unittest.TestCase):

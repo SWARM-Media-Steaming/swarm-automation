@@ -7019,6 +7019,39 @@ class WorkerTestCase(unittest.TestCase):
             resumed["automation_failure_resumed"]["application_version"], "1.0.0"
         )
 
+    def test_deliberate_stall_hold_applies_at_once_with_its_own_wording(self) -> None:
+        self.worker.config = dataclasses.replace(self.worker.config, application_version="1.0.0")
+        self.worker.issue = IssueContext(352, "Stalled review", "Body", [], "https://example.invalid/352")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "low", "session-352")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        calls: list[tuple[list[str], str | None]] = []
+
+        def gh(args, provider=None, body=None, **_kwargs):
+            calls.append((args, body))
+            return ""
+
+        error = WorkerError("Adversarial UAT stopped renewing strict-mode epochs: 4 epochs in a row ended without progress.")
+        error.immediate_hold = True
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker, "ensure_label"),
+            mock.patch.object(self.worker.github, "gh", side_effect=gh),
+        ):
+            self.assertTrue(self.worker.record_automation_failure(error))
+        state = self.worker.read_state()
+        self.assertEqual(state["status"], "automation_failed")
+        self.assertTrue(state["automation_failure"]["deliberate"])
+        comments = [body for args, body in calls if args[:2] == ["issue", "comment"]]
+        self.assertEqual(len(comments), 1)
+        self.assertIn("without getting closer to a result", comments[0])
+        self.assertNotIn("occurred", comments[0])
+        self.assertIn("remove the `Automation Failed` label", comments[0])
+        self.assertTrue(any("Automation Failed" in " ".join(args) for args, _ in calls))
+        # Still released by a corrected build, like any other hold.
+        self.assertTrue(self.worker.automation_failure_is_held())
+        self.worker.config = dataclasses.replace(self.worker.config, application_version="1.0.1")
+        self.assertFalse(self.worker.automation_failure_is_held())
+
     def _held_state(self, number: int) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, application_version="1.0.0")
         self.worker.issue = IssueContext(
