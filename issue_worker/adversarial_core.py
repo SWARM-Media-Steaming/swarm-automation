@@ -2393,6 +2393,15 @@ class AdversarialStageMixin:
         log(message)
         error = WorkerError(message)
         error.immediate_hold = True
+        # What a person needs to act: the failing suites and the independent
+        # reviewer's own last conclusion about them (sanitized when posted).
+        conclusions = [str(r.get("dispute_resolution") or "").strip() for r in loop.get("rounds", [])]
+        error.hold_details = {
+            "reason": reason,
+            "failing_suites": [str(r.get("id", "")) for r in loop.get("results", []) if r.get("exit_code")],
+            "conclusion": next((c for c in reversed(conclusions) if c), ""),
+            "epochs": int(loop.get("epoch") or 1),
+        }
         raise error
 
     def yield_adversarial_epoch(self, stage: AdversarialStage, loop: dict[str, Any]) -> int:

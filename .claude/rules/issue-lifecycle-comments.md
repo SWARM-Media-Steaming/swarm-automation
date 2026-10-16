@@ -285,6 +285,13 @@ label to resume. Leave the issue assigned and open.
 </details>
 ```
 
+A hold the worker chose on purpose (the strict adversarial loop stopped
+converging; `immediate_hold`) uses `render_stall_hold_comment` instead: the AI
+Needs Input shape (Action required, Summary, Recommendations, Step-by-step
+guide, How to resume) in plain language for a non-engineer, with test names, the
+reviewer's explanation and the reason folded into Technical details. Keep the
+marker and the `Automation Failed` label identical.
+
 **Routed to protected-test review** (`route_protected_test_block`):
 ```
 <!-- swarm-issue-worker:protected-test-routed:issue:<n>;provider:<key> -->

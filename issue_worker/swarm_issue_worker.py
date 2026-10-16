@@ -8028,6 +8028,75 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         state.pop("automation_failure_resumed", None)
         self.write_state(state)
 
+    def render_stall_hold_comment(self, marker: str, message: str, failure: dict[str, Any]) -> str:
+        """Plain-language hold notice for a review that stopped converging.
+
+        Same shape as the AI Needs Input comment: the main sections carry no
+        file paths or jargon, and everything technical is folded away.
+        """
+        details = failure.get("hold_details") or {}
+        suites = [str(s) for s in details.get("failing_suites") or []]
+        conclusion = str(details.get("conclusion") or "").strip()
+        cycles = int(details.get("epochs") or 0)
+        if conclusion:
+            action = (
+                "A person needs to check the failing tests listed under Technical details and correct "
+                "them if they are wrong, then remove the `Automation Failed` label so work resumes. "
+                "The automation is not allowed to change those tests itself."
+            )
+            recommendation = (
+                "The independent reviewer disagreed with the failing tests and explained why "
+                "(see Technical details). If that explanation holds, correct the tests rather than "
+                "loosening the change. Do not post passwords or keys in this issue."
+            )
+        else:
+            action = (
+                "A person needs to check the failing tests listed under Technical details and decide "
+                "whether the tests or the change need adjusting, then remove the `Automation Failed` "
+                "label so work resumes."
+            )
+            recommendation = (
+                "Check that the failing tests still match what this issue asks for. "
+                "Do not post passwords or keys in this issue."
+            )
+        steps = ["Ask a developer to open the Technical details below and note the failing tests."]
+        if conclusion:
+            steps.append("Read the reviewer's explanation shown there.")
+        steps += [
+            "Fix whichever is wrong, the tests or the change, on the issue's branch.",
+            "Remove the `Automation Failed` label. Work resumes with a fresh, limited allowance.",
+        ]
+        numbered = "\n".join(f"{n}. {text}" for n, text in enumerate(steps, 1))
+        listing = "\n".join(f"  - `{name}`" for name in suites) or "  - none recorded"
+        reviewer = f"\n\n**Reviewer's last explanation**\n\n```text\n{conclusion}\n```" if conclusion else ""
+        return (
+            f"{marker}\n# ⚠️ Automation needs attention\n\n"
+            "Work on this issue has stopped until a person looks at it. Everything below is in plain "
+            "language; technical detail is folded away at the end.\n\n"
+            f"## Action required\n{action}\n\n"
+            "## Summary\n"
+            "The automated review kept fixing and re-testing this change but the same tests kept failing"
+            + (f" ({cycles} cycles so far)" if cycles else "")
+            + ", so it was stopped to avoid using up AI usage for nothing. "
+            "The work done so far is saved and other issues continue.\n\n"
+            f"## Recommendations\n{recommendation}\n\n"
+            f"## Step-by-step guide\n{numbered}\n\n"
+            "## How to resume\n"
+            "Remove the `Automation Failed` label, or install a newer SWARM Automation build. "
+            "Leave the issue assigned and open.\n\n"
+            "<details><summary>Technical details</summary>\n\n"
+            f"- **Why it stopped:** {details.get('reason') or 'the review stopped converging'}\n"
+            f"- **Failing tests:**\n{listing}\n"
+            f"- **Branch:** `{self.expected_branch()}`\n"
+            f"- First occurrence: {failure['first_at']}\n"
+            f"- Last occurrence: {failure['last_at']}\n"
+            f"- Application version: `{failure['application_version']}`\n"
+            f"- Worker revision: `{failure['worker_revision']}`"
+            f"{reviewer}\n\n"
+            f"```text\n{message[:2000]}\n```\n"
+            "</details>\n"
+        )
+
     def post_automation_failure(self, message: str, failure: dict[str, Any]) -> None:
         """Post one terminal, actionable lifecycle comment without losing work."""
         assert self.issue and self.choice
@@ -8036,27 +8105,24 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             f"<!-- swarm-issue-worker:automation-failed:issue:{self.issue.number};"
             f"fingerprint:{fingerprint} -->"
         )
-        cause = (
-            "The automated review kept retrying without getting closer to a result, so it was stopped "
-            "to avoid spending more usage for nothing."
-            if failure.get("deliberate")
-            else f"The same automation failure occurred {failure['count']} times, so retries on this "
-            "issue are paused."
-        )
-        body = (
-            f"{marker}\n# ⚠️ Automation needs attention\n\n"
-            f"{cause} Its branch and checkpoint are preserved, and other issues continue.\n\n"
-            "## Action required\n\n"
-            "Install a corrected SWARM Automation build, or remove the `Automation Failed` label "
-            "to resume. Leave the issue assigned and open.\n\n"
-            "<details><summary>Failure details</summary>\n\n"
-            f"```text\n{message[:4000]}\n```\n\n"
-            f"- First occurrence: {failure['first_at']}\n"
-            f"- Last occurrence: {failure['last_at']}\n"
-            f"- Application version: `{failure['application_version']}`\n"
-            f"- Worker revision: `{failure['worker_revision']}`\n"
-            "</details>\n"
-        )
+        if failure.get("deliberate"):
+            body = self.render_stall_hold_comment(marker, message, failure)
+        else:
+            body = (
+                f"{marker}\n# ⚠️ Automation needs attention\n\n"
+                f"The same automation failure occurred {failure['count']} times, so retries on this "
+                "issue are paused. Its branch and checkpoint are preserved, and other issues continue.\n\n"
+                "## Action required\n\n"
+                "Install a corrected SWARM Automation build, or remove the `Automation Failed` label "
+                "to resume. Leave the issue assigned and open.\n\n"
+                "<details><summary>Failure details</summary>\n\n"
+                f"```text\n{message[:4000]}\n```\n\n"
+                f"- First occurrence: {failure['first_at']}\n"
+                f"- Last occurrence: {failure['last_at']}\n"
+                f"- Application version: `{failure['application_version']}`\n"
+                f"- Worker revision: `{failure['worker_revision']}`\n"
+                "</details>\n"
+            )
         existing = any(
             marker in str(comment.get("body") or "")
             for comment in self.comments(self.issue.number)
@@ -8101,9 +8167,16 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         deliberate = bool(getattr(error, "immediate_hold", False))
         if deliberate:
             count = max(count, AUTOMATION_FAILURE_LIMIT)
+        details = getattr(error, "hold_details", None) if deliberate else None
         failure = {
             "fingerprint": fingerprint,
             "deliberate": deliberate,
+            **({"hold_details": {
+                "reason": sanitize_text(str(details.get("reason") or ""))[:300],
+                "failing_suites": [sanitize_text(str(s))[:200] for s in details.get("failing_suites", [])][:20],
+                "conclusion": sanitize_text(str(details.get("conclusion") or ""))[:2000],
+                "epochs": int(details.get("epochs") or 0),
+            }} if isinstance(details, dict) else {}),
             "count": count,
             "first_at": previous.get("first_at", now) if same else now,
             "last_at": now,

@@ -275,6 +275,9 @@ class AdversarialUatTests(unittest.TestCase):
         merge.assert_not_called()
         self.assertTrue(raised.exception.immediate_hold)
         self.assertIn("without progress", str(raised.exception))
+        details = raised.exception.hold_details
+        self.assertEqual(details["failing_suites"], ["adversarial-180"])
+        self.assertIn("without progress", details["reason"])
         self.assertIn("adversarial-180", str(raised.exception))
         loop = self.worker.read_state()["adversarial"]
         # The stalled epoch was saved before the hold, so a release resumes at

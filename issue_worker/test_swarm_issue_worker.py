@@ -7019,7 +7019,7 @@ class WorkerTestCase(unittest.TestCase):
             resumed["automation_failure_resumed"]["application_version"], "1.0.0"
         )
 
-    def test_deliberate_stall_hold_applies_at_once_with_its_own_wording(self) -> None:
+    def _stall_hold_comment(self, conclusion: str) -> str:
         self.worker.config = dataclasses.replace(self.worker.config, application_version="1.0.0")
         self.worker.issue = IssueContext(352, "Stalled review", "Body", [], "https://example.invalid/352")
         self.worker.choice = ProviderChoice("Codex", "test-model", "low", "session-352")
@@ -7032,6 +7032,10 @@ class WorkerTestCase(unittest.TestCase):
 
         error = WorkerError("Adversarial UAT stopped renewing strict-mode epochs: 4 epochs in a row ended without progress.")
         error.immediate_hold = True
+        error.hold_details = {
+            "reason": "4 epochs in a row ended without progress",
+            "failing_suites": ["adversarial-issue-352-fixture"], "conclusion": conclusion, "epochs": 4,
+        }
         with (
             mock.patch.object(self.worker, "comments", return_value=[]),
             mock.patch.object(self.worker, "ensure_label"),
@@ -7043,10 +7047,33 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(state["automation_failure"]["deliberate"])
         comments = [body for args, body in calls if args[:2] == ["issue", "comment"]]
         self.assertEqual(len(comments), 1)
-        self.assertIn("without getting closer to a result", comments[0])
-        self.assertNotIn("occurred", comments[0])
-        self.assertIn("remove the `Automation Failed` label", comments[0])
         self.assertTrue(any("Automation Failed" in " ".join(args) for args, _ in calls))
+        return comments[0]
+
+    def test_deliberate_stall_hold_tells_a_person_in_plain_language_what_to_do(self) -> None:
+        comment = self._stall_hold_comment("The fixture is not a real certificate; correct the test data.")
+        for heading in ("## Action required", "## Summary", "## Recommendations",
+                        "## Step-by-step guide", "## How to resume", "<summary>Technical details"):
+            self.assertIn(heading, comment)
+        plain = comment[:comment.index("<details>")]
+        # The main sections carry the action but no test names, paths or code.
+        self.assertIn("correct them if they are wrong", plain)
+        self.assertIn("not allowed to change those tests", plain)
+        self.assertIn("remove the `Automation Failed` label", plain)
+        self.assertNotIn("adversarial-issue-352-fixture", plain)
+        self.assertNotIn("strict-mode", plain)
+        self.assertNotIn("occurred", comment)
+        technical = comment[comment.index("<details>"):]
+        self.assertIn("adversarial-issue-352-fixture", technical)
+        self.assertIn("The fixture is not a real certificate", technical)
+        self.assertLess(comment.index("Action required"), comment.index("Technical details"))
+
+    def test_deliberate_stall_hold_without_a_dispute_asks_for_a_decision(self) -> None:
+        comment = self._stall_hold_comment("")
+        plain = comment[:comment.index("<details>")]
+        self.assertIn("decide whether the tests or the change need adjusting", plain)
+        self.assertNotIn("not allowed to change those tests", plain)
+        self.assertNotIn("Reviewer's last explanation", comment)
         # Still released by a corrected build, like any other hold.
         self.assertTrue(self.worker.automation_failure_is_held())
         self.worker.config = dataclasses.replace(self.worker.config, application_version="1.0.1")
