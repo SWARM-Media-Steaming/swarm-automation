@@ -63,9 +63,14 @@ the `minor` label from a trusted author; the worker owns VERSION.
   remediation, severity, confidence and the issue it was found during. The
   dedicated `adversarial-security` label is created when missing and must stay
   independently searchable from `adversarial-uat`.
-- Dedup twice: the stable per-issue finding marker, and a reworded-title check
-  against still-open `adversarial-security` issues. GitHub failures while
-  deduplicating or filing are retryable and must never abort the round.
+- Dedup three times: the stable per-issue finding marker, a suite marker
+  (`finding_suite_marker`, derived from the cited `suite_ids`, so the same
+  retained failing suite is one issue whichever issue's run found it), and a
+  reworded-title check against still-open issues carrying the stage's
+  `dedup_label` (UAT and security both set one). A suppressed duplicate adds a
+  single idempotent comment to the tracked issue only when it carries content
+  that issue lacks (`note_rediscovery`). GitHub failures while deduplicating,
+  commenting or filing are retryable and must never abort the round.
 
 ### Tests and ownership
 

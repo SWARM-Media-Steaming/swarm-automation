@@ -229,6 +229,43 @@ def _finding_title_is_reworded_duplicate(a: str, b: str) -> bool:
         return False
     extra_raw = extra_sequence[extra_index][1]
     return extra_raw == extra_raw.lower()
+
+
+def finding_suite_marker(kind: str, finding: dict[str, Any]) -> str:
+    """Stable marker for the suites a finding cites, independent of its source issue.
+
+    The per-issue digest marker never matches across issues, but a finding
+    that cites a retained failing suite is the same defect whichever issue's
+    full-discovery run tripped over it. Empty when the finding cites none.
+    """
+    ids = sorted({str(sid).strip() for sid in finding.get("suite_ids", []) if str(sid).strip()})
+    if not ids:
+        return ""
+    key = hashlib.sha256("|".join(ids).encode()).hexdigest()[:20]
+    return f"<!-- swarm-issue-worker:{kind}-suite:{key} -->"
+
+
+REDISCOVERY_MIN_NEW_WORDS = 6
+REDISCOVERY_MIN_NEW_FRACTION = 0.25
+REDISCOVERY_EXCERPT_CHARS = 1500
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[A-Za-z_][A-Za-z0-9_.]{3,}", text.lower())}
+
+
+def rediscovery_adds_context(finding_text: str, known_text: str) -> bool:
+    """Whether a suppressed duplicate says enough that the tracked issue lacks.
+
+    A restatement adds noise, so a comment needs several content words, and a
+    meaningful share of the report, that the tracked issue and its thread
+    do not already contain.
+    """
+    words = _content_words(finding_text)
+    new = words - _content_words(known_text)
+    return len(new) >= REDISCOVERY_MIN_NEW_WORDS and len(new) >= REDISCOVERY_MIN_NEW_FRACTION * len(words)
+
+
 def merge_policy_for(best_effort: bool) -> str:
     """The repository's merge policy. Best effort is never inferred."""
     return MERGE_POLICY_BEST_EFFORT if best_effort is True else MERGE_POLICY_STRICT
@@ -1495,7 +1532,7 @@ class AdversarialStageMixin:
             return []
         output = self.github.gh([
             "issue", "list", "--repo", self.config.github_repository, "--state", "open",
-            "--label", stage.dedup_label, "--json", "title,url", "--limit", "100",
+            "--label", stage.dedup_label, "--json", "title,url,body", "--limit", "1000",
         ], self.choice.key)
         try:
             issues = json.loads(output)
@@ -1505,8 +1542,54 @@ class AdversarialStageMixin:
             ) from error
         if not isinstance(issues, list) or not all(isinstance(issue, dict) for issue in issues):
             raise WorkerError("GitHub returned an invalid issue list while listing existing adversarial findings")
-        return [{"title": str(issue.get("title") or ""), "url": str(issue.get("url") or "")}
+        return [{"title": str(issue.get("title") or ""), "url": str(issue.get("url") or ""),
+                 "body": str(issue.get("body") or "")}
                 for issue in issues]
+
+    def note_rediscovery(self, stage: AdversarialStage, tracked: dict[str, Any],
+                         finding: dict[str, Any]) -> None:
+        """Add a suppressed duplicate's new context to the issue already tracking it.
+
+        Best effort and idempotent: one comment per (source issue, tracked
+        issue), only when the report carries content the tracked issue lacks.
+        A GitHub failure here never escapes into the adversarial round.
+        """
+        from ai_execution_history import sanitize_text
+        from swarm_issue_worker import WorkerError, log
+
+        match = re.search(r"/issues/(\d+)\s*$", str(tracked.get("url", "")))
+        if not match:
+            return
+        number = match.group(1)
+        marker = (f"<!-- swarm-issue-worker:{stage.finding_marker_kind}-rediscovered:"
+                  f"issue:{self.issue.number};target:{number} -->")
+        try:
+            output = self.github.gh([
+                "issue", "view", number, "--repo", self.config.github_repository,
+                "--json", "comments",
+            ], self.choice.key)
+            try:
+                thread = json.loads(output)
+            except json.JSONDecodeError:
+                return
+            comments = thread.get("comments", []) if isinstance(thread, dict) else []
+            bodies = [str(c.get("body") or "") for c in comments if isinstance(c, dict)]
+            if any(marker in body for body in bodies):
+                return
+            text = sanitize_text(f"{finding.get('title', '')}\n{finding.get('body', '')}")
+            if not rediscovery_adds_context(text, "\n".join([str(tracked.get("body", "")), *bodies])):
+                return
+            suites = ", ".join(f"`{sid}`" for sid in finding.get("suite_ids", []) if sid)
+            comment = (f"{marker}\nRediscovered while testing #{self.issue.number}; "
+                       "it adds the following not already recorded here.\n\n"
+                       + (f"- **Suites:** {suites}\n\n" if suites else "")
+                       + text[:REDISCOVERY_EXCERPT_CHARS])
+            self.github.gh([
+                "issue", "comment", number, "--repo", self.config.github_repository, "--body-file", "-",
+            ], self.choice.key, comment)
+            log(f"Added new {stage.log_name} context from #{self.issue.number} to tracked finding #{number}")
+        except WorkerError as error:
+            log(f"Could not add {stage.log_name} context to tracked finding #{number}: {error}")
 
     def file_stage_findings(self, stage: AdversarialStage, loop: dict[str, Any],
                             findings: list[dict[str, Any]]) -> None:
@@ -1600,21 +1683,30 @@ class AdversarialStageMixin:
                     # different issue carries a different marker, so the digest
                     # search above cannot see it. Compare titles against this
                     # stage's still-open findings before adding another.
+                    open_findings = self.existing_finding_titles(stage)
+                    # The same retained suite failing is the same defect no
+                    # matter which issue's run found it or how it was titled.
+                    suite_key = finding_suite_marker(stage.finding_marker_kind, finding)
                     open_duplicate = next(
-                        (item for item in self.existing_finding_titles(stage)
+                        (item for item in open_findings if suite_key and suite_key in item.get("body", "")),
+                        None,
+                    ) or next(
+                        (item for item in open_findings
                          if _finding_title_is_reworded_duplicate(title, item["title"])),
                         None,
                     )
                     if open_duplicate:
                         log(f"Out-of-scope {stage.log_name} finding suppressed as a duplicate of the open "
                             f"issue \"{sanitize_text(open_duplicate['title'])}\": {open_duplicate['url']}")
+                        self.note_rediscovery(stage, open_duplicate, finding)
                         continue
                     finding_labels = stage.finding_labels
                     if self.cites_protected_suite(finding):
                         finding_labels = finding_labels + (PROTECTED_FINDING_LABEL,)
                     output = self.file_labelled_issue(
                         finding["title"][:120],
-                        f"{marker}\n{stage.finding_issue_body(self, finding)}",
+                        f"{marker}\n{suite_key + chr(10) if suite_key else ''}"
+                        f"{stage.finding_issue_body(self, finding)}",
                         finding_labels, self.choice.key)
                     url = github_issue_url_from_output(output)
                     if url:

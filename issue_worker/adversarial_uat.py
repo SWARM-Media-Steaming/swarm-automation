@@ -67,6 +67,7 @@ class UatStage(AdversarialStage):
         ("bug", "d73a4a", "Something is not working"),
         ("adversarial-uat", "5319e7", "Found by independent adversarial tests"),
     )
+    dedup_label = "adversarial-uat"
     router_task = "Adversarial UAT"
     filed_findings_column = "adversarial_filed_findings"
     require_suites = True

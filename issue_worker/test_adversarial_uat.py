@@ -779,6 +779,100 @@ class AdversarialUatTests(unittest.TestCase):
         details = self.worker.read_state()["adversarial"]["filed_finding_details"]
         self.assertEqual(len(details), 2)
 
+    def test_finding_citing_a_suite_already_tracked_by_an_open_issue_is_not_refiled(self):
+        # A retained failing suite is rediscovered by every later issue's
+        # full-discovery run under a differently worded title.
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        first = {"title": "Directory database paths reach SQLite", "body": "Repro.",
+                 "suite_ids": ["adversarial-issue-220-dir", "adversarial-issue-220-blank"]}
+        second = {"title": "open_database accepts a directory as the state path", "body": "Other words.",
+                  "suite_ids": ["adversarial-issue-220-blank", "adversarial-issue-220-dir"]}
+        filed_bodies = []
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "create"]:
+                filed_bodies.append(body)
+            if args[:2] == ["issue", "list"] and "--label" in args:
+                return json.dumps([{"title": "Directory database paths reach SQLite",
+                                    "url": "https://example.invalid/issues/9",
+                                    "body": filed_bodies[0] if filed_bodies else ""}])
+            return self.gh(args, provider, body)
+
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.worker.file_adversarial_findings(loop, [first])
+            loop["filed_findings"], loop["filed_finding_details"] = [], []  # a later issue's run
+            self.worker.file_adversarial_findings(loop, [second])
+        self.assertEqual(len(filed_bodies), 1)
+        self.assertIn("adversarial-finding-suite:", filed_bodies[0])
+        self.assertIn("suppressed as a duplicate of the open issue", output.getvalue())
+
+    def _rediscovery_run(self, tracked_body, second_body, existing_comments=()):
+        loop = self.worker.read_state()["adversarial"]
+        loop["filed_findings"], loop["filed_finding_details"] = [], []
+        comments = []
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"] and "--label" in args:
+                return json.dumps([{"title": "Directory database paths reach SQLite",
+                                    "url": "https://example.invalid/issues/9", "body": tracked_body}])
+            if args[:2] == ["issue", "view"]:
+                return json.dumps({"comments": [{"body": b} for b in existing_comments]})
+            if args[:2] == ["issue", "comment"]:
+                comments.append((args[2], body))
+                return ""
+            return self.gh(args, provider, body)
+
+        finding = {"title": "open_database accepts a directory as the state path", "body": second_body,
+                   "suite_ids": ["adversarial-issue-220-dir"]}
+        marker = adversarial_core.finding_suite_marker("adversarial-finding", finding)
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.worker.file_adversarial_findings(loop, [finding])
+        return comments, marker
+
+    def test_suppressed_duplicate_adds_new_context_to_the_tracked_issue_once(self):
+        self.prepare()
+        new_detail = ("chmod is also applied to the directory; slash, dotdot and tmpdir candidates "
+                      "raise OperationalError later, leaving permissions modified afterwards.")
+        _, marker = self._rediscovery_run("x", new_detail)
+        tracked = f"{marker}\nDirectory paths reach sqlite."
+        comments, _ = self._rediscovery_run(tracked, new_detail)
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0][0], "9")
+        self.assertIn("rediscovered:issue:180;target:9", comments[0][1])
+        self.assertIn("chmod", comments[0][1])
+        again, _ = self._rediscovery_run(tracked, new_detail, existing_comments=[comments[0][1]])
+        self.assertEqual(again, [])
+
+    def test_suppressed_duplicate_with_nothing_new_posts_no_comment(self):
+        self.prepare()
+        known = "Directory paths reach sqlite connect and fail later with OperationalError."
+        _, marker = self._rediscovery_run("x", known)
+        comments, _ = self._rediscovery_run(f"{marker}\n{known}", known)
+        self.assertEqual(comments, [])
+
+    def test_findings_citing_different_suites_are_both_filed_despite_open_findings(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        filed_bodies = []
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "create"]:
+                filed_bodies.append(body)
+            if args[:2] == ["issue", "list"] and "--label" in args:
+                return json.dumps([{"title": "Alpha thing breaks", "url": "https://example.invalid/issues/9",
+                                    "body": filed_bodies[0]}] if filed_bodies else [])
+            return self.gh(args, provider, body)
+
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh):
+            self.worker.file_adversarial_findings(
+                loop, [{"title": "Alpha thing breaks", "body": "A.", "suite_ids": ["adversarial-a"]}])
+            self.worker.file_adversarial_findings(
+                loop, [{"title": "Zebra renders wrong", "body": "Z.", "suite_ids": ["adversarial-z"]}])
+        self.assertEqual(len(filed_bodies), 2)
+
     def test_malformed_gh_create_output_is_not_logged_as_a_successful_filing(self):
         self.prepare()
         finding = {"title": "Separate parser bug", "body": "Reproduction details."}
