@@ -76,11 +76,13 @@ function page(initialStatus, { lastResult = null } = {}) {
     createTextNode: (text) => Object.assign(new Element("#text"), { textContent: text }),
   };
   const window = { SwarmModelCalibration: require(path.join(root, "ui/model-calibration-ui.js")) };
-  const load = new Function("state", "window", "document", "byId", "invoke", "showToast", "formatIsoTimestamp", "errorText",
+  // Issue #467: the extracted slice runs ui/app.js's top-level web block, which
+  // reads the enclosing `webMode` binding. Supply it as the desktop transport.
+  const load = new Function("state", "window", "document", "byId", "invoke", "showToast", "formatIsoTimestamp", "errorText", "webMode",
     `${source.slice(start, end)}
      return { renderModelCalibrationFull };`);
   const controller = load(state, window, document, byId, invoke,
-    (...args) => toasts.push(args), (value) => value, String);
+    (...args) => toasts.push(args), (value) => value, String, false);
   return { controller, byId, calls, toasts };
 }
 

@@ -5159,6 +5159,53 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_calibration_controller_transport_bindings.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-467-calibration-transport-bindings",
+      "name": "Issue #467: calibration controller renders identically under desktop and web transport bindings",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "ui/app.js",
+          "ui/model-calibration-ui.js",
+          "tests/adversarial/calibration_transition_fixture.py",
+          "tests/adversarial/test_calibration_controller_transport_bindings.js"
+        ]
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue467_review_fixture_bindings.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-467-review-fixture-bindings",
+      "name": "Issue #467: calibration review fixtures bind the enclosing webMode variable",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "tests/adversarial/test_model_calibration_review_ui.js",
+          "tests/adversarial/test_model_calibration_review_transitions.js",
+          "tests/adversarial/test_issue467_review_fixture_bindings.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1

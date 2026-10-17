@@ -83,10 +83,12 @@ function page(status, lastResult = null) {
   const window = { SwarmModelCalibration: helpers, setInterval: () => 1, clearInterval: () => {} };
   const toolRefreshes = [];
   const refreshTools = async (options) => { toolRefreshes.push(options); };
-  const load = new Function("state", "window", "document", "byId", "invoke", "showToast", "formatIsoTimestamp", "errorText", "refreshTools",
+  // Issue #467: the extracted slice runs ui/app.js's top-level web block, which
+  // reads the enclosing `webMode` binding. Supply it as the desktop transport.
+  const load = new Function("state", "window", "document", "byId", "invoke", "showToast", "formatIsoTimestamp", "errorText", "refreshTools", "webMode",
     `${source.slice(start, end)}
      return { renderModelCalibrationFull, refreshModelCalibration, refreshModelData, onModelCalibrationRefreshed };`);
-  const controller = load(state, window, document, byId, invoke, () => {}, (value) => value, String, refreshTools);
+  const controller = load(state, window, document, byId, invoke, () => {}, (value) => value, String, refreshTools, false);
   return { controller, byId, calls, nodes, state, toolRefreshes };
 }
 
