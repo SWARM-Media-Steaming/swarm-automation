@@ -97,6 +97,8 @@ unchanged. `storage_contract.StorageContract` is the reusable contract suite
 worker; the hosted image command is `job_launch.py`, which calls it. Keep
 `issue_worker/` stdlib-plus-siblings only. See
 `docs/web-architecture.md` and `.claude/rules/storage.md`.
+The image import test must remain compatible with the configured Python 3.9
+runtime; avoid test-only standard-library APIs added in later Python releases.
 
 The hosted implementation is `storage_remote.RemoteStorage`: checkpoints, logs
 and documents are S3-compatible objects (`object_store.py`, a stdlib SigV4

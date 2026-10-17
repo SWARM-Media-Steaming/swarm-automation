@@ -14,6 +14,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import unittest
 from contextlib import closing
@@ -26,6 +27,31 @@ from storage_contract import StorageContract, execution_start
 from swarm_issue_worker import Config, Worker, build_parser
 
 HERE = Path(__file__).resolve().parent
+
+
+def _stdlib_module_names() -> set[str]:
+    """Return top-level stdlib modules without requiring Python 3.10+ APIs."""
+    paths = set()
+    for value in (sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib")):
+        if value:
+            paths.add(Path(value))
+    names = set(sys.builtin_module_names)
+    # Conditional imports may target a stdlib module newer than this runtime.
+    names.add("tomllib")
+    directories = paths | {path / "lib-dynload" for path in paths}
+    extension_path = sysconfig.get_config_var("DESTSHARED")
+    if extension_path:
+        directories.add(Path(extension_path))
+    for directory in directories:
+        try:
+            for entry in directory.iterdir():
+                name = entry.name.split(".", 1)[0]
+                if name.isidentifier():
+                    if entry.is_dir() or entry.suffix in {".py", ".so", ".pyd"}:
+                        names.add(name)
+        except OSError:
+            continue
+    return names
 
 
 class LocalStorageContract(StorageContract, unittest.TestCase):
@@ -218,7 +244,7 @@ class WorkerImageTests(unittest.TestCase):
 
     def test_worker_modules_import_only_stdlib_and_siblings(self):
         siblings = {path.stem for path in HERE.glob("*.py")}
-        stdlib = set(sys.stdlib_module_names)
+        stdlib = _stdlib_module_names()
         offenders = {}
         for path in sorted(HERE.glob("*.py")):
             if path.name.startswith("test_") or path.name == "storage_contract.py":
