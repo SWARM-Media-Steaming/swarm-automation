@@ -5183,6 +5183,29 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "node",
+        "--test",
+        "tests/adversarial/test_issue467_review_fixture_bindings.js"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-467-review-fixture-bindings",
+      "name": "Issue #467: calibration review fixtures bind the enclosing webMode variable",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "node"
+        ],
+        "files": [
+          "tests/adversarial/test_model_calibration_review_ui.js",
+          "tests/adversarial/test_model_calibration_review_transitions.js",
+          "tests/adversarial/test_issue467_review_fixture_bindings.js"
+        ]
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
