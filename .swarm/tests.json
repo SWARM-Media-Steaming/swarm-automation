@@ -5206,6 +5206,93 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue468_jev_dependencies_fixture_contract.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue468-jev-dependencies-fixture-contract",
+      "name": "Issue #468: Jev context fixture dependency contract",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue468_jev_dependencies_fixture_contract.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue468_jev_fixture_dependency_field.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue468-jev-fixture-dependency-field",
+      "name": "Issue #468: Jev fixture dependency field contract",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue337_jev_context_ingestion.py",
+          "tests/adversarial/test_issue468_jev_fixture_dependency_field.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue468_jev_context_default_dependencies.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue468-jev-context-default-dependencies",
+      "name": "Issue #468: Jev context defaults to no dependencies",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue468_jev_context_default_dependencies.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
