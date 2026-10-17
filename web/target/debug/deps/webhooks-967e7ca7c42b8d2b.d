@@ -1,0 +1,10 @@
+/Users/Jerrod/Library/Application Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/deps/webhooks-967e7ca7c42b8d2b.d: tests/webhooks.rs tests/common/mod.rs Cargo.toml
+
+/Users/Jerrod/Library/Application Support/app.swarm.automation/checkouts/SWARM-Media-Steaming__swarm-automation/web/target/debug/deps/libwebhooks-967e7ca7c42b8d2b.rmeta: tests/webhooks.rs tests/common/mod.rs Cargo.toml
+
+tests/webhooks.rs:
+tests/common/mod.rs:
+Cargo.toml:
+
+# env-dep:CLIPPY_ARGS=-D__CLIPPY_HACKERY__warnings__CLIPPY_HACKERY__
+# env-dep:CLIPPY_CONF_DIR

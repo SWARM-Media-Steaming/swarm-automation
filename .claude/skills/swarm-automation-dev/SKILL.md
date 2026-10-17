@@ -437,7 +437,11 @@ After routing, the issue type constrains the selected worker's allowed outcome:
 - Normal issues are unattended/autonomous. The AI resolves ordinary ambiguity,
   chooses the best maintainable approach, changes code, verifies it, and uses
   the usual commit/PR/`Ready For Testing` delivery flow. It must not ask the
-  user about preferences or implementation choices.
+  user about preferences or implementation choices. An issue auto-filed by an
+  adversarial agent (labelled `adversarial-uat` or `adversarial-security`) is
+  the exception: on completion the worker closes it instead of applying
+  `Ready For Testing` (`close_on_completion`, `close_completed_issue`), since
+  nothing is left for a person to test.
 - An issue labelled `Question` is a strict no-code task. The AI may inspect the
   repository with read-only commands, but must post a grounded answer using
   `SWARM_QUESTION_ANSWER`; it may not edit files or create a commit, and the

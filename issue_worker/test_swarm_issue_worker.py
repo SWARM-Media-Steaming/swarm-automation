@@ -1156,18 +1156,45 @@ class WorkerTestCase(unittest.TestCase):
             "ready_for_testing_label_added": False,
         }
         missing = WorkerError("failed to update issue: 'Ready For Testing' not found")
+        # A pending written without its origin first reads the issue's labels.
+        labels = json.dumps({"labels": [{"name": "bug"}]})
         with mock.patch.object(
             self.worker.github,
             "gh",
-            side_effect=[missing, "", ""],
+            side_effect=[labels, missing, "", ""],
         ) as github:
             result = self.worker.add_pending_label(pending)
 
         self.assertTrue(result["ready_for_testing_label_added"])
-        self.assertEqual(github.call_count, 3)
-        self.assertEqual(github.call_args_list[0].args[0][0:2], ["issue", "edit"])
-        self.assertEqual(github.call_args_list[1].args[0][0:2], ["label", "create"])
-        self.assertEqual(github.call_args_list[2].args[0][0:2], ["issue", "edit"])
+        self.assertEqual(github.call_count, 4)
+        self.assertEqual(github.call_args_list[0].args[0][0:2], ["issue", "view"])
+        self.assertEqual(github.call_args_list[1].args[0][0:2], ["issue", "edit"])
+        self.assertEqual(github.call_args_list[2].args[0][0:2], ["label", "create"])
+        self.assertEqual(github.call_args_list[3].args[0][0:2], ["issue", "edit"])
+
+    def test_adversarial_filed_issue_is_closed_instead_of_marked_ready(self) -> None:
+        pending = {"issue_number": 465, "ai_tool": "claude", "close_on_completion": True}
+        with mock.patch.object(self.worker.github, "gh", return_value="") as github:
+            result = self.worker.add_pending_label(pending)
+
+        self.assertTrue(result["issue_closed"])
+        self.assertNotIn("ready_for_testing_label_added", result)
+        self.assertEqual(github.call_count, 1)
+        self.assertEqual(github.call_args.args[0][:2], ["issue", "close"])
+        self.assertNotIn("--add-label", github.call_args.args[0])
+
+    def test_closing_an_already_closed_adversarial_issue_is_accepted(self) -> None:
+        pending = {"issue_number": 465, "ai_tool": "claude", "close_on_completion": True}
+        already = WorkerError("failed to close issue: Issue #465 is already closed")
+        with mock.patch.object(self.worker.github, "gh", side_effect=already):
+            result = self.worker.add_pending_label(pending)
+        self.assertTrue(result["issue_closed"])
+
+    def test_adversarial_filed_issue_detection_uses_finding_labels(self) -> None:
+        self.worker.issue = IssueContext(465, "Finding", "Body", ["Bug", "Adversarial-UAT"], "https://example.invalid/465")
+        self.assertTrue(self.worker.created_by_adversarial_agent())
+        self.worker.issue = IssueContext(466, "Own issue", "Body", ["adversarial-protected"], "https://example.invalid/466")
+        self.assertFalse(self.worker.created_by_adversarial_agent())
 
     def test_environment_only_marker_is_accepted_alone_on_a_line_or_as_the_final_token(self) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, allow_environment_only_summary=True)
@@ -1367,7 +1394,11 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.finalize_environment_only("## Summary\nNo code change.")
 
-        body = github.call_args.args[2]
+        comment_call = next(
+            call for call in github.call_args_list
+            if call.args[0][:2] == ["issue", "comment"]
+        )
+        body = comment_call.args[2]
         self.assertIn("through-comment:5540212567", body)
 
     def test_quota_notice_is_deduplicated_across_pause_counts(self) -> None:
