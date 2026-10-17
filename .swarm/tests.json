@@ -5293,6 +5293,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue469_python39_stdlib_discovery.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue469-python39-stdlib-discovery",
+      "name": "Issue #469: Python 3.9 worker image stdlib discovery",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/test_storage.py",
+          "tests/adversarial/test_issue469_python39_stdlib_discovery.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
