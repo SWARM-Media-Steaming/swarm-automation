@@ -391,6 +391,11 @@ CI_ISSUE_MARKER_RE = re.compile(r"swarm-issue-worker:ci-failure:branch:([^;\s]+)
 ADVERSARIAL_FINDING_LABELS = ("adversarial-uat", "adversarial-security")
 
 
+def is_adversarial_finding_labels(labels: Iterable[str]) -> bool:
+    lowered = {str(label).lower() for label in labels}
+    return any(label in lowered for label in ADVERSARIAL_FINDING_LABELS)
+
+
 class WorkerError(RuntimeError):
     pass
 
@@ -4335,8 +4340,26 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
     def created_by_adversarial_agent(self) -> bool:
         """Whether the issue being worked was auto-filed by an adversarial agent."""
         assert self.issue
-        labels = {label.lower() for label in self.issue.labels}
-        return any(label in labels for label in ADVERSARIAL_FINDING_LABELS)
+        return is_adversarial_finding_labels(self.issue.labels)
+
+    def record_pending_origin(self, pending: dict[str, Any]) -> dict[str, Any]:
+        """Stamp a pending file an earlier build wrote without its origin.
+
+        Read the issue's labels once and persist the answer, so a retry never
+        asks GitHub again and the decision is fixed for this delivery.
+        """
+        provider = str(pending.get("ai_tool") or pending.get("ai") or "").lower()
+        issue_number = int(pending["issue_number"])
+        remote = json.loads(
+            self.github.gh(
+                ["issue", "view", str(issue_number), "--repo", self.config.github_repository, "--json", "labels"],
+                provider,
+            )
+            or "{}"
+        )
+        pending["close_on_completion"] = is_adversarial_finding_labels(issue_labels(remote))
+        atomic_write_json(self.pending_file, pending)
+        return pending
 
     def close_completed_issue(self, pending: dict[str, Any]) -> dict[str, Any]:
         """Close an adversarial-filed issue whose work is complete.
@@ -4364,6 +4387,8 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         return pending
 
     def add_pending_label(self, pending: dict[str, Any]) -> dict[str, Any]:
+        if "close_on_completion" not in pending and not pending.get("ready_for_testing_label_added"):
+            pending = self.record_pending_origin(pending)
         if pending.get("close_on_completion"):
             return self.close_completed_issue(pending)
         if pending.get("ready_for_testing_label_added"):

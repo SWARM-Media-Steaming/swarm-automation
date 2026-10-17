@@ -1155,18 +1155,21 @@ class WorkerTestCase(unittest.TestCase):
             "ready_for_testing_label_added": False,
         }
         missing = WorkerError("failed to update issue: 'Ready For Testing' not found")
+        # A pending written without its origin first reads the issue's labels.
+        labels = json.dumps({"labels": [{"name": "bug"}]})
         with mock.patch.object(
             self.worker.github,
             "gh",
-            side_effect=[missing, "", ""],
+            side_effect=[labels, missing, "", ""],
         ) as github:
             result = self.worker.add_pending_label(pending)
 
         self.assertTrue(result["ready_for_testing_label_added"])
-        self.assertEqual(github.call_count, 3)
-        self.assertEqual(github.call_args_list[0].args[0][0:2], ["issue", "edit"])
-        self.assertEqual(github.call_args_list[1].args[0][0:2], ["label", "create"])
-        self.assertEqual(github.call_args_list[2].args[0][0:2], ["issue", "edit"])
+        self.assertEqual(github.call_count, 4)
+        self.assertEqual(github.call_args_list[0].args[0][0:2], ["issue", "view"])
+        self.assertEqual(github.call_args_list[1].args[0][0:2], ["issue", "edit"])
+        self.assertEqual(github.call_args_list[2].args[0][0:2], ["label", "create"])
+        self.assertEqual(github.call_args_list[3].args[0][0:2], ["issue", "edit"])
 
     def test_adversarial_filed_issue_is_closed_instead_of_marked_ready(self) -> None:
         pending = {"issue_number": 465, "ai_tool": "claude", "close_on_completion": True}
