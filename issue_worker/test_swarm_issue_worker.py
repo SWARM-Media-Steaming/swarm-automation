@@ -3695,6 +3695,24 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(candidate, run_start)
         self.assertEqual(self.worker.read_state()["candidate_sha"], run_start)
 
+    def test_a_pending_integration_merge_is_finished_not_deferred_as_foreign_changes(self) -> None:
+        self.worker.issue = IssueContext(304, "Merge", "", [], "https://example.invalid/304")
+        self.worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        self.git("switch", "-q", "ai-main")
+        (self.repo / "tracked.txt").write_text("base\nstaged merge\n", encoding="utf-8")
+        self.git("add", "tracked.txt")
+        self.worker.integration_recovery_file.write_text("{}\n", encoding="utf-8")
+
+        def finish_merge() -> str:
+            if self.worker.worktree_status():
+                self.git("commit", "-q", "-m", "reconcile")
+            return self.git("rev-parse", "HEAD")
+
+        with mock.patch.object(self.worker, "synchronize_integration_branch", side_effect=finish_merge) as sync, \
+                mock.patch.object(self.worker, "prune_merged_worker_branches"):
+            self.worker.prepare_repository()
+        self.assertGreaterEqual(sync.call_count, 1)
+
     def test_pr_state_exists_before_branch_creation_and_recreates_interrupted_branch(self) -> None:
         worker = self.pr_worker()
         worker.issue = IssueContext(401, "Transactional branch", "", [], "https://example.invalid/401")
@@ -7786,6 +7804,33 @@ class RunnerTestCase(unittest.TestCase):
             ).stdout.strip()
             self.assertEqual(branch, "ai/codex/issue-114")
             self.assertTrue((repo / "dirty.txt").is_file())
+
+    def test_scheduler_lets_the_worker_finish_a_staged_integration_merge(self) -> None:
+        """A crash mid ai-main <- main merge leaves staged tracked changes and
+        integration-recovery.json. The scheduler must hand the checkout to the
+        worker, not defer it forever as "no saved issue owns" the changes."""
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-merge-test.") as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            state = root / "state"
+            subprocess.run(["git", "init", "-q", "-b", "ai-main", str(repo)], check=True)
+            for name, value in (("user.name", "runner test"), ("user.email", "runner@example.invalid")):
+                subprocess.run(["git", "-C", str(repo), "config", name, value], check=True)
+            (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
+            (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            state.mkdir()
+            args = runner_module.build_parser().parse_args(
+                ["--repo-dir", str(repo), "--state-dir", str(state)]
+            )
+            runner = runner_module.Runner(args, [])
+            self.assertFalse(runner.synchronize_repository(runner.repos[0]))
+
+            (state / "integration-recovery.json").write_text("{}\n", encoding="utf-8")
+            self.assertTrue(runner.synchronize_repository(runner.repos[0]))
+            self.assertEqual((repo / "tracked.txt").read_text(encoding="utf-8"), "two\n")
 
     def test_scheduler_recovers_a_checkout_with_only_harmless_untracked_files(self) -> None:
         """A stale issue branch left over from an interrupted work-round
