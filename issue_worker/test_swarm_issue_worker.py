@@ -41,6 +41,7 @@ from dynamic_router import (
 from adversarial_uat import UAT_STAGE
 from adversarial_security import SECURITY_STAGE
 from token_usage import AgentType, PromptType
+import prompt_budget
 from swarm_issue_worker import (
     CODEX_QUOTA_CACHE_FILE,
     CODEX_QUOTA_CACHE_MAX_AGE_SECONDS,
@@ -4174,6 +4175,42 @@ class WorkerTestCase(unittest.TestCase):
         api.assert_not_called()
         self.assertEqual(self.committed_files(), ["fix.txt"])
 
+    def test_new_build_output_is_left_out_of_the_commit_and_stays_ignored(self) -> None:
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        (self.repo / "fix.txt").write_text("fix\n", encoding="utf-8")
+        built = self.repo / "web" / "target" / "debug"
+        built.mkdir(parents=True)
+        for number in range(40):
+            (built / f"out{number}.h").write_text("x\n", encoding="utf-8")
+        worker.commit_completed_work(run_start)
+        self.assertEqual(self.committed_files(), ["fix.txt"])
+        self.assertEqual(worker.worktree_status(), "")
+
+    def test_an_already_tracked_build_directory_is_not_unstaged(self) -> None:
+        tracked = self.repo / "target"
+        tracked.mkdir()
+        (tracked / "keep.txt").write_text("1\n", encoding="utf-8")
+        self.git("add", "-f", "target/keep.txt")
+        self.git("commit", "-qm", "track target")
+        self.git("push", "-q", "origin", "main")
+        self.git("branch", "-f", "ai-main", "main")
+        self.git("push", "-q", "-f", "origin", "ai-main")
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        (tracked / "keep.txt").write_text("2\n", encoding="utf-8")
+        worker.commit_completed_work(run_start)
+        self.assertEqual(self.committed_files(), ["target/keep.txt"])
+
+    def test_a_commit_far_larger_than_one_issue_fails_loudly_and_commits_nothing(self) -> None:
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        bulk = self.repo / "generated_docs"
+        bulk.mkdir()
+        for number in range(prompt_budget.MAX_COMMIT_FILES + 5):
+            (bulk / f"page{number}.txt").write_text("x\n", encoding="utf-8")
+        with self.assertRaisesRegex(WorkerError, "far more than one issue's change"):
+            worker.commit_completed_work(run_start)
+        self.assertEqual(self.git("rev-parse", "HEAD"), run_start)
+        self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
+
     def test_minor_label_alone_does_not_create_a_commit(self) -> None:
         self.version_repo("0.1.5")
         worker, run_start = self.labelled_issue_worker(["minor"])
@@ -7049,6 +7086,66 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(
             resumed["automation_failure_resumed"]["application_version"], "1.0.0"
         )
+
+    def _stall_hold_comment(self, conclusion: str) -> str:
+        self.worker.config = dataclasses.replace(self.worker.config, application_version="1.0.0")
+        self.worker.issue = IssueContext(352, "Stalled review", "Body", [], "https://example.invalid/352")
+        self.worker.choice = ProviderChoice("Codex", "test-model", "low", "session-352")
+        self.worker.save_new_state(self.worker.issue, self.worker.choice, self.base_sha)
+        calls: list[tuple[list[str], str | None]] = []
+
+        def gh(args, provider=None, body=None, **_kwargs):
+            calls.append((args, body))
+            return ""
+
+        error = WorkerError("Adversarial UAT stopped renewing strict-mode epochs: 4 epochs in a row ended without progress.")
+        error.immediate_hold = True
+        error.hold_details = {
+            "reason": "4 epochs in a row ended without progress",
+            "failing_suites": ["adversarial-issue-352-fixture"], "conclusion": conclusion, "epochs": 4,
+        }
+        with (
+            mock.patch.object(self.worker, "comments", return_value=[]),
+            mock.patch.object(self.worker, "ensure_label"),
+            mock.patch.object(self.worker.github, "gh", side_effect=gh),
+        ):
+            self.assertTrue(self.worker.record_automation_failure(error))
+        state = self.worker.read_state()
+        self.assertEqual(state["status"], "automation_failed")
+        self.assertTrue(state["automation_failure"]["deliberate"])
+        comments = [body for args, body in calls if args[:2] == ["issue", "comment"]]
+        self.assertEqual(len(comments), 1)
+        self.assertTrue(any("Automation Failed" in " ".join(args) for args, _ in calls))
+        return comments[0]
+
+    def test_deliberate_stall_hold_tells_a_person_in_plain_language_what_to_do(self) -> None:
+        comment = self._stall_hold_comment("The fixture is not a real certificate; correct the test data.")
+        for heading in ("## Action required", "## Summary", "## Recommendations",
+                        "## Step-by-step guide", "## How to resume", "<summary>Technical details"):
+            self.assertIn(heading, comment)
+        plain = comment[:comment.index("<details>")]
+        # The main sections carry the action but no test names, paths or code.
+        self.assertIn("correct them if they are wrong", plain)
+        self.assertIn("not allowed to change those tests", plain)
+        self.assertIn("remove the `Automation Failed` label", plain)
+        self.assertNotIn("adversarial-issue-352-fixture", plain)
+        self.assertNotIn("strict-mode", plain)
+        self.assertNotIn("occurred", comment)
+        technical = comment[comment.index("<details>"):]
+        self.assertIn("adversarial-issue-352-fixture", technical)
+        self.assertIn("The fixture is not a real certificate", technical)
+        self.assertLess(comment.index("Action required"), comment.index("Technical details"))
+
+    def test_deliberate_stall_hold_without_a_dispute_asks_for_a_decision(self) -> None:
+        comment = self._stall_hold_comment("")
+        plain = comment[:comment.index("<details>")]
+        self.assertIn("decide whether the tests or the change need adjusting", plain)
+        self.assertNotIn("not allowed to change those tests", plain)
+        self.assertNotIn("Reviewer's last explanation", comment)
+        # Still released by a corrected build, like any other hold.
+        self.assertTrue(self.worker.automation_failure_is_held())
+        self.worker.config = dataclasses.replace(self.worker.config, application_version="1.0.1")
+        self.assertFalse(self.worker.automation_failure_is_held())
 
     def _held_state(self, number: int) -> None:
         self.worker.config = dataclasses.replace(self.worker.config, application_version="1.0.0")

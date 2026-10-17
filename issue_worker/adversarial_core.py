@@ -46,6 +46,8 @@ import subprocess
 import tempfile
 from typing import Any
 
+import finding_dedup
+import prompt_budget
 import routing_cap
 
 #: Counted fix/re-test rounds in one epoch. The initial assessment (round 0)
@@ -74,6 +76,20 @@ STRICT_EPOCHS_PER_RUN = 3
 #: Consecutive epochs without progress before the fixer moves to the strongest
 #: model its provider offers, at that provider's maximum effort.
 STALLED_EPOCHS_BEFORE_STRONGEST = 2
+#: Strict mode renews epochs, but never forever. Any one of these ends the
+#: loop by holding the issue (the Automation Failed path: branch and checkpoint
+#: kept, the queue moves on), because another epoch cannot change the outcome:
+#: epochs in a row without progress, epochs since the budget began, or hours
+#: since it began. The budget restarts when a held issue is released, so a
+#: corrected worker build or a person removing the label gets a fresh allowance.
+STALLED_EPOCHS_BEFORE_HOLD = 4
+MAX_EPOCHS_PER_BUDGET = 12
+MAX_HOURS_PER_BUDGET = 8
+#: A fixer that has returned no change this many times for the same failure,
+#: on the same provider/model/effort, is not called again until something
+#: changes (the failure, or the model or effort that escalation picks).
+FUTILE_EMPTY_FIXES = 3
+FIX_SKIPPED_RESPONSE = "SWARM_FIX_SKIPPED: this fixer already returned no change for this exact failure."
 #: Reasoning effort, weakest first. Escalation climbs this ladder and is
 #: clamped to the highest effort the chosen provider's own tiers use.
 EFFORT_LADDER = ("low", "medium", "high", "xhigh", "max")
@@ -100,6 +116,8 @@ ADVERSARIAL_HANDOFF_MARKER = "swarm-issue-worker:adversarial-disabled-handoff"
 # start_protected_remediation). Its follow-up carries this label.
 PROTECTED_FINDING_LABEL = ("adversarial-protected", "B60205", "Adversarial finding that needs a protected test adjudicated")
 PROTECTED_DISPUTE_MAX_CHARS = 6000
+# Re-exported so the limit is documented and tested beside the other loop bounds.
+ADVERSARIAL_DIFF_MAX_CHARS = prompt_budget.ADVERSARIAL_DIFF_MAX_CHARS
 
 
 def protected_suite_ids(definition: dict[str, Any]) -> set[str]:
@@ -284,6 +302,41 @@ def round_in_epoch(round_number: int) -> int:
 def epoch_exhausted(round_number: int) -> bool:
     """Whether a re-test at this round is the last one of its epoch."""
     return round_number > 0 and round_number % MAX_ROUNDS == 0
+
+
+def fixer_is_futile(loop: dict[str, Any], choice: tuple[str, str, str]) -> bool:
+    """Whether this provider/model/effort already failed to change anything.
+
+    `choice` is (provider name, model, effort). The evidence is the recorded
+    fix approaches: empty ones made against the failure that is still current.
+    A different failure, model or effort starts the count again.
+    """
+    fingerprint = (loop.get("failure_history") or [""])[-1]
+    if not fingerprint:
+        return False
+    empty = [a for a in loop.get("approaches", [])
+             if a.get("empty") and a.get("failure_fingerprint") == fingerprint
+             and (a.get("provider"), a.get("model"), a.get("effort")) == tuple(choice)]
+    return len(empty) >= FUTILE_EMPTY_FIXES
+
+
+def stall_hold_reason(loop: dict[str, Any], epochs_used: int, now: dt.datetime) -> str:
+    """Why strict mode must stop renewing epochs, or "" to carry on."""
+    stalled = int(loop.get("stalled_epochs") or 0)
+    if stalled >= STALLED_EPOCHS_BEFORE_HOLD:
+        return f"{stalled} epochs in a row ended without progress"
+    if epochs_used >= MAX_EPOCHS_PER_BUDGET:
+        return f"{epochs_used} epochs have run without a clean verdict"
+    try:
+        started = dt.datetime.fromisoformat(str(loop.get("budget_started") or ""))
+    except ValueError:
+        return ""
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=now.tzinfo)
+    hours = (now - started).total_seconds() / 3600
+    if hours >= MAX_HOURS_PER_BUDGET:
+        return f"the review has run for {hours:.1f} hours without a clean verdict"
+    return ""
 
 
 def effort_rank(effort: str) -> int:
@@ -1223,11 +1276,42 @@ class AdversarialStageMixin:
             f"effort ({escalation.get('reason', 'epoch_exhausted')}).")
         return escalated
 
+    def bounded_patch(self, base: str, loop: dict[str, Any]) -> str:
+        """The patch under test, kept under the prompt budget.
+
+        Build output is excluded outright. A patch still over budget becomes a
+        change summary plus the smallest whole-file patches. After a provider
+        refuses the prompt as too large, the budget halves for the retry.
+        """
+        excludes = [f":(exclude){TEST_ROOT.rstrip('/')}"] + [
+            f":(exclude,glob)**/{name}/**" for name in sorted(prompt_budget.GENERATED_DIRS)]
+        diff = self.git("diff", "--no-ext-diff", base, "--", ".", *excludes)
+        if len(diff) <= ADVERSARIAL_DIFF_MAX_CHARS >> int(loop.get("prompt_shrink") or 0):
+            return diff
+        stat = self.git("diff", "--stat=200", base, "--", ".", *excludes, check=False)
+        return prompt_budget.bound_diff(diff, stat, ADVERSARIAL_DIFF_MAX_CHARS >> int(loop.get("prompt_shrink") or 0))
+
+    def hold_input_too_large(self, stage: AdversarialStage, loop: dict[str, Any], limit: tuple[int, int]) -> None:
+        """A prompt the provider refuses even after shrinking cannot succeed on a retry."""
+        from swarm_issue_worker import WorkerError, log
+        actual, maximum = limit
+        sizes = (f" ({actual:,} characters against a limit of {maximum:,})" if actual and maximum else "")
+        reason = f"the provider refused the prompt as too large{sizes}"
+        self.record_stage_failure(stage, loop, reason)
+        message = (f"{stage.label} for issue #{self.issue.number}: {reason}, even after the patch was "
+                   "summarised. The change is probably far larger than the issue asked for (for example, "
+                   "committed build output); the issue is held for a person or a corrected build.")
+        log(message)
+        error = WorkerError(message)
+        error.immediate_hold = True
+        error.hold_details = {"reason": reason, "failing_suites": [], "conclusion": "", "epochs": int(loop.get("epoch") or 1)}
+        raise error
+
     def adversarial_common_prompt(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
         base = str(self.read_state()["base_sha"])
         # No completion summary, session transcript, or implementer reasoning
         # enters the tester context. It sees the spec, diff and repo conventions.
-        diff = self.git("diff", "--no-ext-diff", base, "--", ".", f":(exclude){TEST_ROOT.rstrip('/')}")
+        diff = self.bounded_patch(base, loop)
         amendments = "\n".join(str(c.get("body") or "") for c in loop.get("amendments", []))
         rejected = loop.get("retry_rejection") or {}
         rejection_guidance = ""
@@ -1254,6 +1338,7 @@ class AdversarialStageMixin:
             "Do not commit, push, open PRs, post comments, or file issues; the worker handles delivery. "
             "Run checks in the foreground. Do not edit VERSION.\n" + rejection_guidance +
             self.adversarial_history_context(stage, loop) +
+            (self.already_filed_context(stage, loop) if loop["phase"] != "fix" else "") +
             "\nResulting patch:\n" + diff + "\n"
         )
 
@@ -1547,12 +1632,16 @@ class AdversarialStageMixin:
                 for issue in issues]
 
     def note_rediscovery(self, stage: AdversarialStage, tracked: dict[str, Any],
-                         finding: dict[str, Any]) -> None:
+                         finding: dict[str, Any], new_information: str = "") -> None:
         """Add a suppressed duplicate's new context to the issue already tracking it.
 
-        Best effort and idempotent: one comment per (source issue, tracked
-        issue), only when the report carries content the tracked issue lacks.
-        A GitHub failure here never escapes into the adversarial round.
+        The context goes into a bounded block at the end of the tracked issue's
+        description (the worker always reads the description when it works the
+        issue) and into one comment as the audit trail. `new_information` is
+        what the duplicate judge found missing; without it the older word-count
+        test decides. Best effort and idempotent: one comment and one body entry
+        per (source issue, tracked issue). A GitHub failure never escapes into
+        the adversarial round.
         """
         from ai_execution_history import sanitize_text
         from swarm_issue_worker import WorkerError, log
@@ -1566,22 +1655,36 @@ class AdversarialStageMixin:
         try:
             output = self.github.gh([
                 "issue", "view", number, "--repo", self.config.github_repository,
-                "--json", "comments",
+                "--json", "body,comments",
             ], self.choice.key)
             try:
                 thread = json.loads(output)
             except json.JSONDecodeError:
                 return
-            comments = thread.get("comments", []) if isinstance(thread, dict) else []
+            if not isinstance(thread, dict):
+                return
+            comments = thread.get("comments", [])
             bodies = [str(c.get("body") or "") for c in comments if isinstance(c, dict)]
             if any(marker in body for body in bodies):
                 return
-            text = sanitize_text(f"{finding.get('title', '')}\n{finding.get('body', '')}")
-            if not rediscovery_adds_context(text, "\n".join([str(tracked.get("body", "")), *bodies])):
-                return
+            current_body = str(thread.get("body") or tracked.get("body", ""))
+            if new_information.strip():
+                text = sanitize_text(new_information.strip())
+            else:
+                text = sanitize_text(f"{finding.get('title', '')}\n{finding.get('body', '')}")
+                if not rediscovery_adds_context(text, "\n".join([current_body, *bodies])):
+                    return
+            # Body first: it is idempotent per source issue, so a failed comment
+            # can be retried without duplicating anything.
+            merged = finding_dedup.merge_additional_context(current_body, self.issue.number, text)
+            if merged != current_body:
+                self.github.gh([
+                    "issue", "edit", number, "--repo", self.config.github_repository, "--body-file", "-",
+                ], self.choice.key, merged)
             suites = ", ".join(f"`{sid}`" for sid in finding.get("suite_ids", []) if sid)
             comment = (f"{marker}\nRediscovered while testing #{self.issue.number}; "
-                       "it adds the following not already recorded here.\n\n"
+                       "it adds the following not already recorded here, and the same details were added "
+                       "to this issue's description.\n\n"
                        + (f"- **Suites:** {suites}\n\n" if suites else "")
                        + text[:REDISCOVERY_EXCERPT_CHARS])
             self.github.gh([
@@ -1590,6 +1693,160 @@ class AdversarialStageMixin:
             log(f"Added new {stage.log_name} context from #{self.issue.number} to tracked finding #{number}")
         except WorkerError as error:
             log(f"Could not add {stage.log_name} context to tracked finding #{number}: {error}")
+
+    def judge_duplicate(self, stage: AdversarialStage, finding: dict[str, Any],
+                        candidates: list[dict[str, Any]]) -> "finding_dedup.Verdict | None":
+        """Ask a cheap model whether `finding` duplicates one of `candidates`.
+
+        Advisory and fail-open: any failure, timeout or malformed answer returns
+        None, which files the finding. The call goes through the same usage
+        recording as the router's.
+        """
+        from ai_execution_history import sanitize_text
+        from dynamic_router import run_provider_oneshot
+        from swarm_issue_worker import iso_timestamp, log
+        from token_usage import AgentType, PromptType
+
+        host = None
+        usage_sink: list[Any] = []
+        started = iso_timestamp()
+        succeeded = False
+        try:
+            host = self.config.require_spec(self.choice.key)
+            text = sanitize_text(
+                f"Title: {finding.get('title', '')}\nSeverity: {finding.get('severity', 'unknown')}\n"
+                f"{stage.finding_issue_body(self, finding)}")
+            raw = run_provider_oneshot(
+                provider=host.key, bin_path=host.bin or "", model=host.router_model,
+                effort=host.router_effort, prompt=finding_dedup.build_prompt(text, candidates),
+                cwd=self.config.repo_dir, schema=finding_dedup.DUPLICATE_SCHEMA, timeout=120,
+                usage_sink=usage_sink)
+            allowed = [finding_dedup.issue_number(c.get("url", "")) for c in candidates]
+            verdict = finding_dedup.parse_verdict(raw, [n for n in allowed if n is not None])
+            succeeded = verdict is not None
+            return verdict
+        except Exception as error:  # noqa: BLE001 - advisory: any failure means "file it"
+            log(f"Duplicate check for a {stage.log_name} finding could not run ({sanitize_text(str(error))[:200]}); "
+                "filing it as new.")
+            return None
+        finally:
+            if host is not None:
+                self._record_usage_event(
+                    agent_type=AgentType.OTHER.value, prompt_type=PromptType.REVIEW.value,
+                    provider_key=host.key, provider_name=host.name, model=host.router_model,
+                    effort=host.router_effort, attempt_number=1,
+                    usage=usage_sink[0] if usage_sink else None, started_at=started,
+                    success=succeeded, error_type="" if succeeded else "duplicate_judge_failed")
+
+    def already_filed_context(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
+        """What is already tracked, so a fresh reviewer does not rediscover it."""
+        from ai_execution_history import sanitize_text
+        entries = [dict(item) for item in loop.get("filed_finding_details", [])]
+        try:
+            entries += self.existing_finding_titles(stage)
+        except Exception:  # noqa: BLE001 - the list is a convenience, never a blocker
+            pass
+        for entry in entries:
+            entry["title"] = sanitize_text(str(entry.get("title") or ""))
+        return finding_dedup.already_filed_section(entries)
+
+    def defer_unfiled_finding(self, stage: AdversarialStage, loop: dict[str, Any],
+                              finding: dict[str, Any], title: str) -> None:
+        """Keep a finding that is over the per-issue filing limit.
+
+        It is kept in the checkpoint with its details and recorded in one
+        unassigned overflow issue (`record_overflow_findings`), so a real
+        problem is never lost and the tracker is not flooded. A GitHub failure
+        leaves it queued for the next attempt.
+        """
+        from ai_execution_history import sanitize_text
+        from swarm_issue_worker import WorkerError, log
+        unfiled = loop.setdefault("unfiled_findings", [])
+        key = finding_dedup.overflow_key(title)
+        if not any(item.get("key") == key for item in unfiled):
+            unfiled.append({
+                "key": key, "title": title, "severity": str(finding.get("severity") or ""),
+                "text": sanitize_text(stage.finding_issue_body(self, finding))[:finding_dedup.OVERFLOW_ENTRY_CHARS],
+                "recorded": False,
+            })
+            del unfiled[:-50]
+        log(f"Out-of-scope {stage.log_name} finding for #{self.issue.number} is over the limit of "
+            f"{finding_dedup.MAX_FILED_PER_STAGE} follow-up issues; recording it in the overflow issue "
+            f"({sanitize_text(title)}).")
+        self.save_stage(stage, loop)
+        try:
+            self.record_overflow_findings(stage, loop)
+        except WorkerError as error:
+            log(f"Could not record held-back {stage.log_name} findings for #{self.issue.number}: {error}")
+
+    def record_overflow_findings(self, stage: AdversarialStage, loop: dict[str, Any]) -> None:
+        """Write every unrecorded held-back finding into the stage's overflow issue.
+
+        One unassigned issue per source issue and stage, found again by its
+        marker after a restart. Entries are idempotent per finding, and a
+        failure raises before anything is marked recorded.
+        """
+        from swarm_issue_worker import WorkerError, github_issue_url_from_output, log
+        pending = [item for item in loop.get("unfiled_findings", []) if not item.get("recorded")]
+        if not pending:
+            return
+        marker = f"<!-- swarm-issue-worker:{stage.finding_marker_kind}-overflow:issue:{self.issue.number} -->"
+        url = str(loop.get("overflow_issue_url") or "")
+        if not url:
+            output = self.github.gh([
+                "issue", "list", "--repo", self.config.github_repository, "--state", "all",
+                "--search", f'"{marker}" in:body', "--json", "body,url", "--limit", "20",
+            ], self.choice.key)
+            try:
+                found = json.loads(output)
+            except json.JSONDecodeError:
+                found = []
+            existing = next((i for i in found if isinstance(i, dict) and marker in str(i.get("body") or "")), None)
+            if existing:
+                url = github_issue_url_from_output(str(existing.get("url", "")))
+            else:
+                created = self.file_labelled_issue(
+                    f"Further out-of-scope {stage.log_name} findings from #{self.issue.number}",
+                    finding_dedup.overflow_issue_body(marker, self.issue.number, stage.log_name),
+                    stage.finding_labels, self.choice.key, assignee="")
+                url = github_issue_url_from_output(created)
+                if url:
+                    log(f"Filed the overflow issue for {stage.log_name} findings of #{self.issue.number}: {url}")
+            if not url:
+                return
+            loop["overflow_issue_url"] = url
+            self.save_stage(stage, loop)
+        number = finding_dedup.issue_number(url)
+        if number is None:
+            return
+        try:
+            view = json.loads(self.github.gh([
+                "issue", "view", str(number), "--repo", self.config.github_repository, "--json", "body",
+            ], self.choice.key) or "{}")
+        except json.JSONDecodeError as error:
+            raise WorkerError("GitHub returned malformed JSON while reading the overflow issue") from error
+        body = str(view.get("body") or "") if isinstance(view, dict) else ""
+        merged = body
+        for item in pending:
+            merged = finding_dedup.merge_overflow_entry(
+                merged, item["key"], item["title"], item.get("severity", ""), item.get("text", ""))
+        if merged != body:
+            self.github.gh([
+                "issue", "edit", str(number), "--repo", self.config.github_repository, "--body-file", "-",
+            ], self.choice.key, merged)
+        for item in pending:
+            item["recorded"] = True
+        self.save_stage(stage, loop)
+        limit_marker = f"<!-- swarm-issue-worker:{stage.finding_marker_kind}-limit:issue:{self.issue.number} -->"
+        if not any(limit_marker in str(c.get("body") or "") for c in self.comments(self.issue.number)):
+            self.github.gh([
+                "issue", "comment", str(self.issue.number), "--repo", self.config.github_repository,
+                "--body-file", "-",
+            ], self.choice.key,
+                f"{limit_marker}\nThe automated {stage.log_name} review found more separate problems outside "
+                f"this issue's scope than the limit of {finding_dedup.MAX_FILED_PER_STAGE} follow-up issues. "
+                f"The remaining ones, with their details, are collected in {url} instead of being filed "
+                "one by one.")
 
     def file_stage_findings(self, stage: AdversarialStage, loop: dict[str, Any],
                             findings: list[dict[str, Any]]) -> None:
@@ -1699,6 +1956,34 @@ class AdversarialStageMixin:
                         log(f"Out-of-scope {stage.log_name} finding suppressed as a duplicate of the open "
                             f"issue \"{sanitize_text(open_duplicate['title'])}\": {open_duplicate['url']}")
                         self.note_rediscovery(stage, open_duplicate, finding)
+                        continue
+                    # Wording-independent check: a model decides whether this is
+                    # the same defect as a plausible candidate. Advisory and
+                    # fail-open; a weak or failed verdict files the finding.
+                    known = {item.get("url") for item in open_findings}
+                    candidates = open_findings + [
+                        {"title": item.get("title", ""), "url": item.get("url", ""), "body": ""}
+                        for item in details if item.get("url") and item.get("url") not in known]
+                    short = finding_dedup.shortlist(
+                        sanitize_text(f"{title}\n{stage.finding_issue_body(self, finding)}"), candidates)
+                    verdict = self.judge_duplicate(stage, finding, short) if short else None
+                    if finding_dedup.suppresses(verdict, str(finding.get("severity") or "")):
+                        target = next(c for c in short
+                                      if finding_dedup.issue_number(c.get("url", "")) == verdict.duplicate_of)
+                        log(f"Out-of-scope {stage.log_name} finding suppressed as a duplicate of "
+                            f"\"{sanitize_text(target['title'])}\" ({target['url']}), confidence "
+                            f"{verdict.confidence:.2f}: {sanitize_text(verdict.reason)}")
+                        suppressed = loop.setdefault("suppressed_findings", [])
+                        suppressed.append({"title": stored_title, "duplicate_of": target["url"],
+                                           "confidence": verdict.confidence, "reason": verdict.reason,
+                                           "adds_information": verdict.adds_information})
+                        del suppressed[:-50]
+                        self.save_stage(stage, loop)
+                        if verdict.adds_information:
+                            self.note_rediscovery(stage, target, finding, verdict.new_information)
+                        continue
+                    if len([item for item in details if item.get("url")]) >= finding_dedup.MAX_FILED_PER_STAGE:
+                        self.defer_unfiled_finding(stage, loop, finding, title)
                         continue
                     finding_labels = stage.finding_labels
                     if self.cites_protected_suite(finding):
@@ -1886,6 +2171,17 @@ class AdversarialStageMixin:
         # not consume the cybersecurity stage's renewals in the same process.
         self.adversarial_epochs_this_run = 0
         loop = self.read_state()[stage.key]
+        if loop["phase"] != "done" and not loop.get("budget_started"):
+            # First entry, or first entry after a hold was released: the
+            # epoch and time allowance counts from here.
+            loop.update(budget_started=iso_timestamp(), budget_epoch_base=epoch_of(int(loop.get("round") or 0)))
+            self.save_stage(stage, loop)
+        if loop["phase"] != "done":
+            # A checkpoint can already be past the bound (it was written by a
+            # build without it): hold before spending another call.
+            reason = stall_hold_reason(loop, 0, dt.datetime.now().astimezone())
+            if reason:
+                self.hold_stalled_stage(stage, loop, reason)
         # A same-session resume (quota pause, restart) skips the setup below, so
         # replay the boundary logs once; the Overview rebuilds its row from the
         # log tail, which may have rotated past the originals.
@@ -1923,6 +2219,17 @@ class AdversarialStageMixin:
                     # or a broken setup silently bypasses failure recording.
                     self.record_stage_failure(stage, loop, str(error))
                     raise
+            hold_reason = ""
+            if (loop.get("response") is None and loop["phase"] == "fix"
+                    and getattr(self, "choice", None) is not None
+                    and fixer_is_futile(loop, (self.choice.name, self.choice.model, self.choice.effort))):
+                # Calling it again would only spend usage to get the same empty
+                # answer. The round still runs its re-test and counts.
+                log(f"{stage.label} for issue #{self.issue.number}: skipped the fixer "
+                    f"({self.choice.name} {self.choice.model}, effort {self.choice.effort}); it returned no change "
+                    f"{FUTILE_EMPTY_FIXES} times for this exact failure.")
+                loop["response"] = FIX_SKIPPED_RESPONSE
+                self.save_stage(stage, loop)
             if loop.get("response") is None:
                 # Every tester phase starts with a new CLI session. Only an
                 # interrupted *same phase* resumes its existing session.
@@ -1938,9 +2245,19 @@ class AdversarialStageMixin:
                 if status != 0 or not self.ai_output_file.exists() or not self.ai_output_file.stat().st_size:
                     if self.ai_failure_is_quota():
                         return self.pause_adversarial()
+                    limit = self.ai_input_limit()
+                    if limit is not None:
+                        if not loop.get("prompt_shrink"):
+                            loop["prompt_shrink"] = 1
+                            self.save_stage(stage, loop)
+                            log(f"{stage.label} for issue #{self.issue.number}: the provider refused the prompt as "
+                                "too large; retrying once with a smaller patch summary.")
+                            continue
+                        self.hold_input_too_large(stage, loop, limit)
                     self.record_stage_failure(stage, loop, "the adversarial coding session failed")
                     raise WorkerError("Adversarial coding session failed; phase and worktree preserved")
                 loop["response"] = self.ai_output_file.read_text(encoding="utf-8", errors="replace")
+                loop.pop("prompt_shrink", None)
                 self.save_stage(stage, loop)
             output = loop["response"]
             if loop["phase"] == "fix":
@@ -2083,6 +2400,10 @@ class AdversarialStageMixin:
                     self.close_adversarial_epoch(stage, loop, results, blocking, policy)
                     if policy == MERGE_POLICY_BEST_EFFORT:
                         loop["outcome"] = "cap_hit"
+                    else:
+                        base = int(loop.get("budget_epoch_base") or 1)
+                        hold_reason = stall_hold_reason(
+                            loop, epoch_of(loop["round"]) - base + 1, dt.datetime.now().astimezone())
             completion = self.commit_completed_work(loop["stage_base"])
             self.validate_new_commit_messages(loop["stage_base"], completion)
             loop["completion"] = completion
@@ -2110,6 +2431,10 @@ class AdversarialStageMixin:
                         f"{(loop.get('escalation') or {}).get('reason', 'epoch_exhausted')}).")
             loop.update(active=False, response=None)
             self.save_stage(stage, loop)
+            if hold_reason:
+                # Saved first, so the held checkpoint resumes at the next fix
+                # round instead of replaying the re-test that just closed.
+                self.hold_stalled_stage(stage, loop, hold_reason)
             if renewed:
                 self.adversarial_epochs_this_run = getattr(self, "adversarial_epochs_this_run", 0) + 1
                 if self.adversarial_epochs_this_run >= STRICT_EPOCHS_PER_RUN:
@@ -2198,6 +2523,9 @@ class AdversarialStageMixin:
             "provider": self.choice.name, "model": self.choice.model, "effort": self.choice.effort,
             "files": files[:25], "patch_fingerprint": fingerprint, "repeated_patch": repeated,
             "empty": not fingerprint,
+            # The failure this fix answered, so futility is judged per failure.
+            "failure_fingerprint": (loop.get("failure_history") or [""])[-1],
+            "skipped": loop.get("response") == FIX_SKIPPED_RESPONSE,
         })
         del approaches[:-30]
         if repeated:
@@ -2294,6 +2622,33 @@ class AdversarialStageMixin:
             f"({len(failing)} failing suite(s), {len(blocking)} open finding(s), "
             f"{'progress' if progress else 'no progress'}); strict policy does not merge known failures.")
         return summary
+
+    def hold_stalled_stage(self, stage: AdversarialStage, loop: dict[str, Any], reason: str) -> None:
+        """Stop renewing epochs: hold the issue through the Automation Failed path.
+
+        The branch and checkpoint stay, the queue moves on, and one actionable
+        comment is posted (`record_automation_failure`, `park_held_issue`). The
+        allowance restarts so a released issue gets a fresh, bounded budget.
+        """
+        from swarm_issue_worker import WorkerError, log
+        loop.update(stalled_epochs=0, budget_started=None, budget_epoch_base=None)
+        self.save_stage(stage, loop)
+        message = (f"{stage.label} for issue #{self.issue.number} stopped renewing strict-mode epochs: {reason}. "
+                   f"Failing suites: {', '.join(str(r.get('id', '')) for r in loop.get('results', []) if r.get('exit_code')) or 'none'}. "
+                   "Another epoch cannot change the result, so the issue is held for a person or a corrected build.")
+        log(message)
+        error = WorkerError(message)
+        error.immediate_hold = True
+        # What a person needs to act: the failing suites and the independent
+        # reviewer's own last conclusion about them (sanitized when posted).
+        conclusions = [str(r.get("dispute_resolution") or "").strip() for r in loop.get("rounds", [])]
+        error.hold_details = {
+            "reason": reason,
+            "failing_suites": [str(r.get("id", "")) for r in loop.get("results", []) if r.get("exit_code")],
+            "conclusion": next((c for c in reversed(conclusions) if c), ""),
+            "epochs": int(loop.get("epoch") or 1),
+        }
+        raise error
 
     def yield_adversarial_epoch(self, stage: AdversarialStage, loop: dict[str, Any]) -> int:
         """Checkpoint a renewed strict epoch and hand control to the scheduler."""

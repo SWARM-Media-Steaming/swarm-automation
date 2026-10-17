@@ -258,6 +258,64 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(epochs[0]["merge_policy"], "strict")
         self.assertTrue(epochs[0]["next_escalation"].get("reason"))
 
+    def test_strict_loop_holds_the_issue_once_epochs_stall(self):
+        self.prepare(auto=True)
+
+        def never_fix(prompt, activity=""):
+            status = self.role(prompt)
+            (self.repo / "tracked.txt").write_text("broken\n")
+            return status
+
+        with mock.patch("adversarial_core.STRICT_EPOCHS_PER_RUN", 99), \
+                mock.patch("adversarial_core.STALLED_EPOCHS_BEFORE_HOLD", 3), \
+                self.patches(never_fix), \
+                mock.patch.object(self.worker, "merge_pull_request") as merge:
+            with self.assertRaises(WorkerError) as raised:
+                self.worker.run_adversarial_delivery()
+        merge.assert_not_called()
+        self.assertTrue(raised.exception.immediate_hold)
+        self.assertIn("without progress", str(raised.exception))
+        details = raised.exception.hold_details
+        self.assertEqual(details["failing_suites"], ["adversarial-180"])
+        self.assertIn("without progress", details["reason"])
+        self.assertIn("adversarial-180", str(raised.exception))
+        loop = self.worker.read_state()["adversarial"]
+        # The stalled epoch was saved before the hold, so a release resumes at
+        # the next fix round and does not replay the closed re-test.
+        self.assertEqual((loop["phase"], loop["round"], loop["epoch"]), ("fix", 10, 4))
+        self.assertFalse(loop["active"])
+        self.assertEqual(loop["outcome"], "")
+        # A released issue gets a fresh, bounded allowance.
+        self.assertEqual(loop["stalled_epochs"], 0)
+        self.assertIsNone(loop["budget_started"])
+        self.assertTrue(self.worker.in_progress_file.exists())
+
+    def test_futile_fixer_is_skipped_but_the_round_still_retests(self):
+        self.prepare()
+
+        def never_fix(prompt, activity=""):
+            status = self.role(prompt)
+            (self.repo / "tracked.txt").write_text("broken\n")
+            return status
+
+        with mock.patch("adversarial_core.STRICT_EPOCHS_PER_RUN", 99), \
+                mock.patch("adversarial_core.STALLED_EPOCHS_BEFORE_HOLD", 99), \
+                mock.patch("adversarial_core.MAX_EPOCHS_PER_BUDGET", 3), \
+                mock.patch.object(self.worker, "escalate_stage_choice", lambda stage, loop, choice, *a, **kw: choice), \
+                self.patches(never_fix):
+            with self.assertRaises(WorkerError) as raised:
+                self.worker.run_adversarial_delivery()
+        self.assertIn("epochs have run", str(raised.exception))
+        fixes = [c for c in self.calls if c[0] == "fix"]
+        tests = [c for c in self.calls if c[0] == "test"]
+        # Three epochs of three rounds. Escalation rotates the provider, so two
+        # distinct choices each get their tries; the third epoch returns to the
+        # first choice, which already returned nothing for this exact failure.
+        self.assertEqual(len(fixes), 2 * adversarial_core.FUTILE_EMPTY_FIXES)
+        self.assertEqual(len(tests), 1 + 3 * adversarial_core.MAX_ROUNDS)
+        approaches = self.worker.read_state()["adversarial"]["approaches"]
+        self.assertEqual(sum(1 for a in approaches if a.get("skipped")), 3 * adversarial_core.MAX_ROUNDS - len(fixes))
+
     def test_best_effort_merges_issue_pr_when_routine_approval_is_off(self):
         self.prepare(auto=False)
         self.worker.config = dataclasses.replace(
@@ -852,6 +910,214 @@ class AdversarialUatTests(unittest.TestCase):
         _, marker = self._rediscovery_run("x", known)
         comments, _ = self._rediscovery_run(f"{marker}\n{known}", known)
         self.assertEqual(comments, [])
+
+    # --- model-judged duplicate detection ---------------------------------
+    TRACKED = {"title": "Pairing code goes over plaintext http", "url": "https://example.invalid/issues/9",
+               "body": "pairing code cleartext http certificate pinned peer_connectivity"}
+    REWORDED = {"title": "Unpinned address pairing exposes the secret on the wire",
+                "body": "The pairing code travels in cleartext over http and the certificate becomes the pin; "
+                        "handlers_network.py is also affected."}
+
+    def _judged_run(self, findings, verdict, *, open_issues=None, current_body="Original description."):
+        """Run filing with a fake duplicate judge. `verdict` is a dict, raw text or an Exception."""
+        if not getattr(self, "_judge_prepared", False):
+            self.prepare()
+            self._judge_prepared = True
+        self.api = []
+        loop = self.worker.read_state()["adversarial"]
+        loop["filed_findings"], loop["filed_finding_details"], loop["suppressed_findings"] = [], [], []
+        posted, edits, judge_calls = [], [], []
+        tracked = [dict(self.TRACKED)] if open_issues is None else open_issues
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"] and "--label" in args:
+                return json.dumps(tracked)
+            if args[:2] == ["issue", "view"]:
+                return json.dumps({"body": current_body, "comments": []})
+            if args[:2] == ["issue", "edit"]:
+                edits.append((args[2], body))
+                return ""
+            if args[:2] == ["issue", "comment"]:
+                posted.append((args[2], body))
+                return ""
+            return self.gh(args, provider, body)
+
+        def oneshot(**kwargs):
+            judge_calls.append(kwargs)
+            if isinstance(verdict, Exception):
+                raise verdict
+            return verdict if isinstance(verdict, str) else json.dumps(verdict)
+
+        output = io.StringIO()
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh), \
+                mock.patch("dynamic_router.run_provider_oneshot", side_effect=oneshot), \
+                mock.patch.object(self.worker, "comments", return_value=[{"body": b} for _, b in posted]), \
+                contextlib.redirect_stdout(output):
+            self.worker.file_adversarial_findings(loop, findings)
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        return {"creates": creates, "posted": posted, "edits": edits, "calls": judge_calls,
+                "log": output.getvalue(), "loop": self.worker.read_state()["adversarial"]}
+
+    def _verdict(self, **kw):
+        return {"duplicate_of": 9, "confidence": 0.9, "adds_information": True,
+                "new_information": "Also affects handlers_network.py", "reason": "same defect", **kw}
+
+    def test_model_duplicate_is_not_filed_and_its_new_facts_reach_the_issue_description(self):
+        result = self._judged_run([dict(self.REWORDED)], self._verdict())
+        self.assertEqual(result["creates"], [])
+        self.assertEqual(len(result["calls"]), 1)
+        self.assertEqual(result["calls"][0]["schema"], adversarial_core.finding_dedup.DUPLICATE_SCHEMA)
+        number, body = result["edits"][0]
+        self.assertEqual(number, "9")
+        self.assertTrue(body.startswith("Original description."))
+        self.assertIn("Also affects handlers_network.py", body)
+        self.assertEqual([n for n, _ in result["posted"]], ["9"])
+        self.assertIn("rediscovered:issue:180;target:9", result["posted"][0][1])
+        self.assertIn("description", result["posted"][0][1])
+        suppressed = result["loop"]["suppressed_findings"]
+        self.assertEqual((len(suppressed), suppressed[0]["duplicate_of"]), (1, self.TRACKED["url"]))
+        self.assertIn("suppressed as a duplicate", result["log"])
+
+    def test_model_duplicate_without_new_facts_changes_nothing_on_the_tracked_issue(self):
+        result = self._verdict(adds_information=False, new_information="")
+        result = self._judged_run([dict(self.REWORDED)], result)
+        self.assertEqual(result["creates"], [])
+        self.assertEqual((result["edits"], result["posted"]), ([], []))
+
+    def test_low_confidence_or_unlisted_duplicate_is_filed_as_new(self):
+        for verdict in (self._verdict(confidence=0.5), self._verdict(duplicate_of=77), self._verdict(duplicate_of=0)):
+            result = self._judged_run([dict(self.REWORDED)], verdict)
+            self.assertEqual(len(result["creates"]), 1, verdict)
+            self.assertEqual((result["edits"], result["posted"]), ([], []))
+
+    def test_severe_finding_needs_a_stricter_verdict_to_be_suppressed(self):
+        severe = {**self.REWORDED, "severity": "High"}
+        self.assertEqual(len(self._judged_run([dict(severe)], self._verdict(confidence=0.8))["creates"]), 1)
+        self.assertEqual(self._judged_run([dict(severe)], self._verdict(confidence=0.95))["creates"], [])
+
+    def test_a_failing_or_garbled_judge_files_the_finding(self):
+        for verdict in (RuntimeError("provider exploded"), "not json at all"):
+            result = self._judged_run([dict(self.REWORDED)], verdict)
+            self.assertEqual(len(result["creates"]), 1)
+            self.assertEqual(result["loop"].get("suppressed_findings", []), [])
+        failed = self._judged_run([dict(self.REWORDED)], RuntimeError("provider exploded"))
+        self.assertIn("filing it as new", failed["log"])
+
+    def test_judge_is_not_called_without_a_plausible_candidate(self):
+        unrelated = [{"title": "Sidebar icon misaligned", "url": "https://example.invalid/issues/5", "body": "css"}]
+        result = self._judged_run([dict(self.REWORDED)], self._verdict(), open_issues=unrelated)
+        self.assertEqual((result["calls"], len(result["creates"])), ([], 1))
+
+    def _overflow_gh(self, state):
+        """A GitHub fake that remembers the overflow issue's body and what was posted."""
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"] and "--search" in args:
+                return json.dumps([{"url": state["url"], "body": state["body"]}] if state.get("url") else [])
+            if args[:2] == ["issue", "view"]:
+                return json.dumps({"body": state["body"]})
+            if args[:2] == ["issue", "edit"]:
+                if state.get("fail_edit"):
+                    from swarm_issue_worker import WorkerError as Err
+                    raise Err("edit failed")
+                state["body"] = body
+                state["edits"] += 1
+                return ""
+            if args[:2] == ["issue", "comment"]:
+                state["comments"].append(body)
+                return ""
+            if args[:2] == ["issue", "create"]:
+                if "--assignee" not in args and "Further out-of-scope" in " ".join(args):
+                    self.api.append(args)
+                    state["body"], state["url"], state["unassigned"] = body, "https://example.invalid/issues/190", True
+                    return state["url"]
+            return self.gh(args, provider, body)
+        return gh
+
+    def _file_over_cap(self, loop, state, names):
+        findings = [{"title": f"Distinct problem {name}", "body": f"Unrelated body about the {name} subsystem."}
+                    for name in names]
+        with mock.patch.object(adversarial_core.finding_dedup, "MAX_FILED_PER_STAGE", 2), \
+                mock.patch.object(self.worker.github, "gh", side_effect=self._overflow_gh(state)), \
+                mock.patch.object(self.worker, "comments", side_effect=lambda n: [{"body": b} for b in state["comments"]]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.worker.file_adversarial_findings(loop, findings)
+
+    def test_findings_over_the_cap_are_recorded_in_one_unassigned_overflow_issue(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        state = {"body": "", "url": "", "edits": 0, "comments": []}
+        self._file_over_cap(loop, state, ("alpha", "bravo", "charlie", "delta", "echo"))
+        creates = [a for a in self.api if a[:2] == ["issue", "create"]]
+        # Two ordinary follow-ups plus exactly one overflow issue.
+        self.assertEqual(len(creates), 3)
+        self.assertTrue(state["unassigned"])
+        for name in ("charlie", "delta", "echo"):
+            self.assertIn(f"Distinct problem {name}", state["body"])
+            self.assertIn(f"the {name} subsystem", state["body"])
+        self.assertNotIn("Distinct problem alpha", state["body"])
+        self.assertIn("deliberately unassigned", state["body"])
+        saved = self.worker.read_state()["adversarial"]
+        self.assertEqual(len(saved["filed_finding_details"]), 2)
+        self.assertTrue(all(item["recorded"] for item in saved["unfiled_findings"]))
+        self.assertEqual(saved["overflow_issue_url"], "https://example.invalid/issues/190")
+        self.assertEqual(len(state["comments"]), 1)
+        self.assertIn("https://example.invalid/issues/190", state["comments"][0])
+
+    def test_later_overflow_findings_extend_the_same_issue_without_a_second_notice(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        state = {"body": "", "url": "", "edits": 0, "comments": []}
+        self._file_over_cap(loop, state, ("alpha", "bravo", "charlie"))
+        self.api = []
+        # A restart: the checkpoint forgot the URL, so the issue is found by its marker.
+        loop = self.worker.read_state()["adversarial"]
+        loop.pop("overflow_issue_url", None)
+        self._file_over_cap(loop, state, ("alpha", "bravo", "charlie", "delta"))
+        self.assertEqual([a for a in self.api if a[:2] == ["issue", "create"]], [])
+        self.assertIn("Distinct problem charlie", state["body"])
+        self.assertIn("Distinct problem delta", state["body"])
+        self.assertEqual(state["body"].count("overflow:entry:"), 2)
+        self.assertEqual(len(state["comments"]), 1)
+
+    def test_a_failed_overflow_write_keeps_the_finding_queued_for_retry(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        state = {"body": "", "url": "", "edits": 0, "comments": [], "fail_edit": True}
+        self._file_over_cap(loop, state, ("alpha", "bravo", "charlie"))
+        saved = self.worker.read_state()["adversarial"]
+        self.assertEqual([item["recorded"] for item in saved["unfiled_findings"]], [False])
+        self.assertEqual(state["comments"], [])
+        state["fail_edit"] = False
+        self._file_over_cap(self.worker.read_state()["adversarial"], state, ("alpha", "bravo", "charlie"))
+        self.assertIn("Distinct problem charlie", state["body"])
+        saved = self.worker.read_state()["adversarial"]
+        self.assertEqual([item["recorded"] for item in saved["unfiled_findings"]], [True])
+
+    def test_fresh_reviewer_is_told_what_is_already_tracked(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        loop["filed_finding_details"] = [{"marker": "m", "title": "Already filed by this run",
+                                          "url": "https://example.invalid/issues/3"}]
+
+        def gh(args, provider=None, body=None):
+            if args[:2] == ["issue", "list"] and "--label" in args:
+                return json.dumps([self.TRACKED])
+            return self.gh(args, provider, body)
+
+        with mock.patch.object(self.worker.github, "gh", side_effect=gh):
+            text = self.worker.already_filed_context(uat.UAT_STAGE, loop)
+            tester = self.worker.adversarial_common_prompt(uat.UAT_STAGE, {**loop, "phase": "test"})
+            fixer = self.worker.adversarial_common_prompt(uat.UAT_STAGE, {**loop, "phase": "fix"})
+        self.assertIn("Already filed by this run", text)
+        self.assertIn("Pairing code goes over plaintext http", text)
+        self.assertIn("ALREADY TRACKED", tester)
+        self.assertNotIn("ALREADY TRACKED", fixer)
+
+    def test_tracked_list_failure_never_blocks_the_prompt(self):
+        self.prepare()
+        loop = self.worker.read_state()["adversarial"]
+        with mock.patch.object(self.worker.github, "gh", side_effect=WorkerError("rate limited")):
+            self.assertEqual(self.worker.already_filed_context(uat.UAT_STAGE, loop), "")
 
     def test_findings_citing_different_suites_are_both_filed_despite_open_findings(self):
         self.prepare()
@@ -1611,6 +1877,82 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertEqual(self.pr_bodies, [])
         self.assertEqual(self.comments_posted, [])
         self.assertNotEqual(self.worker.read_state()["adversarial"].get("outcome"), "cap_hit")
+
+
+    TOO_LARGE = ('Error: turn/start failed: Input exceeds the maximum length of 1048576 characters. (code -32602), '
+                 'data: {"input_error_code":"input_too_large","max_chars":1048576,"actual_chars":9187573}')
+
+    def test_an_oversized_patch_is_summarised_in_the_tester_prompt(self):
+        self.prepare(fixed=True)
+        for number in range(400):
+            (self.repo / f"bulk{number}.txt").write_text("line\n" * 2000)
+        self.git("add", ".")
+        self.git("commit", "-qm", "bulk")
+        prompts = []
+
+        def tester(prompt, activity=""):
+            prompts.append(prompt)
+            return self.role(prompt, activity)
+
+        with self.patches(tester), mock.patch.object(self.worker, "finalize_issue"):
+            self.worker.run_adversarial_delivery()
+        self.assertTrue(prompts)
+        self.assertLess(len(prompts[0]), adversarial_core.ADVERSARIAL_DIFF_MAX_CHARS + 20_000)
+        self.assertIn("Patches omitted for size", prompts[0])
+        self.assertIn("Change summary", prompts[0])
+
+    def test_build_output_never_reaches_the_tester_prompt(self):
+        self.prepare(fixed=True)
+        built = self.repo / "web" / "target" / "debug"
+        built.mkdir(parents=True)
+        (built / "ssl.h").write_text("BUILD_ARTIFACT_MARKER\n")
+        self.git("add", "-f", ".")
+        self.git("commit", "-qm", "oops")
+        prompts = []
+
+        def tester(prompt, activity=""):
+            prompts.append(prompt)
+            return self.role(prompt, activity)
+
+        with self.patches(tester), mock.patch.object(self.worker, "finalize_issue"):
+            self.worker.run_adversarial_delivery()
+        self.assertNotIn("BUILD_ARTIFACT_MARKER", prompts[0])
+
+    def test_input_too_large_retries_once_smaller_then_holds_at_once(self):
+        self.prepare(fixed=True)
+        prompts = []
+
+        def refused(prompt, activity=""):
+            prompts.append(prompt)
+            self.worker.ai_output_file.write_text("")
+            self.worker.ai_diagnostic_file.write_text(self.TOO_LARGE)
+            return 1
+
+        with self.patches(refused), mock.patch.object(self.worker, "merge_pull_request") as merge:
+            with self.assertRaisesRegex(WorkerError, "refused the prompt as too large") as caught:
+                self.worker.run_adversarial_delivery()
+        self.assertEqual(len(prompts), 2, "one retry with a smaller patch, then stop")
+        self.assertTrue(getattr(caught.exception, "immediate_hold", False))
+        self.assertIn("9,187,573", str(caught.exception.hold_details) + str(caught.exception))
+        merge.assert_not_called()
+
+    def test_a_successful_retry_after_input_too_large_continues(self):
+        self.prepare(fixed=True)
+        attempts = []
+
+        def flaky(prompt, activity=""):
+            attempts.append(1)
+            if len(attempts) == 1:
+                self.worker.ai_output_file.write_text("")
+                self.worker.ai_diagnostic_file.write_text(self.TOO_LARGE)
+                return 1
+            self.worker.ai_diagnostic_file.write_text("")
+            return self.role(prompt, activity)
+
+        with self.patches(flaky), mock.patch.object(self.worker, "finalize_issue"):
+            self.worker.run_adversarial_delivery()
+        self.assertGreaterEqual(len(attempts), 2)
+        self.assertNotIn("prompt_shrink", self.worker.read_state()["adversarial"])
 
 
 class ResultPayloadTests(unittest.TestCase):

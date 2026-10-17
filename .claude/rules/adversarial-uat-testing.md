@@ -24,6 +24,13 @@ label from a trusted author; the worker owns VERSION.
   That delivery merges into the integration branch and promotes to the base
   branch only when both automatic promotion and automatic issue-PR merging are
   on. It must not become `AI Needs Input` solely because findings remain.
+  Strict mode is bounded: 4 epochs in a row without progress, 12 epochs, or 8
+  hours since the budget began ends it through the Automation Failed hold
+  (`hold_stalled_stage`, `STALLED_EPOCHS_BEFORE_HOLD`, `MAX_EPOCHS_PER_BUDGET`,
+  `MAX_HOURS_PER_BUDGET`), and a fixer that returned no change three times for
+  the same failure on the same provider/model/effort is skipped
+  (`fixer_is_futile`). A released hold restarts the budget. Never add a
+  strict-mode path that can renew epochs without one of these bounds.
   The same delivery is used when a tester report is rejected three times
   (missing verdict, invalid report, or edits the tester may not make), even
   if this setting is off: another epoch cannot produce the missing verdict.

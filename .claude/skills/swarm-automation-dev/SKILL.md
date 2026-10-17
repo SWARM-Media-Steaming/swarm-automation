@@ -10,6 +10,15 @@ description: Use when working on this repository (SWARM Automation, the Tauri de
 meant to run against **any** local Git checkout, not just SWARM's. A fix made here
 is the whole change; there is no other copy to sync.
 
+## Keep the worker flow diagram current
+
+`docs/worker-flow.md` (with its generated `docs/worker-flow.html` and
+`docs/index.html`, served by GitHub Pages) is the reference for how the worker
+selects, works, attacks and delivers an issue. Any change to that flow, a limit,
+an exit code, a label or a lifecycle comment updates the diagram in the same
+change: edit the Markdown, run `python3 scripts/build_worker_flow_html.py`, and run
+`test_worker_flow_docs` (`.claude/rules/worker-flow-diagram.md`).
+
 ## This is a standalone Cargo package, not a workspace member
 
 `Cargo.toml` has concrete `version`/`edition`/`license` and concrete
@@ -520,7 +529,16 @@ CLI `--adversarial-best-effort-merge`):
   acceptance policy passes. After `STRICT_EPOCHS_PER_RUN` (3) epochs in one
   process the worker exits 13 (`adversarial_epoch_continuing`). The scheduler
   treats 13 as progress and resumes the same in-progress checkpoint. Do not
-  file `AI Needs Input` because findings remain.
+  file `AI Needs Input` because findings remain. Strict mode is bounded, though:
+  after `STALLED_EPOCHS_BEFORE_HOLD` (4) epochs in a row without progress,
+  `MAX_EPOCHS_PER_BUDGET` (12) epochs, or `MAX_HOURS_PER_BUDGET` (8) hours, the
+  stage saves its checkpoint and raises a `WorkerError` with `immediate_hold`
+  (`hold_stalled_stage`). `record_automation_failure` holds it at once, parks the
+  issue and posts the Automation Failed comment; a corrected build or a removed
+  label releases it with a fresh budget. A fixer that returned no change
+  `FUTILE_EMPTY_FIXES` (3) times for the same failure on the same
+  provider/model/effort is not called again (`fixer_is_futile`); the round still
+  re-tests, and escalating to another model or effort earns a fresh try.
 - **best_effort**: do not start another epoch. Deliver the latest commit,
   labelled **Best-effort merge with unresolved adversarial results**, merge the
   issue PR into the integration branch even when routine approval is manual,
