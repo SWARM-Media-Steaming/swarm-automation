@@ -14,6 +14,10 @@ transitions, and the code that must keep producing them:
 2. **Reworked / Completed** — `finalize_issue` → `render_pending_comment` /
    `post_pending_comment`, once a commit for this work-round has actually
    been delivered (see `issue-branch-delivery.md` — never before).
+   For an issue auto-filed by an adversarial agent (labelled
+   `adversarial-uat` or `adversarial-security`), the same completion comment
+   is followed by closing the issue (`close_completed_issue`) instead of
+   applying `Ready For Testing`. Other issues keep the label and stay open.
 3. **Stopped because usage ran out** — `post_quota_comment`, when the
    provider's remaining quota drops below `minimum_remaining_percent`
    mid-run.

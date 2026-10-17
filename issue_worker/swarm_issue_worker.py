@@ -383,6 +383,19 @@ CI_LOG_EXCERPT_CHARS = 3000
 CI_ISSUE_MARKER_RE = re.compile(r"swarm-issue-worker:ci-failure:branch:([^;\s]+);sha:([0-9a-f]{40})")
 
 
+# Labels only an adversarial agent's auto-filed finding carries (each stage's
+# finding_labels include its own; see adversarial_uat.py and
+# adversarial_security.py). Such an issue is closed on completion, not marked
+# Ready For Testing. The protected label is left out: a person's own issue is
+# also routed to adjudication with it.
+ADVERSARIAL_FINDING_LABELS = ("adversarial-uat", "adversarial-security")
+
+
+def is_adversarial_finding_labels(labels: Iterable[str]) -> bool:
+    lowered = {str(label).lower() for label in labels}
+    return any(label in lowered for label in ADVERSARIAL_FINDING_LABELS)
+
+
 class WorkerError(RuntimeError):
     pass
 
@@ -4324,7 +4337,79 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         atomic_write_json(self.pending_file, pending)
         return pending
 
+    def created_by_adversarial_agent(self) -> bool:
+        """Whether the issue being worked was auto-filed by an adversarial agent."""
+        assert self.issue
+        return is_adversarial_finding_labels(self.issue.labels)
+
+    def record_pending_origin(self, pending: dict[str, Any]) -> dict[str, Any]:
+        """Stamp a pending file an earlier build wrote without its origin.
+
+        Read the issue's labels once and persist the answer, so a retry never
+        asks GitHub again and the decision is fixed for this delivery.
+        """
+        provider = str(pending.get("ai_tool") or pending.get("ai") or "").lower()
+        issue_number = int(pending["issue_number"])
+        remote = json.loads(
+            self.github.gh(
+                ["issue", "view", str(issue_number), "--repo", self.config.github_repository, "--json", "labels"],
+                provider,
+            )
+            or "{}"
+        )
+        labels = issue_labels(remote)
+        pending["close_on_completion"] = is_adversarial_finding_labels(labels)
+        pending["ready_for_testing_label_present"] = self.config.ready_label in labels
+        atomic_write_json(self.pending_file, pending)
+        return pending
+
+    def close_completed_issue(self, pending: dict[str, Any]) -> dict[str, Any]:
+        """Close an adversarial-filed issue whose work is complete.
+
+        Nothing remains for a person to test on these issues, so they are not
+        marked Ready For Testing; the completion comment already records the
+        delivered commit.
+        """
+        if pending.get("issue_closed") and (
+            not pending.get("ready_for_testing_label_present")
+            or pending.get("ready_for_testing_label_removed")
+        ):
+            return pending
+        provider = str(pending.get("ai_tool") or pending.get("ai") or "").lower()
+        issue_number = int(pending["issue_number"])
+        log(f"Closing GitHub issue #{issue_number}: it was filed by an adversarial agent and its work is complete.")
+        if not pending.get("issue_closed"):
+            try:
+                self.github.gh(
+                    ["issue", "close", str(issue_number), "--repo", self.config.github_repository],
+                    provider,
+                )
+            except WorkerError as error:
+                # Already closed (for example by a merged pull request) is the goal state.
+                if "already closed" not in str(error).lower():
+                    raise
+            pending["issue_closed"] = True
+            atomic_write_json(self.pending_file, pending)
+        if pending.get("ready_for_testing_label_present") and not pending.get("ready_for_testing_label_removed"):
+            self.github.gh(
+                [
+                    "issue", "edit", str(issue_number), "--repo",
+                    self.config.github_repository, "--remove-label", self.config.ready_label,
+                ],
+                provider,
+            )
+            pending["ready_for_testing_label_removed"] = True
+            atomic_write_json(self.pending_file, pending)
+        return pending
+
     def add_pending_label(self, pending: dict[str, Any]) -> dict[str, Any]:
+        # Older checkpoints may already have applied Ready For Testing before
+        # they recorded the issue's origin. Recover origin before trusting the
+        # label-added receipt, since adversarial findings must be closed.
+        if "close_on_completion" not in pending:
+            pending = self.record_pending_origin(pending)
+        if pending.get("close_on_completion"):
+            return self.close_completed_issue(pending)
         if pending.get("ready_for_testing_label_added"):
             return pending
         provider = str(pending.get("ai_tool") or pending.get("ai") or "").lower()
@@ -4373,6 +4458,20 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             log("Dry run: pending GitHub delivery exists; no delivery or AI work was performed.")
             raise SystemExit(0)
         pending = read_json(self.pending_file)
+        if pending.get("environment_only"):
+            pending = self.post_environment_only_comment(pending)
+            pending = self.add_pending_label(pending)
+            issue_number = int(pending["issue_number"])
+            self.record_completed(issue_number)
+            self.history.note("Execution completed without repository changes", iso_timestamp())
+            execution_id = str(pending.get("execution_id") or "")
+            if execution_id and self.history.repository:
+                self.history.execution_id = execution_id
+            self.finish_execution_history("environment_only", str(pending.get("ai_output") or ""))
+            self.pending_file.unlink()
+            self.clear_in_progress(issue_number)
+            log(f"GitHub delivery finished; issue #{issue_number} is marked completed locally.")
+            return
         pending = self.post_pending_comment(pending)
         pending = self.add_pending_label(pending)
         issue_number = int(pending["issue_number"])
@@ -7067,6 +7166,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             "commit_message": self.git("log", "-1", "--format=%s", commit_sha),
             "github_comment_posted": False,
             "ready_for_testing_label_added": False,
+            "close_on_completion": self.created_by_adversarial_agent(),
             "pull_request_url": pr_url,
             "branch_name": branch,
             "adversarial_summary": self.adversarial_summary_line(),
@@ -7130,28 +7230,52 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             f"{ai_output or '(No captured AI output was available.)'}\n"
             "</details>\n"
         )
-        existing = any(marker in str(comment.get("body") or "") for comment in self.comments(self.issue.number))
-        if not existing:
-            log(f"Posting the environment-only summary to GitHub issue #{self.issue.number}.")
-            self.github.gh(
-                [
-                    "issue",
-                    "comment",
-                    str(self.issue.number),
-                    "--repo",
-                    self.config.github_repository,
-                    "--body-file",
-                    "-",
-                ],
-                self.choice.key,
-                body,
-            )
+        pending = {
+            "environment_only": True,
+            "issue_number": self.issue.number,
+            "ai_tool": self.choice.key,
+            "body": body,
+            "github_comment_posted": False,
+            "ready_for_testing_label_added": False,
+            "close_on_completion": self.created_by_adversarial_agent(),
+            "ai_output": ai_output,
+            "execution_id": self.history.execution_id,
+        }
+        atomic_write_json(self.pending_file, pending)
+        pending = self.post_environment_only_comment(pending)
+        pending = self.add_pending_label(pending)
         self.record_completed(self.issue.number)
         self.history.note("Execution completed without repository changes", iso_timestamp())
         self.cleanup_no_code_branch("environment-only")
         self.finish_execution_history("environment_only", ai_output)
+        self.pending_file.unlink(missing_ok=True)
         self.clear_in_progress(self.issue.number)
         log(f"Finished issue #{self.issue.number} with {self.choice.name}: environment-only summary posted.")
+
+    def post_environment_only_comment(self, pending: dict[str, Any]) -> dict[str, Any]:
+        if pending.get("github_comment_posted"):
+            return pending
+        provider = str(pending.get("ai_tool") or "").lower()
+        issue_number = int(pending["issue_number"])
+        body = str(pending["body"])
+        marker = body.splitlines()[0]
+        existing = any(
+            marker in str(comment.get("body") or "")
+            for comment in self.comments(issue_number)
+        )
+        if not existing:
+            log(f"Posting the environment-only summary to GitHub issue #{issue_number}.")
+            self.github.gh(
+                [
+                    "issue", "comment", str(issue_number), "--repo",
+                    self.config.github_repository, "--body-file", "-",
+                ],
+                provider,
+                body,
+            )
+        pending["github_comment_posted"] = True
+        atomic_write_json(self.pending_file, pending)
+        return pending
 
     @staticmethod
     def split_technical_details(output: str) -> tuple[str, str]:
