@@ -34,6 +34,11 @@ A scheduler starts one worker run per repository on an interval. A run does at
 most one unit of work (one issue, or one resumed checkpoint), then exits with a
 code that tells the scheduler what happened.
 
+Before starting a run, the scheduler leaves a checkout with tracked changes
+alone unless the worker owns them: a saved `in-progress-issue.json`, or an
+`integration-recovery.json` for a half-finished `ai-main` <- `main` merge. The
+worker finishes that merge on its next run.
+
 ```mermaid
 flowchart TD
     S["Scheduler<br/>install_swarm_issue_cron.py<br/>every interval, repos in parallel"] --> R["One worker run<br/>Worker.run"]
@@ -436,6 +441,7 @@ Under the repository's worker state directory
 | File or folder | Holds |
 |---|---|
 | `in-progress-issue.json` | the active attempt: provider, session, routing decision, each adversarial stage's phase, round, epoch, approaches, filed and held-back findings, usage events |
+| `integration-recovery.json` | a pinned `ai-main` <- `main` merge in progress, resumed by the next run |
 | `worker.lock` | the per-repository lock |
 | `completed-issues` | issue numbers already delivered |
 | `quota-paused-issues/` | attempts waiting for usage |
