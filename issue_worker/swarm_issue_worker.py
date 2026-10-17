@@ -4357,7 +4357,9 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             )
             or "{}"
         )
-        pending["close_on_completion"] = is_adversarial_finding_labels(issue_labels(remote))
+        labels = issue_labels(remote)
+        pending["close_on_completion"] = is_adversarial_finding_labels(labels)
+        pending["ready_for_testing_label_present"] = self.config.ready_label in labels
         atomic_write_json(self.pending_file, pending)
         return pending
 
@@ -4368,26 +4370,43 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         marked Ready For Testing; the completion comment already records the
         delivered commit.
         """
-        if pending.get("issue_closed"):
+        if pending.get("issue_closed") and (
+            not pending.get("ready_for_testing_label_present")
+            or pending.get("ready_for_testing_label_removed")
+        ):
             return pending
         provider = str(pending.get("ai_tool") or pending.get("ai") or "").lower()
         issue_number = int(pending["issue_number"])
         log(f"Closing GitHub issue #{issue_number}: it was filed by an adversarial agent and its work is complete.")
-        try:
+        if not pending.get("issue_closed"):
+            try:
+                self.github.gh(
+                    ["issue", "close", str(issue_number), "--repo", self.config.github_repository],
+                    provider,
+                )
+            except WorkerError as error:
+                # Already closed (for example by a merged pull request) is the goal state.
+                if "already closed" not in str(error).lower():
+                    raise
+            pending["issue_closed"] = True
+            atomic_write_json(self.pending_file, pending)
+        if pending.get("ready_for_testing_label_present") and not pending.get("ready_for_testing_label_removed"):
             self.github.gh(
-                ["issue", "close", str(issue_number), "--repo", self.config.github_repository],
+                [
+                    "issue", "edit", str(issue_number), "--repo",
+                    self.config.github_repository, "--remove-label", self.config.ready_label,
+                ],
                 provider,
             )
-        except WorkerError as error:
-            # Already closed (for example by a merged pull request) is the goal state.
-            if "already closed" not in str(error).lower():
-                raise
-        pending["issue_closed"] = True
-        atomic_write_json(self.pending_file, pending)
+            pending["ready_for_testing_label_removed"] = True
+            atomic_write_json(self.pending_file, pending)
         return pending
 
     def add_pending_label(self, pending: dict[str, Any]) -> dict[str, Any]:
-        if "close_on_completion" not in pending and not pending.get("ready_for_testing_label_added"):
+        # Older checkpoints may already have applied Ready For Testing before
+        # they recorded the issue's origin. Recover origin before trusting the
+        # label-added receipt, since adversarial findings must be closed.
+        if "close_on_completion" not in pending:
             pending = self.record_pending_origin(pending)
         if pending.get("close_on_completion"):
             return self.close_completed_issue(pending)
