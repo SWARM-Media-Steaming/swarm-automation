@@ -41,6 +41,7 @@ from dynamic_router import (
 from adversarial_uat import UAT_STAGE
 from adversarial_security import SECURITY_STAGE
 from token_usage import AgentType, PromptType
+import prompt_budget
 from swarm_issue_worker import (
     CODEX_QUOTA_CACHE_FILE,
     CODEX_QUOTA_CACHE_MAX_AGE_SECONDS,
@@ -4142,6 +4143,42 @@ class WorkerTestCase(unittest.TestCase):
             worker.commit_completed_work(run_start)
         api.assert_not_called()
         self.assertEqual(self.committed_files(), ["fix.txt"])
+
+    def test_new_build_output_is_left_out_of_the_commit_and_stays_ignored(self) -> None:
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        (self.repo / "fix.txt").write_text("fix\n", encoding="utf-8")
+        built = self.repo / "web" / "target" / "debug"
+        built.mkdir(parents=True)
+        for number in range(40):
+            (built / f"out{number}.h").write_text("x\n", encoding="utf-8")
+        worker.commit_completed_work(run_start)
+        self.assertEqual(self.committed_files(), ["fix.txt"])
+        self.assertEqual(worker.worktree_status(), "")
+
+    def test_an_already_tracked_build_directory_is_not_unstaged(self) -> None:
+        tracked = self.repo / "target"
+        tracked.mkdir()
+        (tracked / "keep.txt").write_text("1\n", encoding="utf-8")
+        self.git("add", "-f", "target/keep.txt")
+        self.git("commit", "-qm", "track target")
+        self.git("push", "-q", "origin", "main")
+        self.git("branch", "-f", "ai-main", "main")
+        self.git("push", "-q", "-f", "origin", "ai-main")
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        (tracked / "keep.txt").write_text("2\n", encoding="utf-8")
+        worker.commit_completed_work(run_start)
+        self.assertEqual(self.committed_files(), ["target/keep.txt"])
+
+    def test_a_commit_far_larger_than_one_issue_fails_loudly_and_commits_nothing(self) -> None:
+        worker, run_start = self.labelled_issue_worker(["bug"])
+        bulk = self.repo / "generated_docs"
+        bulk.mkdir()
+        for number in range(prompt_budget.MAX_COMMIT_FILES + 5):
+            (bulk / f"page{number}.txt").write_text("x\n", encoding="utf-8")
+        with self.assertRaisesRegex(WorkerError, "far more than one issue's change"):
+            worker.commit_completed_work(run_start)
+        self.assertEqual(self.git("rev-parse", "HEAD"), run_start)
+        self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
 
     def test_minor_label_alone_does_not_create_a_commit(self) -> None:
         self.version_repo("0.1.5")

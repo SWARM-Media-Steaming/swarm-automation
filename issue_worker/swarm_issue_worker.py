@@ -104,6 +104,7 @@ from issue_images import (
     inlined_images,
 )
 import available_models
+import prompt_budget
 import routing_cap
 from dynamic_router import (
     DEFAULT_ROUTING_OPTIMIZATION,
@@ -2463,6 +2464,14 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         else:
             log(f"Issue #{self.issue.number} already has this resume notice.")
         self.update_state(resumed_comment_token=resume_token)
+
+    def ai_input_limit(self) -> tuple[int, int] | None:
+        """``(actual, maximum)`` characters when the last AI call was refused as too large."""
+        combined = ""
+        for path in (self.ai_output_file, self.ai_diagnostic_file):
+            if path.exists():
+                combined += path.read_text(encoding="utf-8", errors="replace")[-200_000:]
+        return prompt_budget.parse_input_limit(combined)
 
     def ai_failure_is_quota(self) -> bool:
         combined = ""
@@ -6279,6 +6288,43 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             f"{VERSION_FILE} {current[0]}.{current[1]}.{current[2]} -> {new[0]}.{new[1]}.{new[2]}."
         )
 
+    def guard_staged_commit(self) -> None:
+        """Keep build output out of the commit and refuse one far larger than an issue's change.
+
+        A directory a toolchain regenerates (``target/``, ``node_modules/`` ...)
+        that is newly added is unstaged and excluded locally. What remains must
+        stay under a file and line budget, or the commit fails loudly instead of
+        flowing into prompts, the push and the pull request.
+        """
+        assert self.issue
+        added = [p for p in self.git("diff", "--cached", "--name-only", "--diff-filter=A", "-z").split("\0") if p]
+        prefixes = prompt_budget.generated_prefixes(added)
+        if prefixes:
+            self.git("reset", "-q", "--", *prefixes)
+            exclude = Path(self.git("rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            known = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+            lines = [f"/{prefix}/" for prefix in prefixes if f"/{prefix}/" not in known]
+            if lines:
+                with exclude.open("a", encoding="utf-8") as handle:
+                    handle.write("\n".join(lines) + "\n")
+            log(f"Issue #{self.issue.number}: left build output out of the commit: {', '.join(prefixes)}.")
+        staged = [p for p in self.git("diff", "--cached", "--name-only", "-z").split("\0") if p]
+        changed = 0
+        for row in self.git("diff", "--cached", "--numstat").splitlines():
+            first, _, rest = row.partition("\t")
+            second = rest.partition("\t")[0]
+            changed += (int(first) if first.isdigit() else 0) + (int(second) if second.isdigit() else 0)
+        if len(staged) > prompt_budget.MAX_COMMIT_FILES or changed > prompt_budget.MAX_COMMIT_CHANGED_LINES:
+            self.git("reset", "-q")
+            raise WorkerError(
+                f"Issue #{self.issue.number} staged {len(staged)} files and {changed:,} changed lines, far more than "
+                f"one issue's change (limits {prompt_budget.MAX_COMMIT_FILES} files, "
+                f"{prompt_budget.MAX_COMMIT_CHANGED_LINES:,} lines). Largest areas: "
+                f"{prompt_budget.top_level_summary(staged)}. Nothing was committed; check for build output "
+                "or generated files that the repository does not ignore."
+            )
+
     def commit_completed_work(
         self,
         run_start: str,
@@ -6294,6 +6340,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         self.git("add", "--all")
         if app_owned:
             self.git("reset", "-q", "--", *app_owned)
+        self.guard_staged_commit()
         if self.git_ok("diff", "--cached", "--quiet"):
             raise WorkerError(
                 f"Issue #{self.issue.number} left worktree changes that Git could not stage"

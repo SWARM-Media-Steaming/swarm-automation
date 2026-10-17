@@ -1879,6 +1879,82 @@ class AdversarialUatTests(unittest.TestCase):
         self.assertNotEqual(self.worker.read_state()["adversarial"].get("outcome"), "cap_hit")
 
 
+    TOO_LARGE = ('Error: turn/start failed: Input exceeds the maximum length of 1048576 characters. (code -32602), '
+                 'data: {"input_error_code":"input_too_large","max_chars":1048576,"actual_chars":9187573}')
+
+    def test_an_oversized_patch_is_summarised_in_the_tester_prompt(self):
+        self.prepare(fixed=True)
+        for number in range(400):
+            (self.repo / f"bulk{number}.txt").write_text("line\n" * 2000)
+        self.git("add", ".")
+        self.git("commit", "-qm", "bulk")
+        prompts = []
+
+        def tester(prompt, activity=""):
+            prompts.append(prompt)
+            return self.role(prompt, activity)
+
+        with self.patches(tester), mock.patch.object(self.worker, "finalize_issue"):
+            self.worker.run_adversarial_delivery()
+        self.assertTrue(prompts)
+        self.assertLess(len(prompts[0]), adversarial_core.ADVERSARIAL_DIFF_MAX_CHARS + 20_000)
+        self.assertIn("Patches omitted for size", prompts[0])
+        self.assertIn("Change summary", prompts[0])
+
+    def test_build_output_never_reaches_the_tester_prompt(self):
+        self.prepare(fixed=True)
+        built = self.repo / "web" / "target" / "debug"
+        built.mkdir(parents=True)
+        (built / "ssl.h").write_text("BUILD_ARTIFACT_MARKER\n")
+        self.git("add", "-f", ".")
+        self.git("commit", "-qm", "oops")
+        prompts = []
+
+        def tester(prompt, activity=""):
+            prompts.append(prompt)
+            return self.role(prompt, activity)
+
+        with self.patches(tester), mock.patch.object(self.worker, "finalize_issue"):
+            self.worker.run_adversarial_delivery()
+        self.assertNotIn("BUILD_ARTIFACT_MARKER", prompts[0])
+
+    def test_input_too_large_retries_once_smaller_then_holds_at_once(self):
+        self.prepare(fixed=True)
+        prompts = []
+
+        def refused(prompt, activity=""):
+            prompts.append(prompt)
+            self.worker.ai_output_file.write_text("")
+            self.worker.ai_diagnostic_file.write_text(self.TOO_LARGE)
+            return 1
+
+        with self.patches(refused), mock.patch.object(self.worker, "merge_pull_request") as merge:
+            with self.assertRaisesRegex(WorkerError, "refused the prompt as too large") as caught:
+                self.worker.run_adversarial_delivery()
+        self.assertEqual(len(prompts), 2, "one retry with a smaller patch, then stop")
+        self.assertTrue(getattr(caught.exception, "immediate_hold", False))
+        self.assertIn("9,187,573", str(caught.exception.hold_details) + str(caught.exception))
+        merge.assert_not_called()
+
+    def test_a_successful_retry_after_input_too_large_continues(self):
+        self.prepare(fixed=True)
+        attempts = []
+
+        def flaky(prompt, activity=""):
+            attempts.append(1)
+            if len(attempts) == 1:
+                self.worker.ai_output_file.write_text("")
+                self.worker.ai_diagnostic_file.write_text(self.TOO_LARGE)
+                return 1
+            self.worker.ai_diagnostic_file.write_text("")
+            return self.role(prompt, activity)
+
+        with self.patches(flaky), mock.patch.object(self.worker, "finalize_issue"):
+            self.worker.run_adversarial_delivery()
+        self.assertGreaterEqual(len(attempts), 2)
+        self.assertNotIn("prompt_shrink", self.worker.read_state()["adversarial"])
+
+
 class ResultPayloadTests(unittest.TestCase):
     """A pure function, tested directly against formatting a tester actually
     produced in production (2026-09) rather than only the hand-written happy

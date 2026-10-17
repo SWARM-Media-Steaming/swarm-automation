@@ -47,6 +47,7 @@ import tempfile
 from typing import Any
 
 import finding_dedup
+import prompt_budget
 import routing_cap
 
 #: Counted fix/re-test rounds in one epoch. The initial assessment (round 0)
@@ -115,6 +116,8 @@ ADVERSARIAL_HANDOFF_MARKER = "swarm-issue-worker:adversarial-disabled-handoff"
 # start_protected_remediation). Its follow-up carries this label.
 PROTECTED_FINDING_LABEL = ("adversarial-protected", "B60205", "Adversarial finding that needs a protected test adjudicated")
 PROTECTED_DISPUTE_MAX_CHARS = 6000
+# Re-exported so the limit is documented and tested beside the other loop bounds.
+ADVERSARIAL_DIFF_MAX_CHARS = prompt_budget.ADVERSARIAL_DIFF_MAX_CHARS
 
 
 def protected_suite_ids(definition: dict[str, Any]) -> set[str]:
@@ -1273,11 +1276,42 @@ class AdversarialStageMixin:
             f"effort ({escalation.get('reason', 'epoch_exhausted')}).")
         return escalated
 
+    def bounded_patch(self, base: str, loop: dict[str, Any]) -> str:
+        """The patch under test, kept under the prompt budget.
+
+        Build output is excluded outright. A patch still over budget becomes a
+        change summary plus the smallest whole-file patches. After a provider
+        refuses the prompt as too large, the budget halves for the retry.
+        """
+        excludes = [f":(exclude){TEST_ROOT.rstrip('/')}"] + [
+            f":(exclude,glob)**/{name}/**" for name in sorted(prompt_budget.GENERATED_DIRS)]
+        diff = self.git("diff", "--no-ext-diff", base, "--", ".", *excludes)
+        if len(diff) <= ADVERSARIAL_DIFF_MAX_CHARS >> int(loop.get("prompt_shrink") or 0):
+            return diff
+        stat = self.git("diff", "--stat=200", base, "--", ".", *excludes, check=False)
+        return prompt_budget.bound_diff(diff, stat, ADVERSARIAL_DIFF_MAX_CHARS >> int(loop.get("prompt_shrink") or 0))
+
+    def hold_input_too_large(self, stage: AdversarialStage, loop: dict[str, Any], limit: tuple[int, int]) -> None:
+        """A prompt the provider refuses even after shrinking cannot succeed on a retry."""
+        from swarm_issue_worker import WorkerError, log
+        actual, maximum = limit
+        sizes = (f" ({actual:,} characters against a limit of {maximum:,})" if actual and maximum else "")
+        reason = f"the provider refused the prompt as too large{sizes}"
+        self.record_stage_failure(stage, loop, reason)
+        message = (f"{stage.label} for issue #{self.issue.number}: {reason}, even after the patch was "
+                   "summarised. The change is probably far larger than the issue asked for (for example, "
+                   "committed build output); the issue is held for a person or a corrected build.")
+        log(message)
+        error = WorkerError(message)
+        error.immediate_hold = True
+        error.hold_details = {"reason": reason, "failing_suites": [], "conclusion": "", "epochs": int(loop.get("epoch") or 1)}
+        raise error
+
     def adversarial_common_prompt(self, stage: AdversarialStage, loop: dict[str, Any]) -> str:
         base = str(self.read_state()["base_sha"])
         # No completion summary, session transcript, or implementer reasoning
         # enters the tester context. It sees the spec, diff and repo conventions.
-        diff = self.git("diff", "--no-ext-diff", base, "--", ".", f":(exclude){TEST_ROOT.rstrip('/')}")
+        diff = self.bounded_patch(base, loop)
         amendments = "\n".join(str(c.get("body") or "") for c in loop.get("amendments", []))
         rejected = loop.get("retry_rejection") or {}
         rejection_guidance = ""
@@ -2211,9 +2245,19 @@ class AdversarialStageMixin:
                 if status != 0 or not self.ai_output_file.exists() or not self.ai_output_file.stat().st_size:
                     if self.ai_failure_is_quota():
                         return self.pause_adversarial()
+                    limit = self.ai_input_limit()
+                    if limit is not None:
+                        if not loop.get("prompt_shrink"):
+                            loop["prompt_shrink"] = 1
+                            self.save_stage(stage, loop)
+                            log(f"{stage.label} for issue #{self.issue.number}: the provider refused the prompt as "
+                                "too large; retrying once with a smaller patch summary.")
+                            continue
+                        self.hold_input_too_large(stage, loop, limit)
                     self.record_stage_failure(stage, loop, "the adversarial coding session failed")
                     raise WorkerError("Adversarial coding session failed; phase and worktree preserved")
                 loop["response"] = self.ai_output_file.read_text(encoding="utf-8", errors="replace")
+                loop.pop("prompt_shrink", None)
                 self.save_stage(stage, loop)
             output = loop["response"]
             if loop["phase"] == "fix":

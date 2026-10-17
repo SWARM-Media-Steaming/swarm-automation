@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import build_worker_flow_html as builder  # noqa: E402
 
-LIMIT_MODULES = ("adversarial_core", "finding_dedup", "swarm_issue_worker")
+LIMIT_MODULES = ("adversarial_core", "finding_dedup", "prompt_budget", "swarm_issue_worker")
 
 
 def worker_source() -> str:

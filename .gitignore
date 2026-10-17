@@ -1,4 +1,4 @@
-/target
+target/
 gen/
 node_modules/
 Cargo.lock.orig

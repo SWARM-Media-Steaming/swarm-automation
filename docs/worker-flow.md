@@ -138,7 +138,8 @@ flowchart TD
     K -->|"no change: environment only"| K7["finalize_environment_only<br/>comment, exit 10"]
     K -->|"no change at all"| K8["escalate_after_no_change<br/>stronger attempt next time,<br/>exit 15"]
     K -->|"made a commit"| L["Version policy:<br/>discard any AI edit to VERSION,<br/>worker writes the minor bump if labelled"]
-    L --> M["Validate: still on the issue branch,<br/>history only grows, commit messages,<br/>issue reference present, tree clean"]
+    L --> L0["guard_staged_commit()<br/>build output left out,<br/>oversized commit refused"]
+    L0 --> M["Validate: still on the issue branch,<br/>history only grows, commit messages,<br/>issue reference present, tree clean"]
     M --> N{"Any adversarial stage enabled?"}
     N -->|"yes"| P
     N -->|"no"| Q["finalize_issue<br/>section 7"]
@@ -345,6 +346,8 @@ flowchart TD
     B -->|"Self-recovering condition"| RL["exit 15<br/>quiet, retried next pass"]
     B -->|"Tester answer rejected 3 times"| BE["Best-effort delivery<br/>even in strict mode"]
     B -->|"Missing commit or dirty worktree"| H
+    B -->|"Provider refuses the prompt as too large"| PL["bounded_patch()<br/>retry once with a smaller patch summary"]
+    PL -->|"still refused"| H
 ```
 
 | Situation | Result | Comment on the issue |
@@ -353,6 +356,7 @@ flowchart TD
 | AI needs a person | `AI Needs Input` label, waits for a trusted reply | AI needs your input |
 | Question issue | code-free answer, no `Ready For Testing` | AI answer |
 | Same failure 3 times | held and parked | Automation needs attention |
+| Prompt refused as too large, again after a smaller retry | held and parked at once | Automation needs attention |
 | Strict loop stalls or exhausts its budget | held and parked | Automation needs attention, plain language |
 | Protected test blocks the fixer | `adversarial-protected`, fresh adjudicator | routed to protected-test review |
 | Tester result rejected 3 times | best-effort delivery | completion comment naming the rejection |
@@ -374,6 +378,9 @@ together.
 | `MAX_HOURS_PER_BUDGET` | 8 | hours since the budget began before the issue is held |
 | `FUTILE_EMPTY_FIXES` | 3 | empty fixes for the same failure and choice before the fixer is skipped |
 | `AUTOMATION_FAILURE_LIMIT` | 3 | identical failures before a hold (also the tester-rejection bound) |
+| `ADVERSARIAL_DIFF_MAX_CHARS` | 400000 | characters of patch embedded in a tester prompt; over it the patch is summarised, and halved for the one retry after a provider refuses the prompt as too large |
+| `MAX_COMMIT_FILES` | 500 | staged files above which a worker commit fails instead of flowing into prompts and the pull request |
+| `MAX_COMMIT_CHANGED_LINES` | 200000 | staged changed lines above which a worker commit fails |
 | `MAX_FILED_PER_STAGE` | 5 | follow-up issues one stage files per source issue |
 | `MAX_CANDIDATES` | 8 | open issues sent to the duplicate judge |
 | `DUPLICATE_MIN_CONFIDENCE` | 0.7 | confidence needed to suppress a duplicate |
