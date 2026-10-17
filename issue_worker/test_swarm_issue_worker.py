@@ -1390,7 +1390,11 @@ class WorkerTestCase(unittest.TestCase):
         ):
             self.worker.finalize_environment_only("## Summary\nNo code change.")
 
-        body = github.call_args.args[2]
+        comment_call = next(
+            call for call in github.call_args_list
+            if call.args[0][:2] == ["issue", "comment"]
+        )
+        body = comment_call.args[2]
         self.assertIn("through-comment:5540212567", body)
 
     def test_quota_notice_is_deduplicated_across_pause_counts(self) -> None:

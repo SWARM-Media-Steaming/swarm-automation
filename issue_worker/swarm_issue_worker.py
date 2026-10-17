@@ -4414,6 +4414,20 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             log("Dry run: pending GitHub delivery exists; no delivery or AI work was performed.")
             raise SystemExit(0)
         pending = read_json(self.pending_file)
+        if pending.get("environment_only"):
+            pending = self.post_environment_only_comment(pending)
+            pending = self.add_pending_label(pending)
+            issue_number = int(pending["issue_number"])
+            self.record_completed(issue_number)
+            self.history.note("Execution completed without repository changes", iso_timestamp())
+            execution_id = str(pending.get("execution_id") or "")
+            if execution_id and self.history.repository:
+                self.history.execution_id = execution_id
+            self.finish_execution_history("environment_only", str(pending.get("ai_output") or ""))
+            self.pending_file.unlink()
+            self.clear_in_progress(issue_number)
+            log(f"GitHub delivery finished; issue #{issue_number} is marked completed locally.")
+            return
         pending = self.post_pending_comment(pending)
         pending = self.add_pending_label(pending)
         issue_number = int(pending["issue_number"])
@@ -7172,28 +7186,52 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             f"{ai_output or '(No captured AI output was available.)'}\n"
             "</details>\n"
         )
-        existing = any(marker in str(comment.get("body") or "") for comment in self.comments(self.issue.number))
-        if not existing:
-            log(f"Posting the environment-only summary to GitHub issue #{self.issue.number}.")
-            self.github.gh(
-                [
-                    "issue",
-                    "comment",
-                    str(self.issue.number),
-                    "--repo",
-                    self.config.github_repository,
-                    "--body-file",
-                    "-",
-                ],
-                self.choice.key,
-                body,
-            )
+        pending = {
+            "environment_only": True,
+            "issue_number": self.issue.number,
+            "ai_tool": self.choice.key,
+            "body": body,
+            "github_comment_posted": False,
+            "ready_for_testing_label_added": False,
+            "close_on_completion": self.created_by_adversarial_agent(),
+            "ai_output": ai_output,
+            "execution_id": self.history.execution_id,
+        }
+        atomic_write_json(self.pending_file, pending)
+        pending = self.post_environment_only_comment(pending)
+        pending = self.add_pending_label(pending)
         self.record_completed(self.issue.number)
         self.history.note("Execution completed without repository changes", iso_timestamp())
         self.cleanup_no_code_branch("environment-only")
         self.finish_execution_history("environment_only", ai_output)
+        self.pending_file.unlink(missing_ok=True)
         self.clear_in_progress(self.issue.number)
         log(f"Finished issue #{self.issue.number} with {self.choice.name}: environment-only summary posted.")
+
+    def post_environment_only_comment(self, pending: dict[str, Any]) -> dict[str, Any]:
+        if pending.get("github_comment_posted"):
+            return pending
+        provider = str(pending.get("ai_tool") or "").lower()
+        issue_number = int(pending["issue_number"])
+        body = str(pending["body"])
+        marker = body.splitlines()[0]
+        existing = any(
+            marker in str(comment.get("body") or "")
+            for comment in self.comments(issue_number)
+        )
+        if not existing:
+            log(f"Posting the environment-only summary to GitHub issue #{issue_number}.")
+            self.github.gh(
+                [
+                    "issue", "comment", str(issue_number), "--repo",
+                    self.config.github_repository, "--body-file", "-",
+                ],
+                provider,
+                body,
+            )
+        pending["github_comment_posted"] = True
+        atomic_write_json(self.pending_file, pending)
+        return pending
 
     @staticmethod
     def split_technical_details(output: str) -> tuple[str, str]:
