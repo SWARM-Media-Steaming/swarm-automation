@@ -31,21 +31,24 @@ HERE = Path(__file__).resolve().parent
 
 def _stdlib_module_names() -> set[str]:
     """Return top-level stdlib modules without requiring Python 3.10+ APIs."""
-    paths = {
-        Path(value).resolve()
-        for value in (sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib"),
-                      sysconfig.get_config_var("DESTSHARED"))
-        if value
-    }
+    paths = set()
+    for value in (sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib")):
+        if value:
+            paths.add(Path(value).resolve())
     names = set(sys.builtin_module_names)
     # Conditional imports may target a stdlib module newer than this runtime.
     names.add("tomllib")
-    for directory in paths | {path / "lib-dynload" for path in paths}:
+    directories = paths | {path / "lib-dynload" for path in paths}
+    extension_path = sysconfig.get_config_var("DESTSHARED")
+    if extension_path:
+        directories.add(Path(extension_path).resolve())
+    for directory in directories:
         try:
-            entries = directory.iterdir()
-            for entry in entries:
+            for entry in directory.iterdir():
                 name = entry.name.split(".", 1)[0]
-                if name.isidentifier() and (entry.is_dir() or entry.suffix in {".py", ".so", ".pyd"}):
+                if name.isidentifier() and (
+                    entry.is_dir() or entry.suffix in {".py", ".so", ".pyd"}
+                ):
                     names.add(name)
         except OSError:
             pass
