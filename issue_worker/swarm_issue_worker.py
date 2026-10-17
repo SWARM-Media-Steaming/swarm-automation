@@ -1306,7 +1306,13 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
         ).returncode == 0
 
     def read_state(self, path: Path | None = None) -> dict[str, Any]:
-        return read_json(path or self.in_progress_file)
+        target = path or self.in_progress_file
+        if path is None and not target.exists():
+            # No issue owns the worker (e.g. resolving the ai-main <- main
+            # merge). Session bookkeeping then sees empty state instead of
+            # crashing the run and stranding the half-finished merge.
+            return {}
+        return read_json(target)
 
     def write_state(self, value: dict[str, Any], path: Path | None = None) -> None:
         atomic_write_json(path or self.in_progress_file, value)
@@ -1314,7 +1320,10 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
     def update_state(self, **changes: Any) -> dict[str, Any]:
         state = self.read_state()
         state.update(changes)
-        self.write_state(state)
+        if self.in_progress_file.exists():
+            # Never mint an in-progress file for a run with no issue: the
+            # scheduler would treat it as an owner of the checkout.
+            self.write_state(state)
         return state
 
     def completed_numbers(self) -> set[int]:

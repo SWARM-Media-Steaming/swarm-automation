@@ -171,6 +171,15 @@ class WorkerStorageTests(unittest.TestCase):
         self.config = Config.from_args(build_parser().parse_args(argv))
         self.worker = Worker(self.config)
 
+    def test_state_without_an_owning_issue_is_empty_and_never_created(self):
+        """Resolving the ai-main <- main merge runs the AI with no issue; the
+        session bookkeeping must not crash on the missing in-progress file
+        nor mint one (the scheduler would treat it as an owner)."""
+        self.assertFalse(self.worker.in_progress_file.exists())
+        self.assertEqual(self.worker.read_state(), {})
+        self.assertEqual(self.worker.update_state(session_id="x"), {"session_id": "x"})
+        self.assertFalse(self.worker.in_progress_file.exists())
+
     def test_worker_state_paths_come_from_the_storage_layout(self):
         s, t = self.worker.storage, self.worker.tenant
         self.assertEqual(t, DEFAULT_TENANT)

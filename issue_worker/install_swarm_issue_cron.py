@@ -230,6 +230,9 @@ class Runner:
     def in_progress_file(self, repo: dict[str, object]) -> Path:
         return Path(str(repo["state_dir"])) / "in-progress-issue.json"
 
+    def integration_recovery_file(self, repo: dict[str, object]) -> Path:
+        return Path(str(repo["state_dir"])) / "integration-recovery.json"
+
     def log(self, message: str) -> None:
         line = f"[{timestamp()}] {message}"
         print(line, flush=True)
@@ -378,9 +381,15 @@ class Runner:
             # A saved issue owns the checkout — leave it exactly as it is; the
             # worker resumes it and does its own fetching.
             return True
+        if self.integration_recovery_file(repo).exists():
+            # A pinned ai-main <- main merge is mid-flight. Its staged
+            # resolution is the worker's own work, and only the worker can
+            # finish it (synchronize_integration_branch resumes the
+            # checkpoint). Deferring here would wedge the repo for good.
+            return True
         status_lines = self.git(repo, "status", "--porcelain").stdout.splitlines()
         if status_lines:
-            tracked = [line for line in status_lines if not line.startswith("??")]
+            tracked =[line for line in status_lines if not line.startswith("??")]
             if tracked:
                 return self._defer(
                     repo,

@@ -7756,6 +7756,33 @@ class RunnerTestCase(unittest.TestCase):
             self.assertEqual(branch, "ai/codex/issue-114")
             self.assertTrue((repo / "dirty.txt").is_file())
 
+    def test_scheduler_lets_the_worker_finish_a_staged_integration_merge(self) -> None:
+        """A crash mid ai-main <- main merge leaves staged tracked changes and
+        integration-recovery.json. The scheduler must hand the checkout to the
+        worker, not defer it forever as "no saved issue owns" the changes."""
+        with tempfile.TemporaryDirectory(prefix="swarm-runner-merge-test.") as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            state = root / "state"
+            subprocess.run(["git", "init", "-q", "-b", "ai-main", str(repo)], check=True)
+            for name, value in (("user.name", "runner test"), ("user.email", "runner@example.invalid")):
+                subprocess.run(["git", "-C", str(repo), "config", name, value], check=True)
+            (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
+            (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            state.mkdir()
+            args = runner_module.build_parser().parse_args(
+                ["--repo-dir", str(repo), "--state-dir", str(state)]
+            )
+            runner = runner_module.Runner(args, [])
+            self.assertFalse(runner.synchronize_repository(runner.repos[0]))
+
+            (state / "integration-recovery.json").write_text("{}\n", encoding="utf-8")
+            self.assertTrue(runner.synchronize_repository(runner.repos[0]))
+            self.assertEqual((repo / "tracked.txt").read_text(encoding="utf-8"), "two\n")
+
     def test_scheduler_recovers_a_checkout_with_only_harmless_untracked_files(self) -> None:
         """A stale issue branch left over from an interrupted work-round
         (no in-progress-issue.json, so no owner) whose tree already matches
