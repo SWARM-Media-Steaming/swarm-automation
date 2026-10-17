@@ -5293,6 +5293,118 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue469_python39_stdlib_discovery.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue469-python39-stdlib-discovery",
+      "name": "Issue #469: Python 3.9 worker image stdlib discovery",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/test_storage.py",
+          "tests/adversarial/test_issue469_python39_stdlib_discovery.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue469_worker_image_scan_python39.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue469-worker-image-scan-python39",
+      "name": "Issue #469: worker image import scan on Python 3.9 interface",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/test_storage.py",
+          "tests/adversarial/test_issue469_worker_image_scan_python39.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue469_native_runtime.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue469-native-python-runtime",
+      "name": "Issue #469: worker image scan on configured Python runtime",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/test_storage.py",
+          "tests/adversarial/test_issue469_native_runtime.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue469_missing_stdlib_names_api.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue469-missing-stdlib-names-api",
+      "name": "Issue #469: worker image scan without sys.stdlib_module_names",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/test_storage.py",
+          "tests/adversarial/test_issue469_missing_stdlib_names_api.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
