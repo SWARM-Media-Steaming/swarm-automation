@@ -34,24 +34,23 @@ def _stdlib_module_names() -> set[str]:
     paths = set()
     for value in (sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib")):
         if value:
-            paths.add(Path(value).resolve())
+            paths.add(Path(value))
     names = set(sys.builtin_module_names)
     # Conditional imports may target a stdlib module newer than this runtime.
     names.add("tomllib")
     directories = paths | {path / "lib-dynload" for path in paths}
     extension_path = sysconfig.get_config_var("DESTSHARED")
     if extension_path:
-        directories.add(Path(extension_path).resolve())
+        directories.add(Path(extension_path))
     for directory in directories:
         try:
             for entry in directory.iterdir():
                 name = entry.name.split(".", 1)[0]
-                if name.isidentifier() and (
-                    entry.is_dir() or entry.suffix in {".py", ".so", ".pyd"}
-                ):
-                    names.add(name)
+                if name.isidentifier():
+                    if entry.is_dir() or entry.suffix in {".py", ".so", ".pyd"}:
+                        names.add(name)
         except OSError:
-            pass
+            continue
     return names
 
 
