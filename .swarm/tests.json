@@ -5131,6 +5131,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue465_no_committed_build_artifacts.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue465-no-committed-build-artifacts",
+      "name": "Issue #465 security: cargo build output is not committed",
+      "origin": "adversarial-security",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "tests/adversarial/security/test_issue465_no_committed_build_artifacts.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
