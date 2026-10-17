@@ -5349,6 +5349,34 @@
         ]
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue469_native_runtime.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue469-native-python-runtime",
+      "name": "Issue #469: worker image scan on configured Python runtime",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/test_storage.py",
+          "tests/adversarial/test_issue469_native_runtime.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
