@@ -5082,6 +5082,35 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue465_legacy_ready_label_recovery.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue465-legacy-ready-label-recovery",
+      "name": "Issue #465: legacy pending recovery with stale Ready For Testing label",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3",
+          "git"
+        ],
+        "files": [
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue465_legacy_ready_label_recovery.py"
+        ]
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue465_legacy_pending_and_pause_boundaries.py",
         "-v"
       ],
