@@ -197,7 +197,7 @@ class FailureAndProvenanceTests(unittest.TestCase):
             context_max_excerpt_chars=400,
         )
         worker = object.__new__(Worker)
-        worker.issue = SimpleNamespace(body=body)
+        worker.issue = SimpleNamespace(body=body, dependencies=[])
         worker.config = SimpleNamespace(jev=settings)
         calls = []
 
@@ -235,7 +235,9 @@ class FailureAndProvenanceTests(unittest.TestCase):
         raw_marker = "RAW_BODY_MUST_NOT_BE_PERSISTED"
         body = long_issue(suffix=f"## Acceptance criteria\n{raw_marker}\n")
         worker = object.__new__(Worker)
-        worker.issue = SimpleNamespace(number=337, title="Jev context", labels=[], body=body)
+        worker.issue = SimpleNamespace(
+            number=337, title="Jev context", labels=[], body=body, dependencies=[]
+        )
         worker.config = SimpleNamespace(
             jev=JevSettings(enabled=True, context_max_raw_chars=300),
             github_repository="example/repository",

@@ -5206,6 +5206,35 @@
         ]
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue468_jev_dependencies_fixture_contract.py",
+        "-v"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue468-jev-dependencies-fixture-contract",
+      "name": "Issue #468: Jev context fixture dependency contract",
+      "origin": "adversarial",
+      "requirements": {
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "issue_worker/issue_context.py",
+          "issue_worker/swarm_issue_worker.py",
+          "tests/adversarial/test_issue468_jev_dependencies_fixture_contract.py"
+        ]
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
