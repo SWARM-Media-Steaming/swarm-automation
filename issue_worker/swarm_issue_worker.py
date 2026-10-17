@@ -3330,7 +3330,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             if normalize_decision_type(decision_type) in ISSUE_CONTEXT_DECISION_TYPES:
                 payload.setdefault("issue_context", build_issue_context(
                     self.issue.body, issue_context_settings_from(self.config.jev),
-                    dependencies=self.issue.dependencies))
+                    dependencies=getattr(self.issue, "dependencies", None)))
         payload.setdefault("repository", self.config.github_repository)
         result = self.decision_engine().evaluate(decision_type, payload)
         result = self.expand_partial_context(result, decision_type, payload)
@@ -3390,7 +3390,7 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
             return result
         expanded = build_issue_context(
             self.issue.body, issue_context_settings_from(self.config.jev).expanded(),
-            dependencies=self.issue.dependencies)
+            dependencies=getattr(self.issue, "dependencies", None))
         expanded["metadata"]["expandedRetry"] = True
         payload["issue_context"] = expanded
         retry = self.decision_engine().evaluate(decision_type, payload)
