@@ -3664,6 +3664,24 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(candidate, run_start)
         self.assertEqual(self.worker.read_state()["candidate_sha"], run_start)
 
+    def test_a_pending_integration_merge_is_finished_not_deferred_as_foreign_changes(self) -> None:
+        self.worker.issue = IssueContext(304, "Merge", "", [], "https://example.invalid/304")
+        self.worker.choice = ProviderChoice("Codex", "test", "high", "session")
+        self.git("switch", "-q", "ai-main")
+        (self.repo / "tracked.txt").write_text("base\nstaged merge\n", encoding="utf-8")
+        self.git("add", "tracked.txt")
+        self.worker.integration_recovery_file.write_text("{}\n", encoding="utf-8")
+
+        def finish_merge() -> str:
+            if self.worker.worktree_status():
+                self.git("commit", "-q", "-m", "reconcile")
+            return self.git("rev-parse", "HEAD")
+
+        with mock.patch.object(self.worker, "synchronize_integration_branch", side_effect=finish_merge) as sync, \
+                mock.patch.object(self.worker, "prune_merged_worker_branches"):
+            self.worker.prepare_repository()
+        self.assertGreaterEqual(sync.call_count, 1)
+
     def test_pr_state_exists_before_branch_creation_and_recreates_interrupted_branch(self) -> None:
         worker = self.pr_worker()
         worker.issue = IssueContext(401, "Transactional branch", "", [], "https://example.invalid/401")

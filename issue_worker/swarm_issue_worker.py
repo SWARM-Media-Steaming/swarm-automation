@@ -6061,6 +6061,11 @@ class Worker(PromptSessionMixin, IntegrationRecoveryMixin, DeliveryRecoveryMixin
                     raise WorkerError("Repository has changes on a work branch with no recovery state")
                 if not self.git_ok("switch", integ):
                     self.git("switch", self.config.base_branch)
+            if self.integration_recovery_file.exists() and self.git("branch", "--show-current") == integ:
+                # The dirty tree is this worker's own pinned ai-main <- main
+                # merge, not foreign work. Finish it before anything else;
+                # deferring here would strand the merge forever.
+                self.synchronize_integration_branch()
             if self.worktree_status():
                 log("Repository has uncommitted changes unrelated to a saved attempt; deferring new issue work.")
                 raise SystemExit(0)
